@@ -240,7 +240,34 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
         // `leases` has no liveness flag; a lease's effective liveness follows from its ticket's
         // state (already restored to `Ready` by the accompanying `ticket.state_changed`), so
         // expiry/release need no further write here.
-        EventKind::TicketLeaseExpired | EventKind::TicketLeaseReleased => {}
+        EventKind::TicketLeaseExpired | EventKind::TicketLeaseReleased => {
+            // A lease that ended must leave the live set, together with the resource claims it
+            // held. Leaving it behind is not a cosmetic leak: the double-lease invariant would
+            // then refuse every future lease on that ticket, so a worker that crashed once would
+            // block its ticket permanently — the exact failure leases exist to prevent
+            // (SPEC.md §4.5, §17 invariant 5).
+            let lease = event
+                .payload
+                .as_ticket_lease_expired()
+                .map(|p| p.lease.clone())
+                .or_else(|| {
+                    event
+                        .payload
+                        .as_ticket_lease_released()
+                        .map(|p| p.lease.clone())
+                });
+            if let Some(lease) = lease {
+                tx.raw()
+                    .execute(
+                        "DELETE FROM resource_claims WHERE lease = ?1",
+                        params![lease.as_str()],
+                    )
+                    .map_err(storage_err)?;
+                tx.raw()
+                    .execute("DELETE FROM leases WHERE id = ?1", params![lease.as_str()])
+                    .map_err(storage_err)?;
+            }
+        }
         EventKind::TicketDelegated => {
             if let Some(p) = event.payload.as_ticket_delegated() {
                 tx.raw()

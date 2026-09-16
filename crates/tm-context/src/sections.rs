@@ -1,0 +1,745 @@
+//! The section builders, one per [`crate::tokens::SectionKind`], in priority order. Each is a
+//! standalone, independently testable function: given a ticket (and, where needed, a
+//! [`ProjectView`] snapshot or a [`CodeIntel`] handle), it renders one [`RawSection`] with
+//! provenance but does not know about token budgets or dropping — [`crate::pack::compile`]
+//! is the only place that reconciles sections against a [`crate::tokens::TokenBudget`].
+
+use std::collections::HashSet;
+
+use tm_codeintel::hybrid::{Query, RetrievalContext, SignalWeights};
+use tm_codeintel::CodeIntel;
+use tm_core::{ProjectView, Ticket};
+use tm_types::{Predicate, Result};
+
+use crate::pack::ProvenanceRef;
+use crate::tokens::SectionKind;
+
+/// One rendered section before it's admitted (or dropped) by [`crate::pack::compile`]'s
+/// budget accounting.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RawSection {
+    /// Which section this is.
+    pub kind: SectionKind,
+    /// Short human-readable title, e.g. `"Objective"`.
+    pub title: String,
+    /// Rendered body text.
+    pub body: String,
+    /// What real-world things (decision ids, file paths, commit shas, artifact ids) this
+    /// section's content was drawn from, for [`crate::pack::ContextPack::provenance`].
+    pub provenance: Vec<ProvenanceRef>,
+}
+
+/// The repository paths a ticket has claimed, derived from its resource claims' underlying
+/// glob patterns — the input every path-scoped section (decisions, symbol outlines) filters
+/// against.
+///
+/// Flattens `ticket.resources[].paths.patterns()` into their `as_str()` strings,
+/// deduplicated, in first-seen order. Pure, total, no error cases.
+pub fn claimed_paths(ticket: &Ticket) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    for resource in &ticket.resources {
+        for pattern in resource.paths.patterns() {
+            let pattern_str = pattern.as_str().to_string();
+            if seen.insert(pattern_str.clone()) {
+                paths.push(pattern_str);
+            }
+        }
+    }
+    paths
+}
+
+/// Recursively render a predicate to a string with indentation.
+fn render_predicate(predicate: &Predicate, indent: usize) -> String {
+    let indent_str = " ".repeat(indent);
+    match predicate {
+        Predicate::CommandSucceeds { command } => {
+            format!("{}CommandSucceeds: {}", indent_str, command.join(" "))
+        }
+        Predicate::FileExists { path } => {
+            format!("{}FileExists: {}", indent_str, path)
+        }
+        Predicate::FileMatches { path, regex } => {
+            format!("{}FileMatches: {} ~ {}", indent_str, path, regex)
+        }
+        Predicate::TestsPass { suite } => match suite {
+            Some(s) => format!("{}TestsPass: {}", indent_str, s),
+            None => format!("{}TestsPass: default", indent_str),
+        },
+        Predicate::TicketClosed { ticket } => {
+            format!("{}TicketClosed: {}", indent_str, ticket)
+        }
+        Predicate::AllOf(ps) => {
+            let mut lines = vec![format!("{}AllOf:", indent_str)];
+            for p in ps {
+                lines.push(render_predicate(p, indent + 2));
+            }
+            lines.join("\n")
+        }
+        Predicate::AnyOf(ps) => {
+            let mut lines = vec![format!("{}AnyOf:", indent_str)];
+            for p in ps {
+                lines.push(render_predicate(p, indent + 2));
+            }
+            lines.join("\n")
+        }
+        Predicate::Not(p) => {
+            let mut lines = vec![format!("{}Not:", indent_str)];
+            lines.push(render_predicate(p, indent + 2));
+            lines.join("\n")
+        }
+        Predicate::HumanAttested { note } => {
+            format!("{}HumanAttested: {}", indent_str, note)
+        }
+        Predicate::Judgment { claim } => {
+            format!("{}Judgment: {}", indent_str, claim)
+        }
+    }
+}
+
+/// Section 1 (highest priority): the ticket's objective and success predicates.
+///
+/// Renders `ticket.objective` verbatim, then one line per `ticket.success` predicate via a
+/// plain-text rendering of [`tm_types::Predicate`].
+pub fn build_objective(ticket: &Ticket) -> RawSection {
+    let mut body_lines = vec![ticket.objective.clone()];
+
+    if !ticket.success.is_empty() {
+        body_lines.push(String::new());
+        for predicate in &ticket.success {
+            body_lines.push(render_predicate(predicate, 0));
+        }
+    }
+
+    let body = body_lines.join("\n");
+    let provenance = vec![ProvenanceRef {
+        locator: ticket.id.to_string(),
+        detail: "ticket objective/success".to_string(),
+    }];
+
+    RawSection {
+        kind: SectionKind::Objective,
+        title: "Objective".to_string(),
+        body,
+        provenance,
+    }
+}
+
+/// Section 2: active decisions affecting the ticket's claimed paths.
+///
+/// Renders active decisions overlapping claimed_paths(ticket) or naming ticket.id.
+pub fn build_decisions(ticket: &Ticket, view: &ProjectView) -> RawSection {
+    let paths = claimed_paths(ticket);
+    let decisions_vec: Vec<_> = view.decisions.values().collect();
+
+    let mut seen_ids = HashSet::new();
+    let mut all_decisions = Vec::new();
+
+    for path in &paths {
+        for decision in decisions_vec.iter() {
+            if decision.is_active() {
+                let pattern_set =
+                    tm_types::PatternSet::parse(decision.affected_paths.iter().cloned())
+                        .unwrap_or_else(|_| tm_types::PatternSet::empty());
+                if pattern_set.matches(path) && seen_ids.insert(decision.id.clone()) {
+                    all_decisions.push(*decision);
+                }
+            }
+        }
+    }
+
+    for decision in decisions_vec.iter() {
+        if decision.is_active()
+            && decision.affected_tickets.contains(&ticket.id)
+            && seen_ids.insert(decision.id.clone())
+        {
+            all_decisions.push(*decision);
+        }
+    }
+
+    all_decisions.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| a.id.cmp(&b.id)));
+
+    let mut body_lines = Vec::new();
+    let mut provenance = Vec::new();
+
+    for decision in all_decisions {
+        body_lines.push(format!(
+            "{}: {} (why: {})",
+            decision.subject, decision.decision, decision.reason
+        ));
+        provenance.push(ProvenanceRef {
+            locator: decision.id.to_string(),
+            detail: decision.subject.clone(),
+        });
+    }
+
+    let body = body_lines.join("\n");
+
+    RawSection {
+        kind: SectionKind::Decisions,
+        title: "Active Decisions".to_string(),
+        body,
+        provenance,
+    }
+}
+
+/// Section 3: parent/dependency outputs and evidence.
+///
+/// Renders dependency/parent ticket summaries + matching evidence from view.evidence.
+pub fn build_dependencies(ticket: &Ticket, view: &ProjectView) -> RawSection {
+    let mut deps_to_show = Vec::new();
+
+    if let Some(parent_id) = &ticket.parent {
+        deps_to_show.push(parent_id.clone());
+    }
+
+    deps_to_show.extend(ticket.dependencies.iter().cloned());
+
+    let mut body_lines = Vec::new();
+    let mut provenance = Vec::new();
+
+    for dep_id in deps_to_show {
+        if let Some(dep_ticket) = view.tickets.get(&dep_id) {
+            body_lines.push(format!("**{}**: {}", dep_id, dep_ticket.objective));
+            body_lines.push(format!("State: {:?}", dep_ticket.state));
+
+            let dep_evidence: Vec<_> = view
+                .evidence
+                .iter()
+                .filter(|e| e.ticket == dep_id)
+                .collect();
+
+            for evidence in dep_evidence {
+                body_lines.push(format!(
+                    "Evidence: {} ({})",
+                    evidence.summary, evidence.artifact
+                ));
+            }
+
+            provenance.push(ProvenanceRef {
+                locator: dep_id.to_string(),
+                detail: String::new(),
+            });
+
+            body_lines.push(String::new());
+        }
+    }
+
+    let body = body_lines.join("\n").trim_end().to_string();
+
+    RawSection {
+        kind: SectionKind::Dependencies,
+        title: "Dependencies & Evidence".to_string(),
+        body,
+        provenance,
+    }
+}
+
+/// Section 4: hybrid retrieval results for the ticket's objective.
+///
+/// Renders hybrid search results for the ticket's objective, seeded with claimed paths.
+pub fn build_retrieval(
+    ticket: &Ticket,
+    ci: &CodeIntel,
+    weights: SignalWeights,
+) -> Result<RawSection> {
+    let paths = claimed_paths(ticket);
+    let query = Query {
+        text: ticket.objective.clone(),
+        seed_symbols: Vec::new(),
+        seed_paths: paths.clone(),
+    };
+
+    let ctx = RetrievalContext {
+        claimed_paths: paths,
+        recently_edited: Vec::new(),
+    };
+
+    let hits = ci.search_hybrid(&query, &ctx, weights)?;
+
+    let mut body_lines = Vec::new();
+    let mut provenance = Vec::new();
+
+    for hit in hits {
+        let line_range = match (hit.line_start, hit.line_end) {
+            (Some(start), Some(end)) => format!("{}-{}", start, end),
+            (Some(start), None) => start.to_string(),
+            _ => "?".to_string(),
+        };
+
+        body_lines.push(format!("{}:{}: {}", hit.path, line_range, hit.snippet));
+
+        let locator = match hit.line_start {
+            Some(start) => format!("{}:{}", hit.path, start),
+            None => hit.path.clone(),
+        };
+
+        provenance.push(ProvenanceRef {
+            locator,
+            detail: "hybrid retrieval hit".to_string(),
+        });
+    }
+
+    let body = body_lines.join("\n");
+
+    Ok(RawSection {
+        kind: SectionKind::Retrieval,
+        title: "Retrieval Results".to_string(),
+        body,
+        provenance,
+    })
+}
+
+/// Section 5: symbol outlines for the ticket's claimed paths.
+///
+/// Renders symbol outlines for each claimed path, indented by depth.
+pub fn build_symbol_outlines(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSection> {
+    let paths = claimed_paths(ticket);
+
+    let mut body_lines = Vec::new();
+    let mut provenance = Vec::new();
+
+    for path in paths {
+        let outline = ci.outline(&path)?;
+
+        if !outline.is_empty() {
+            body_lines.push(format!("## {}", path));
+
+            for entry in outline {
+                let indent = " ".repeat((entry.depth as usize) * 2);
+                body_lines.push(format!("{}{}", indent, entry.rendered));
+            }
+
+            body_lines.push(String::new());
+
+            provenance.push(ProvenanceRef {
+                locator: path,
+                detail: String::new(),
+            });
+        }
+    }
+
+    let body = body_lines.join("\n").trim_end().to_string();
+
+    Ok(RawSection {
+        kind: SectionKind::SymbolOutlines,
+        title: "Symbol Outlines".to_string(),
+        body,
+        provenance,
+    })
+}
+
+/// Section 6: relevant git history.
+///
+/// Renders relevant git history for each claimed path.
+pub fn build_git_history(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSection> {
+    let paths = claimed_paths(ticket);
+
+    let mut body_lines = Vec::new();
+    let mut provenance = Vec::new();
+
+    const MAX_HISTORY_HITS_PER_PATH: usize = 5;
+
+    for path in paths {
+        let hits = ci.history_search(&path)?;
+
+        let top_hits = hits.iter().take(MAX_HISTORY_HITS_PER_PATH);
+
+        for hit in top_hits {
+            let sha_short = if hit.commit.sha.len() >= 7 {
+                &hit.commit.sha[..7]
+            } else {
+                &hit.commit.sha
+            };
+
+            let first_line = hit.commit.message.lines().next().unwrap_or("");
+
+            body_lines.push(format!("{} {}: {}", sha_short, first_line, hit.snippet));
+
+            provenance.push(ProvenanceRef {
+                locator: hit.commit.sha.clone(),
+                detail: String::new(),
+            });
+        }
+    }
+
+    let body = body_lines.join("\n");
+
+    Ok(RawSection {
+        kind: SectionKind::GitHistory,
+        title: "Git History".to_string(),
+        body,
+        provenance,
+    })
+}
+
+/// Section 7: prior failures recorded on this ticket.
+///
+/// Renders failures from the ticket's failure history.
+pub fn build_prior_failures(ticket: &Ticket) -> RawSection {
+    let mut body_lines = Vec::new();
+
+    for failure in &ticket.failures {
+        body_lines.push(format!(
+            "attempt {} ({:?}): {}",
+            failure.attempt, failure.class, failure.detail
+        ));
+    }
+
+    let body = body_lines.join("\n");
+
+    RawSection {
+        kind: SectionKind::PriorFailures,
+        title: "Prior Failures".to_string(),
+        body,
+        provenance: Vec::new(),
+    }
+}
+
+/// Section 8 (lowest priority, dropped first on overflow): project conventions.
+///
+/// Renders project conventions.
+pub fn build_conventions(conventions: &[String]) -> RawSection {
+    let body = conventions.join("\n");
+
+    RawSection {
+        kind: SectionKind::Conventions,
+        title: "Conventions".to_string(),
+        body,
+        provenance: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tm_core::{Ticket, TicketKind, TicketState};
+    use tm_types::{Authority, Budget, Predicate, TicketId};
+
+    fn minimal_ticket(id: &str, objective: &str) -> Ticket {
+        Ticket {
+            id: TicketId::new(id).expect("valid ticket id"),
+            kind: TicketKind::Work,
+            objective: objective.to_string(),
+            state: TicketState::Ready,
+            parent: None,
+            children: Vec::new(),
+            dependencies: Vec::new(),
+            milestone: None,
+            authority: Authority::none(),
+            resources: Vec::new(),
+            executor: tm_core::ExecutorRequirements {
+                role: tm_types::Role::CoderFast,
+                human_required: false,
+                min_capability: tm_types::Tolerance::Any,
+            },
+            context_refs: Vec::new(),
+            success: Vec::new(),
+            verification: tm_core::VerificationPolicy::None,
+            budget: Budget::unlimited(),
+            retry: tm_core::RetryPolicy {
+                max_attempts: 3,
+                base_delay_seconds: 10,
+                backoff_multiplier: 2.0,
+                max_delay_seconds: 120,
+            },
+            cycle: None,
+            attempts: 0,
+            failures: Vec::new(),
+            priority: 0,
+            created: tm_types::Timestamp::EPOCH,
+            updated: tm_types::Timestamp::EPOCH,
+        }
+    }
+
+    #[test]
+    fn claimed_paths_empty_resources() {
+        let ticket = minimal_ticket("T-1", "Test objective");
+        assert_eq!(claimed_paths(&ticket), Vec::<String>::new());
+    }
+
+    #[test]
+    fn claimed_paths_deduplicates_first_seen_order() {
+        let mut ticket = minimal_ticket("T-1", "Test objective");
+        let patterns1 =
+            tm_types::PatternSet::parse(vec!["src/*.rs".to_string(), "src/lib.rs".to_string()])
+                .expect("valid patterns");
+        let patterns2 =
+            tm_types::PatternSet::parse(vec!["src/*.rs".to_string()]).expect("valid patterns");
+
+        ticket.resources = vec![
+            tm_core::ResourceClaim {
+                paths: patterns1,
+                mode: tm_core::ResourceMode::Shared,
+            },
+            tm_core::ResourceClaim {
+                paths: patterns2,
+                mode: tm_core::ResourceMode::Shared,
+            },
+        ];
+
+        let paths = claimed_paths(&ticket);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.iter().any(|p| p == "src/*.rs"));
+        assert!(paths.iter().any(|p| p == "src/lib.rs"));
+    }
+
+    #[test]
+    fn build_objective_renders_objective_only() {
+        let ticket = minimal_ticket("T-1", "Fix the bug");
+        let section = build_objective(&ticket);
+
+        assert_eq!(section.kind, SectionKind::Objective);
+        assert_eq!(section.title, "Objective");
+        assert!(section.body.contains("Fix the bug"));
+        assert_eq!(section.provenance.len(), 1);
+        assert_eq!(section.provenance[0].locator, "T-1");
+        assert_eq!(section.provenance[0].detail, "ticket objective/success");
+    }
+
+    #[test]
+    fn build_objective_renders_predicates() {
+        let mut ticket = minimal_ticket("T-1", "Implement feature");
+        ticket.success = vec![
+            Predicate::FileExists {
+                path: "src/feature.rs".to_string(),
+            },
+            Predicate::TestsPass {
+                suite: Some("unit".to_string()),
+            },
+        ];
+
+        let section = build_objective(&ticket);
+        assert!(section.body.contains("Implement feature"));
+        assert!(section.body.contains("FileExists: src/feature.rs"));
+        assert!(section.body.contains("TestsPass: unit"));
+    }
+
+    #[test]
+    fn build_objective_renders_nested_predicates() {
+        let mut ticket = minimal_ticket("T-1", "Complex task");
+        ticket.success = vec![Predicate::AllOf(vec![
+            Predicate::FileExists {
+                path: "a.txt".to_string(),
+            },
+            Predicate::FileExists {
+                path: "b.txt".to_string(),
+            },
+        ])];
+
+        let section = build_objective(&ticket);
+        assert!(section.body.contains("AllOf:"));
+        assert!(section.body.contains("FileExists: a.txt"));
+        assert!(section.body.contains("FileExists: b.txt"));
+    }
+
+    #[test]
+    fn build_decisions_empty_view() {
+        let ticket = minimal_ticket("T-1", "Task");
+        let view = ProjectView::empty();
+
+        let section = build_decisions(&ticket, &view);
+        assert_eq!(section.kind, SectionKind::Decisions);
+        assert_eq!(section.title, "Active Decisions");
+        assert_eq!(section.body, "");
+        assert_eq!(section.provenance.len(), 0);
+    }
+
+    #[test]
+    fn build_prior_failures_empty() {
+        let ticket = minimal_ticket("T-1", "Task");
+        let section = build_prior_failures(&ticket);
+
+        assert_eq!(section.kind, SectionKind::PriorFailures);
+        assert_eq!(section.title, "Prior Failures");
+        assert_eq!(section.body, "");
+        assert_eq!(section.provenance.len(), 0);
+    }
+
+    #[test]
+    fn build_prior_failures_with_records() {
+        let mut ticket = minimal_ticket("T-1", "Task");
+        ticket.failures = vec![
+            tm_core::FailureRecord {
+                class: tm_core::FailureClass::ExecutorCrash,
+                detail: "Process crashed".to_string(),
+                at: tm_types::Timestamp::EPOCH,
+                attempt: 1,
+            },
+            tm_core::FailureRecord {
+                class: tm_core::FailureClass::VerificationFailed,
+                detail: "Test failed".to_string(),
+                at: tm_types::Timestamp::EPOCH,
+                attempt: 2,
+            },
+        ];
+
+        let section = build_prior_failures(&ticket);
+        assert!(section.body.contains("attempt 1"));
+        assert!(section.body.contains("ExecutorCrash"));
+        assert!(section.body.contains("Process crashed"));
+        assert!(section.body.contains("attempt 2"));
+        assert!(section.body.contains("VerificationFailed"));
+        assert!(section.body.contains("Test failed"));
+    }
+
+    #[test]
+    fn build_conventions_empty() {
+        let conventions: Vec<String> = Vec::new();
+        let section = build_conventions(&conventions);
+
+        assert_eq!(section.kind, SectionKind::Conventions);
+        assert_eq!(section.title, "Conventions");
+        assert_eq!(section.body, "");
+        assert_eq!(section.provenance.len(), 0);
+    }
+
+    #[test]
+    fn build_conventions_with_items() {
+        let conventions = vec![
+            "Use snake_case for variables".to_string(),
+            "Always add doc comments".to_string(),
+            "Write tests for public functions".to_string(),
+        ];
+
+        let section = build_conventions(&conventions);
+        assert!(section.body.contains("Use snake_case for variables"));
+        assert!(section.body.contains("Always add doc comments"));
+        assert!(section.body.contains("Write tests for public functions"));
+    }
+
+    #[test]
+    fn build_dependencies_empty() {
+        let ticket = minimal_ticket("T-1", "Task");
+        let view = ProjectView::empty();
+
+        let section = build_dependencies(&ticket, &view);
+        assert_eq!(section.kind, SectionKind::Dependencies);
+        assert_eq!(section.title, "Dependencies & Evidence");
+        assert_eq!(section.body, "");
+    }
+
+    #[test]
+    fn render_predicate_command_succeeds() {
+        let pred = Predicate::CommandSucceeds {
+            command: vec!["make".to_string(), "test".to_string()],
+        };
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("CommandSucceeds"));
+        assert!(rendered.contains("make test"));
+    }
+
+    #[test]
+    fn render_predicate_file_exists() {
+        let pred = Predicate::FileExists {
+            path: "Cargo.toml".to_string(),
+        };
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("FileExists: Cargo.toml"));
+    }
+
+    #[test]
+    fn render_predicate_file_matches() {
+        let pred = Predicate::FileMatches {
+            path: "src/main.rs".to_string(),
+            regex: r#"fn main\(\)"#.to_string(),
+        };
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("FileMatches"));
+        assert!(rendered.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn render_predicate_tests_pass_with_suite() {
+        let pred = Predicate::TestsPass {
+            suite: Some("integration".to_string()),
+        };
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("TestsPass: integration"));
+    }
+
+    #[test]
+    fn render_predicate_tests_pass_default() {
+        let pred = Predicate::TestsPass { suite: None };
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("TestsPass: default"));
+    }
+
+    #[test]
+    fn render_predicate_ticket_closed() {
+        let pred = Predicate::TicketClosed {
+            ticket: TicketId::new("T-5").expect("valid"),
+        };
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("TicketClosed: T-5"));
+    }
+
+    #[test]
+    fn render_predicate_human_attested() {
+        let pred = Predicate::HumanAttested {
+            note: "Code review approved".to_string(),
+        };
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("HumanAttested: Code review approved"));
+    }
+
+    #[test]
+    fn render_predicate_judgment() {
+        let pred = Predicate::Judgment {
+            claim: "Design is sound".to_string(),
+        };
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("Judgment: Design is sound"));
+    }
+
+    #[test]
+    fn render_predicate_indentation() {
+        let pred = Predicate::FileExists {
+            path: "test.rs".to_string(),
+        };
+        let rendered = render_predicate(&pred, 4);
+        assert!(rendered.starts_with("    FileExists"));
+    }
+
+    #[test]
+    fn render_predicate_all_of() {
+        let pred = Predicate::AllOf(vec![
+            Predicate::FileExists {
+                path: "a.rs".to_string(),
+            },
+            Predicate::FileExists {
+                path: "b.rs".to_string(),
+            },
+        ]);
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("AllOf:"));
+        assert!(rendered.contains("FileExists: a.rs"));
+        assert!(rendered.contains("FileExists: b.rs"));
+    }
+
+    #[test]
+    fn render_predicate_any_of() {
+        let pred = Predicate::AnyOf(vec![
+            Predicate::TestsPass {
+                suite: Some("unit".to_string()),
+            },
+            Predicate::TestsPass {
+                suite: Some("integration".to_string()),
+            },
+        ]);
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("AnyOf:"));
+        assert!(rendered.contains("TestsPass: unit"));
+        assert!(rendered.contains("TestsPass: integration"));
+    }
+
+    #[test]
+    fn render_predicate_not() {
+        let pred = Predicate::Not(Box::new(Predicate::FileExists {
+            path: "forbidden.rs".to_string(),
+        }));
+        let rendered = render_predicate(&pred, 0);
+        assert!(rendered.contains("Not:"));
+        assert!(rendered.contains("FileExists: forbidden.rs"));
+    }
+}

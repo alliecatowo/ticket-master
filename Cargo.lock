@@ -1602,6 +1602,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tm-context"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tm-codeintel",
+ "tm-core",
+ "tm-events",
+ "tm-types",
+ "tracing",
+]
+
+[[package]]
 name = "tm-core"
 version = "0.1.0"
 dependencies = [
@@ -1615,6 +1632,21 @@ dependencies = [
  "thiserror",
  "tm-events",
  "tm-types",
+ "tracing",
+]
+
+[[package]]
+name = "tm-docs"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "tempfile",
+ "thiserror",
+ "tm-codeintel",
+ "tm-core",
+ "tm-events",
+ "tm-types",
+ "toml",
  "tracing",
 ]
 
@@ -1634,6 +1666,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tm-harness"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "insta",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tm-core",
+ "tm-events",
+ "tm-types",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "tm-provider"
 version = "0.1.0"
 dependencies = [
@@ -1648,6 +1698,22 @@ dependencies = [
  "tm-types",
  "tokio",
  "toml",
+ "tracing",
+]
+
+[[package]]
+name = "tm-scheduler"
+version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tm-core",
+ "tm-events",
+ "tm-provider",
+ "tm-types",
  "tracing",
 ]
 

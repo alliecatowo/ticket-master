@@ -1,0 +1,21 @@
+[package]
+name = "tm-scheduler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The scheduler: a pure function from project state to the next actions, plus a thin deterministic driver."
+
+[dependencies]
+tm-types = { workspace = true }
+tm-core = { workspace = true }
+tm-events = { workspace = true }
+tm-provider = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

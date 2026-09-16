@@ -50,6 +50,8 @@ pub struct InvalidTransition {
 //   Submitted        VerificationStarted          -> Verifying
 //   Submitted        Cancel                       -> Cancelled
 //   Verifying        VerificationPassed           -> Auditing
+//   Leased           Failed                       -> Recovery
+//   Running          Failed                       -> Recovery
 //   Verifying        VerificationFailed           -> Recovery
 //   Verifying        Cancel                       -> Cancelled
 //   Auditing         AuditPassed                  -> Closed
@@ -82,10 +84,12 @@ pub fn transition(from: TicketState, trigger: Trigger) -> Result<TicketState, In
         (Ready, DependenciesUnsatisfied) => Ok(Blocked),
         (Ready, Cancel) => Ok(Cancelled),
         (Leased, WorkStarted) => Ok(Running),
+        (Leased, Failed) => Ok(Recovery),
         (Leased, LeaseExpired) => Ok(Ready),
         (Leased, LeaseReleased) => Ok(Ready),
         (Leased, Cancel) => Ok(Cancelled),
         (Running, Submit) => Ok(Submitted),
+        (Running, Failed) => Ok(Recovery),
         (Running, LeaseExpired) => Ok(Ready),
         (Running, LeaseReleased) => Ok(Ready),
         (Running, Cancel) => Ok(Cancelled),
@@ -151,6 +155,7 @@ impl TransitionTable {
         Trigger::VerificationStarted,
         Trigger::VerificationPassed,
         Trigger::VerificationFailed,
+        Trigger::Failed,
         Trigger::AuditPassed,
         Trigger::AuditRejectedMinor,
         Trigger::AuditRejectedStructural,
@@ -202,10 +207,12 @@ mod tests {
             (Ready, DependenciesUnsatisfied, Blocked),
             (Ready, Cancel, Cancelled),
             (Leased, WorkStarted, Running),
+            (Leased, Failed, Recovery),
             (Leased, LeaseExpired, Ready),
             (Leased, LeaseReleased, Ready),
             (Leased, Cancel, Cancelled),
             (Running, Submit, Submitted),
+            (Running, Failed, Recovery),
             (Running, LeaseExpired, Ready),
             (Running, LeaseReleased, Ready),
             (Running, Cancel, Cancelled),

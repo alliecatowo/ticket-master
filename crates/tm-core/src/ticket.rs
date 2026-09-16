@@ -126,6 +126,13 @@ pub enum Trigger {
     AuditRejectedMinor,
     /// Rule 7: `Auditing -> Replan`.
     AuditRejectedStructural,
+    /// The executing worker failed: `Leased | Running -> Recovery`.
+    ///
+    /// SPEC.md §4.3's diagram routes `RUNNING ├── failure ──► RECOVERY`, which is how an
+    /// executor crash, a tool failure or an insufficient-authority stop enters the retry
+    /// machinery. Without it, failure could only be recorded after verification, so a worker
+    /// that died mid-run had no legal way back into the graph.
+    Failed,
     /// Rule 8: `Recovery -> Ready`, while `attempts < max_attempts` and budget remains.
     RetryScheduled,
     /// Rule 8: `Recovery -> Escalated`, attempts exhausted, budget exhausted, or a

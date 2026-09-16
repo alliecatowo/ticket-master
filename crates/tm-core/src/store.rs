@@ -37,15 +37,16 @@ use std::sync::Arc;
 
 use rusqlite::Connection;
 use tm_events::payload::{
-    ArtifactCreatedPayload, DecisionCreatedPayload, DecisionSupersededPayload,
-    MilestoneClosedPayload, MilestoneCreatedPayload, MilestoneReopenedPayload,
-    TicketAuditRejectedPayload, TicketAuditedPayload, TicketBudgetExhaustedPayload,
-    TicketCancelledPayload, TicketChildAddedPayload, TicketClosedPayload, TicketCreatedPayload,
-    TicketDependencyAddedPayload, TicketEscalatedPayload, TicketFailedPayload,
-    TicketHeartbeatPayload, TicketLeaseExpiredPayload, TicketLeaseReleasedPayload,
-    TicketLeasedPayload, TicketReopenedPayload, TicketRetryScheduledPayload,
-    TicketStateChangedPayload, TicketSubmittedPayload, TicketUpdatedPayload,
-    TicketVerificationFailedPayload, TicketVerifiedPayload, UsageRecordedPayload,
+    ArtifactCreatedPayload, AuthorityRevertedPayload, DecisionCreatedPayload,
+    DecisionSupersededPayload, MilestoneClosedPayload, MilestoneCreatedPayload,
+    MilestoneReopenedPayload, TicketAuditRejectedPayload, TicketAuditedPayload,
+    TicketBudgetExhaustedPayload, TicketCancelledPayload, TicketChildAddedPayload,
+    TicketClosedPayload, TicketCreatedPayload, TicketDependencyAddedPayload,
+    TicketEscalatedPayload, TicketFailedPayload, TicketHeartbeatPayload, TicketLeaseExpiredPayload,
+    TicketLeaseReleasedPayload, TicketLeasedPayload, TicketReopenedPayload,
+    TicketRetryScheduledPayload, TicketStateChangedPayload, TicketSubmittedPayload,
+    TicketUpdatedPayload, TicketVerificationFailedPayload, TicketVerifiedPayload,
+    UsageRecordedPayload,
 };
 use tm_events::{Event, EventDraft, EventLog, Payload, Tx};
 use tm_types::{
@@ -786,7 +787,10 @@ impl Store {
                 .tickets
                 .get(&ticket)
                 .ok_or_else(|| TmError::not_found("ticket", &ticket))?;
-            let attempt = t.attempts + 1;
+            // `attempts` was incremented when the lease was acquired, so it already names the
+            // attempt that just failed. A ticket that failed without ever being leased still
+            // counts as one attempt.
+            let attempt = t.attempts.max(1);
             let can_retry =
                 class.is_retryable() && attempt < t.retry.max_attempts && !t.budget.is_exhausted();
             let trigger = if can_retry {
@@ -794,19 +798,54 @@ impl Store {
             } else {
                 Trigger::RetryExhausted
             };
-            let to = machine::transition(t.state, trigger)
-                .map_err(|e| TmError::InvalidTransition(e.to_string()))?;
-            let mut drafts = vec![
-                EventDraft::new(
+            let mut drafts = vec![EventDraft::new(
+                actor.clone(),
+                Id::from(ticket.clone()),
+                Payload::from(TicketFailedPayload {
+                    ticket: ticket.clone(),
+                    reason: detail.clone(),
+                }),
+            )];
+            // The failed executor is finished with this attempt, so its lease ends here and the
+            // authority it held reverts. Leaving the lease live would block every later attempt
+            // on the double-lease invariant (SPEC.md §4.5, §8).
+            for lease in view.leases.values().filter(|l| l.ticket == ticket) {
+                drafts.push(EventDraft::new(
                     actor.clone(),
                     Id::from(ticket.clone()),
-                    Payload::from(TicketFailedPayload {
+                    Payload::from(TicketLeaseReleasedPayload {
                         ticket: ticket.clone(),
-                        reason: detail.clone(),
+                        lease: lease.id.clone(),
                     }),
-                ),
-                state_changed_draft(&ticket, t.state, to, actor.clone()),
-            ];
+                ));
+                drafts.push(EventDraft::new(
+                    actor.clone(),
+                    Id::from(ticket.clone()),
+                    Payload::from(AuthorityRevertedPayload {
+                        subject: lease.holder.clone(),
+                        ticket: Some(ticket.clone()),
+                        to_seq: 0,
+                    }),
+                ));
+            }
+            // Failure is two transitions, not one: the ticket enters Recovery, and only from
+            // there does the retry policy decide between another attempt and escalation. A
+            // ticket already in Recovery (a failed verification, say) skips the first step.
+            let mut from = t.state;
+            if from != TicketState::Recovery {
+                let into_recovery = machine::transition(from, Trigger::Failed)
+                    .map_err(|e| TmError::InvalidTransition(e.to_string()))?;
+                drafts.push(state_changed_draft(
+                    &ticket,
+                    from,
+                    into_recovery,
+                    actor.clone(),
+                ));
+                from = into_recovery;
+            }
+            let to = machine::transition(from, trigger)
+                .map_err(|e| TmError::InvalidTransition(e.to_string()))?;
+            drafts.push(state_changed_draft(&ticket, from, to, actor.clone()));
             if can_retry {
                 let not_before = self
                     .clock
@@ -895,6 +934,18 @@ impl Store {
                         expires_at: lease.heartbeat.plus_seconds(ttl_seconds as i64),
                     }),
                 ),
+                // The attempt is spent the moment the work is handed out, not when it is
+                // reported failed (SPEC.md 4.3 rule 4). Counting it here is what stops a worker
+                // that crashes without ever reporting from looping on the ticket for free: the
+                // lease expires, the ticket returns to Ready, and the attempt is already gone.
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(ticket.clone()),
+                    Payload::from(TicketUpdatedPayload {
+                        ticket: ticket.clone(),
+                        fields: serde_json::json!({ "attempts": t.attempts + 1 }),
+                    }),
+                ),
                 state_changed_draft(&ticket, t.state, to, actor),
             ])
         })
@@ -979,6 +1030,17 @@ impl Store {
                         lease: action.lease.clone(),
                     }),
                 ));
+                if let Some(lease) = view.leases.get(&action.lease) {
+                    drafts.push(EventDraft::new(
+                        system.clone(),
+                        Id::from(action.ticket.clone()),
+                        Payload::from(AuthorityRevertedPayload {
+                            subject: lease.holder.clone(),
+                            ticket: Some(action.ticket.clone()),
+                            to_seq: 0,
+                        }),
+                    ));
+                }
                 if let Some(t) = view.tickets.get(&action.ticket) {
                     if let Ok(to) = machine::transition(t.state, Trigger::LeaseExpired) {
                         drafts.push(state_changed_draft(
@@ -2146,6 +2208,88 @@ mod tests {
             TicketState::Leased
         );
         assert_eq!(view.leases.len(), 1);
+    }
+
+    /// SPEC.md §17 invariant 5: a dead worker cannot block the project.
+    ///
+    /// A worker that crashes never calls `record_failure`, so if the attempt were only counted
+    /// on a reported failure, the lease would expire, the ticket would return to `Ready`, and
+    /// the same crash could repeat forever. Counting the attempt when the lease is handed out
+    /// is what bounds that loop.
+    #[test]
+    fn invariant_5_a_crashed_worker_spends_an_attempt() {
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store = Store::open_with(dir.path(), clock.clone(), ids).unwrap();
+        let ticket_id = create_root_ticket(&store);
+        store.activate(&ticket_id, actor()).unwrap();
+
+        let attempts = |s: &Store| s.view().unwrap().tickets.get(&ticket_id).unwrap().attempts;
+        assert_eq!(attempts(&store), 0);
+
+        for expected in 1..=3u32 {
+            store
+                .acquire_lease(&ticket_id, actor(), Authority::none(), vec![], 10, actor())
+                .expect("acquire lease");
+            assert_eq!(
+                attempts(&store),
+                expected,
+                "handing out the work spends the attempt immediately"
+            );
+
+            // The worker dies: no heartbeat, no failure report, just silence past the TTL.
+            clock.advance_seconds(11);
+            store.expire_leases().expect("expire");
+            assert_eq!(
+                store.view().unwrap().tickets.get(&ticket_id).unwrap().state,
+                TicketState::Ready,
+                "the ticket returns to the ready set rather than staying stuck"
+            );
+            assert_eq!(
+                attempts(&store),
+                expected,
+                "expiry must not double-count what leasing already charged"
+            );
+        }
+    }
+
+    /// The retry ceiling has to be reachable, or `max_attempts` is decorative.
+    #[test]
+    fn invariant_5_repeated_failure_escalates_instead_of_looping() {
+        let (_dir, store) = open_store();
+        let ticket_id = create_root_ticket(&store);
+        store.activate(&ticket_id, actor()).unwrap();
+
+        let mut escalated_after = None;
+        for round in 1..=6u32 {
+            store
+                .acquire_lease(&ticket_id, actor(), Authority::none(), vec![], 60, actor())
+                .expect("acquire lease");
+            store
+                .record_failure(
+                    &ticket_id,
+                    crate::ticket::FailureClass::ExecutorCrash,
+                    "worker died".to_string(),
+                    actor(),
+                )
+                .expect("record failure");
+            let state = store.view().unwrap().tickets.get(&ticket_id).unwrap().state;
+            if state == TicketState::Escalated {
+                escalated_after = Some(round);
+                break;
+            }
+            // Recovery hands the ticket back to Ready so the next attempt can be leased.
+            if state == TicketState::Recovery {
+                store
+                    .transition(&ticket_id, Trigger::RetryScheduled, actor())
+                    .expect("recovery back to ready");
+            }
+        }
+        assert!(
+            escalated_after.is_some(),
+            "a ticket that keeps failing must escalate, not retry forever"
+        );
     }
 
     #[test]

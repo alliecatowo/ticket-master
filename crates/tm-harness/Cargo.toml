@@ -1,0 +1,23 @@
+[package]
+name = "tm-harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ticketmaster Harness: versioned project state for how the project works on itself — tool preferences, routing, verification defaults, prompt fragments — epoch-pinned per session, improved only against repo-local benchmarks."
+
+[dependencies]
+tm-types = { workspace = true }
+tm-core = { workspace = true }
+tm-events = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+insta = { workspace = true }
