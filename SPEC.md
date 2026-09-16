@@ -848,3 +848,120 @@ CI (`.github/workflows/ci.yml`) runs the same `verify` target on Linux and macOS
 
 Each invariant maps to at least one named test (`invariant_<n>_*`), listed in
 `docs/contracts/invariants.md`.
+
+---
+
+## 18. Surfaces
+
+Everything in this section is a **client of `tm-server`** (§14). No surface talks to SQLite, and no
+surface owns truth: they render the materialized state and stream changes over SSE. That is what
+makes "multiple clients, one world" (§59 of the brief) true by construction rather than by
+discipline.
+
+```
+              tm-core (SQLite: project.db, index.db)
+                        │
+                   tm-server  REST + SSE
+                        │
+   ┌────────────┬───────┴────────┬──────────────────┐
+   │            │                │                  │
+  tm  (CLI)   web app      Ticketmaster.app     VS Code ext
+  Rust        Vite/React   SwiftUI (macOS 26)   TypeScript
+                   └──────── @ticketmaster/client ────┘
+```
+
+### 18.1 `clients/ts/` — the shared TypeScript client
+
+One package, consumed by both the web app and the VS Code extension. Nothing else may hand-roll
+`fetch` against the API.
+
+- Typed bindings for every endpoint and every event payload. The types are **generated** from the
+  Rust types (`tm-server` exposes `GET /schema` returning JSON Schema; a `pnpm gen` step writes
+  `src/generated.ts`). A CI check regenerates and fails on drift, so the surfaces cannot silently
+  disagree with Core.
+- `TicketmasterClient` — REST methods, plus `subscribe(fromSeq)` returning an async iterable over
+  SSE that reconnects with `Last-Event-ID` and never drops or duplicates across a reconnect.
+- `ProjectStore` — an in-memory materialized view fed by the event stream, so a surface renders
+  from the same event-sourced model Core uses. Pure and unit-testable with a scripted event array.
+- Tests: `vitest`, including a reconnect test that asserts exactly-once delivery across a
+  simulated drop.
+
+### 18.2 `clients/web/` — the project canvas
+
+Vite + React + TypeScript. Served by `tm serve` as static assets, so `tm serve --open` is the whole
+setup story. No SSR, no framework lock-in, no build step the Rust binary cannot run.
+
+Views, drawn from the brief's §43 native project canvas and §40 multiplayer:
+
+| View | Contents |
+|---|---|
+| Status | The "since you left" report: closed, repaired, reconciled, benchmarked, needs-you |
+| Graph | Dependency and parent/child graph, milestones as cuts, loop edges marked |
+| Backlog | Ready / blocked / active, filterable by milestone, kind, executor role |
+| Ticket | Objective, state, authority, evidence, failures, artifacts, event history |
+| Rooms | Per-milestone activity: participants, comments, live presence |
+| Review | Diffs and evidence awaiting audit, with approve/reject |
+| Decisions | Decision log with supersession chains |
+| Providers | Role→model routing, quota headroom, breaker state, spend |
+
+Rules: presence and path leases are shown wherever work is shown, because collision prevention is
+the same substrate for humans and agents. Approvals are first-class and blocking. Every mutation
+goes through the client package; optimistic updates are reconciled against the event stream.
+
+### 18.3 `clients/macos/` — `Ticketmaster.app`
+
+SwiftUI, macOS 26 (Tahoe), Swift 6.3, built with Xcode 26. A Swift package (`TicketmasterKit`) for
+models, the API client and view models — so the logic is testable with `swift test` without
+launching a UI — plus a thin app target.
+
+**Liquid Glass is the real thing, not a blur imitation.** Use the system APIs:
+
+- `.glassEffect(_:in:)` for floating controls and panels; `.glassEffect(.regular.tint(_).interactive())`
+  where the control responds to pointer or press.
+- `GlassEffectContainer` to group nearby glass elements so they blend and morph as one, instead of
+  stacking independent glass layers (stacked glass is the single most common way to get this wrong).
+- `@Namespace` + `.glassEffectID(_:in:)` for morphing transitions between related glass elements.
+- `.buttonStyle(.glass)` / `.glassProminent` for buttons; `ToolbarSpacer` to group toolbar items.
+- `.backgroundExtensionEffect()` where content should bleed under a sidebar or inspector.
+- Toolbars, sidebars, sheets and inspectors adopt Liquid Glass automatically on macOS 26 — do not
+  hand-roll what the system already gives you, and do **not** substitute `.ultraThinMaterial`.
+- Respect Reduce Transparency and Increase Contrast: the app must stay legible and correct with
+  those on, which is an accessibility requirement, not a nicety.
+
+Structure: `NavigationSplitView` — sidebar (milestones, saved views, participants), content (the
+ticket list or graph), detail (ticket inspector). Menu bar extra showing active work and
+needs-you count. Native notifications for `approval.requested` and `ticket.escalated`.
+
+### 18.4 `clients/vscode/` — the editor surface
+
+TypeScript extension over `@ticketmaster/client`:
+
+- Tree view of milestones → tickets → children, with state badges.
+- Presence and path leases surfaced as editor decorations, so you can see that `src/auth/**` is
+  leased by `T-184` before you start editing it.
+- Decisions affecting the open file shown as a CodeLens.
+- Commands: open ticket, claim ticket, submit with evidence, record a decision, run `tm` on the
+  current selection.
+- Tests: `vitest` for the pure logic; the VS Code host integration is exercised through the
+  extension test runner.
+
+### 18.5 Verification ladder
+
+Staged deliberately: a surface is "done" at level 1, and levels 2 and 3 are tracked as real work
+rather than aspiration.
+
+1. **Now — build, unit and contract.** `cargo test` for the CLI; `vitest` for the TS packages
+   including `ProjectStore` reducer tests and SSE reconnect tests; `swift test` for
+   `TicketmasterKit`; `xcodebuild -scheme Ticketmaster build` for the app; API-contract tests for
+   web and extension run against a real `tm serve` on an ephemeral port with a seeded project.
+   Schema-drift check between Rust types and generated TS types.
+2. **Next — end-to-end.** Playwright against a live `tm serve`: create a ticket, watch it appear
+   over SSE without a refresh, approve a blocked action, see the agent resume. Tracked as
+   `T-E2E-WEB`.
+3. **Next — visual regression.** Snapshot the canvas views and the Mac app's glass surfaces in
+   light and dark, with Reduce Transparency both on and off, and diff against baselines. Tracked
+   as `T-VIS-REG`. Liquid Glass is exactly the kind of thing that regresses invisibly, so this
+   matters more here than in a flat UI.
+
+Surfaces never gate Core: a broken surface build must not fail `cargo test --workspace`. The
+`verify` target runs the Rust gate always, and the surface gates when their toolchains are present.
