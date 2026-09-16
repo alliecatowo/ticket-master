@@ -1,0 +1,30 @@
+[package]
+name = "tm-codeintel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Local-first code intelligence for Ticketmaster: semantic, exact, symbol-aware and git-history retrieval fused over a single SQLite index."
+
+[dependencies]
+tm-types = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+regex = { workspace = true }
+ignore = { workspace = true }
+globset = { workspace = true }
+git2 = { workspace = true }
+blake3 = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-go = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-python = "0.25"
+
+[dev-dependencies]
+tempfile = { workspace = true }

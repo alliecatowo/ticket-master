@@ -1,0 +1,576 @@
+//! [`MockProvider`]: the deterministic provider every test in the workspace uses instead of a
+//! network call.
+//!
+//! Responses are scripted by a hash of the request (so the same request always gets the same
+//! answer without the caller threading through a request id), plus optional injected failures,
+//! latency and quota-exhaustion behavior. No variant of this provider ever performs I/O.
+
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use parking_lot::Mutex;
+use tm_types::Clock;
+
+use crate::fabric::Provider;
+use crate::types::{
+    Candidate, Completion, CompletionRequest, ContentBlock, EmbedRequest, Embeddings, ModelId,
+    ProviderError, StopReason, Usage,
+};
+
+/// A canonical hash of a [`CompletionRequest`], used as the script lookup key.
+///
+/// Two requests that are equal after normalizing away fields that don't affect the "meaning" of
+/// the request (currently: none — every field is significant) hash equally.
+pub type RequestHash = u64;
+
+/// Hash a [`CompletionRequest`] into a [`RequestHash`].
+///
+/// Serializes `req` to canonical JSON via `serde_json::to_string` (field order is stable
+/// because `CompletionRequest`'s fields are declared in a fixed order and serde_json preserves
+/// struct field order), then hashes the bytes with `std::hash::DefaultHasher`.
+pub fn hash_request(req: &CompletionRequest) -> RequestHash {
+    // Invariant: `CompletionRequest` contains no map with non-string keys and no type whose
+    // `Serialize` impl can fail, so serialization to a `String` cannot error.
+    let json =
+        serde_json::to_string(req).expect("CompletionRequest serialization should never fail");
+    let mut hasher = std::hash::DefaultHasher::new();
+    json.as_bytes().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// One scripted failure to inject for a matching request.
+#[derive(Debug, Clone)]
+pub struct ScriptedFailure {
+    /// How many times this failure fires before falling through to the next script entry (or a
+    /// generic "unscripted" error). `None` means it fires forever.
+    pub times: Option<u32>,
+    /// The error to return.
+    pub error: ProviderError,
+}
+
+/// A scripted response or behavior for one request hash.
+#[derive(Debug, Clone)]
+pub enum Script {
+    /// Return this completion.
+    Respond(Completion),
+    /// Fail with this error.
+    Fail(ScriptedFailure),
+    /// Report the candidate as quota-exhausted: a [`ProviderError::RateLimited`] with the given
+    /// `retry_after`.
+    Exhausted {
+        /// How long the caller should wait before retrying.
+        retry_after: Duration,
+    },
+}
+
+/// A deterministic, network-free [`Provider`]. Every test in the workspace that needs a
+/// completion or embedding uses this instead of [`crate::anthropic::AnthropicProvider`].
+pub struct MockProvider {
+    id: String,
+    model: ModelId,
+    clock: std::sync::Arc<dyn Clock>,
+    scripts: Mutex<HashMap<RequestHash, Script>>,
+    default_latency: Duration,
+    embed_dim: usize,
+    call_log: Mutex<Vec<CompletionRequest>>,
+}
+
+impl MockProvider {
+    /// A mock provider identifying itself as `id`/`model`, with no scripted responses yet: every
+    /// request will fail with [`ProviderError::Unscripted`] until [`MockProvider::script`] is
+    /// called.
+    pub fn new(id: impl Into<String>, model: ModelId, clock: std::sync::Arc<dyn Clock>) -> Self {
+        MockProvider {
+            id: id.into(),
+            model,
+            clock,
+            scripts: Mutex::new(HashMap::new()),
+            default_latency: Duration::from_millis(0),
+            embed_dim: 8,
+            call_log: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Script the response for any request that hashes equal to `req`'s hash.
+    pub fn script_response(&self, req: &CompletionRequest, completion: Completion) {
+        self.scripts
+            .lock()
+            .insert(hash_request(req), Script::Respond(completion));
+    }
+
+    /// Script a failure for any request that hashes equal to `req`'s hash.
+    pub fn script_failure(&self, req: &CompletionRequest, failure: ScriptedFailure) {
+        self.scripts
+            .lock()
+            .insert(hash_request(req), Script::Fail(failure));
+    }
+
+    /// Script quota exhaustion for any request that hashes equal to `req`'s hash.
+    pub fn script_exhausted(&self, req: &CompletionRequest, retry_after: Duration) {
+        self.scripts
+            .lock()
+            .insert(hash_request(req), Script::Exhausted { retry_after });
+    }
+
+    /// Set the latency reported for unscripted-latency responses (scripted `Completion::latency`
+    /// values, when present, take precedence).
+    pub fn set_default_latency(&mut self, latency: Duration) {
+        self.default_latency = latency;
+    }
+
+    /// Every request this provider has received, in order, for test assertions.
+    pub fn call_log(&self) -> Vec<CompletionRequest> {
+        self.call_log.lock().clone()
+    }
+
+    /// Build a deterministic completion for `req` without registering it as a script: a
+    /// convenience for tests that don't care about exact content, only that a call succeeded.
+    ///
+    /// Derives a short deterministic text body from `hash_request(req)`, wraps it in a single
+    /// `Text` content block with `StopReason::EndTurn`, estimates `Usage` from input message
+    /// byte lengths plus a fixed output token count, and uses `self.model.clone()`,
+    /// `self.default_latency`, and `received_at: self.clock.now()`.
+    pub fn deterministic_completion(&self, req: &CompletionRequest) -> Completion {
+        let hash = hash_request(req);
+        let text = format!("mock-{:x}", hash);
+
+        let input_tokens = req
+            .messages
+            .iter()
+            .flat_map(|msg| &msg.content)
+            .map(|block| match block {
+                ContentBlock::Text { text } => (text.len() / 4) as u32,
+                ContentBlock::ToolUse { input, .. } => (input.to_string().len() / 4) as u32,
+                ContentBlock::ToolResult { content, .. } => content
+                    .iter()
+                    .map(|b| match b {
+                        ContentBlock::Text { text } => (text.len() / 4) as u32,
+                        _ => 0,
+                    })
+                    .sum(),
+            })
+            .sum();
+
+        let output_tokens = 10u32;
+
+        Completion {
+            model: self.model.clone(),
+            candidates: vec![Candidate {
+                content: vec![ContentBlock::Text { text }],
+                stop_reason: StopReason::EndTurn,
+            }],
+            usage: Usage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: self.default_latency,
+            received_at: self.clock.now(),
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for MockProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Serve `req` from the script table, falling back to [`ProviderError::Unscripted`].
+    ///
+    /// Pushes `req.clone()` onto `call_log`, looks up `hash_request(req)` in `scripts`.
+    /// If `Respond(completion)`, returns `Ok(completion.clone())`. If `Fail(f)`, decrements
+    /// `f.times` if `Some` (removing the script entry once it reaches zero so the next call falls
+    /// through), and returns `Err(f.error.clone())`. If `Exhausted { retry_after }`, returns
+    /// `Err(ProviderError::RateLimited { message: "mock quota exhausted".into(), retry_after:
+    /// Some(*retry_after) })`. Returns `Err(ProviderError::Unscripted)` if no script is found.
+    /// This method never sleeps or awaits real time — latency is data on the returned
+    /// `Completion`, not an actual delay, since tests must stay fast and deterministic.
+    async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
+        self.call_log.lock().push(req.clone());
+
+        let hash = hash_request(&req);
+        let mut scripts = self.scripts.lock();
+
+        match scripts.get_mut(&hash) {
+            Some(Script::Respond(completion)) => Ok(completion.clone()),
+            Some(Script::Fail(failure)) => {
+                let error = failure.error.clone();
+                if let Some(times) = &mut failure.times {
+                    *times -= 1;
+                    if *times == 0 {
+                        scripts.remove(&hash);
+                    }
+                }
+                Err(error)
+            }
+            Some(Script::Exhausted { retry_after }) => Err(ProviderError::RateLimited {
+                message: "mock quota exhausted".into(),
+                retry_after: Some(*retry_after),
+            }),
+            None => Err(ProviderError::Unscripted(format!(
+                "no script for hash {hash:x}"
+            ))),
+        }
+    }
+
+    /// Deterministically embed `req.inputs` without any scripting: every text maps to a fixed
+    /// small vector derived from its own hash, so identical inputs always produce identical
+    /// vectors and tests can assert on embedding equality/inequality without real model calls.
+    ///
+    /// For each input string, hashes it with a stable hasher, then expands the hash into
+    /// `self.embed_dim` floats in `[-1.0, 1.0]` via a deterministic mixing function (splitmix64).
+    /// Usage is `input_tokens` estimated from total input byte length / 4, with everything else zero.
+    async fn embed(&self, req: EmbedRequest) -> Result<Embeddings, ProviderError> {
+        let mut vectors = Vec::with_capacity(req.inputs.len());
+        let mut total_bytes = 0u32;
+
+        for input in &req.inputs {
+            total_bytes = total_bytes.saturating_add(input.len() as u32);
+
+            let mut hasher = std::hash::DefaultHasher::new();
+            input.hash(&mut hasher);
+            let seed = hasher.finish();
+
+            let mut vector = Vec::with_capacity(self.embed_dim);
+            let mut state = seed;
+
+            for _ in 0..self.embed_dim {
+                state ^= state >> 30;
+                state = state.wrapping_mul(0xbf58476d1ce4e5b9);
+                state ^= state >> 27;
+
+                let bits = (state >> 11) & 0xfffff;
+                let normalized = (bits as f32 / 0xfffff as f32) * 2.0 - 1.0;
+                vector.push(normalized);
+            }
+
+            vectors.push(vector);
+        }
+
+        let input_tokens = total_bytes / 4;
+
+        Ok(Embeddings {
+            model: self.model.clone(),
+            vectors,
+            usage: Usage {
+                input_tokens,
+                output_tokens: 0,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tm_types::FixedClock;
+
+    fn make_test_request() -> CompletionRequest {
+        CompletionRequest {
+            system: Some("test system".to_string()),
+            messages: vec![],
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: Some(0.5),
+            stop_sequences: vec![],
+            stream: false,
+            n: 1,
+        }
+    }
+
+    fn make_test_clock() -> std::sync::Arc<dyn Clock> {
+        std::sync::Arc::new(FixedClock::epoch())
+    }
+
+    #[test]
+    fn hash_request_deterministic() {
+        let req = make_test_request();
+        let hash1 = hash_request(&req);
+        let hash2 = hash_request(&req);
+        assert_eq!(hash1, hash2, "same request should hash identically");
+    }
+
+    #[test]
+    fn hash_request_different_for_different_requests() {
+        let req1 = make_test_request();
+        let mut req2 = make_test_request();
+        req2.max_tokens = 2048;
+
+        let hash1 = hash_request(&req1);
+        let hash2 = hash_request(&req2);
+        assert_ne!(hash1, hash2, "different requests should hash differently");
+    }
+
+    #[test]
+    fn deterministic_completion_has_correct_structure() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock.clone());
+        let req = make_test_request();
+
+        let completion = provider.deterministic_completion(&req);
+
+        assert_eq!(completion.model.provider, "test");
+        assert_eq!(completion.model.model, "model");
+        assert_eq!(completion.candidates.len(), 1);
+        assert_eq!(completion.candidates[0].stop_reason, StopReason::EndTurn);
+        assert_eq!(completion.usage.output_tokens, 10);
+        assert_eq!(completion.received_at, tm_types::Timestamp::EPOCH);
+    }
+
+    #[test]
+    fn deterministic_completion_contains_hash_in_text() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock.clone());
+        let req = make_test_request();
+
+        let completion = provider.deterministic_completion(&req);
+        let content = &completion.candidates[0].content;
+        assert_eq!(content.len(), 1);
+
+        if let ContentBlock::Text { text } = &content[0] {
+            assert!(text.starts_with("mock-"));
+        } else {
+            panic!("expected text content block");
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_scripted_response() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = make_test_request();
+        let scripted_completion = Completion {
+            model: ModelId::new("test", "model"),
+            candidates: vec![Candidate {
+                content: vec![ContentBlock::Text {
+                    text: "scripted response".to_string(),
+                }],
+                stop_reason: StopReason::EndTurn,
+            }],
+            usage: Usage {
+                input_tokens: 100,
+                output_tokens: 50,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: Duration::from_millis(100),
+            received_at: tm_types::Timestamp::EPOCH,
+        };
+
+        provider.script_response(&req, scripted_completion.clone());
+
+        let result = provider.complete(req.clone()).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), scripted_completion);
+        assert_eq!(provider.call_log().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_with_scripted_failure() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = make_test_request();
+        let error = ProviderError::InvalidRequest("bad input".to_string());
+        provider.script_failure(
+            &req,
+            ScriptedFailure {
+                times: Some(1),
+                error: error.clone(),
+            },
+        );
+
+        let result = provider.complete(req.clone()).await;
+        assert!(result.is_err());
+        assert_eq!(provider.call_log().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn complete_with_failure_that_fires_multiple_times() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = make_test_request();
+        let error = ProviderError::InvalidRequest("bad input".to_string());
+        provider.script_failure(
+            &req,
+            ScriptedFailure {
+                times: Some(2),
+                error: error.clone(),
+            },
+        );
+
+        let result1 = provider.complete(req.clone()).await;
+        assert!(result1.is_err());
+
+        let result2 = provider.complete(req.clone()).await;
+        assert!(result2.is_err());
+
+        let result3 = provider.complete(req.clone()).await;
+        assert!(matches!(result3, Err(ProviderError::Unscripted(_))));
+    }
+
+    #[tokio::test]
+    async fn complete_with_failure_that_fires_forever() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = make_test_request();
+        let error = ProviderError::InvalidRequest("bad input".to_string());
+        provider.script_failure(
+            &req,
+            ScriptedFailure {
+                times: None,
+                error: error.clone(),
+            },
+        );
+
+        for _ in 0..5 {
+            let result = provider.complete(req.clone()).await;
+            assert!(result.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_with_exhausted_quota() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = make_test_request();
+        let retry_after = Duration::from_secs(60);
+        provider.script_exhausted(&req, retry_after);
+
+        let result = provider.complete(req.clone()).await;
+        assert!(result.is_err());
+
+        match result.unwrap_err() {
+            ProviderError::RateLimited {
+                message,
+                retry_after: Some(dur),
+            } => {
+                assert_eq!(message, "mock quota exhausted");
+                assert_eq!(dur, Duration::from_secs(60));
+            }
+            _ => panic!("expected RateLimited error"),
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_unscripted_error() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = make_test_request();
+
+        let result = provider.complete(req.clone()).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ProviderError::Unscripted(_)));
+    }
+
+    #[tokio::test]
+    async fn complete_tracks_call_log() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = make_test_request();
+        provider.script_response(&req, provider.deterministic_completion(&req));
+
+        let _ = provider.complete(req.clone()).await;
+        let _ = provider.complete(req.clone()).await;
+
+        let log = provider.call_log();
+        assert_eq!(log.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn embed_deterministic_output() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = EmbedRequest {
+            inputs: vec!["hello".to_string(), "world".to_string()],
+        };
+
+        let result = provider.embed(req).await;
+        assert!(result.is_ok());
+
+        let embeddings = result.unwrap();
+        assert_eq!(embeddings.vectors.len(), 2);
+        assert_eq!(embeddings.vectors[0].len(), 8);
+        assert_eq!(embeddings.vectors[1].len(), 8);
+    }
+
+    #[tokio::test]
+    async fn embed_same_input_produces_same_vector() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req1 = EmbedRequest {
+            inputs: vec!["test".to_string()],
+        };
+
+        let req2 = EmbedRequest {
+            inputs: vec!["test".to_string()],
+        };
+
+        let result1 = provider.embed(req1).await.unwrap();
+        let result2 = provider.embed(req2).await.unwrap();
+
+        assert_eq!(result1.vectors[0], result2.vectors[0]);
+    }
+
+    #[tokio::test]
+    async fn embed_different_inputs_produce_different_vectors() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = EmbedRequest {
+            inputs: vec!["hello".to_string(), "world".to_string()],
+        };
+
+        let result = provider.embed(req).await.unwrap();
+
+        assert_ne!(result.vectors[0], result.vectors[1]);
+    }
+
+    #[tokio::test]
+    async fn embed_vectors_in_range() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = EmbedRequest {
+            inputs: vec!["test".to_string()],
+        };
+
+        let result = provider.embed(req).await.unwrap();
+
+        for &value in &result.vectors[0] {
+            assert!(
+                (-1.0..=1.0).contains(&value),
+                "vector values should be in [-1.0, 1.0]"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn embed_usage_calculation() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = EmbedRequest {
+            inputs: vec!["hello".to_string()],
+        };
+
+        let result = provider.embed(req).await.unwrap();
+
+        assert_eq!(result.usage.input_tokens, 5 / 4);
+        assert_eq!(result.usage.output_tokens, 0);
+    }
+}
