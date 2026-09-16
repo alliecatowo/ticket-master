@@ -31,7 +31,10 @@
 //!
 //! [macos]: crate::macos
 
-#![forbid(unsafe_code)]
+// `unsafe` is denied crate-wide and by default forbidden; `crate::macos` carries a narrow,
+// locally-scoped `#![allow(unsafe_code)]` because `AXUIElement*`, `CGWindowListCopyWindowInfo`
+// and ImageIO's image destination have no safe Rust wrapper — see that module's doc comment.
+#![deny(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod backend;
@@ -44,7 +47,7 @@ pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
-pub use backend::{Backend, BackendKind, Capabilities, SelectionEnv, select_backend};
+pub use backend::{select_backend, Backend, BackendKind, Capabilities, SelectionEnv};
 pub use input::{InputAction, KeyChord, Modifier, MouseButton, Point, ScrollDelta};
 pub use session::{ComputerSession, PanicStop, SessionMode};
 
@@ -107,7 +110,9 @@ impl From<ComputerError> for tm_types::TmError {
         match &e {
             ComputerError::BackendUnavailable { .. }
             | ComputerError::PermissionMissing { .. }
-            | ComputerError::UnsupportedBackend { .. } => tm_types::TmError::Provider(e.to_string()),
+            | ComputerError::UnsupportedBackend { .. } => {
+                tm_types::TmError::Provider(e.to_string())
+            }
             ComputerError::Parse(_) => tm_types::TmError::Parse(e.to_string()),
             ComputerError::PanicStop(_) => tm_types::TmError::InvalidTransition(e.to_string()),
             ComputerError::ApprovalRequired => tm_types::TmError::AuthorityDenied(e.to_string()),

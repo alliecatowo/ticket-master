@@ -1365,3 +1365,154 @@ the same reproducibility reason browsers are (§19.1a).
 macOS only, by construction. It is listed here so that when it is built it is built the same way as
 the rest — accessibility tree first, screenshots second, evidence recorded as artifacts — rather
 than as a bolt-on with its own vocabulary.
+
+---
+
+## 24. Executors
+
+An executor is whatever actually does a ticket's work. Ticketmaster does not assume that is its own
+agent, and the system is better if it never assumes that.
+
+### 24.1 The context pack is the boundary
+
+The load-bearing idea: **every executor receives the same compiled artifact.** A ticket's context
+pack (§8.1) — objective, success predicates, active decisions, dependency outputs, hybrid retrieval
+results, symbol outlines, relevant history, prior failures — is compiled deterministically by
+Ticketmaster and handed over. What happens on the other side is the executor's business.
+
+That is what makes the project's actual bet portable. The bet is not "our agent loop is better"; a
+tool-using loop is a few hundred lines and nobody's advantage. The bet is that *deterministic
+context compilation plus retrieval makes cheaper models succeed more often, in parallel, for less* —
+and that advantage applies just as well when the thing on the far side of the boundary is Claude
+Code or Codex as when it is `tm-agent`. Delegating to another harness with a compiled pack is
+strictly better than that harness rediscovering the codebase itself.
+
+So harness choice is a routing decision, not an architectural one.
+
+### 24.2 The trait
+
+```rust
+pub trait Executor: Send + Sync {
+    fn id(&self) -> &str;
+    fn capabilities(&self) -> ExecutorCapabilities;
+    async fn execute(&self, task: ExecutorTask) -> Result<ExecutorOutcome>;
+    async fn cancel(&self, handle: &ExecutionHandle) -> Result<()>;
+}
+```
+
+`ExecutorTask` carries the ticket, the context pack, the granted (already attenuated) authority,
+the budget, and the harness epoch. `ExecutorOutcome` carries evidence, artifacts, a patch, usage,
+and a failure class — never a self-certification, because verification stays separate (§11).
+
+`ExecutorCapabilities` declares `streaming`, `tool_use`, `patch_output`, `interactive`,
+`accepts_context_pack`, `sandboxed`, `max_context_tokens`, `cost_class`. The scheduler matches a
+ticket's `ExecutorRequirements` against these and refuses a mismatch rather than degrading quietly.
+
+### 24.3 Shipped adapters
+
+| Adapter | Transport | Notes |
+|---|---|---|
+| `builtin` | in-process `tm-agent` | The reference executor; cheapest, most parallel, fully instrumented |
+| `claude-code` | headless print mode / SDK | Strong interactive and agentic coding |
+| `codex` | headless exec / JSON | Rust, open source; good sandbox and approval model to learn from |
+| `pi` | JSON RPC over stdin/stdout | Minimal, extension-based; RPC mode makes it trivially driveable |
+| `opencode` | headless / JSON | |
+| `human` | the CLI and web surfaces | A human is an executor; manual work never leaves orchestration (§38 of the brief) |
+
+There is no single standard to target — pi uses its own JSON RPC with no MCP, others differ — so
+each adapter normalizes its harness into `ExecutorOutcome`, exactly as `Tracker` normalizes issue
+trackers and `Provider` normalizes model APIs. Where a harness speaks a general agent protocol, the
+adapter uses it; where it does not, the adapter drives its headless mode over stdio.
+
+**Authority is enforced on our side of the boundary, not theirs.** An external harness is handed a
+sandbox derived from the granted authority — filesystem scope, network policy, permitted commands —
+and its writes are validated against that scope on return. We do not trust a third-party harness to
+honour our permission model; we constrain it and check its output.
+
+### 24.4 Executor fabric
+
+Provider Fabric (§6) routes *cognition* under quota, health and price. The same machinery routes
+*compute*, because where an executor runs is as much infrastructure as which model it uses.
+
+```
+placement: local-process | container | remote-node | cloud-sandbox
+```
+
+Tracked per placement: concurrency, live load, cost, latency, health, and quota — including free
+tiers, which are ordinary routable capacity with a daily ceiling rather than a special case. A
+project can burst onto remote nodes overnight and fall back to local when they are exhausted, using
+the same `Use | Degrade | Wait | Exhausted` decision the model router already returns.
+
+This is what makes "twenty agents overnight" a resourcing question with an answer, instead of a
+hope.
+
+---
+
+## 25. Workflow definitions
+
+Ticketmaster should ship a workflow DSL, and it belongs in Core rather than in a client.
+
+### 25.1 Why this is central and not a nicety
+
+Today a graph is produced two ways: a human writes tickets, or a frontier model compiles a spec
+into them (§12). Both produce *instances*. Neither produces *reusable structure*. A workflow
+definition is the missing authoring layer between intent and graph:
+
+- **Composability.** "Review a change across N dimensions then adversarially verify each finding"
+  is a shape, not a one-off. Named, parameterized, and reused, it stops being re-derived by a model
+  every time at frontier prices.
+- **It is static control plane.** Per §21.2, topology may drift but policy may not. A workflow
+  definition is reviewed, versioned and diffable *before* it runs, while its instances stay dynamic.
+  That is precisely the control the loop/graph discipline asks for over dynamically created work.
+- **It is benchmarkable.** A named workflow can be replayed against repository-local benchmark tasks
+  (§10) and compared across harness epochs. An ad-hoc model-emitted graph cannot.
+- **It is cheap.** Expanding a definition into tickets is deterministic software. No inference is
+  spent on structure that was already decided.
+
+### 25.2 Shape
+
+A definition compiles to a ticket subgraph — it does not introduce a second execution engine. The
+scheduler, leases, authority, budgets and verification all apply unchanged; the DSL only says what
+nodes and edges to create.
+
+```toml
+[workflow.review-change]
+params = ["target"]
+
+[[workflow.review-change.node]]
+id        = "dimension"
+for_each  = ["correctness", "security", "performance", "tests"]
+role      = "reviewer.semantic"
+objective = "Review {{target}} for {{item}} problems."
+produces  = "findings"
+
+[[workflow.review-change.node]]
+id        = "verify"
+for_each  = "dimension.findings"      # fans out over the previous node's output
+role      = "auditor.semantic"
+objective = "Try to refute this finding: {{item.summary}}"
+depends   = ["dimension"]
+budget    = { tokens = 20000 }
+
+[[workflow.review-change.node]]
+id        = "synthesize"
+role      = "synthesizer.long_context"
+depends   = ["verify"]
+join      = "all"                      # an explicit join, with a documented timeout policy
+```
+
+Required properties, taken from the graph contract (§21):
+
+- every node declares role, objective, budget, and its verification policy
+- every edge declares its condition; every join declares expected inputs, timeout and merge rule
+- loops must carry a `CycleBudget`; a cycle without one is rejected at compile time, not at runtime
+- expansion is validated against `tm-core` invariants **before** it commits, in one transaction
+- a definition is versioned project state, and a running instance is pinned to the version it
+  started on — the same rule that protects sessions from harness changes (§10)
+
+### 25.3 What it must not become
+
+The discipline from the loop/graph guidance applies to us too: *do not turn a single bounded task
+into a multi-agent graph because the syntax makes it easy.* The DSL is for genuinely multi-stage
+work with real ordering or fan-out. `tm doctor` should warn on a workflow whose graph is one node
+wide and one node deep, because that is a prompt wearing a costume.

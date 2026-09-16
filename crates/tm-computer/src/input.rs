@@ -47,25 +47,47 @@ impl Rect {
     }
 
     /// True when `p` falls within this rect, inclusive of its edges.
-    // IMPL: p.x in [origin.x, origin.x + width] and p.y in [origin.y, origin.y + height].
     pub fn contains(&self, p: Point) -> bool {
-        todo!("bounds check per the IMPL note")
+        p.x >= self.origin.x
+            && p.x <= self.origin.x + self.width
+            && p.y >= self.origin.y
+            && p.y <= self.origin.y + self.height
     }
 }
 
 /// Clamp `p` into `bounds`, so a synthesized event never targets off-screen coordinates.
-// IMPL: clamp p.x to [bounds.origin.x, bounds.origin.x + bounds.width], same for y. Pure, no
-// panics, total over all finite inputs (NaN is left as NaN — callers must reject it upstream).
 pub fn clamp_point(p: Point, bounds: Rect) -> Point {
-    todo!("clamp per the IMPL note")
+    let clamp = |v: f64, min: f64, max: f64| -> f64 {
+        if v.is_nan() {
+            v
+        } else {
+            v.max(min).min(max)
+        }
+    };
+
+    Point {
+        x: clamp(p.x, bounds.origin.x, bounds.origin.x + bounds.width),
+        y: clamp(p.y, bounds.origin.y, bounds.origin.y + bounds.height),
+    }
 }
 
 /// Interpolate `steps` intermediate points from `from` to `to`, inclusive of both ends, for
 /// backends that synthesize a drag as a sequence of move events rather than a single jump.
-// IMPL: linear interpolation; steps == 0 or 1 returns just [from, to]; steps >= 2 returns
-// from, steps-1 evenly spaced midpoints, to (len == steps + 1). Pure, deterministic, no clock.
 pub fn lerp_drag_path(from: Point, to: Point, steps: usize) -> Vec<Point> {
-    todo!("linear interpolation per the IMPL note")
+    if steps <= 1 {
+        return vec![from, to];
+    }
+
+    let mut path = vec![from];
+    for i in 1..steps {
+        let t = i as f64 / steps as f64;
+        path.push(Point {
+            x: from.x + t * (to.x - from.x),
+            y: from.y + t * (to.y - from.y),
+        });
+    }
+    path.push(to);
+    path
 }
 
 /// Which mouse button an action targets.
@@ -102,23 +124,90 @@ pub struct KeyChord {
     pub key: String,
 }
 
+/// True when `s` (already lowercased) names a modifier alias, so a trailing chord segment of
+/// this shape is a missing key, not a key literally named e.g. `"shift"`.
+fn is_modifier_name(s: &str) -> bool {
+    matches!(
+        s,
+        "ctrl" | "control" | "alt" | "option" | "shift" | "cmd" | "command" | "super" | "meta"
+    )
+}
+
 impl KeyChord {
     /// Parse a chord string of the form `mod+mod+...+key`, e.g. `"cmd+shift+4"`.
-    // IMPL: split on '+'; the last segment is the key, every prior segment must match a known
-    // modifier name (case-insensitively; accept "command"/"cmd", "option"/"alt",
-    // "control"/"ctrl", "shift", and on non-macOS also "super"/"meta" as aliases for Cmd).
-    // Reject empty input, a chord with no key segment, an unknown modifier name, or a duplicate
-    // modifier, each with a ComputerError::Parse naming the offending segment. The key segment
-    // itself is not validated against a keycode table here — that mapping is backend-specific
-    // and happens in `Backend::input`.
     pub fn parse(s: &str) -> Result<KeyChord, ComputerError> {
-        todo!("chord parsing per the IMPL note")
+        if s.is_empty() {
+            return Err(ComputerError::Parse("empty chord string".to_string()));
+        }
+
+        let parts: Vec<&str> = s.split('+').collect();
+        if parts.is_empty() || parts.iter().all(|p| p.is_empty()) {
+            return Err(ComputerError::Parse("empty chord string".to_string()));
+        }
+
+        if parts.len() < 2 {
+            return Err(ComputerError::Parse(
+                "chord must have at least a modifier and a key".to_string(),
+            ));
+        }
+
+        let key = parts[parts.len() - 1].to_lowercase();
+        if key.is_empty() {
+            return Err(ComputerError::Parse("empty key segment".to_string()));
+        }
+        if is_modifier_name(&key) {
+            return Err(ComputerError::Parse(
+                "chord must have at least a modifier and a key".to_string(),
+            ));
+        }
+
+        let mut modifiers = BTreeSet::new();
+
+        for &part in &parts[..parts.len() - 1] {
+            if part.is_empty() {
+                return Err(ComputerError::Parse(
+                    "empty segment in chord string".to_string(),
+                ));
+            }
+
+            let lower = part.to_lowercase();
+            let modifier = match lower.as_str() {
+                "ctrl" | "control" => Modifier::Ctrl,
+                "alt" | "option" => Modifier::Alt,
+                "shift" => Modifier::Shift,
+                "cmd" | "command" => Modifier::Cmd,
+                "super" | "meta" => Modifier::Cmd,
+                _ => return Err(ComputerError::Parse(format!("unknown modifier: {}", part))),
+            };
+
+            if !modifiers.insert(modifier) {
+                return Err(ComputerError::Parse(format!(
+                    "duplicate modifier: {}",
+                    part
+                )));
+            }
+        }
+
+        Ok(KeyChord { modifiers, key })
     }
 
     /// Render this chord back to its canonical string form (modifiers in [`Modifier`] order,
     /// lowercase, `+`-joined), the inverse of [`KeyChord::parse`] for any chord it can produce.
     pub fn to_canonical_string(&self) -> String {
-        todo!("canonical rendering: join modifier names in enum order then the key, '+'-joined")
+        let mut parts = Vec::new();
+
+        for modifier in &self.modifiers {
+            let name = match modifier {
+                Modifier::Ctrl => "ctrl",
+                Modifier::Alt => "alt",
+                Modifier::Shift => "shift",
+                Modifier::Cmd => "cmd",
+            };
+            parts.push(name);
+        }
+
+        parts.push(&self.key);
+        parts.join("+")
     }
 }
 
@@ -184,3 +273,330 @@ pub enum InputAction {
     },
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn point_contains_inside_bounds() {
+        let rect = Rect::new(Point::new(10.0, 20.0), 100.0, 50.0);
+        assert!(rect.contains(Point::new(50.0, 45.0)));
+    }
+
+    #[test]
+    fn point_contains_on_origin_edge() {
+        let rect = Rect::new(Point::new(10.0, 20.0), 100.0, 50.0);
+        assert!(rect.contains(Point::new(10.0, 20.0)));
+    }
+
+    #[test]
+    fn point_contains_on_far_edge() {
+        let rect = Rect::new(Point::new(10.0, 20.0), 100.0, 50.0);
+        assert!(rect.contains(Point::new(110.0, 70.0)));
+    }
+
+    #[test]
+    fn point_contains_outside_x_negative() {
+        let rect = Rect::new(Point::new(10.0, 20.0), 100.0, 50.0);
+        assert!(!rect.contains(Point::new(9.9, 45.0)));
+    }
+
+    #[test]
+    fn point_contains_outside_x_positive() {
+        let rect = Rect::new(Point::new(10.0, 20.0), 100.0, 50.0);
+        assert!(!rect.contains(Point::new(110.1, 45.0)));
+    }
+
+    #[test]
+    fn point_contains_outside_y_negative() {
+        let rect = Rect::new(Point::new(10.0, 20.0), 100.0, 50.0);
+        assert!(!rect.contains(Point::new(50.0, 19.9)));
+    }
+
+    #[test]
+    fn point_contains_outside_y_positive() {
+        let rect = Rect::new(Point::new(10.0, 20.0), 100.0, 50.0);
+        assert!(!rect.contains(Point::new(50.0, 70.1)));
+    }
+
+    #[test]
+    fn clamp_point_inside_bounds() {
+        let bounds = Rect::new(Point::new(0.0, 0.0), 100.0, 100.0);
+        let p = Point::new(50.0, 50.0);
+        let clamped = clamp_point(p, bounds);
+        assert_eq!(clamped, Point::new(50.0, 50.0));
+    }
+
+    #[test]
+    fn clamp_point_outside_left() {
+        let bounds = Rect::new(Point::new(10.0, 0.0), 100.0, 100.0);
+        let p = Point::new(5.0, 50.0);
+        let clamped = clamp_point(p, bounds);
+        assert_eq!(clamped, Point::new(10.0, 50.0));
+    }
+
+    #[test]
+    fn clamp_point_outside_right() {
+        let bounds = Rect::new(Point::new(0.0, 0.0), 100.0, 100.0);
+        let p = Point::new(150.0, 50.0);
+        let clamped = clamp_point(p, bounds);
+        assert_eq!(clamped, Point::new(100.0, 50.0));
+    }
+
+    #[test]
+    fn clamp_point_outside_top() {
+        let bounds = Rect::new(Point::new(0.0, 10.0), 100.0, 100.0);
+        let p = Point::new(50.0, 5.0);
+        let clamped = clamp_point(p, bounds);
+        assert_eq!(clamped, Point::new(50.0, 10.0));
+    }
+
+    #[test]
+    fn clamp_point_outside_bottom() {
+        let bounds = Rect::new(Point::new(0.0, 0.0), 100.0, 100.0);
+        let p = Point::new(50.0, 150.0);
+        let clamped = clamp_point(p, bounds);
+        assert_eq!(clamped, Point::new(50.0, 100.0));
+    }
+
+    #[test]
+    fn clamp_point_preserves_nan() {
+        let bounds = Rect::new(Point::new(0.0, 0.0), 100.0, 100.0);
+        let p = Point::new(f64::NAN, 50.0);
+        let clamped = clamp_point(p, bounds);
+        assert!(clamped.x.is_nan());
+        assert_eq!(clamped.y, 50.0);
+    }
+
+    #[test]
+    fn clamp_point_nan_y() {
+        let bounds = Rect::new(Point::new(0.0, 0.0), 100.0, 100.0);
+        let p = Point::new(50.0, f64::NAN);
+        let clamped = clamp_point(p, bounds);
+        assert_eq!(clamped.x, 50.0);
+        assert!(clamped.y.is_nan());
+    }
+
+    #[test]
+    fn lerp_drag_path_zero_steps() {
+        let from = Point::new(0.0, 0.0);
+        let to = Point::new(10.0, 10.0);
+        let path = lerp_drag_path(from, to, 0);
+        assert_eq!(path, vec![from, to]);
+        assert_eq!(path.len(), 2);
+    }
+
+    #[test]
+    fn lerp_drag_path_one_step() {
+        let from = Point::new(0.0, 0.0);
+        let to = Point::new(10.0, 10.0);
+        let path = lerp_drag_path(from, to, 1);
+        assert_eq!(path, vec![from, to]);
+        assert_eq!(path.len(), 2);
+    }
+
+    #[test]
+    fn lerp_drag_path_two_steps() {
+        let from = Point::new(0.0, 0.0);
+        let to = Point::new(10.0, 10.0);
+        let path = lerp_drag_path(from, to, 2);
+        assert_eq!(path.len(), 3);
+        assert_eq!(path[0], from);
+        assert_eq!(path[2], to);
+        assert_eq!(path[1], Point::new(5.0, 5.0));
+    }
+
+    #[test]
+    fn lerp_drag_path_three_steps() {
+        let from = Point::new(0.0, 0.0);
+        let to = Point::new(9.0, 9.0);
+        let path = lerp_drag_path(from, to, 3);
+        assert_eq!(path.len(), 4);
+        assert_eq!(path[0], from);
+        assert_eq!(path[3], to);
+        assert_eq!(path[1], Point::new(3.0, 3.0));
+        assert_eq!(path[2], Point::new(6.0, 6.0));
+    }
+
+    #[test]
+    fn lerp_drag_path_includes_both_endpoints() {
+        let from = Point::new(1.0, 2.0);
+        let to = Point::new(11.0, 12.0);
+        let path = lerp_drag_path(from, to, 10);
+        assert_eq!(path[0], from);
+        assert_eq!(path[path.len() - 1], to);
+    }
+
+    #[test]
+    fn key_chord_parse_single_modifier() {
+        let chord = KeyChord::parse("cmd+4").unwrap();
+        assert_eq!(chord.key, "4");
+        assert!(chord.modifiers.contains(&Modifier::Cmd));
+    }
+
+    #[test]
+    fn key_chord_parse_multiple_modifiers() {
+        let chord = KeyChord::parse("cmd+shift+4").unwrap();
+        assert_eq!(chord.key, "4");
+        assert!(chord.modifiers.contains(&Modifier::Cmd));
+        assert!(chord.modifiers.contains(&Modifier::Shift));
+    }
+
+    #[test]
+    fn key_chord_parse_all_modifiers() {
+        let chord = KeyChord::parse("ctrl+alt+shift+cmd+a").unwrap();
+        assert_eq!(chord.key, "a");
+        assert!(chord.modifiers.contains(&Modifier::Ctrl));
+        assert!(chord.modifiers.contains(&Modifier::Alt));
+        assert!(chord.modifiers.contains(&Modifier::Shift));
+        assert!(chord.modifiers.contains(&Modifier::Cmd));
+    }
+
+    #[test]
+    fn key_chord_parse_lowercase_key() {
+        let chord = KeyChord::parse("cmd+A").unwrap();
+        assert_eq!(chord.key, "a");
+    }
+
+    #[test]
+    fn key_chord_parse_case_insensitive_modifiers() {
+        let chord1 = KeyChord::parse("CMD+t").unwrap();
+        let chord2 = KeyChord::parse("cmd+t").unwrap();
+        assert_eq!(chord1, chord2);
+    }
+
+    #[test]
+    fn key_chord_parse_control_alias() {
+        let chord1 = KeyChord::parse("ctrl+a").unwrap();
+        let chord2 = KeyChord::parse("control+a").unwrap();
+        assert_eq!(chord1, chord2);
+    }
+
+    #[test]
+    fn key_chord_parse_option_alias() {
+        let chord1 = KeyChord::parse("alt+a").unwrap();
+        let chord2 = KeyChord::parse("option+a").unwrap();
+        assert_eq!(chord1, chord2);
+    }
+
+    #[test]
+    fn key_chord_parse_command_alias() {
+        let chord1 = KeyChord::parse("cmd+a").unwrap();
+        let chord2 = KeyChord::parse("command+a").unwrap();
+        assert_eq!(chord1, chord2);
+    }
+
+    #[test]
+    fn key_chord_parse_super_alias() {
+        let chord1 = KeyChord::parse("super+a").unwrap();
+        let chord2 = KeyChord::parse("meta+a").unwrap();
+        assert_eq!(chord1, chord2);
+        assert!(chord1.modifiers.contains(&Modifier::Cmd));
+    }
+
+    #[test]
+    fn key_chord_parse_function_key() {
+        let chord = KeyChord::parse("cmd+f5").unwrap();
+        assert_eq!(chord.key, "f5");
+    }
+
+    #[test]
+    fn key_chord_parse_return_key() {
+        let chord = KeyChord::parse("shift+return").unwrap();
+        assert_eq!(chord.key, "return");
+    }
+
+    #[test]
+    fn key_chord_parse_empty_string() {
+        assert!(KeyChord::parse("").is_err());
+    }
+
+    #[test]
+    fn key_chord_parse_no_key_segment() {
+        assert!(KeyChord::parse("cmd+shift").is_err());
+    }
+
+    #[test]
+    fn key_chord_parse_unknown_modifier() {
+        assert!(KeyChord::parse("cmd+unknown+a").is_err());
+    }
+
+    #[test]
+    fn key_chord_parse_duplicate_modifier() {
+        assert!(KeyChord::parse("cmd+cmd+a").is_err());
+    }
+
+    #[test]
+    fn key_chord_parse_duplicate_modifier_different_case() {
+        assert!(KeyChord::parse("cmd+CMD+a").is_err());
+    }
+
+    #[test]
+    fn key_chord_to_canonical_single_modifier() {
+        let chord = KeyChord {
+            modifiers: {
+                let mut set = BTreeSet::new();
+                set.insert(Modifier::Cmd);
+                set
+            },
+            key: "4".to_string(),
+        };
+        assert_eq!(chord.to_canonical_string(), "cmd+4");
+    }
+
+    #[test]
+    fn key_chord_to_canonical_multiple_modifiers_sorted() {
+        let chord = KeyChord {
+            modifiers: {
+                let mut set = BTreeSet::new();
+                set.insert(Modifier::Shift);
+                set.insert(Modifier::Cmd);
+                set.insert(Modifier::Ctrl);
+                set
+            },
+            key: "t".to_string(),
+        };
+        // BTreeSet is sorted, so order should be ctrl, shift, cmd (enum order)
+        assert_eq!(chord.to_canonical_string(), "ctrl+shift+cmd+t");
+    }
+
+    #[test]
+    fn key_chord_roundtrip_single_modifier() {
+        let original = "cmd+a";
+        let chord = KeyChord::parse(original).unwrap();
+        let canonical = chord.to_canonical_string();
+        assert_eq!(canonical, original);
+    }
+
+    #[test]
+    fn key_chord_roundtrip_multiple_modifiers() {
+        let chord = KeyChord::parse("cmd+shift+f5").unwrap();
+        let canonical = chord.to_canonical_string();
+        let reparsed = KeyChord::parse(&canonical).unwrap();
+        assert_eq!(chord, reparsed);
+    }
+
+    #[test]
+    fn key_chord_parse_numeric_key() {
+        let chord = KeyChord::parse("alt+1").unwrap();
+        assert_eq!(chord.key, "1");
+    }
+
+    #[test]
+    fn key_chord_parse_special_chars_in_key() {
+        let chord = KeyChord::parse("cmd+.").unwrap();
+        assert_eq!(chord.key, ".");
+    }
+
+    #[test]
+    fn key_chord_parse_plus_in_key_position() {
+        // A key that is "+" by itself should fail because it splits on +
+        // This tests the edge case where key is empty
+        assert!(KeyChord::parse("cmd+").is_err());
+    }
+
+    #[test]
+    fn key_chord_parse_triple_plus() {
+        assert!(KeyChord::parse("cmd++a").is_err());
+    }
+}

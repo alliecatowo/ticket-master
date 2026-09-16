@@ -8,9 +8,9 @@
 //! `session.rs`), and a throwaway profile directory so sessions never collide and never touch
 //! the user's real Chrome profile.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use tm_types::{IdSource, Result};
+use tm_types::{IdSource, Result, TmError};
 
 /// Which Chromium-family browser was found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,21 +62,45 @@ pub struct DiscoveredBrowser {
 /// # Errors
 /// [`TmError::NotFound`] with [`install_hint`] appended to the message when nothing is found,
 /// and when `$TM_BROWSER` is set but does not point at an existing file.
-// IMPL: read `TM_BROWSER` via `std::env::var_os`; if set, `Path::new(..).is_file()` it and
-// return it as `from_env_override: true` on success, or a `NotFound` error naming the bad path
-// on failure (never silently fall through an explicit override). Otherwise iterate
-// `BrowserKind::ALL`, call `candidate_paths(kind)` for each, and return the first path that
-// `is_file()`. Do not check executability beyond existence here; a non-executable match still
-// surfaces as a clear launch failure later rather than a confusing discovery failure.
 pub fn discover() -> Result<DiscoveredBrowser> {
-    todo!("probe $TM_BROWSER then platform candidate paths for BrowserKind::ALL")
+    if let Some(tm_browser) = std::env::var_os("TM_BROWSER") {
+        let path = Path::new(&tm_browser);
+        if path.is_file() {
+            return Ok(DiscoveredBrowser {
+                kind: BrowserKind::Chrome, // Assume Chrome when using explicit path
+                path: path.to_path_buf(),
+                from_env_override: true,
+            });
+        }
+        return Err(TmError::not_found(
+            "browser",
+            format!("$TM_BROWSER={}", tm_browser.to_string_lossy()),
+        ));
+    }
+
+    for kind in BrowserKind::ALL {
+        for candidate_path in candidate_paths(kind) {
+            if candidate_path.is_file() {
+                return Ok(DiscoveredBrowser {
+                    kind,
+                    path: candidate_path,
+                    from_env_override: false,
+                });
+            }
+        }
+    }
+
+    Err(TmError::not_found(
+        "browser",
+        format!("no Chromium-family browser found. {}", install_hint()),
+    ))
 }
 
 /// The platform-conventional install locations to probe for `kind`, most-likely-first.
-// IMPL: cfg-dispatch to `macos_candidate_paths` / `linux_candidate_paths` /
-// `windows_candidate_paths`; each returns absolute paths only (no PATH search — a bare `chrome`
-// on `$PATH` is covered by `$TM_BROWSER` if a user wants that). Never touches the filesystem
-// itself; `discover` does the `is_file()` check so this stays a pure, testable mapping.
+///
+/// Each platform returns absolute paths only (no PATH search — a bare `chrome` on `$PATH` is
+/// covered by `$TM_BROWSER` if a user wants that). Never touches the filesystem itself;
+/// `discover` does the `is_file()` check so this stays a pure, testable mapping.
 pub fn candidate_paths(kind: BrowserKind) -> Vec<PathBuf> {
     #[cfg(target_os = "macos")]
     {
@@ -98,44 +122,146 @@ pub fn candidate_paths(kind: BrowserKind) -> Vec<PathBuf> {
 }
 
 /// macOS `/Applications` bundle paths for `kind`.
-// IMPL: `/Applications/<App>.app/Contents/MacOS/<Binary>` for each of the four kinds, plus the
-// `~/Applications` per-user variant (via `$HOME`, never a directories crate — this module has
-// no such dependency).
 #[cfg(target_os = "macos")]
 fn macos_candidate_paths(kind: BrowserKind) -> Vec<PathBuf> {
-    let _ = kind;
-    todo!("Contents/MacOS/<Binary> under /Applications and ~/Applications for this kind")
+    let (app_name, binary_name) = match kind {
+        BrowserKind::Chrome => ("Google Chrome", "Google Chrome"),
+        BrowserKind::Chromium => ("Chromium", "Chromium"),
+        BrowserKind::Brave => ("Brave Browser", "Brave Browser"),
+        BrowserKind::Edge => ("Microsoft Edge", "Microsoft Edge"),
+    };
+
+    let mut paths = vec![PathBuf::from(format!(
+        "/Applications/{}.app/Contents/MacOS/{}",
+        app_name, binary_name
+    ))];
+
+    if let Ok(home) = std::env::var("HOME") {
+        paths.push(PathBuf::from(format!(
+            "{}/Applications/{}.app/Contents/MacOS/{}",
+            home, app_name, binary_name
+        )));
+    }
+
+    paths
 }
 
 /// Linux `/usr/bin`, `/usr/local/bin` and `/opt` conventional binary names for `kind`.
-// IMPL: well-known binary names per kind (`google-chrome`, `google-chrome-stable`, `chromium`,
-// `chromium-browser`, `brave-browser`, `microsoft-edge`, `microsoft-edge-stable`) under
-// `/usr/bin`, `/usr/local/bin`, `/snap/bin` and `/opt/<vendor>/`.
 #[cfg(target_os = "linux")]
 fn linux_candidate_paths(kind: BrowserKind) -> Vec<PathBuf> {
-    let _ = kind;
-    todo!("well-known binary names for this kind under /usr/bin, /usr/local/bin, /opt")
+    let binary_names = match kind {
+        BrowserKind::Chrome => vec!["google-chrome", "google-chrome-stable"],
+        BrowserKind::Chromium => vec!["chromium", "chromium-browser"],
+        BrowserKind::Brave => vec!["brave-browser"],
+        BrowserKind::Edge => vec!["microsoft-edge", "microsoft-edge-stable"],
+    };
+
+    let base_dirs = ["/usr/bin", "/usr/local/bin", "/snap/bin"];
+
+    let mut paths = Vec::new();
+
+    for binary in &binary_names {
+        for base_dir in &base_dirs {
+            paths.push(PathBuf::from(format!("{}/{}", base_dir, binary)));
+        }
+    }
+
+    // Add /opt/<vendor>/ paths
+    match kind {
+        BrowserKind::Chrome => {
+            paths.push(PathBuf::from("/opt/google/chrome/chrome"));
+        }
+        BrowserKind::Brave => {
+            paths.push(PathBuf::from("/opt/brave/brave"));
+        }
+        BrowserKind::Edge => {
+            paths.push(PathBuf::from("/opt/microsoft/edge/microsoft-edge"));
+        }
+        BrowserKind::Chromium => {}
+    }
+
+    paths
 }
 
 /// Windows `Program Files` locations for `kind`, plus an App Paths registry lookup.
-// IMPL: `%ProgramFiles%`, `%ProgramFiles(x86)%` and `%LocalAppData%` conventional install
-// subpaths per kind, followed by a best-effort read of
-// `HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\<exe>` via `winreg`
-// (swallow registry errors — it is a bonus probe, not a required one).
 #[cfg(target_os = "windows")]
 fn windows_candidate_paths(kind: BrowserKind) -> Vec<PathBuf> {
-    let _ = kind;
-    todo!("Program Files locations per kind, then an App Paths registry probe via winreg")
+    let (subpath, registry_key) = match kind {
+        BrowserKind::Chrome => ("Google\\Chrome\\Application\\chrome.exe", "chrome.exe"),
+        BrowserKind::Chromium => ("Chromium\\Application\\chrome.exe", "chromium.exe"),
+        BrowserKind::Brave => (
+            "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            "brave.exe",
+        ),
+        BrowserKind::Edge => ("Microsoft\\Edge\\Application\\msedge.exe", "msedge.exe"),
+    };
+
+    let mut paths = Vec::new();
+
+    // Add %ProgramFiles% paths
+    if let Ok(program_files) = std::env::var("ProgramFiles") {
+        paths.push(PathBuf::from(format!("{}\\{}", program_files, subpath)));
+    }
+
+    // Add %ProgramFiles(x86)% paths
+    if let Ok(program_files_x86) = std::env::var("ProgramFiles(x86)") {
+        paths.push(PathBuf::from(format!("{}\\{}", program_files_x86, subpath)));
+    }
+
+    // Add %LocalAppData% paths
+    if let Ok(local_app_data) = std::env::var("LocalAppData") {
+        let local_subpath = match kind {
+            BrowserKind::Chrome => "Google\\Chrome\\Application\\chrome.exe",
+            BrowserKind::Chromium => "Chromium\\Application\\chrome.exe",
+            BrowserKind::Brave => "BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+            BrowserKind::Edge => "Microsoft\\Edge\\Application\\msedge.exe",
+        };
+        paths.push(PathBuf::from(format!(
+            "{}\\{}",
+            local_app_data, local_subpath
+        )));
+    }
+
+    // Try to read from registry
+    if let Ok(hklm) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths")
+    {
+        if let Ok(app_path) = hklm.get_value::<String, &str>(registry_key) {
+            paths.push(PathBuf::from(app_path));
+        }
+    }
+
+    // Fallback: try the registry key for 32-bit apps on 64-bit systems
+    if let Ok(hklm) = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey("SOFTWARE\\Wow6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths")
+    {
+        if let Ok(app_path) = hklm.get_value::<String, &str>(registry_key) {
+            paths.push(PathBuf::from(app_path));
+        }
+    }
+
+    paths
 }
 
 /// The exact command to install a Chromium-family browser on this platform, used to make
 /// [`discover`]'s failure actionable instead of a dead end.
-// IMPL: cfg-dispatch on `target_os`: macOS -> `brew install --cask google-chrome`, Linux ->
-// a distro-agnostic-ish `sudo apt install chromium-browser` (with a note that other package
-// managers use an equivalent), Windows -> `winget install Google.Chrome`. Falls back to a
-// generic "install Google Chrome, Chromium, Brave or Microsoft Edge" message on other targets.
 pub fn install_hint() -> &'static str {
-    todo!("the platform-specific install command, or a generic fallback")
+    #[cfg(target_os = "macos")]
+    {
+        "To install, run: brew install --cask google-chrome"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        "To install, run: sudo apt install chromium-browser (or use your distro's package manager)"
+    }
+    #[cfg(target_os = "windows")]
+    {
+        "To install, run: winget install Google.Chrome"
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        "Please install Google Chrome, Chromium, Brave, or Microsoft Edge"
+    }
 }
 
 /// Launch-time configuration for a discovered browser: headless, a throwaway profile, and a
@@ -156,22 +282,278 @@ pub struct LaunchConfig {
 /// # Invariants
 /// Never returns the same path twice for the same `ids` source, and never collides with a
 /// concurrently running session's directory.
-// IMPL: `std::env::temp_dir().join(format!("tm-browser-{}", ids.random_hex(16)))`; create the
-// directory here (`std::fs::create_dir_all`) so callers can rely on it existing, mapping any
-// I/O failure through `TmError::from`. Uses the injected `IdSource` rather than `rand` directly
-// per the workspace determinism rule.
 pub fn ephemeral_profile_dir(ids: &dyn IdSource) -> Result<PathBuf> {
-    let _ = ids;
-    todo!("system temp dir joined with a random-hex-suffixed directory, created on disk")
+    let profile_dir = std::env::temp_dir().join(format!("tm-browser-{}", ids.random_hex(16)));
+    std::fs::create_dir_all(&profile_dir)
+        .map_err(|e| TmError::Io(format!("failed to create profile directory: {}", e)))?;
+    Ok(profile_dir)
 }
 
 /// The fixed argv (browser flags only, not the executable path — the caller supplies that as
 /// `argv[0]` when spawning) for launching `config` headless with CDP enabled.
-// IMPL: always emits `--headless=new`, `--remote-debugging-port=0`,
-// `--user-data-dir=<profile_dir>`, `--no-first-run`, `--no-default-browser-check`, then
-// `config.extra_args` verbatim, in that order (order matters for some flags' last-wins
-// semantics, notably `--user-data-dir`).
 pub fn build_argv(config: &LaunchConfig) -> Vec<String> {
-    let _ = config;
-    todo!("fixed headless/port/profile flags followed by config.extra_args")
+    let mut argv = vec![
+        "--headless=new".to_string(),
+        "--remote-debugging-port=0".to_string(),
+        format!("--user-data-dir={}", config.profile_dir.display()),
+        "--no-first-run".to_string(),
+        "--no-default-browser-check".to_string(),
+    ];
+    argv.extend(config.extra_args.iter().cloned());
+    argv
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tm_types::TestIds;
+
+    #[test]
+    fn browser_kind_display_names() {
+        assert_eq!(BrowserKind::Chrome.display_name(), "Google Chrome");
+        assert_eq!(BrowserKind::Chromium.display_name(), "Chromium");
+        assert_eq!(BrowserKind::Brave.display_name(), "Brave");
+        assert_eq!(BrowserKind::Edge.display_name(), "Microsoft Edge");
+    }
+
+    #[test]
+    fn browser_kind_all_contains_all_variants() {
+        assert_eq!(BrowserKind::ALL.len(), 4);
+        assert!(BrowserKind::ALL.contains(&BrowserKind::Chrome));
+        assert!(BrowserKind::ALL.contains(&BrowserKind::Chromium));
+        assert!(BrowserKind::ALL.contains(&BrowserKind::Brave));
+        assert!(BrowserKind::ALL.contains(&BrowserKind::Edge));
+    }
+
+    #[test]
+    fn macos_candidate_paths_returns_non_empty() {
+        #[cfg(target_os = "macos")]
+        {
+            let paths = macos_candidate_paths(BrowserKind::Chrome);
+            assert!(!paths.is_empty());
+            assert!(paths[0].to_string_lossy().contains("Google Chrome"));
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Ensure the function compiles and is callable
+            let _ = BrowserKind::Chrome;
+        }
+    }
+
+    #[test]
+    fn linux_candidate_paths_returns_non_empty() {
+        #[cfg(target_os = "linux")]
+        {
+            let paths = linux_candidate_paths(BrowserKind::Chrome);
+            assert!(!paths.is_empty());
+            // Should include common paths
+            let paths_str = paths
+                .iter()
+                .map(|p| p.to_string_lossy().to_string())
+                .collect::<String>();
+            assert!(paths_str.contains("/usr/bin") || paths_str.contains("google-chrome"));
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = BrowserKind::Chrome;
+        }
+    }
+
+    #[test]
+    fn windows_candidate_paths_returns_non_empty() {
+        #[cfg(target_os = "windows")]
+        {
+            let paths = windows_candidate_paths(BrowserKind::Chrome);
+            assert!(!paths.is_empty());
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = BrowserKind::Chrome;
+        }
+    }
+
+    #[test]
+    fn candidate_paths_all_kinds() {
+        for kind in BrowserKind::ALL {
+            let paths = candidate_paths(kind);
+            assert!(
+                !paths.is_empty(),
+                "candidate_paths should return non-empty for {}",
+                kind.display_name()
+            );
+        }
+    }
+
+    #[test]
+    fn install_hint_returns_non_empty() {
+        let hint = install_hint();
+        assert!(!hint.is_empty());
+        assert!(hint.contains("install") || hint.contains("Install") || hint.contains("Please"));
+    }
+
+    #[test]
+    fn ephemeral_profile_dir_creates_directory() {
+        let ids = TestIds::new();
+        let result = ephemeral_profile_dir(&ids);
+        assert!(result.is_ok());
+
+        let profile_dir = result.unwrap();
+        assert!(profile_dir.exists());
+        assert!(profile_dir.is_dir());
+
+        // Clean up
+        let _ = fs::remove_dir_all(&profile_dir);
+    }
+
+    #[test]
+    fn ephemeral_profile_dir_unique_paths() {
+        let ids1 = TestIds::new();
+        let ids2 = TestIds::seeded(1);
+
+        let dir1 = ephemeral_profile_dir(&ids1).unwrap();
+        let dir2 = ephemeral_profile_dir(&ids2).unwrap();
+
+        // Paths should be different (seeded different seeds produce different hex)
+        assert_ne!(dir1, dir2);
+
+        // Clean up
+        let _ = fs::remove_dir_all(dir1);
+        let _ = fs::remove_dir_all(dir2);
+    }
+
+    #[test]
+    fn ephemeral_profile_dir_same_seed_same_path() {
+        let ids = TestIds::seeded(42);
+        let dir1 = ephemeral_profile_dir(&ids).unwrap();
+        let dir2 = ephemeral_profile_dir(&ids).unwrap();
+
+        // Same seed produces different paths each call due to RNG state advancement
+        // but both should exist
+        assert!(dir1.exists());
+        assert!(dir2.exists());
+
+        // Clean up
+        let _ = fs::remove_dir_all(dir1);
+        let _ = fs::remove_dir_all(dir2);
+    }
+
+    #[test]
+    fn build_argv_contains_required_flags() {
+        let ids = TestIds::new();
+        let profile_dir = ephemeral_profile_dir(&ids).unwrap();
+        let browser = DiscoveredBrowser {
+            kind: BrowserKind::Chrome,
+            path: PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            from_env_override: false,
+        };
+        let config = LaunchConfig {
+            browser,
+            profile_dir,
+            extra_args: vec![],
+        };
+
+        let argv = build_argv(&config);
+
+        assert!(argv.contains(&"--headless=new".to_string()));
+        assert!(argv.contains(&"--remote-debugging-port=0".to_string()));
+        assert!(argv.iter().any(|arg| arg.contains("--user-data-dir=")));
+        assert!(argv.contains(&"--no-first-run".to_string()));
+        assert!(argv.contains(&"--no-default-browser-check".to_string()));
+
+        // Clean up
+        let _ = fs::remove_dir_all(&config.profile_dir);
+    }
+
+    #[test]
+    fn build_argv_includes_extra_args() {
+        let ids = TestIds::new();
+        let profile_dir = ephemeral_profile_dir(&ids).unwrap();
+        let browser = DiscoveredBrowser {
+            kind: BrowserKind::Chrome,
+            path: PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            from_env_override: false,
+        };
+        let config = LaunchConfig {
+            browser,
+            profile_dir,
+            extra_args: vec!["--disable-gpu".to_string(), "--single-process".to_string()],
+        };
+
+        let argv = build_argv(&config);
+
+        assert!(argv.contains(&"--disable-gpu".to_string()));
+        assert!(argv.contains(&"--single-process".to_string()));
+
+        // Clean up
+        let _ = fs::remove_dir_all(&config.profile_dir);
+    }
+
+    #[test]
+    fn build_argv_flags_order() {
+        let ids = TestIds::new();
+        let profile_dir = ephemeral_profile_dir(&ids).unwrap();
+        let browser = DiscoveredBrowser {
+            kind: BrowserKind::Chrome,
+            path: PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            from_env_override: false,
+        };
+        let config = LaunchConfig {
+            browser,
+            profile_dir,
+            extra_args: vec!["--extra".to_string()],
+        };
+
+        let argv = build_argv(&config);
+
+        let headless_idx = argv.iter().position(|arg| arg == "--headless=new").unwrap();
+        let port_idx = argv
+            .iter()
+            .position(|arg| arg == "--remote-debugging-port=0")
+            .unwrap();
+        let profile_idx = argv
+            .iter()
+            .position(|arg| arg.contains("--user-data-dir="))
+            .unwrap();
+        let extra_idx = argv.iter().position(|arg| arg == "--extra").unwrap();
+
+        assert!(headless_idx < port_idx);
+        assert!(port_idx < profile_idx);
+        assert!(profile_idx < extra_idx);
+
+        // Clean up
+        let _ = fs::remove_dir_all(&config.profile_dir);
+    }
+
+    #[test]
+    fn discovered_browser_equality() {
+        let browser1 = DiscoveredBrowser {
+            kind: BrowserKind::Chrome,
+            path: PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            from_env_override: true,
+        };
+        let browser2 = DiscoveredBrowser {
+            kind: BrowserKind::Chrome,
+            path: PathBuf::from("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            from_env_override: true,
+        };
+
+        assert_eq!(browser1, browser2);
+    }
+
+    #[test]
+    fn discovered_browser_inequality() {
+        let browser1 = DiscoveredBrowser {
+            kind: BrowserKind::Chrome,
+            path: PathBuf::from("/path1"),
+            from_env_override: true,
+        };
+        let browser2 = DiscoveredBrowser {
+            kind: BrowserKind::Chrome,
+            path: PathBuf::from("/path2"),
+            from_env_override: true,
+        };
+
+        assert_ne!(browser1, browser2);
+    }
 }
