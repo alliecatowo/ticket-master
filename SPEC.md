@@ -1010,3 +1010,220 @@ rather than aspiration.
 
 Surfaces never gate Core: a broken surface build must not fail `cargo test --workspace`. The
 `verify` target runs the Rust gate always, and the surface gates when their toolchains are present.
+
+---
+
+## 19. Browser automation (`tm-browser`)
+
+An agent that cannot open a page cannot check whether the thing it built works. Browser control is
+therefore a first-class executor capability, not an optional plugin — but it must be *cheap*, or
+agents will avoid it and go back to guessing.
+
+### 19.1 No-friction principle
+
+- **No Node, no Playwright, no driver binaries.** `tm-browser` speaks the Chrome DevTools Protocol
+  directly over a WebSocket. The only external dependency is a Chromium-family browser.
+- **Bring-your-own browser, discovered not downloaded.** Probe, in order: `$TM_BROWSER`, Chrome,
+  Chromium, Brave, Edge in the platform's usual locations. If none is found, say so with the exact
+  install command for the platform rather than silently downloading 150 MB.
+- Launch headless by default (`--headless=new`), with `--remote-debugging-port=0` and a
+  throwaway profile directory, so sessions never collide and never touch the user's real profile.
+- `tm browser open <url>` must work on a clean machine with a browser installed and no other setup.
+
+### 19.2 The agent-facing surface is the accessibility tree, not pixels
+
+The default observation is a **structured snapshot** of the page derived from the accessibility
+tree: role, name, value, state and a stable `ref` per node. This is the single most important
+design decision in this crate.
+
+```
+- button "Approve T-184" [ref=e17]
+- textbox "Objective" [ref=e21] value="fix auth refresh race"
+- list "Ready tickets" [ref=e30]
+  - link "T-191 Windows packaging" [ref=e31]
+```
+
+An agent then acts by reference — `browser.click(ref: "e17")` — instead of guessing CSS selectors
+or reading coordinates off a screenshot. That is cheaper (a snapshot is a few hundred tokens where
+a screenshot is thousands), more reliable (no pixel hunting), and diffable between steps so the
+agent can see what its action changed. Screenshots remain available for visual checks and for the
+visual-regression work in §18.5, but they are not the default perception channel.
+
+### 19.3 Capabilities
+
+```
+browser.open(url) / close / list_tabs / switch_tab
+browser.snapshot()            -> accessibility tree with refs (the default observation)
+browser.screenshot(full_page) -> PNG artifact
+browser.click(ref) / hover(ref) / type(ref, text) / select(ref, value) / press(key)
+browser.eval(js)              -> JSON value
+browser.wait_for(selector | text | network_idle, timeout)
+browser.console()             -> collected console messages since last call
+browser.network()             -> request/response log, with bodies stored as artifacts
+browser.cookies() / set_cookie / storage_state
+browser.pdf()                 -> PDF artifact
+```
+
+Every command output that exceeds a threshold becomes an **artifact** (§8.2) rather than being
+inlined, so a huge DOM or network log is stored once and queried, never pasted into a context
+window twice.
+
+### 19.4 Authority and safety
+
+Browser actions are gated like everything else. `Authority.network` governs which origins may be
+navigated to; `arbitrary: false` with an allowlist means an agent can drive `localhost:7777` for a
+smoke test but cannot wander onto the open internet. Downloads land in an artifact directory, never
+in the repository. Every session records a trace (navigations, actions, console errors) as evidence
+attachable to a ticket — so "I verified the page works" is a claim backed by a replayable log.
+
+---
+
+## 20. Computer use (`tm-computer`)
+
+Beyond the browser: drive a real desktop. macOS and Linux only — Windows is explicitly out of
+scope, and the crate should say so rather than pretending to be portable.
+
+### 20.1 Backends
+
+| Backend | Input | Capture | Element tree | Headless |
+|---|---|---|---|---|
+| `macos` | `CGEvent` (Quartz) | `ScreenCaptureKit`, `CGDisplayCreateImage` fallback | `AXUIElement` accessibility API | **No** — see §20.3 |
+| `x11` | `XTest` | `XGetImage` / SHM | AT-SPI where available | **Yes** — `Xvfb` |
+| `wayland` | `libei` / portal `RemoteDesktop` | portal `ScreenCast` (PipeWire) | AT-SPI | Partial — compositor dependent |
+
+Backend selection is automatic (`WAYLAND_DISPLAY` → wayland, `DISPLAY` → x11, macOS → macos) and
+overridable with `TM_COMPUTER_BACKEND`. An unavailable backend fails with a precise, actionable
+message — which permission, which package, which environment variable — never a generic error.
+
+### 20.2 Surface
+
+Mirroring §19.2: the preferred observation is the **accessibility element tree** (`AXUIElement` on
+macOS, AT-SPI on Linux) with stable refs, falling back to a screenshot when the tree is unavailable
+or the target is a canvas-style app that exposes nothing useful.
+
+```
+computer.snapshot()              -> element tree with refs, or a screenshot when unavailable
+computer.screenshot(display | window)
+computer.click(ref | x,y) / double_click / right_click / drag(from, to)
+computer.type(text) / key(chord)      e.g. key("cmd+shift+4"), key("ctrl+alt+t")
+computer.scroll(ref | x,y, dx, dy)
+computer.windows() / focus(window) / move(window) / resize(window)
+computer.clipboard_get() / clipboard_set(text)
+computer.launch(app) / quit(app)
+```
+
+### 20.3 Headless desktops, honestly
+
+On **Linux this genuinely works**: `tm computer --headless` starts an `Xvfb` display, optionally
+with a window manager, runs the session against it, and tears it down. Nothing appears on a real
+screen, nothing steals the user's focus, and many sessions can run concurrently on separate display
+numbers. This is the supported path for autonomous GUI work and for CI.
+
+On **macOS it does not**, and the crate must not pretend otherwise. There is no supported virtual
+display that a headless daemon can drive: Quartz event injection targets the active session, and
+screen capture requires a real (or VNC-attached) session. `tm computer` on macOS therefore runs
+**attended** — it drives the logged-in desktop, which means it visibly moves the user's cursor and
+requires explicit consent. For unattended macOS work the documented answer is a dedicated machine
+or VM with an auto-logged-in session, not a flag that quietly does something weaker.
+
+Because attended automation takes over a human's input devices, macOS sessions additionally require
+an explicit approval (§4.4 oversight) and support a **panic stop**: moving the physical mouse during
+an agent-driven session, or pressing the configured abort chord, revokes the lease immediately.
+
+### 20.4 Permissions
+
+macOS requires TCC grants for Accessibility and Screen Recording. `tm doctor` checks both, reports
+which is missing, and prints the exact `System Settings` path — a permissions failure must never
+surface as a mysterious empty screenshot. Linux X11 needs `XTEST`; Wayland needs a portal-capable
+session, and `tm doctor` names the missing piece.
+
+### 20.5 Authority
+
+New action classes, gated exactly like paths and commands: `computer.input`, `computer.capture`,
+`computer.clipboard`, `browser.navigate`. Default steady-state oversight puts `computer.input` and
+`computer.clipboard` behind approval — an agent that can synthesize keystrokes into whatever window
+has focus is strictly more dangerous than one that can write files inside a scoped path, and the
+authority model should reflect that rather than treating it as another tool.
+
+---
+
+## 21. Loop and graph contracts
+
+Ticketmaster is, structurally, a loop-and-graph engine, and it is worth stating the contracts it
+implements so they can be reviewed as contracts rather than inferred from code.
+
+### 21.1 The ticket is a loop contract
+
+Every dimension a loop contract must answer has a home in the ticket (§4.2):
+
+| Loop contract dimension | Where it lives |
+|---|---|
+| Goal and input | `objective`, `context_refs` |
+| State | project state in SQLite, not a context window |
+| Actions | `authority` (what may be done), `resources` (where) |
+| Observation | `evidence`, command artifacts, code intelligence |
+| Verification | `success` predicates, `verification` policy, the `V-`/`A-` nodes |
+| Stop and escalation | `retry`, `cycle` budget, `budget`, `Escalated` state |
+| Evidence | `artifacts` + `evidence`, immutable and replayable |
+
+The anti-pattern this forecloses is "keep trying until done": a loop with no termination, cost or
+escalation boundary. Every cycle in the graph carries a `CycleBudget`, and a cycle without one is
+rejected at creation as an invariant violation (§4.3).
+
+### 21.2 Static control plane, dynamic work graph
+
+The work graph is deliberately plastic — tickets are created, split, merged and abandoned as
+reality lands. The **control plane is not**. These are static, versioned project state, changed
+only through an explicit authorized transition:
+
+- which ticket kinds and states exist, and which transitions are legal (§4.3)
+- the authority lattice and the oversight policy (§4.4)
+- resource ceilings, budgets and the efficacy fraction (§5, §10)
+- who may close a milestone, reopen one, or promote a harness epoch
+
+Dynamically created tickets are therefore constrained rather than free: a child's authority is
+attenuated from its parent, its budget is debited from its parent's remaining, its provenance
+(which ticket and which executor created it) is recorded, and the whole proposed subgraph is
+validated against invariants before it commits. Topology may drift; policy may not.
+
+### 21.3 Three loops, three owners
+
+| Loop | Owner | Cadence |
+|---|---|---|
+| Execution — plan, act, observe, verify, retry within budget | the scheduler and executors | continuous |
+| Governance — goals, authority, budgets, acceptance, release | the human, through oversight policy | per decision |
+| Improvement — telemetry to candidate change to benchmark to epoch | harness engineering (§10) | per epoch |
+
+Removing a human from repetitive execution is not the same as removing human accountability: the
+governance loop is where a named person stays responsible for irreversible effects, and the
+oversight policy is the machine-readable form of that.
+
+### 21.4 Admission control
+
+A finite retry budget bounds one ticket; it does not bound the system. Work can be *authored*
+faster than it can be *verified*, and an unbounded authoring rate quietly converts into an
+unbounded review queue — the backlog grows, verification lags, and the graph's trustworthiness
+decays while every individual ticket looks well-behaved.
+
+The scheduler therefore reserves verification capacity before dispatching new work:
+
+```toml
+[admission]
+max_unverified_tickets      = 24   # submitted-or-verifying, not yet audited
+max_review_queue_age_hours  = 12   # oldest item awaiting human judgment
+resume_below                = 16   # hysteresis: do not restart at the pause threshold
+```
+
+When a ceiling is reached, the scheduler stops *starting* new work while allowing in-flight
+verification and rework to drain, and resumes only below a distinct lower threshold so the system
+does not oscillate at the boundary. This is an explicit admission rule in `plan()`, visible in
+`tm sched plan` output, not an emergent property.
+
+### 21.5 Idempotent effects across resume
+
+Crash recovery restores execution; it does not undo effects. Every external effect an executor can
+perform — a command, a push, a mirror write, a browser form submission — carries an idempotency key
+derived from `(ticket, attempt, effect)` and records a receipt as an artifact. On resume, an effect
+whose receipt already exists is not repeated. Resuming an interrupted ticket establishes continuity
+of execution, and nothing more: whether the delivered result was *sufficient* is the verifier's
+question, and whether its effects can be reversed is the oversight policy's.
