@@ -734,8 +734,43 @@ pub trait Tracker: Send + Sync {
   human-created issues (which become new tickets in `Draft`).
 - Conflict rule: on divergence, Ticketmaster wins for orchestration fields; the external system
   wins for human-presentation fields (title prose, labels, assignee display).
-- Shipped adapter: GitHub Issues (`gh` REST via `reqwest`, token from env/keychain). A
-  `NullTracker` and a `RecordingTracker` (tests) are also provided.
+### 13.1 Shipped adapters
+
+Task providers are plural on purpose: which tracker a team uses is an integration detail, and
+Ticketmaster's graph is authoritative regardless of which one is attached. All of them implement
+the same `Tracker` trait, are selected by `mirror.toml`, and may be attached simultaneously (a
+project can mirror to Linear for product and GitHub Issues for open-source contributors).
+
+| Adapter | Transport | Auth | Notes |
+|---|---|---|---|
+| `github` | REST v3 | `GITHUB_TOKEN` / `gh auth token` | Issues, comments, labels, assignees, milestones |
+| `linear` | GraphQL | `LINEAR_API_KEY` | Issues, states, cycles, projects; native parent/child |
+| `jira` | REST v3 | `JIRA_EMAIL` + `JIRA_API_TOKEN` | Issues, transitions, epics; workflow-constrained states |
+| `gitlab` | REST v4 | `GITLAB_TOKEN` | Issues, notes, labels, milestones |
+| `null` | — | — | Accepts and discards; the default when nothing is configured |
+| `recording` | — | — | Test double capturing every call for assertions |
+
+Adapters differ in what they can represent, so capability is declared, not assumed:
+
+```rust
+pub struct TrackerCapabilities {
+    pub parent_child: bool,        // Linear yes; GitHub Issues only via task lists
+    pub arbitrary_states: bool,    // Jira workflows constrain transitions
+    pub milestones: bool,
+    pub labels: bool,
+    pub comments: bool,
+    pub max_body_bytes: usize,
+}
+```
+
+`ProjectionPolicy` consults capabilities and degrades deliberately: where `parent_child` is false,
+descendants roll up into a checklist in the body rather than being dropped; where
+`arbitrary_states` is false, internal states map onto the nearest configured external state and the
+exact internal state stays in Ticketmaster. A degradation is recorded in the mirror link, never
+silently applied, so it is visible why an external issue looks coarser than the real graph.
+
+Every adapter is unit-tested against recorded request/response fixtures with **no network**, and
+each has a round-trip test asserting that pushing then pulling a projection is idempotent.
 
 ---
 
@@ -857,6 +892,16 @@ Everything in this section is a **client of `tm-server`** (§14). No surface tal
 surface owns truth: they render the materialized state and stream changes over SSE. That is what
 makes "multiple clients, one world" (§59 of the brief) true by construction rather than by
 discipline.
+
+**Depth is deliberately uneven.** The CLI is the surface that has to prove the system actually
+works, so it is built to full depth: every subcommand, the interactive coding agent, stable
+`--json` everywhere. The web app, the macOS app and the editor extension are built as real
+scaffolding — correct structure, generated types, a working vertical slice (connect, stream the
+event log, render live tickets, perform one mutation), tests and a green build — rather than to
+feature parity with the CLI. That is an honest V0 for those surfaces: they demonstrably work
+against the real API and are laid out so filling in the remaining views is ordinary work, not a
+rewrite. Anything left unbuilt in a surface is listed in that surface's README as open work, not
+implied to exist.
 
 ```
               tm-core (SQLite: project.db, index.db)
