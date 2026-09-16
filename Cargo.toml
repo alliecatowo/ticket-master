@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/alliecatowo/ticket-master"
+
+[workspace.dependencies]
+tm-types = { path = "crates/tm-types" }
+tm-events = { path = "crates/tm-events" }
+tm-core = { path = "crates/tm-core" }
+tm-scheduler = { path = "crates/tm-scheduler" }
+tm-provider = { path = "crates/tm-provider" }
+tm-codeintel = { path = "crates/tm-codeintel" }
+tm-context = { path = "crates/tm-context" }
+tm-docs = { path = "crates/tm-docs" }
+tm-harness = { path = "crates/tm-harness" }
+tm-agent = { path = "crates/tm-agent" }
+tm-genesis = { path = "crates/tm-genesis" }
+tm-mirror = { path = "crates/tm-mirror" }
+tm-server = { path = "crates/tm-server" }
+
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+rusqlite = { version = "0.37", features = ["bundled", "blob", "functions", "backup"] }
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+regex = "1"
+globset = "0.4"
+ignore = "0.4"
+git2 = { version = "0.20", default-features = false }
+blake3 = "1"
+time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
+rand = "0.9"
+parking_lot = "0.12"
+similar = "2"
+dirs = "6"
+futures = "0.3"
+async-trait = "0.1"
+tempfile = "3"
+proptest = "1"
+insta = { version = "1", features = ["json", "redactions"] }
+assert_cmd = "2"
+predicates = "3"
+serial_test = "3"
