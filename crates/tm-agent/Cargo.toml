@@ -1,0 +1,27 @@
+[package]
+name = "tm-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The tool-using, authority-gated coding agent loop for Ticketmaster."
+
+[dependencies]
+tm-types = { workspace = true }
+tm-core = { workspace = true }
+tm-events = { workspace = true }
+tm-provider = { workspace = true }
+tm-codeintel = { workspace = true }
+tm-context = { workspace = true }
+tm-harness = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+similar = { workspace = true }
+tracing = { workspace = true }
+regex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

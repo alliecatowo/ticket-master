@@ -1019,16 +1019,78 @@ An agent that cannot open a page cannot check whether the thing it built works. 
 therefore a first-class executor capability, not an optional plugin — but it must be *cheap*, or
 agents will avoid it and go back to guessing.
 
-### 19.1 No-friction principle
+### 19.1 Never the user's browser
 
-- **No Node, no Playwright, no driver binaries.** `tm-browser` speaks the Chrome DevTools Protocol
-  directly over a WebSocket. The only external dependency is a Chromium-family browser.
-- **Bring-your-own browser, discovered not downloaded.** Probe, in order: `$TM_BROWSER`, Chrome,
-  Chromium, Brave, Edge in the platform's usual locations. If none is found, say so with the exact
-  install command for the platform rather than silently downloading 150 MB.
-- Launch headless by default (`--headless=new`), with `--remote-debugging-port=0` and a
-  throwaway profile directory, so sessions never collide and never touch the user's real profile.
-- `tm browser open <url>` must work on a clean machine with a browser installed and no other setup.
+The first design of this section said "discover a system Chromium". That was wrong, and the reasons
+are worth recording so nobody re-proposes it:
+
+- **Chrome 136+ refuses remote-debugging against the default profile outright.** The approach does
+  not merely smell bad, it does not work.
+- **Concurrent sessions sharing a `--user-data-dir` corrupt each other.** File-lock contention
+  causes crashes and silent failures, and cookies, local storage and TLS session tickets leak
+  between sessions. Ticketmaster's whole premise is many agents working at once across many
+  projects; one shared profile is the exact opposite of that.
+- **It is the human's browser.** It may be open, mid-login, or auto-updating. An agent that steals
+  focus or logs someone out has done real damage.
+- **It destroys reproducibility.** A browser that silently updates underneath a project means an
+  e2e run cannot be replayed, which defeats the point of e2e evidence.
+
+So: Ticketmaster brings its own browser, pinned, isolated per session, and never touches the user's.
+
+### 19.1a Providers
+
+Browser acquisition is an integration detail, exactly like task trackers (§13.1), so it is plural
+behind one trait. `browser.toml` selects providers; several may be configured with a fallback order.
+
+```rust
+pub trait BrowserProvider: Send + Sync {
+    fn id(&self) -> &str;
+    fn capabilities(&self) -> BrowserCapabilities;
+    async fn acquire(&self, req: &SessionRequest) -> Result<BrowserEndpoint>; // a CDP websocket URL
+    async fn release(&self, endpoint: &BrowserEndpoint) -> Result<()>;
+}
+```
+
+| Provider | What it does | When it is right |
+|---|---|---|
+| `managed` (default) | Downloads a **pinned Chrome for Testing** build into `~/.tm/browsers/<channel>-<version>/`, verifies its checksum, and launches it per session | Local work and CI: hermetic, reproducible, no system dependency |
+| `remote-cdp` | Connects to any CDP endpoint you already run (a container, a lab machine) | Self-hosted fleets, air-gapped networks |
+| `docker` | Starts a container from a pinned image and connects to it | Linux CI, strong isolation, disposable |
+| `browserbase` / `steel` / `browserless` / `hyperbrowser` | Cloud browser sessions over each vendor's API, normalized to a CDP endpoint | Scale beyond one machine; residential egress; sessions that must outlive the host |
+
+The pinned version is **project state**: `browser.toml` records the exact build, so checking out an
+older commit re-runs its e2e against the browser that commit was verified with. A provider that
+cannot honour the pinned version reports a capability mismatch rather than silently substituting a
+different build, because "it passed on some other browser" is not evidence.
+
+Capabilities are declared, not assumed — `headless`, `pinned_version`, `persistent_context`,
+`video_recording`, `proxy`, `stealth`, `max_concurrent` — and the session planner refuses a request
+the chosen provider cannot satisfy instead of degrading quietly.
+
+### 19.1b Session isolation and concurrency
+
+A *session* is the unit of isolation and it maps onto the lease that authorized it:
+
+- its own browser process (or remote session) and its own throwaway `--user-data-dir`
+- `--remote-debugging-port=0`, so ports are never guessed or collided on
+- keyed by `(project, ticket, lease)` in a session registry, so `tm browser list` shows who holds what
+- **the session dies with the lease.** When a lease expires or is revoked, its browser is torn down
+  and its profile directory deleted. A crashed agent cannot leave a browser running forever, which
+  is the same reversion rule that governs everything else (§4.5)
+- concurrency is bounded by `Authority.resources`, so twenty agents cannot spawn twenty browsers
+  unless the authority says they may
+
+The managed provider downloads a given build **once per machine** and reuses the binary across
+sessions; only the profile is per-session. Downloading happens on first use with a clear log line,
+or ahead of time via `tm browser install`, and never silently during an unrelated command.
+
+### 19.1c Why this matters most for verification
+
+Navigation is half of it. The half that actually justifies the crate is **e2e verification**: a
+worker claims "the page works", and the system needs that to be a replayable fact. A hermetic,
+version-pinned, isolated browser session makes the claim checkable — same browser build, same
+flags, same clean profile, trace and console and network log stored as artifacts, browser version
+recorded in the evidence record. Without pinning and isolation, an e2e pass is an anecdote.
 
 ### 19.2 The agent-facing surface is the accessibility tree, not pixels
 
@@ -1227,3 +1289,79 @@ derived from `(ticket, attempt, effect)` and records a receipt as an artifact. O
 whose receipt already exists is not repeated. Resuming an interrupted ticket establishes continuity
 of execution, and nothing more: whether the delivered result was *sufficient* is the verifier's
 question, and whether its effects can be reversed is the oversight policy's.
+
+---
+
+## 22. Interactive processes (`tm-pty`)
+
+Ticketmaster builds a CLI and a TUI. An agent that can only run `cmd | cat` cannot test either of
+them, cannot answer a prompt, cannot drive a REPL, and cannot verify anything that refuses to run
+without a terminal. So a pseudo-terminal is a first-class executor capability, not a workaround.
+
+This is the same idea as §19.2 and §20.2 in a third medium: **give the agent the rendered screen,
+not the raw byte stream.**
+
+### 22.1 Why a pipe is not enough
+
+Programs behave differently when stdout is not a tty: they disable colour, disable progress bars,
+disable interactive prompts, and sometimes refuse outright. Worse, a TUI writes escape sequences
+that are meaningless as a byte log — scrollback, cursor moves, redraws. Handing an agent 40 KB of
+ANSI soup and asking "did the layout work?" wastes tokens and answers nothing.
+
+### 22.2 The surface
+
+```
+pty.spawn(argv, cwd, env, cols, rows)      -> PtySession
+pty.screen()        -> rendered screen: text grid, cursor position, styles, title
+pty.diff()          -> what changed on screen since the last call
+pty.send(text) / pty.key(chord)            e.g. key("ctrl+c"), key("enter"), key("down down enter")
+pty.expect(pattern, timeout)               -> matched text, or a timeout carrying the current screen
+pty.resize(cols, rows)                     -> exercise reflow, which is where TUIs break
+pty.wait_exit(timeout)                     -> exit status
+pty.record()                               -> the whole session as an asciicast artifact
+```
+
+`screen()` is produced by running the output through a real terminal emulator (a VT100/xterm
+parser), so what the agent sees is what a human would see: a grid of cells after all the escape
+sequences have been applied. `diff()` between two screens is how an agent learns what its keystroke
+did, cheaply.
+
+`expect(pattern, timeout)` is the expect-style primitive that makes interactive automation
+tractable: wait for the prompt, answer it, wait for the next one. A timeout returns the *current
+screen* rather than a bare error, because "what was on screen when it hung" is the whole diagnosis.
+
+### 22.3 What this unlocks
+
+- **Testing `tm` itself.** The interactive coding client (§18) and every TUI view become verifiable
+  by the same machinery that verifies everything else, including terminal resize behaviour.
+- **Interactive-only paths.** Password and confirmation prompts, `git rebase -i`, REPLs, database
+  shells, SSH sessions, installers — anything that demands a tty.
+- **Honest evidence.** Every session records an asciicast artifact, so "the TUI works" is a replayable
+  recording attached to a ticket, not a claim. That makes it usable for the visual-regression ladder
+  in §18.5: a recorded screen at a known size diffs like any other snapshot.
+
+### 22.4 Authority and safety
+
+A pty is a more powerful thing than a pipe, and the authority model must say so. `pty.spawn` is
+governed by the same `shell.allow`/`shell.deny` patterns as `RunCommand`, and `pty.send` is a
+distinct action class: an agent that can synthesize keystrokes into a live interactive process can
+answer a destructive confirmation prompt. Sessions carry the lease's TTL and are killed on
+expiry — process group and all — so a crashed agent cannot leave an orphaned interactive shell
+holding a lock. Output is bounded: a runaway process producing megabytes is truncated into an
+artifact rather than into a context window.
+
+---
+
+## 23. iOS simulator (stretch)
+
+Marked stretch deliberately: valuable, well-understood, and not on the path to a working V1.
+
+The same shape as §20 applies. `simctl` boots and manages simulators (headless in the sense that no
+visible Simulator.app window is required), `xcrun simctl io` captures screenshots and video, and the
+element tree comes from the accessibility hierarchy via XCUITest or `idb`. Sessions are keyed to a
+lease and torn down with it, and a device is pinned by runtime and device type in project state for
+the same reproducibility reason browsers are (§19.1a).
+
+macOS only, by construction. It is listed here so that when it is built it is built the same way as
+the rest — accessibility tree first, screenshots second, evidence recorded as artifacts — rather
+than as a bolt-on with its own vocabulary.

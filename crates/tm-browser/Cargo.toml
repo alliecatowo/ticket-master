@@ -1,0 +1,24 @@
+[package]
+name = "tm-browser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ticketmaster Browser: no-friction headless browser control over the raw Chrome DevTools Protocol, with an accessibility-tree snapshot as the default agent-facing observation."
+
+[dependencies]
+tm-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+blake3 = { workspace = true }
+tokio-tungstenite = "0.24"
+
+[target.'cfg(windows)'.dependencies]
+# Chrome/Edge installs register an App Paths key even when off the PATH; used as a last-resort
+# discovery probe on Windows only.
+winreg = "0.52"
