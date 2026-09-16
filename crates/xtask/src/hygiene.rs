@@ -90,6 +90,11 @@ pub fn check_time_and_rand(root: &Path) -> Vec<String> {
                 if tracker.in_test() {
                     continue;
                 }
+                // A module doc comment stating "never call SystemTime::now" is the rule being
+                // documented, not broken.
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
                 for needle in FORBIDDEN {
                     if line.contains(needle) {
                         violations.push(format!(

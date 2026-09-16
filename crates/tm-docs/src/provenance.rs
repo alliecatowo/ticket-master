@@ -9,6 +9,7 @@
 //! compiled [`CompiledProvenance`], never the raw strings again.
 
 use std::collections::BTreeSet;
+use std::str::FromStr;
 
 use tm_types::{DecisionId, PatternSet};
 
@@ -35,13 +36,29 @@ impl CompiledProvenance {
 
 /// Split one doc's raw `derived_from` entries into path patterns and decision references, and
 /// compile the path patterns into a [`PatternSet`].
-// IMPL: for each entry, try `DecisionId::from_str`; on success it's a decision reference, on
-// failure treat it as a path glob (this covers bare config-file names like `providers.toml`
-// too — they are just patterns with no wildcard). Feed the path entries to
-// `PatternSet::parse`, which returns `tm_types::Result`; propagate its error with `?`. Dedup
-// decisions via the `BTreeSet`; path pattern dedup is `PatternSet::parse`'s job, not ours.
 pub fn compile(doc: &DocRecord) -> tm_types::Result<CompiledProvenance> {
-    todo!("split derived_from into path globs vs decision ids and compile, see IMPL note above")
+    let mut path_patterns = Vec::new();
+    let mut decisions = BTreeSet::new();
+
+    for entry in &doc.derived_from {
+        match DecisionId::from_str(entry) {
+            Ok(decision_id) => {
+                decisions.insert(decision_id);
+            }
+            Err(_) => {
+                // Not a decision id, treat as a path glob
+                path_patterns.push(entry.clone());
+            }
+        }
+    }
+
+    let paths = PatternSet::parse(path_patterns)?;
+
+    Ok(CompiledProvenance {
+        doc_id: doc.id.clone(),
+        paths,
+        decisions,
+    })
 }
 
 /// A batch of changes to assess docs against: paths touched by a commit/index update, and/or
@@ -81,10 +98,12 @@ pub struct ProvenanceIndex {
 impl ProvenanceIndex {
     /// Compile every doc's provenance. Fails on the first doc whose `derived_from` contains an
     /// uncompilable path pattern.
-    // IMPL: `docs.iter().map(compile).collect::<tm_types::Result<Vec<_>>>()?`, wrap in
-    // `ProvenanceIndex { entries }`.
     pub fn build(docs: &[DocRecord]) -> tm_types::Result<Self> {
-        todo!("compile every doc's provenance, see IMPL note above")
+        let entries = docs
+            .iter()
+            .map(compile)
+            .collect::<tm_types::Result<Vec<_>>>()?;
+        Ok(ProvenanceIndex { entries })
     }
 
     /// Doc ids whose basis is touched by `changed_paths`.
@@ -111,5 +130,502 @@ impl ProvenanceIndex {
         let mut touched = self.docs_touched_by_paths(&changes.changed_paths);
         touched.extend(self.docs_touched_by_decisions(&changes.superseded_decisions));
         touched
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::{DocMode, DocRecord};
+
+    #[test]
+    fn compile_with_mixed_entries() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "test-doc".to_string(),
+            "docs/test.md".to_string(),
+            DocMode::Generated,
+            vec![
+                "crates/tm-core/src/**".to_string(),
+                "D-019".to_string(),
+                "providers.toml".to_string(),
+                "D-027".to_string(),
+            ],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert_eq!(compiled.doc_id, "test-doc");
+        assert_eq!(compiled.decisions.len(), 2);
+        assert!(compiled.decisions.contains(&DecisionId::new("D-019")?));
+        assert!(compiled.decisions.contains(&DecisionId::new("D-027")?));
+
+        Ok(())
+    }
+
+    #[test]
+    fn compile_with_only_paths() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "path-doc".to_string(),
+            "docs/path.md".to_string(),
+            DocMode::Maintained,
+            vec!["crates/tm-docs/src/**".to_string(), "README.md".to_string()],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert_eq!(compiled.doc_id, "path-doc");
+        assert!(compiled.decisions.is_empty());
+        assert!(compiled.paths.matches("crates/tm-docs/src/lib.rs"));
+        assert!(compiled.paths.matches("README.md"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn compile_with_only_decisions() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "decision-doc".to_string(),
+            "docs/decision.md".to_string(),
+            DocMode::Human,
+            vec![
+                "D-001".to_string(),
+                "D-042".to_string(),
+                "D-100".to_string(),
+            ],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert_eq!(compiled.doc_id, "decision-doc");
+        assert_eq!(compiled.decisions.len(), 3);
+        assert!(compiled.paths.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn compile_with_empty_derived_from() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "empty-doc".to_string(),
+            "docs/empty.md".to_string(),
+            DocMode::Generated,
+            vec![],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert_eq!(compiled.doc_id, "empty-doc");
+        assert!(compiled.decisions.is_empty());
+        assert!(compiled.paths.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn compile_invalid_pattern() {
+        let doc = DocRecord::new(
+            "invalid-doc".to_string(),
+            "docs/invalid.md".to_string(),
+            DocMode::Generated,
+            vec!["[invalid(pattern".to_string()],
+        );
+
+        let result = compile(&doc);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn is_touched_by_matching_path() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["crates/tm-docs/src/**".to_string()],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert!(compiled.is_touched_by(&["crates/tm-docs/src/lib.rs".to_string()], &[]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn is_touched_by_non_matching_path() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["crates/tm-core/src/**".to_string()],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert!(!compiled.is_touched_by(&["crates/tm-docs/src/lib.rs".to_string()], &[]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn is_touched_by_matching_decision() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["D-019".to_string()],
+        );
+
+        let compiled = compile(&doc)?;
+        let superseded = vec![DecisionId::new("D-019")?];
+
+        assert!(compiled.is_touched_by(&[], &superseded));
+
+        Ok(())
+    }
+
+    #[test]
+    fn is_touched_by_non_matching_decision() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["D-019".to_string()],
+        );
+
+        let compiled = compile(&doc)?;
+        let superseded = vec![DecisionId::new("D-020")?];
+
+        assert!(!compiled.is_touched_by(&[], &superseded));
+
+        Ok(())
+    }
+
+    #[test]
+    fn is_touched_by_both_path_and_decision() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["crates/**".to_string(), "D-019".to_string()],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert!(compiled.is_touched_by(&["crates/test.rs".to_string()], &[]));
+
+        assert!(compiled.is_touched_by(&[], &[DecisionId::new("D-019")?]));
+
+        assert!(compiled.is_touched_by(
+            &["crates/test.rs".to_string()],
+            &[DecisionId::new("D-019")?]
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn is_touched_by_multiple_paths() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["src/**".to_string()],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert!(compiled.is_touched_by(
+            &[
+                "README.md".to_string(),
+                "src/main.rs".to_string(),
+                "tests/test.rs".to_string()
+            ],
+            &[]
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn is_touched_by_empty_changes() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["crates/**".to_string()],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert!(!compiled.is_touched_by(&[], &[]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_index_build_single_doc() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc1".to_string(),
+            "docs/doc1.md".to_string(),
+            DocMode::Generated,
+            vec!["crates/**".to_string()],
+        );
+
+        let index = ProvenanceIndex::build(&[doc])?;
+
+        assert_eq!(index.entries.len(), 1);
+        assert_eq!(index.entries[0].doc_id, "doc1");
+
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_index_build_multiple_docs() -> tm_types::Result<()> {
+        let doc1 = DocRecord::new(
+            "doc1".to_string(),
+            "docs/doc1.md".to_string(),
+            DocMode::Generated,
+            vec!["crates/tm-core/**".to_string()],
+        );
+        let doc2 = DocRecord::new(
+            "doc2".to_string(),
+            "docs/doc2.md".to_string(),
+            DocMode::Maintained,
+            vec!["D-019".to_string()],
+        );
+
+        let index = ProvenanceIndex::build(&[doc1, doc2])?;
+
+        assert_eq!(index.entries.len(), 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn docs_touched_by_paths() -> tm_types::Result<()> {
+        let doc1 = DocRecord::new(
+            "doc1".to_string(),
+            "docs/doc1.md".to_string(),
+            DocMode::Generated,
+            vec!["crates/tm-core/**".to_string()],
+        );
+        let doc2 = DocRecord::new(
+            "doc2".to_string(),
+            "docs/doc2.md".to_string(),
+            DocMode::Maintained,
+            vec!["crates/tm-docs/**".to_string()],
+        );
+
+        let index = ProvenanceIndex::build(&[doc1, doc2])?;
+
+        let touched = index.docs_touched_by_paths(&["crates/tm-core/src/lib.rs".to_string()]);
+
+        assert_eq!(touched.len(), 1);
+        assert!(touched.contains("doc1"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn docs_touched_by_decisions() -> tm_types::Result<()> {
+        let doc1 = DocRecord::new(
+            "doc1".to_string(),
+            "docs/doc1.md".to_string(),
+            DocMode::Generated,
+            vec!["D-019".to_string()],
+        );
+        let doc2 = DocRecord::new(
+            "doc2".to_string(),
+            "docs/doc2.md".to_string(),
+            DocMode::Maintained,
+            vec!["D-027".to_string()],
+        );
+
+        let index = ProvenanceIndex::build(&[doc1, doc2])?;
+
+        let touched = index.docs_touched_by_decisions(&[DecisionId::new("D-019")?]);
+
+        assert_eq!(touched.len(), 1);
+        assert!(touched.contains("doc1"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn docs_touched_by_paths_multiple_matches() -> tm_types::Result<()> {
+        let doc1 = DocRecord::new(
+            "doc1".to_string(),
+            "docs/doc1.md".to_string(),
+            DocMode::Generated,
+            vec!["crates/**".to_string()],
+        );
+        let doc2 = DocRecord::new(
+            "doc2".to_string(),
+            "docs/doc2.md".to_string(),
+            DocMode::Maintained,
+            vec!["crates/tm-docs/**".to_string()],
+        );
+
+        let index = ProvenanceIndex::build(&[doc1, doc2])?;
+
+        let touched = index.docs_touched_by_paths(&["crates/tm-core/src/lib.rs".to_string()]);
+
+        assert_eq!(touched.len(), 1);
+        assert!(touched.contains("doc1"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn changeset_empty() {
+        let cs = ChangeSet::empty();
+        assert!(cs.changed_paths.is_empty());
+        assert!(cs.superseded_decisions.is_empty());
+    }
+
+    #[test]
+    fn changeset_from_file_records() {
+        let records = vec![
+            tm_codeintel::FileRecord {
+                path: "src/main.rs".to_string(),
+                blake3: "0".repeat(64),
+                size: 100,
+                lang: None,
+                mtime: 0,
+            },
+            tm_codeintel::FileRecord {
+                path: "Cargo.toml".to_string(),
+                blake3: "1".repeat(64),
+                size: 200,
+                lang: None,
+                mtime: 0,
+            },
+        ];
+
+        let cs = ChangeSet::from_file_records(&records);
+
+        assert_eq!(cs.changed_paths.len(), 2);
+        assert!(cs.changed_paths.contains(&"src/main.rs".to_string()));
+        assert!(cs.changed_paths.contains(&"Cargo.toml".to_string()));
+        assert!(cs.superseded_decisions.is_empty());
+    }
+
+    #[test]
+    fn docs_touched_with_changeset() -> tm_types::Result<()> {
+        let doc1 = DocRecord::new(
+            "doc1".to_string(),
+            "docs/doc1.md".to_string(),
+            DocMode::Generated,
+            vec!["crates/tm-core/**".to_string()],
+        );
+        let doc2 = DocRecord::new(
+            "doc2".to_string(),
+            "docs/doc2.md".to_string(),
+            DocMode::Maintained,
+            vec!["D-019".to_string()],
+        );
+
+        let index = ProvenanceIndex::build(&[doc1, doc2])?;
+
+        let mut cs = ChangeSet::empty();
+        cs.changed_paths = vec!["crates/tm-core/src/lib.rs".to_string()];
+        cs.superseded_decisions = vec![DecisionId::new("D-019")?];
+
+        let touched = index.docs_touched(&cs);
+
+        assert_eq!(touched.len(), 2);
+        assert!(touched.contains("doc1"));
+        assert!(touched.contains("doc2"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn docs_touched_with_no_matches() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["crates/tm-core/**".to_string()],
+        );
+
+        let index = ProvenanceIndex::build(&[doc])?;
+
+        let cs = ChangeSet::empty();
+
+        let touched = index.docs_touched(&cs);
+
+        assert!(touched.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn doc_with_wildcard_patterns() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["*.md".to_string(), "src/*/main.rs".to_string()],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert!(compiled.paths.matches("README.md"));
+        assert!(compiled.paths.matches("CONTRIBUTING.md"));
+        assert!(!compiled.paths.matches("docs/README.md")); // * doesn't cross /
+
+        Ok(())
+    }
+
+    #[test]
+    fn doc_with_double_star_pattern() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["docs/**".to_string()],
+        );
+
+        let compiled = compile(&doc)?;
+
+        assert!(compiled.paths.matches("docs/file.md"));
+        assert!(compiled.paths.matches("docs/nested/dir/file.md"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_index_build_with_invalid_pattern() {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec!["[invalid(".to_string()],
+        );
+
+        let result = ProvenanceIndex::build(&[doc]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn decision_id_deduplication() -> tm_types::Result<()> {
+        let doc = DocRecord::new(
+            "doc".to_string(),
+            "docs/doc.md".to_string(),
+            DocMode::Generated,
+            vec![
+                "D-019".to_string(),
+                "D-019".to_string(), // Duplicate
+                "D-027".to_string(),
+            ],
+        );
+
+        let compiled = compile(&doc)?;
+
+        // BTreeSet automatically deduplicates
+        assert_eq!(compiled.decisions.len(), 2);
+
+        Ok(())
     }
 }

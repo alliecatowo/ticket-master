@@ -14,9 +14,9 @@
 //! [`tm_types::TicketId`] from the caller's [`tm_types::IdSource`].
 
 use tm_core::TicketKind;
-use tm_types::{ArtifactId, Clock, IdSource, ParticipantId, TicketId, Timestamp};
+use tm_types::{ArtifactId, Clock, IdKind, IdSource, ParticipantId, TicketId, Timestamp};
 
-use crate::registry::{DocMode, DocRecord};
+use crate::registry::{DocMode, DocRecord, DocState};
 
 /// Why a reconciliation ticket was opened for a doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +123,17 @@ pub fn open_reconciliation(
     ids: &dyn IdSource,
     clock: &dyn Clock,
 ) -> tm_types::Result<ReconciliationTicket> {
-    todo!("allocate a ticket id, move the doc to Reconciling, see IMPL note above")
+    let kind = ReconciliationKind::for_mode(doc.mode);
+    let ticket = TicketId::new(ids.next(IdKind::Ticket).as_str())?;
+    let opened = clock.now();
+    doc.state = DocState::Reconciling;
+    Ok(ReconciliationTicket {
+        doc_id: doc.id.clone(),
+        kind,
+        ticket_kind: TicketKind::Work,
+        ticket,
+        opened,
+    })
 }
 
 /// Accept a human attestation and return a `Maintained`/`Human` doc to [`crate::registry::DocState::Fresh`].
@@ -139,7 +149,20 @@ pub fn open_reconciliation(
 // open_ticket.ticket` before calling; this function's own job is just applying the transition).
 // On success: `doc.state = DocState::Fresh; doc.last_verified = Some(attestation.ts);`.
 pub fn accept_attestation(doc: &mut DocRecord, attestation: &Attestation) -> tm_types::Result<()> {
-    todo!("validate and apply the attestation, returning the doc to Fresh, see IMPL note above")
+    if doc.state != DocState::Reconciling {
+        // No reconciliation ticket is open at all, so there is no "expected" ticket id to
+        // report distinct from the one given; reuse it rather than fabricate/validate a
+        // placeholder (an empty string would itself fail `TicketId::new`'s validation).
+        return Err(ReconcileError::TicketMismatch {
+            doc_id: doc.id.clone(),
+            given: attestation.ticket.clone(),
+            expected: attestation.ticket.clone(),
+        }
+        .into());
+    }
+    doc.state = DocState::Fresh;
+    doc.last_verified = Some(attestation.ts);
+    Ok(())
 }
 
 /// Regenerate a `Generated` doc's content and return it to [`crate::registry::DocState::Fresh`]. The only
@@ -159,5 +182,339 @@ pub fn apply_regeneration(
     content_hash: &str,
     ts: Timestamp,
 ) -> tm_types::Result<()> {
-    todo!("hard-refuse non-Generated docs, else mark Fresh, see IMPL note above")
+    if doc.mode != DocMode::Generated {
+        return Err(ReconcileError::NotSystemWritable {
+            doc_id: doc.id.clone(),
+            mode: doc.mode,
+        }
+        .into());
+    }
+    let _ = content_hash;
+    doc.state = DocState::Fresh;
+    doc.last_verified = Some(ts);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tm_types::{CounterIds, FixedClock, Timestamp};
+
+    /// Test helpers
+    fn test_clock() -> FixedClock {
+        FixedClock::epoch()
+    }
+
+    fn test_ids() -> CounterIds {
+        CounterIds::new()
+    }
+
+    #[test]
+    fn open_reconciliation_generated_doc() {
+        let ids = test_ids();
+        let clock = test_clock();
+        clock.set(Timestamp::from_unix_seconds(1000));
+        let mut doc = DocRecord::new(
+            "test_doc".to_string(),
+            "docs/test.md".to_string(),
+            DocMode::Generated,
+            vec!["*.rs".to_string()],
+        );
+
+        let result = open_reconciliation(&mut doc, &ids, &clock);
+
+        assert!(result.is_ok());
+        let ticket = result.unwrap();
+        assert_eq!(ticket.doc_id, "test_doc");
+        assert_eq!(ticket.kind, ReconciliationKind::Regeneration);
+        assert_eq!(ticket.ticket_kind, TicketKind::Work);
+        assert_eq!(ticket.opened, Timestamp::from_unix_seconds(1000));
+        assert_eq!(doc.state, DocState::Reconciling);
+    }
+
+    #[test]
+    fn open_reconciliation_maintained_doc() {
+        let ids = test_ids();
+        let clock = test_clock();
+        clock.set(Timestamp::from_unix_seconds(2000));
+        let mut doc = DocRecord::new(
+            "maintained_doc".to_string(),
+            "docs/maintained.md".to_string(),
+            DocMode::Maintained,
+            vec!["config.toml".to_string()],
+        );
+
+        let result = open_reconciliation(&mut doc, &ids, &clock);
+
+        assert!(result.is_ok());
+        let ticket = result.unwrap();
+        assert_eq!(ticket.doc_id, "maintained_doc");
+        assert_eq!(ticket.kind, ReconciliationKind::Review);
+        assert_eq!(ticket.ticket_kind, TicketKind::Work);
+        assert_eq!(ticket.opened, Timestamp::from_unix_seconds(2000));
+        assert_eq!(doc.state, DocState::Reconciling);
+    }
+
+    #[test]
+    fn open_reconciliation_human_doc() {
+        let ids = test_ids();
+        let clock = test_clock();
+        clock.set(Timestamp::from_unix_seconds(3000));
+        let mut doc = DocRecord::new(
+            "human_doc".to_string(),
+            "docs/vision.md".to_string(),
+            DocMode::Human,
+            vec![],
+        );
+
+        let result = open_reconciliation(&mut doc, &ids, &clock);
+
+        assert!(result.is_ok());
+        let ticket = result.unwrap();
+        assert_eq!(ticket.doc_id, "human_doc");
+        assert_eq!(ticket.kind, ReconciliationKind::Review);
+        assert_eq!(doc.state, DocState::Reconciling);
+    }
+
+    #[test]
+    fn accept_attestation_happy_path() {
+        let mut doc = DocRecord::new(
+            "test_doc".to_string(),
+            "docs/test.md".to_string(),
+            DocMode::Maintained,
+            vec![],
+        );
+        doc.state = DocState::Reconciling;
+
+        let ticket_id = TicketId::new("T-123").unwrap();
+        let participant = ParticipantId::new("human:reviewer").unwrap();
+        let attestation = Attestation {
+            doc_id: "test_doc".to_string(),
+            ticket: ticket_id,
+            attested_by: participant,
+            note: "Doc is still accurate".to_string(),
+            evidence: None,
+            ts: Timestamp::from_unix_seconds(5000),
+        };
+
+        let result = accept_attestation(&mut doc, &attestation);
+
+        assert!(result.is_ok());
+        assert_eq!(doc.state, DocState::Fresh);
+        assert_eq!(doc.last_verified, Some(Timestamp::from_unix_seconds(5000)));
+    }
+
+    #[test]
+    fn accept_attestation_not_reconciling_state() {
+        let mut doc = DocRecord::new(
+            "test_doc".to_string(),
+            "docs/test.md".to_string(),
+            DocMode::Maintained,
+            vec![],
+        );
+        doc.state = DocState::Fresh;
+
+        let ticket_id = TicketId::new("T-123").unwrap();
+        let participant = ParticipantId::new("human:reviewer").unwrap();
+        let attestation = Attestation {
+            doc_id: "test_doc".to_string(),
+            ticket: ticket_id,
+            attested_by: participant,
+            note: "Doc is still accurate".to_string(),
+            evidence: None,
+            ts: Timestamp::from_unix_seconds(5000),
+        };
+
+        let result = accept_attestation(&mut doc, &attestation);
+
+        assert!(result.is_err());
+        match result {
+            Err(tm_types::TmError::AuthorityDenied(msg)) => {
+                assert!(msg.contains("ticket"));
+                assert!(msg.contains("test_doc"));
+            }
+            _ => panic!("Expected AuthorityDenied error"),
+        }
+        assert_eq!(doc.state, DocState::Fresh);
+    }
+
+    #[test]
+    fn accept_attestation_stale_doc() {
+        let mut doc = DocRecord::new(
+            "stale_doc".to_string(),
+            "docs/stale.md".to_string(),
+            DocMode::Maintained,
+            vec![],
+        );
+        doc.state = DocState::Stale;
+
+        let ticket_id = TicketId::new("T-456").unwrap();
+        let participant = ParticipantId::new("human:reviewer").unwrap();
+        let attestation = Attestation {
+            doc_id: "stale_doc".to_string(),
+            ticket: ticket_id,
+            attested_by: participant,
+            note: "Fixed the doc".to_string(),
+            evidence: None,
+            ts: Timestamp::from_unix_seconds(6000),
+        };
+
+        let result = accept_attestation(&mut doc, &attestation);
+
+        assert!(result.is_err());
+        assert_eq!(doc.state, DocState::Stale);
+    }
+
+    #[test]
+    fn accept_attestation_with_evidence() {
+        let mut doc = DocRecord::new(
+            "test_doc".to_string(),
+            "docs/test.md".to_string(),
+            DocMode::Human,
+            vec![],
+        );
+        doc.state = DocState::Reconciling;
+
+        let ticket_id = TicketId::new("T-789").unwrap();
+        let participant = ParticipantId::new("human:reviewer").unwrap();
+        let artifact = ArtifactId::new("ART-000000000001").unwrap();
+        let attestation = Attestation {
+            doc_id: "test_doc".to_string(),
+            ticket: ticket_id,
+            attested_by: participant,
+            note: "Updated with latest architecture".to_string(),
+            evidence: Some(artifact),
+            ts: Timestamp::from_unix_seconds(7000),
+        };
+
+        let result = accept_attestation(&mut doc, &attestation);
+
+        assert!(result.is_ok());
+        assert_eq!(doc.state, DocState::Fresh);
+        assert_eq!(doc.last_verified, Some(Timestamp::from_unix_seconds(7000)));
+    }
+
+    #[test]
+    fn apply_regeneration_generated_doc() {
+        let mut doc = DocRecord::new(
+            "generated_doc".to_string(),
+            "docs/generated.md".to_string(),
+            DocMode::Generated,
+            vec!["src/**/*.rs".to_string()],
+        );
+        doc.state = DocState::Reconciling;
+
+        let result = apply_regeneration(
+            &mut doc,
+            "blake3_hash_123",
+            Timestamp::from_unix_seconds(8000),
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(doc.state, DocState::Fresh);
+        assert_eq!(doc.last_verified, Some(Timestamp::from_unix_seconds(8000)));
+    }
+
+    #[test]
+    fn apply_regeneration_rejects_maintained_doc() {
+        let mut doc = DocRecord::new(
+            "maintained_doc".to_string(),
+            "docs/maintained.md".to_string(),
+            DocMode::Maintained,
+            vec!["config.toml".to_string()],
+        );
+        doc.state = DocState::Reconciling;
+
+        let result = apply_regeneration(&mut doc, "some_hash", Timestamp::from_unix_seconds(9000));
+
+        assert!(result.is_err());
+        match result {
+            Err(tm_types::TmError::AuthorityDenied(msg)) => {
+                assert!(msg.contains("maintained_doc"));
+                assert!(msg.contains("Maintained"));
+                assert!(msg.contains("may not rewrite"));
+            }
+            _ => panic!("Expected AuthorityDenied error"),
+        }
+        assert_eq!(doc.state, DocState::Reconciling);
+    }
+
+    #[test]
+    fn apply_regeneration_rejects_human_doc() {
+        let mut doc = DocRecord::new(
+            "human_doc".to_string(),
+            "docs/vision.md".to_string(),
+            DocMode::Human,
+            vec![],
+        );
+        doc.state = DocState::Reconciling;
+
+        let result = apply_regeneration(
+            &mut doc,
+            "another_hash",
+            Timestamp::from_unix_seconds(10000),
+        );
+
+        assert!(result.is_err());
+        match result {
+            Err(tm_types::TmError::AuthorityDenied(msg)) => {
+                assert!(msg.contains("human_doc"));
+                assert!(msg.contains("Human"));
+                assert!(msg.contains("may not rewrite"));
+            }
+            _ => panic!("Expected AuthorityDenied error"),
+        }
+        assert_eq!(doc.state, DocState::Reconciling);
+    }
+
+    #[test]
+    fn apply_regeneration_hard_rule_before_mutation() {
+        let mut doc = DocRecord::new(
+            "human_doc".to_string(),
+            "docs/human.md".to_string(),
+            DocMode::Human,
+            vec![],
+        );
+        let original_state = doc.state;
+
+        let result = apply_regeneration(&mut doc, "hash", Timestamp::from_unix_seconds(11000));
+
+        assert!(result.is_err());
+        assert_eq!(doc.state, original_state);
+    }
+
+    #[test]
+    fn apply_regeneration_from_fresh_state() {
+        let mut doc = DocRecord::new(
+            "generated_doc".to_string(),
+            "docs/gen.md".to_string(),
+            DocMode::Generated,
+            vec!["*.rs".to_string()],
+        );
+        doc.state = DocState::Fresh;
+
+        let result = apply_regeneration(&mut doc, "hash", Timestamp::from_unix_seconds(12000));
+
+        assert!(result.is_ok());
+        assert_eq!(doc.state, DocState::Fresh);
+        assert_eq!(doc.last_verified, Some(Timestamp::from_unix_seconds(12000)));
+    }
+
+    #[test]
+    fn reconciliation_kind_generated() {
+        let kind = ReconciliationKind::for_mode(DocMode::Generated);
+        assert_eq!(kind, ReconciliationKind::Regeneration);
+    }
+
+    #[test]
+    fn reconciliation_kind_maintained() {
+        let kind = ReconciliationKind::for_mode(DocMode::Maintained);
+        assert_eq!(kind, ReconciliationKind::Review);
+    }
+
+    #[test]
+    fn reconciliation_kind_human() {
+        let kind = ReconciliationKind::for_mode(DocMode::Human);
+        assert_eq!(kind, ReconciliationKind::Review);
+    }
 }

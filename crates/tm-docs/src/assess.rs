@@ -106,43 +106,321 @@ impl Assessor {
     ///   the dismissal is then consumed (removed from `self.dismissals`) so it does not silently
     ///   suppress a *future*, unrelated staleness flag.
     /// - Otherwise the doc transitions `Fresh`/`Unverified` -> `Stale`.
-    // IMPL: `let touched = self.provenance.docs_touched(changes);` then for each `doc_id` in
-    // `touched` (iterate in sorted order — `BTreeSet` already gives that — for determinism):
-    // look up the record via `self.registry.get(doc_id)` (skip silently, or debug-assert, if the
-    // provenance index references a doc the registry no longer has — that is a build/registry
-    // desync, not something `assess` should panic over); compute `reasons` by re-checking which
-    // `changed_paths`/`superseded_decisions` this doc's `CompiledProvenance` actually matched
-    // (needed for the human-readable reason strings; `ProvenanceIndex` does not expose this
-    // directly today, so either add a per-doc lookup here or thread it through
-    // `docs_touched`/`CompiledProvenance` — implementer's call); apply the transition rules
-    // above via `self.registry.get_mut(doc_id)`; push the `DocAssessment`.
     pub fn assess(&mut self, changes: &ChangeSet) -> Vec<DocAssessment> {
-        todo!("resolve touched docs and apply the staleness transition rules, see IMPL note above")
+        let touched = self.provenance.docs_touched(changes);
+        let mut assessments = Vec::with_capacity(touched.len());
+
+        for doc_id in touched {
+            // The provenance index and registry are built from the same doc list; a doc id the
+            // registry no longer has is a build/registry desync, not something `assess` should
+            // panic over, so it is skipped rather than unwrapped.
+            let Some(record) = self.registry.get(&doc_id) else {
+                debug_assert!(
+                    false,
+                    "provenance index references doc {doc_id} missing from registry"
+                );
+                continue;
+            };
+
+            // Recompile this doc's provenance to recover which specific paths/decisions matched,
+            // for the human-readable reason strings; `ProvenanceIndex` only exposes the touched
+            // doc id set, not the per-doc match detail.
+            let reasons = match crate::provenance::compile(record) {
+                Ok(compiled) => {
+                    let mut reasons: Vec<String> = changes
+                        .changed_paths
+                        .iter()
+                        .filter(|p| compiled.paths.matches(p))
+                        .map(|p| format!("path {p}"))
+                        .collect();
+                    reasons.extend(
+                        changes
+                            .superseded_decisions
+                            .iter()
+                            .filter(|d| compiled.decisions.contains(d))
+                            .map(|d| format!("decision {d}")),
+                    );
+                    reasons
+                }
+                Err(_) => Vec::new(),
+            };
+
+            let previous_state = record.state;
+            let live_dismissal = self.dismissals.remove(&doc_id);
+            let dismissed = live_dismissal.is_some();
+
+            let new_state = if previous_state == DocState::Stale {
+                DocState::Stale
+            } else if dismissed {
+                DocState::Unverified
+            } else {
+                DocState::Stale
+            };
+
+            if let Some(record) = self.registry.get_mut(&doc_id) {
+                record.state = new_state;
+            }
+
+            assessments.push(DocAssessment {
+                doc_id,
+                previous_state,
+                new_state,
+                reasons,
+                dismissed,
+            });
+        }
+
+        assessments
     }
 
     /// Build the `doc.invalidated` payloads for a batch of [`DocAssessment`]s: one per doc that
     /// actually transitioned *into* `Stale` this call (i.e. `previous_state != Stale &&
     /// new_state == Stale`) — a no-op `Stale -> Stale` thrash-guard result does not get a second
     /// event, and a dismissed result (`Unverified`) does not get one either.
-    // IMPL: filter `assessments` for `previous_state != DocState::Stale && new_state ==
-    // DocState::Stale`, map to `tm_events::payload::DocInvalidatedPayload { path: <doc's path>,
-    // reason: assessment.reasons.join("; ") }`. This needs the doc's `path`, not just its id —
-    // take a `&DocRegistry` (post-assessment state is fine, path never changes) as a second
-    // argument to resolve it.
     pub fn invalidation_events(
         assessments: &[DocAssessment],
         registry: &DocRegistry,
     ) -> Vec<tm_events::payload::DocInvalidatedPayload> {
-        todo!("emit doc.invalidated for docs that newly became Stale, see IMPL note above")
+        assessments
+            .iter()
+            .filter(|a| a.previous_state != DocState::Stale && a.new_state == DocState::Stale)
+            .filter_map(|a| {
+                registry
+                    .get(&a.doc_id)
+                    .map(|record| tm_events::payload::DocInvalidatedPayload {
+                        path: record.path.clone(),
+                        reason: a.reasons.join("; "),
+                    })
+            })
+            .collect()
     }
 
     /// The predicate behind `tm docs check`: `Ok(())` when no doc is `Stale`, otherwise
     /// `Err(TmError::invariant(..))` naming every stale doc id. The CLI turns this `Result` into
     /// the process exit code via `TmError::exit_code()`.
-    // IMPL: collect `self.registry.list()` filtered to `DocState::Stale`, sorted by id; if
-    // empty, `Ok(())`; else `Err(TmError::invariant(format!("stale docs: {ids}")))` with `ids`
-    // being a comma-joined list.
     pub fn check(&self) -> tm_types::Result<()> {
-        todo!("fail with every stale doc id named, see IMPL note above")
+        // `DocRegistry::list` is already sorted by id (it iterates a `BTreeMap`).
+        let stale_ids: Vec<&str> = self
+            .registry
+            .list()
+            .into_iter()
+            .filter(|r| r.state == DocState::Stale)
+            .map(|r| r.id.as_str())
+            .collect();
+
+        if stale_ids.is_empty() {
+            Ok(())
+        } else {
+            Err(tm_types::TmError::invariant(format!(
+                "stale docs: {}",
+                stale_ids.join(", ")
+            )))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::registry::{DocMode, DocRecord};
+    use std::str::FromStr;
+    use tm_types::{DecisionId, ParticipantId, Timestamp};
+
+    fn ts() -> Timestamp {
+        Timestamp::parse_rfc3339("2026-01-01T00:00:00Z").expect("valid rfc3339 fixture")
+    }
+
+    fn doc(id: &str, mode: DocMode, derived_from: &[&str]) -> DocRecord {
+        DocRecord::new(
+            id.to_string(),
+            format!("docs/{id}.md"),
+            mode,
+            derived_from.iter().map(|s| s.to_string()).collect(),
+        )
+    }
+
+    fn assessor(docs: Vec<DocRecord>) -> Assessor {
+        let mut registry = DocRegistry::new();
+        for d in docs {
+            registry.insert(d);
+        }
+        let provenance =
+            ProvenanceIndex::build(&registry.list().into_iter().cloned().collect::<Vec<_>>())
+                .expect("fixture docs compile");
+        Assessor::new(registry, provenance)
+    }
+
+    #[test]
+    fn touched_doc_goes_fresh_to_stale_with_reasons() {
+        let mut a = assessor(vec![doc(
+            "arch",
+            DocMode::Maintained,
+            &["crates/tm-core/**"],
+        )]);
+        let changes = ChangeSet {
+            changed_paths: vec!["crates/tm-core/src/lib.rs".to_string()],
+            superseded_decisions: vec![],
+        };
+        let results = a.assess(&changes);
+        assert_eq!(results.len(), 1);
+        let r = &results[0];
+        assert_eq!(r.doc_id, "arch");
+        assert_eq!(r.previous_state, DocState::Unverified);
+        assert_eq!(r.new_state, DocState::Stale);
+        assert!(!r.dismissed);
+        assert_eq!(
+            r.reasons,
+            vec!["path crates/tm-core/src/lib.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn untouched_doc_does_not_appear_in_results() {
+        let mut a = assessor(vec![doc(
+            "arch",
+            DocMode::Maintained,
+            &["crates/tm-core/**"],
+        )]);
+        let changes = ChangeSet {
+            changed_paths: vec!["crates/tm-scheduler/src/lib.rs".to_string()],
+            superseded_decisions: vec![],
+        };
+        assert!(a.assess(&changes).is_empty());
+    }
+
+    #[test]
+    fn already_stale_doc_is_not_reinvalidated() {
+        let mut a = assessor(vec![doc(
+            "arch",
+            DocMode::Maintained,
+            &["crates/tm-core/**"],
+        )]);
+        let changes = ChangeSet {
+            changed_paths: vec!["crates/tm-core/src/lib.rs".to_string()],
+            superseded_decisions: vec![],
+        };
+        let first = a.assess(&changes);
+        assert_eq!(first[0].new_state, DocState::Stale);
+
+        let second = a.assess(&changes);
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].previous_state, DocState::Stale);
+        assert_eq!(second[0].new_state, DocState::Stale);
+
+        // No new `doc.invalidated` for the no-op thrash: `check` should still fail, but
+        // `invalidation_events` over the second batch must be empty.
+        let events = Assessor::invalidation_events(&second, a.registry());
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn live_dismissal_suppresses_stale_and_is_consumed() {
+        let mut a = assessor(vec![doc(
+            "arch",
+            DocMode::Maintained,
+            &["crates/tm-core/**"],
+        )]);
+        a.dismiss(Dismissal {
+            doc_id: "arch".to_string(),
+            note: "checked, still accurate".to_string(),
+            dismissed_by: ParticipantId::new("human:allie").expect("valid participant id fixture"),
+            ts: ts(),
+        });
+
+        let changes = ChangeSet {
+            changed_paths: vec!["crates/tm-core/src/lib.rs".to_string()],
+            superseded_decisions: vec![],
+        };
+        let first = a.assess(&changes);
+        assert_eq!(first[0].new_state, DocState::Unverified);
+        assert!(first[0].dismissed);
+
+        // The dismissal was consumed: a second, unrelated touch is not silently suppressed.
+        let second = a.assess(&changes);
+        assert_eq!(second[0].new_state, DocState::Stale);
+        assert!(!second[0].dismissed);
+    }
+
+    #[test]
+    fn decision_supersession_touches_doc_with_decision_reason() {
+        let d = DecisionId::from_str("D-019").expect("valid decision id fixture");
+        let mut a = assessor(vec![doc("policy", DocMode::Human, &["D-019"])]);
+        let changes = ChangeSet {
+            changed_paths: vec![],
+            superseded_decisions: vec![d],
+        };
+        let results = a.assess(&changes);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].new_state, DocState::Stale);
+        assert_eq!(results[0].reasons, vec!["decision D-019".to_string()]);
+    }
+
+    #[test]
+    fn invalidation_events_skip_dismissed_and_thrash_results() {
+        let mut a = assessor(vec![
+            doc("arch", DocMode::Maintained, &["crates/tm-core/**"]),
+            doc("api", DocMode::Generated, &["crates/tm-api/**"]),
+        ]);
+        a.dismiss(Dismissal {
+            doc_id: "arch".to_string(),
+            note: "fine".to_string(),
+            dismissed_by: ParticipantId::new("human:allie").expect("valid participant id fixture"),
+            ts: ts(),
+        });
+        let changes = ChangeSet {
+            changed_paths: vec![
+                "crates/tm-core/src/lib.rs".to_string(),
+                "crates/tm-api/src/lib.rs".to_string(),
+            ],
+            superseded_decisions: vec![],
+        };
+        let results = a.assess(&changes);
+        let events = Assessor::invalidation_events(&results, a.registry());
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path, "docs/api.md");
+    }
+
+    #[test]
+    fn check_passes_when_no_doc_is_stale() {
+        let a = assessor(vec![doc(
+            "arch",
+            DocMode::Maintained,
+            &["crates/tm-core/**"],
+        )]);
+        assert!(a.check().is_ok());
+    }
+
+    #[test]
+    fn check_fails_naming_every_stale_doc_id() {
+        let mut a = assessor(vec![
+            doc("arch", DocMode::Maintained, &["crates/tm-core/**"]),
+            doc("api", DocMode::Generated, &["crates/tm-api/**"]),
+        ]);
+        let changes = ChangeSet {
+            changed_paths: vec![
+                "crates/tm-core/src/lib.rs".to_string(),
+                "crates/tm-api/src/lib.rs".to_string(),
+            ],
+            superseded_decisions: vec![],
+        };
+        a.assess(&changes);
+        let err = a.check().unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("api"));
+        assert!(msg.contains("arch"));
+    }
+
+    #[test]
+    fn human_docs_still_flow_through_assess_like_any_other_mode() {
+        // The hard rule that a `Human` doc's *content* is never rewritten lives in
+        // `crate::reconcile`; `assess` itself only tracks staleness state and must treat every
+        // `DocMode` identically when deciding Fresh/Stale.
+        let mut a = assessor(vec![doc("vision", DocMode::Human, &["crates/tm-core/**"])]);
+        let changes = ChangeSet {
+            changed_paths: vec!["crates/tm-core/src/lib.rs".to_string()],
+            superseded_decisions: vec![],
+        };
+        let results = a.assess(&changes);
+        assert_eq!(results[0].new_state, DocState::Stale);
     }
 }
