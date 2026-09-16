@@ -1,0 +1,6 @@
+[tools]
+go = "latest"
+node = "latest"
+pnpm = "latest"
+rust = "latest"
+uv = "latest"
