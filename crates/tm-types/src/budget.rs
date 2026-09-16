@@ -183,17 +183,20 @@ impl Budget {
         Ok(())
     }
 
-    /// True when `other`'s limits fit inside what is left of `self`.
+    /// True when what `other` still has left fits inside what is left of `self`.
     ///
-    /// This is the delegation test: a child may never be handed more than its parent still has.
+    /// This is the delegation test: a child may never be handed more than its parent still
+    /// has. Comparing remaining-to-remaining (rather than remaining-to-`other`'s raw limit)
+    /// is what makes this reflexive: a budget always has exactly as much left as itself.
     pub fn contains(&self, other: &Budget) -> bool {
         fn fits(limit: u64, remaining: u64, want: u64) -> bool {
             limit == u64::MAX || want <= remaining
         }
         let r = self.remaining();
-        fits(self.tokens, r.tokens, other.tokens)
-            && fits(self.dollars_micros, r.dollars_micros, other.dollars_micros)
-            && fits(self.wall_seconds, r.wall_seconds, other.wall_seconds)
+        let o = other.remaining();
+        fits(self.tokens, r.tokens, o.tokens)
+            && fits(self.dollars_micros, r.dollars_micros, o.dollars_micros)
+            && fits(self.wall_seconds, r.wall_seconds, o.wall_seconds)
     }
 
     /// The componentwise minimum of two budgets' limits, with spend reset.

@@ -351,7 +351,10 @@ impl Authority {
         if !other.shell.allow.is_subset_of(&self.shell.allow) {
             out.push("shell.allow exceeds the grantor's".to_string());
         }
-        if !self.shell.deny.is_subset_of(&other.shell.deny) {
+        // A disabled shell cannot run anything, so it cannot violate a denial regardless of
+        // what its (irrelevant) deny list says; only an enabled child must inherit every
+        // denial its grantor imposes.
+        if other.shell.enabled && !self.shell.deny.is_subset_of(&other.shell.deny) {
             out.push("shell.deny drops a restriction the grantor imposes".to_string());
         }
         if other.resources.max_workers > self.resources.max_workers {

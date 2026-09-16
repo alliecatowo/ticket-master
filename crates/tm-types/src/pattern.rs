@@ -100,6 +100,7 @@ fn segments_imply(q: &[&str], p: &[&str]) -> bool {
         // Absorb zero segments, or absorb one segment of `p` and try again.
         return segments_imply(qt, p) || segments_imply(q, &p[1..]);
     }
+    // Invariant: the empty-`p` case returned above, so `p` still has a first segment here.
     let (ph, pt) = p.split_first().expect("p is non-empty");
     if *ph == "**" {
         // A bounded pattern cannot cover an unbounded one.
