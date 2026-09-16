@@ -142,7 +142,9 @@ impl PatternSet {
 
     /// The universal set: matches every path.
     pub fn all() -> Self {
-        PatternSet { patterns: vec![PathPattern("**".to_string())] }
+        PatternSet {
+            patterns: vec![PathPattern("**".to_string())],
+        }
     }
 
     /// Build from pattern sources.
@@ -186,7 +188,9 @@ impl PatternSet {
     pub fn matches_text(&self, text: impl AsRef<str>) -> bool {
         let text = text.as_ref();
         self.patterns.iter().any(|p| {
-            Glob::new(p.as_str()).map(|g| g.compile_matcher().is_match(text)).unwrap_or(false)
+            Glob::new(p.as_str())
+                .map(|g| g.compile_matcher().is_match(text))
+                .unwrap_or(false)
         })
     }
 
@@ -209,7 +213,9 @@ impl PatternSet {
 
     /// True when every path matched by `self` is provably matched by `other`.
     pub fn is_subset_of(&self, other: &PatternSet) -> bool {
-        self.patterns.iter().all(|p| other.patterns.iter().any(|q| p.implied_by(q)))
+        self.patterns
+            .iter()
+            .all(|p| other.patterns.iter().any(|q| p.implied_by(q)))
     }
 
     /// The union of two sets.
@@ -244,13 +250,17 @@ impl PatternSet {
 
     /// True unless the two sets are provably disjoint.
     pub fn overlaps(&self, other: &PatternSet) -> bool {
-        self.patterns.iter().any(|a| other.patterns.iter().any(|b| a.may_overlap(b)))
+        self.patterns
+            .iter()
+            .any(|a| other.patterns.iter().any(|b| a.may_overlap(b)))
     }
 }
 
 impl fmt::Debug for PatternSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_list().entries(self.patterns.iter().map(|p| p.as_str())).finish()
+        f.debug_list()
+            .entries(self.patterns.iter().map(|p| p.as_str()))
+            .finish()
     }
 }
 

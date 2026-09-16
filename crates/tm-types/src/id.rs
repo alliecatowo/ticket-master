@@ -83,7 +83,12 @@ fn valid_numeric(s: &str, prefixes: &[&str]) -> bool {
 
 fn valid_hex(s: &str, prefix: &str, len: usize) -> bool {
     s.strip_prefix(prefix)
-        .map(|rest| rest.len() == len && rest.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+        .map(|rest| {
+            rest.len() == len
+                && rest
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        })
         .unwrap_or(false)
 }
 
@@ -122,8 +127,7 @@ macro_rules! id_newtype {
 
             /// The numeric suffix, when this identifier has one.
             pub fn number(&self) -> Option<u64> {
-                let digits: String =
-                    self.0.chars().skip_while(|c| !c.is_ascii_digit()).collect();
+                let digits: String = self.0.chars().skip_while(|c| !c.is_ascii_digit()).collect();
                 digits.parse().ok()
             }
         }
@@ -174,9 +178,24 @@ id_newtype!(
     |s| valid_numeric(s, &["T-", "V-", "A-"]),
     "T-<n>, V-<n> or A-<n>"
 );
-id_newtype!(MilestoneId, "A milestone identifier, `M-<n>`.", |s| valid_numeric(s, &["M-"]), "M-<n>");
-id_newtype!(DecisionId, "A decision identifier, `D-<n>`.", |s| valid_numeric(s, &["D-"]), "D-<n>");
-id_newtype!(SessionId, "A session identifier, `S-<n>`.", |s| valid_numeric(s, &["S-"]), "S-<n>");
+id_newtype!(
+    MilestoneId,
+    "A milestone identifier, `M-<n>`.",
+    |s| valid_numeric(s, &["M-"]),
+    "M-<n>"
+);
+id_newtype!(
+    DecisionId,
+    "A decision identifier, `D-<n>`.",
+    |s| valid_numeric(s, &["D-"]),
+    "D-<n>"
+);
+id_newtype!(
+    SessionId,
+    "A session identifier, `S-<n>`.",
+    |s| valid_numeric(s, &["S-"]),
+    "S-<n>"
+);
 id_newtype!(
     ArtifactId,
     "An artifact identifier, `ART-<hex12>`.",
@@ -298,7 +317,15 @@ macro_rules! into_id {
         impl From<$t> for Id { fn from(v: $t) -> Id { Id(v.0) } }
     )*};
 }
-into_id!(TicketId, MilestoneId, DecisionId, SessionId, ArtifactId, LeaseId, ParticipantId);
+into_id!(
+    TicketId,
+    MilestoneId,
+    DecisionId,
+    SessionId,
+    ArtifactId,
+    LeaseId,
+    ParticipantId
+);
 
 #[cfg(test)]
 mod tests {

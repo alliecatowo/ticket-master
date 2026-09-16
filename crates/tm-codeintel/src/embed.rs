@@ -290,7 +290,7 @@ mod tests {
     fn fit_idf_changes_subsequent_embeddings_and_clears_cache() {
         let mut embedder = LocalHashEmbedder::new();
         let text = "distinctive rare phrase".to_string();
-        let before = embedder.embed(&[text.clone()]).unwrap();
+        let before = embedder.embed(std::slice::from_ref(&text)).unwrap();
 
         let corpus = vec![
             "distinctive rare phrase".to_string(),

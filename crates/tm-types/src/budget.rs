@@ -22,17 +22,26 @@ pub struct Spend {
 impl Spend {
     /// Tokens only.
     pub fn tokens(n: u64) -> Self {
-        Spend { tokens: n, ..Default::default() }
+        Spend {
+            tokens: n,
+            ..Default::default()
+        }
     }
 
     /// Money only, in millionths of a dollar.
     pub fn dollars_micros(n: u64) -> Self {
-        Spend { dollars_micros: n, ..Default::default() }
+        Spend {
+            dollars_micros: n,
+            ..Default::default()
+        }
     }
 
     /// Wall-clock seconds only.
     pub fn seconds(n: u64) -> Self {
-        Spend { wall_seconds: n, ..Default::default() }
+        Spend {
+            wall_seconds: n,
+            ..Default::default()
+        }
     }
 
     /// Componentwise sum, saturating.
@@ -124,19 +133,31 @@ impl Budget {
 
     /// A budget that permits nothing.
     pub fn none() -> Self {
-        Budget { tokens: 0, dollars_micros: 0, wall_seconds: 0, spent: Spend::default() }
+        Budget {
+            tokens: 0,
+            dollars_micros: 0,
+            wall_seconds: 0,
+            spent: Spend::default(),
+        }
     }
 
     /// A budget with explicit limits.
     pub fn new(tokens: u64, dollars_micros: u64, wall_seconds: u64) -> Self {
-        Budget { tokens, dollars_micros, wall_seconds, spent: Spend::default() }
+        Budget {
+            tokens,
+            dollars_micros,
+            wall_seconds,
+            spent: Spend::default(),
+        }
     }
 
     /// What is left in each component, saturating at zero.
     pub fn remaining(&self) -> Spend {
         Spend {
             tokens: self.tokens.saturating_sub(self.spent.tokens),
-            dollars_micros: self.dollars_micros.saturating_sub(self.spent.dollars_micros),
+            dollars_micros: self
+                .dollars_micros
+                .saturating_sub(self.spent.dollars_micros),
             wall_seconds: self.wall_seconds.saturating_sub(self.spent.wall_seconds),
         }
     }
@@ -203,8 +224,14 @@ impl Budget {
     pub fn intersect(&self, other: &Budget) -> Budget {
         Budget {
             tokens: self.remaining().tokens.min(other.remaining().tokens),
-            dollars_micros: self.remaining().dollars_micros.min(other.remaining().dollars_micros),
-            wall_seconds: self.remaining().wall_seconds.min(other.remaining().wall_seconds),
+            dollars_micros: self
+                .remaining()
+                .dollars_micros
+                .min(other.remaining().dollars_micros),
+            wall_seconds: self
+                .remaining()
+                .wall_seconds
+                .min(other.remaining().wall_seconds),
             spent: Spend::default(),
         }
     }
@@ -228,7 +255,11 @@ mod tests {
     #[test]
     fn a_refused_spend_applies_no_component() {
         let mut b = Budget::new(100, 10, 100);
-        let over = Spend { tokens: 1, dollars_micros: 50, wall_seconds: 1 };
+        let over = Spend {
+            tokens: 1,
+            dollars_micros: 50,
+            wall_seconds: 1,
+        };
         assert!(b.try_spend(over).is_err());
         assert_eq!(b.spent, Spend::default());
     }
@@ -253,7 +284,13 @@ mod tests {
     #[test]
     fn a_child_cannot_be_handed_more_than_remains() {
         let mut parent = Budget::new(100, 100, 100);
-        parent.try_spend(Spend { tokens: 70, dollars_micros: 0, wall_seconds: 0 }).unwrap();
+        parent
+            .try_spend(Spend {
+                tokens: 70,
+                dollars_micros: 0,
+                wall_seconds: 0,
+            })
+            .unwrap();
         assert!(parent.contains(&Budget::new(30, 100, 100)));
         assert!(!parent.contains(&Budget::new(31, 100, 100)));
         assert!(Budget::unlimited().contains(&Budget::new(u64::MAX, 5, 5)));

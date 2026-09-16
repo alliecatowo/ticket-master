@@ -1,410 +1,552 @@
-//! Milestones as graph cuts over the ticket set.
+//! Milestones as graph cuts (`SPEC.md` §4.6).
 //!
-//! A milestone groups a set of tickets; closing it requires every member ticket to be terminal
-//! (`Closed` or `Cancelled`); reopening it requires `authority.project.reopen_milestone` and
-//! cascades `ticket.reopened` to affected descendants (`SPEC.md` §4.6). This module owns the pure
-//! decision logic; `store.rs::create_milestone`/`close_milestone`/`reopen_milestone` own event
-//! drafting and persistence.
+//! A milestone is a named set of member tickets. Closing requires every member `Closed` or
+//! `Cancelled`; reopening cascades `ticket.reopened` to affected descendants (tickets outside
+//! the milestone that depended on one of its members). Pure logic over an injected view; `Store`
+//! owns persistence and event emission.
 
-use thiserror::Error;
-use tm_types::{Authority, DecisionId, MilestoneId, ParticipantId, TicketId};
+use tm_types::{DecisionId, MilestoneId, ParticipantId, TicketId};
 
+use crate::graph::DependencyGraph;
 use crate::ticket::TicketState;
 
-/// Whether a milestone is accepting/tracking work or has been closed out.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Open or closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MilestoneState {
-    /// Open: member tickets may still be in any state.
+    /// Still accepting/tracking work.
     Open,
     /// Closed: every member ticket was `Closed` or `Cancelled` at close time.
     Closed,
 }
 
-/// A graph cut over the ticket set: a named group of tickets tracked to completion together.
-#[derive(Debug, Clone, PartialEq)]
+/// A milestone record.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Milestone {
-    /// Stable identifier.
+    /// Identity.
     pub id: MilestoneId,
-    /// Human title.
+    /// Human-readable title.
     pub title: String,
     /// Member ticket ids.
     pub tickets: Vec<TicketId>,
-    /// Current lifecycle state.
+    /// Open or closed.
     pub state: MilestoneState,
-    /// Who closed this milestone, if it is closed.
+    /// Who closed it, if closed.
     pub closed_by: Option<ParticipantId>,
-    /// Assumptions (decisions) this milestone's scope rests on.
+    /// Decisions this milestone's scope rests on.
     pub assumptions: Vec<DecisionId>,
 }
 
-/// Why [`close`] refused to close a milestone.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-#[error("milestone {milestone} has {count} member ticket(s) not Closed or Cancelled")]
-pub struct NotAllMembersTerminal {
-    /// The milestone that failed to close.
-    pub milestone: MilestoneId,
-    /// How many member tickets were neither `Closed` nor `Cancelled`.
-    pub count: usize,
+/// Why [`MilestoneStore::close`] refused to close a milestone.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CloseError {
+    /// At least one member ticket is neither `Closed` nor `Cancelled`.
+    #[error("milestone {0} has an open member ticket")]
+    OpenMember(MilestoneId),
 }
 
-/// Why [`reopen`] refused to reopen a milestone.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
-pub enum ReopenError {
-    /// The milestone was not `Closed`.
-    #[error("milestone {0} is not Closed")]
-    NotClosed(MilestoneId),
-    /// The caller's authority lacked `project.reopen_milestone`.
-    #[error("authority lacks project.reopen_milestone")]
-    AuthorityDenied,
-}
+/// Facade over pure milestone operations; `Store` wraps these with authority checks, event
+/// emission and persistence.
+pub struct MilestoneStore;
 
-/// True when every member ticket's state is `Closed` or `Cancelled`.
-pub fn all_members_terminal(
-    milestone: &Milestone,
-    states: &std::collections::BTreeMap<TicketId, TicketState>,
-) -> bool {
-    milestone.tickets.iter().all(|ticket_id| {
-        matches!(
-            states.get(ticket_id),
-            Some(TicketState::Closed) | Some(TicketState::Cancelled)
-        )
-    })
-}
-
-/// Attempt to close `milestone`, given the current state of every ticket. `SPEC.md` §4.6: closing
-/// requires all member tickets `Closed|Cancelled`.
-pub fn close(
-    milestone: &Milestone,
-    states: &std::collections::BTreeMap<TicketId, TicketState>,
-    by: ParticipantId,
-) -> Result<Milestone, NotAllMembersTerminal> {
-    if all_members_terminal(milestone, states) {
+impl MilestoneStore {
+    /// Close `milestone`, given the current state of every one of its member tickets.
+    ///
+    /// # Errors
+    /// [`CloseError::OpenMember`] unless every ticket in `member_states` is
+    /// [`TicketState::Closed`] or [`TicketState::Cancelled`].
+    pub fn close(
+        milestone: &Milestone,
+        member_states: &std::collections::BTreeMap<TicketId, TicketState>,
+        closed_by: ParticipantId,
+    ) -> Result<Milestone, CloseError> {
+        for ticket_id in &milestone.tickets {
+            if let Some(&state) = member_states.get(ticket_id) {
+                if state != TicketState::Closed && state != TicketState::Cancelled {
+                    return Err(CloseError::OpenMember(milestone.id.clone()));
+                }
+            } else {
+                return Err(CloseError::OpenMember(milestone.id.clone()));
+            }
+        }
         Ok(Milestone {
+            id: milestone.id.clone(),
+            title: milestone.title.clone(),
+            tickets: milestone.tickets.clone(),
             state: MilestoneState::Closed,
-            closed_by: Some(by),
-            ..milestone.clone()
-        })
-    } else {
-        let count = milestone
-            .tickets
-            .iter()
-            .filter(|ticket_id| {
-                !matches!(
-                    states.get(ticket_id),
-                    Some(TicketState::Closed) | Some(TicketState::Cancelled)
-                )
-            })
-            .count();
-        Err(NotAllMembersTerminal {
-            milestone: milestone.id.clone(),
-            count,
+            closed_by: Some(closed_by),
+            assumptions: milestone.assumptions.clone(),
         })
     }
-}
 
-/// Attempt to reopen `milestone`, given the authority the caller is acting with. `SPEC.md` §4.6:
-/// requires `authority.project.reopen_milestone`; returns the reopened milestone plus the
-/// descendant tickets that must receive a cascaded `ticket.reopened`.
-pub fn reopen(
-    milestone: &Milestone,
-    authority: &Authority,
-) -> Result<(Milestone, Vec<TicketId>), ReopenError> {
-    if milestone.state != MilestoneState::Closed {
-        return Err(ReopenError::NotClosed(milestone.id.clone()));
-    }
-    if !authority.project.reopen_milestone {
-        return Err(ReopenError::AuthorityDenied);
-    }
-    Ok((
-        Milestone {
+    /// Reopen `milestone`, returning the reopened milestone plus the set of descendant tickets
+    /// (outside the milestone) whose dependency on a milestone member means they must also
+    /// receive `ticket.reopened` (`SPEC.md` §4.6: "cascades ticket.reopened to affected
+    /// descendants"). Authority checking (`authority.project.reopen_milestone`) happens in
+    /// `Store`, not here.
+    pub fn reopen(milestone: &Milestone, graph: &DependencyGraph) -> (Milestone, Vec<TicketId>) {
+        let mut all_descendants = std::collections::BTreeSet::new();
+        let milestone_members: std::collections::BTreeSet<TicketId> =
+            milestone.tickets.iter().cloned().collect();
+
+        for member in &milestone.tickets {
+            let descendants = graph.descendants(member);
+            all_descendants.extend(descendants);
+        }
+
+        // Remove the milestone's own members from the descendants list
+        for member in &milestone_members {
+            all_descendants.remove(member);
+        }
+
+        let reopened = Milestone {
+            id: milestone.id.clone(),
+            title: milestone.title.clone(),
+            tickets: milestone.tickets.clone(),
             state: MilestoneState::Open,
             closed_by: None,
-            ..milestone.clone()
-        },
-        milestone.tickets.clone(),
-    ))
-}
+            assumptions: milestone.assumptions.clone(),
+        };
 
-/// Every milestone whose `tickets` contains `ticket`.
-pub fn milestones_containing<'a>(all: &'a [Milestone], ticket: &TicketId) -> Vec<&'a Milestone> {
-    all.iter().filter(|m| m.tickets.contains(ticket)).collect()
+        let affected: Vec<TicketId> = all_descendants.into_iter().collect();
+        (reopened, affected)
+    }
+
+    /// Every milestone (from `all`) that lists `ticket` as a member.
+    pub fn membership_of<'a>(all: &'a [Milestone], ticket: &TicketId) -> Vec<&'a Milestone> {
+        all.iter().filter(|m| m.tickets.contains(ticket)).collect()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::DependencyEdge;
     use std::collections::BTreeMap;
-    use tm_types::{Authority, MilestoneId, ParticipantId, TicketId};
+    use tm_types::ParticipantId;
 
-    fn make_milestone(id: &str, tickets: Vec<&str>) -> Milestone {
+    fn test_ids() -> tm_types::CounterIds {
+        tm_types::CounterIds::new()
+    }
+
+    fn test_milestone(_ids: &tm_types::CounterIds, id: &str, tickets: Vec<TicketId>) -> Milestone {
         Milestone {
-            id: MilestoneId::new(id).unwrap(),
+            id: MilestoneId::new(id).expect("invalid milestone id"),
             title: format!("Milestone {}", id),
-            tickets: tickets
-                .into_iter()
-                .map(|t| TicketId::new(t).unwrap())
-                .collect(),
+            tickets,
             state: MilestoneState::Open,
             closed_by: None,
-            assumptions: vec![],
+            assumptions: Vec::new(),
         }
     }
 
-    fn make_states(pairs: Vec<(&str, TicketState)>) -> BTreeMap<TicketId, TicketState> {
-        pairs
-            .into_iter()
-            .map(|(id, state)| (TicketId::new(id).unwrap(), state))
-            .collect()
+    fn test_ticket_id(prefix: &str, n: u64) -> TicketId {
+        TicketId::new(format!("{}-{}", prefix, n)).expect("invalid ticket id")
     }
 
     #[test]
-    fn all_members_terminal_empty_milestone() {
-        let milestone = make_milestone("M-1", vec![]);
-        let states = make_states(vec![]);
-        assert!(all_members_terminal(&milestone, &states));
-    }
+    fn close_all_tickets_closed() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1), test_ticket_id("T", 2)];
+        let milestone = test_milestone(&ids, "M-1", tickets.clone());
 
-    #[test]
-    fn all_members_terminal_single_closed() {
-        let milestone = make_milestone("M-1", vec!["T-1"]);
-        let states = make_states(vec![("T-1", TicketState::Closed)]);
-        assert!(all_members_terminal(&milestone, &states));
-    }
+        let mut member_states = BTreeMap::new();
+        member_states.insert(tickets[0].clone(), TicketState::Closed);
+        member_states.insert(tickets[1].clone(), TicketState::Closed);
 
-    #[test]
-    fn all_members_terminal_single_cancelled() {
-        let milestone = make_milestone("M-1", vec!["T-1"]);
-        let states = make_states(vec![("T-1", TicketState::Cancelled)]);
-        assert!(all_members_terminal(&milestone, &states));
-    }
+        let closer = ParticipantId::system();
+        let result = MilestoneStore::close(&milestone, &member_states, closer.clone());
 
-    #[test]
-    fn all_members_terminal_mixed_closed_and_cancelled() {
-        let milestone = make_milestone("M-1", vec!["T-1", "T-2", "T-3"]);
-        let states = make_states(vec![
-            ("T-1", TicketState::Closed),
-            ("T-2", TicketState::Cancelled),
-            ("T-3", TicketState::Closed),
-        ]);
-        assert!(all_members_terminal(&milestone, &states));
-    }
-
-    #[test]
-    fn all_members_terminal_one_not_terminal() {
-        let milestone = make_milestone("M-1", vec!["T-1", "T-2"]);
-        let states = make_states(vec![
-            ("T-1", TicketState::Closed),
-            ("T-2", TicketState::Ready),
-        ]);
-        assert!(!all_members_terminal(&milestone, &states));
-    }
-
-    #[test]
-    fn all_members_terminal_missing_ticket() {
-        let milestone = make_milestone("M-1", vec!["T-1", "T-2"]);
-        let states = make_states(vec![("T-1", TicketState::Closed)]);
-        assert!(!all_members_terminal(&milestone, &states));
-    }
-
-    #[test]
-    fn all_members_terminal_escalated() {
-        let milestone = make_milestone("M-1", vec!["T-1"]);
-        let states = make_states(vec![("T-1", TicketState::Escalated)]);
-        assert!(!all_members_terminal(&milestone, &states));
-    }
-
-    #[test]
-    fn close_all_terminal_empty_milestone() {
-        let milestone = make_milestone("M-1", vec![]);
-        let states = make_states(vec![]);
-        let by = ParticipantId::system();
-
-        let result = close(&milestone, &states, by);
         assert!(result.is_ok());
-
         let closed = result.unwrap();
         assert_eq!(closed.state, MilestoneState::Closed);
-        assert_eq!(closed.closed_by, Some(ParticipantId::system()));
+        assert_eq!(closed.closed_by, Some(closer));
         assert_eq!(closed.id, milestone.id);
-        assert_eq!(closed.title, milestone.title);
         assert_eq!(closed.tickets, milestone.tickets);
-        assert_eq!(closed.assumptions, milestone.assumptions);
     }
 
     #[test]
-    fn close_all_terminal_with_tickets() {
-        let milestone = make_milestone("M-1", vec!["T-1", "T-2"]);
-        let states = make_states(vec![
-            ("T-1", TicketState::Closed),
-            ("T-2", TicketState::Cancelled),
-        ]);
-        let by = ParticipantId::new("human:alice").unwrap();
+    fn close_all_tickets_cancelled() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1), test_ticket_id("T", 2)];
+        let milestone = test_milestone(&ids, "M-1", tickets.clone());
 
-        let result = close(&milestone, &states, by.clone());
+        let mut member_states = BTreeMap::new();
+        member_states.insert(tickets[0].clone(), TicketState::Cancelled);
+        member_states.insert(tickets[1].clone(), TicketState::Cancelled);
+
+        let closer = ParticipantId::system();
+        let result = MilestoneStore::close(&milestone, &member_states, closer);
+
         assert!(result.is_ok());
-
         let closed = result.unwrap();
         assert_eq!(closed.state, MilestoneState::Closed);
-        assert_eq!(closed.closed_by, Some(by));
     }
 
     #[test]
-    fn close_not_all_terminal_one_ready() {
-        let milestone = make_milestone("M-1", vec!["T-1", "T-2", "T-3"]);
-        let states = make_states(vec![
-            ("T-1", TicketState::Closed),
-            ("T-2", TicketState::Ready),
-            ("T-3", TicketState::Closed),
-        ]);
-        let by = ParticipantId::system();
+    fn close_mixed_closed_and_cancelled() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1), test_ticket_id("T", 2)];
+        let milestone = test_milestone(&ids, "M-1", tickets.clone());
 
-        let result = close(&milestone, &states, by);
+        let mut member_states = BTreeMap::new();
+        member_states.insert(tickets[0].clone(), TicketState::Closed);
+        member_states.insert(tickets[1].clone(), TicketState::Cancelled);
+
+        let closer = ParticipantId::system();
+        let result = MilestoneStore::close(&milestone, &member_states, closer);
+
+        assert!(result.is_ok());
+        let closed = result.unwrap();
+        assert_eq!(closed.state, MilestoneState::Closed);
+    }
+
+    #[test]
+    fn close_fails_when_member_is_open() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1), test_ticket_id("T", 2)];
+        let milestone = test_milestone(&ids, "M-1", tickets.clone());
+
+        let mut member_states = BTreeMap::new();
+        member_states.insert(tickets[0].clone(), TicketState::Closed);
+        member_states.insert(tickets[1].clone(), TicketState::Ready);
+
+        let closer = ParticipantId::system();
+        let result = MilestoneStore::close(&milestone, &member_states, closer);
+
         assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.milestone, MilestoneId::new("M-1").unwrap());
-        assert_eq!(err.count, 1);
+        assert_eq!(
+            result.unwrap_err(),
+            CloseError::OpenMember(milestone.id.clone())
+        );
     }
 
     #[test]
-    fn close_not_all_terminal_multiple_not_terminal() {
-        let milestone = make_milestone("M-1", vec!["T-1", "T-2", "T-3", "T-4"]);
-        let states = make_states(vec![
-            ("T-1", TicketState::Closed),
-            ("T-2", TicketState::Running),
-            ("T-3", TicketState::Submitted),
-            ("T-4", TicketState::Escalated),
-        ]);
-        let by = ParticipantId::system();
+    fn close_fails_when_member_is_running() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1), test_ticket_id("T", 2)];
+        let milestone = test_milestone(&ids, "M-1", tickets.clone());
 
-        let result = close(&milestone, &states, by);
+        let mut member_states = BTreeMap::new();
+        member_states.insert(tickets[0].clone(), TicketState::Closed);
+        member_states.insert(tickets[1].clone(), TicketState::Running);
+
+        let closer = ParticipantId::system();
+        let result = MilestoneStore::close(&milestone, &member_states, closer);
+
         assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.count, 3);
     }
 
     #[test]
-    fn close_not_all_terminal_missing_ticket() {
-        let milestone = make_milestone("M-1", vec!["T-1", "T-2"]);
-        let states = make_states(vec![("T-1", TicketState::Closed)]);
-        let by = ParticipantId::system();
+    fn close_fails_when_member_is_submitted() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1), test_ticket_id("T", 2)];
+        let milestone = test_milestone(&ids, "M-1", tickets.clone());
 
-        let result = close(&milestone, &states, by);
+        let mut member_states = BTreeMap::new();
+        member_states.insert(tickets[0].clone(), TicketState::Submitted);
+        member_states.insert(tickets[1].clone(), TicketState::Closed);
+
+        let closer = ParticipantId::system();
+        let result = MilestoneStore::close(&milestone, &member_states, closer);
+
         assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.count, 1);
+        assert_eq!(
+            result.unwrap_err(),
+            CloseError::OpenMember(milestone.id.clone())
+        );
     }
 
     #[test]
-    fn reopen_closed_with_permission() {
-        let mut milestone = make_milestone("M-1", vec!["T-1", "T-2"]);
+    fn close_fails_when_member_missing_from_states() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1), test_ticket_id("T", 2)];
+        let milestone = test_milestone(&ids, "M-1", tickets.clone());
+
+        let mut member_states = BTreeMap::new();
+        member_states.insert(tickets[0].clone(), TicketState::Closed);
+        // Intentionally omit tickets[1]
+
+        let closer = ParticipantId::system();
+        let result = MilestoneStore::close(&milestone, &member_states, closer);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            CloseError::OpenMember(milestone.id.clone())
+        );
+    }
+
+    #[test]
+    fn close_preserves_title_and_assumptions() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1)];
+        let mut milestone = test_milestone(&ids, "M-1", tickets.clone());
+        milestone.title = "Important Release".to_string();
+        milestone.assumptions = vec![DecisionId::new("D-5").expect("invalid decision id")];
+
+        let mut member_states = BTreeMap::new();
+        member_states.insert(tickets[0].clone(), TicketState::Closed);
+
+        let closer = ParticipantId::system();
+        let closed = MilestoneStore::close(&milestone, &member_states, closer).unwrap();
+
+        assert_eq!(closed.title, "Important Release");
+        assert_eq!(closed.assumptions.len(), 1);
+    }
+
+    #[test]
+    fn reopen_basic_no_descendants() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1)];
+        let mut milestone = test_milestone(&ids, "M-1", tickets.clone());
         milestone.state = MilestoneState::Closed;
         milestone.closed_by = Some(ParticipantId::system());
 
-        let authority = Authority::root();
+        let graph = DependencyGraph::build(vec![tickets[0].clone()], vec![], vec![]);
 
-        let result = reopen(&milestone, &authority);
-        assert!(result.is_ok());
+        let (reopened, affected) = MilestoneStore::reopen(&milestone, &graph);
 
-        let (reopened, tickets_to_cascade) = result.unwrap();
         assert_eq!(reopened.state, MilestoneState::Open);
         assert_eq!(reopened.closed_by, None);
         assert_eq!(reopened.id, milestone.id);
-        assert_eq!(reopened.title, milestone.title);
-        assert_eq!(tickets_to_cascade, milestone.tickets);
+        assert_eq!(reopened.tickets, milestone.tickets);
+        assert!(affected.is_empty());
     }
 
     #[test]
-    fn reopen_open_fails() {
-        let milestone = make_milestone("M-1", vec!["T-1"]);
-        let authority = Authority::root();
+    fn reopen_with_descendants() {
+        let ids = test_ids();
+        let t1 = test_ticket_id("T", 1);
+        let t2 = test_ticket_id("T", 2);
+        let t3 = test_ticket_id("T", 3);
 
-        let result = reopen(&milestone, &authority);
-        assert!(result.is_err());
+        let milestone = test_milestone(&ids, "M-1", vec![t1.clone()]);
 
-        match result.unwrap_err() {
-            ReopenError::NotClosed(id) => assert_eq!(id, MilestoneId::new("M-1").unwrap()),
-            ReopenError::AuthorityDenied => panic!("Expected NotClosed error"),
-        }
-    }
+        // t2 depends on t1, t3 depends on t2
+        use crate::ticket::DependencyKind;
+        let edges = vec![
+            DependencyEdge {
+                from: t2.clone(),
+                to: t1.clone(),
+                kind: DependencyKind::Hard,
+            },
+            DependencyEdge {
+                from: t3.clone(),
+                to: t2.clone(),
+                kind: DependencyKind::Hard,
+            },
+        ];
+        let graph = DependencyGraph::build(vec![t1.clone(), t2.clone(), t3.clone()], edges, vec![]);
 
-    #[test]
-    fn reopen_no_authority() {
-        let mut milestone = make_milestone("M-1", vec!["T-1"]);
-        milestone.state = MilestoneState::Closed;
-        milestone.closed_by = Some(ParticipantId::system());
+        let (reopened, affected) = MilestoneStore::reopen(&milestone, &graph);
 
-        let authority = Authority::none();
-
-        let result = reopen(&milestone, &authority);
-        assert!(result.is_err());
-
-        match result.unwrap_err() {
-            ReopenError::AuthorityDenied => (),
-            ReopenError::NotClosed(_) => panic!("Expected AuthorityDenied error"),
-        }
-    }
-
-    #[test]
-    fn reopen_closed_empty_tickets() {
-        let mut milestone = make_milestone("M-1", vec![]);
-        milestone.state = MilestoneState::Closed;
-        milestone.closed_by = Some(ParticipantId::system());
-
-        let authority = Authority::root();
-
-        let result = reopen(&milestone, &authority);
-        assert!(result.is_ok());
-
-        let (reopened, tickets_to_cascade) = result.unwrap();
         assert_eq!(reopened.state, MilestoneState::Open);
-        assert!(tickets_to_cascade.is_empty());
+        assert_eq!(reopened.closed_by, None);
+        // Affected should be t2 and t3
+        assert_eq!(affected.len(), 2);
+        assert!(affected.contains(&t2));
+        assert!(affected.contains(&t3));
+        // t1 (the milestone member) should not be in affected
+        assert!(!affected.contains(&t1));
     }
 
     #[test]
-    fn milestones_containing_no_milestones() {
-        let all = vec![];
-        let ticket = TicketId::new("T-1").unwrap();
-        let result = milestones_containing(&all, &ticket);
+    fn reopen_excludes_milestone_members_from_descendants() {
+        let ids = test_ids();
+        let t1 = test_ticket_id("T", 1);
+        let t2 = test_ticket_id("T", 2);
+        let t3 = test_ticket_id("T", 3);
+
+        // t1 and t2 are milestone members
+        let milestone = test_milestone(&ids, "M-1", vec![t1.clone(), t2.clone()]);
+
+        // t1 -> t2 (both in milestone), t2 -> t3 (t3 outside)
+        use crate::ticket::DependencyKind;
+        let edges = vec![
+            DependencyEdge {
+                from: t2.clone(),
+                to: t1.clone(),
+                kind: DependencyKind::Hard,
+            },
+            DependencyEdge {
+                from: t3.clone(),
+                to: t2.clone(),
+                kind: DependencyKind::Hard,
+            },
+        ];
+        let graph = DependencyGraph::build(vec![t1.clone(), t2.clone(), t3.clone()], edges, vec![]);
+
+        let (reopened, affected) = MilestoneStore::reopen(&milestone, &graph);
+
+        assert_eq!(reopened.state, MilestoneState::Open);
+        // Only t3 should be affected (t1 and t2 are milestone members and should be excluded)
+        assert_eq!(affected.len(), 1);
+        assert!(affected.contains(&t3));
+        assert!(!affected.contains(&t1));
+        assert!(!affected.contains(&t2));
+    }
+
+    #[test]
+    fn reopen_multiple_members_union_descendants() {
+        let ids = test_ids();
+        let t1 = test_ticket_id("T", 1);
+        let t2 = test_ticket_id("T", 2);
+        let t3 = test_ticket_id("T", 3);
+        let t4 = test_ticket_id("T", 4);
+
+        // t1 and t2 are milestone members
+        let milestone = test_milestone(&ids, "M-1", vec![t1.clone(), t2.clone()]);
+
+        // t3 depends on t1, t4 depends on t2
+        use crate::ticket::DependencyKind;
+        let edges = vec![
+            DependencyEdge {
+                from: t3.clone(),
+                to: t1.clone(),
+                kind: DependencyKind::Hard,
+            },
+            DependencyEdge {
+                from: t4.clone(),
+                to: t2.clone(),
+                kind: DependencyKind::Hard,
+            },
+        ];
+        let graph = DependencyGraph::build(
+            vec![t1.clone(), t2.clone(), t3.clone(), t4.clone()],
+            edges,
+            vec![],
+        );
+
+        let (reopened, affected) = MilestoneStore::reopen(&milestone, &graph);
+
+        assert_eq!(reopened.state, MilestoneState::Open);
+        // Both t3 and t4 should be affected
+        assert_eq!(affected.len(), 2);
+        assert!(affected.contains(&t3));
+        assert!(affected.contains(&t4));
+    }
+
+    #[test]
+    fn reopen_preserves_title_and_assumptions() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1)];
+        let mut milestone = test_milestone(&ids, "M-1", tickets.clone());
+        milestone.title = "Release v2.0".to_string();
+        milestone.assumptions = vec![DecisionId::new("D-10").expect("invalid decision id")];
+        milestone.state = MilestoneState::Closed;
+        milestone.closed_by = Some(ParticipantId::system());
+
+        let graph = DependencyGraph::build(vec![tickets[0].clone()], vec![], vec![]);
+
+        let (reopened, _) = MilestoneStore::reopen(&milestone, &graph);
+
+        assert_eq!(reopened.title, "Release v2.0");
+        assert_eq!(reopened.assumptions.len(), 1);
+        assert_eq!(
+            reopened.assumptions[0],
+            DecisionId::new("D-10").expect("invalid decision id")
+        );
+    }
+
+    #[test]
+    fn membership_of_empty_list() {
+        let ticket = test_ticket_id("T", 1);
+        let result = MilestoneStore::membership_of(&[], &ticket);
         assert!(result.is_empty());
     }
 
     #[test]
-    fn milestones_containing_ticket_in_one() {
-        let milestones = vec![
-            make_milestone("M-1", vec!["T-1", "T-2"]),
-            make_milestone("M-2", vec!["T-3", "T-4"]),
-        ];
-        let ticket = TicketId::new("T-1").unwrap();
-        let result = milestones_containing(&milestones, &ticket);
+    fn membership_of_no_matches() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1), test_ticket_id("T", 2)];
+        let milestone = test_milestone(&ids, "M-1", tickets);
+
+        let query_ticket = test_ticket_id("T", 99);
+        let milestones = [milestone];
+        let result = MilestoneStore::membership_of(&milestones, &query_ticket);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn membership_of_single_match() {
+        let ids = test_ids();
+        let t1 = test_ticket_id("T", 1);
+        let t2 = test_ticket_id("T", 2);
+        let milestone = test_milestone(&ids, "M-1", vec![t1.clone(), t2]);
+
+        let milestones = [milestone.clone()];
+        let result = MilestoneStore::membership_of(&milestones, &t1);
+
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].id, MilestoneId::new("M-1").unwrap());
+        assert_eq!(result[0].id, milestone.id);
     }
 
     #[test]
-    fn milestones_containing_ticket_in_multiple() {
-        let milestones = vec![
-            make_milestone("M-1", vec!["T-1", "T-2"]),
-            make_milestone("M-2", vec!["T-1", "T-3"]),
-            make_milestone("M-3", vec!["T-4"]),
-        ];
-        let ticket = TicketId::new("T-1").unwrap();
-        let result = milestones_containing(&milestones, &ticket);
+    fn membership_of_multiple_milestones() {
+        let ids = test_ids();
+        let t1 = test_ticket_id("T", 1);
+        let t2 = test_ticket_id("T", 2);
+
+        let m1 = test_milestone(&ids, "M-1", vec![t1.clone(), t2.clone()]);
+        let m2 = test_milestone(&ids, "M-2", vec![t1.clone()]);
+        let m3 = test_milestone(&ids, "M-3", vec![t2.clone()]);
+
+        let milestones = [m1.clone(), m2.clone(), m3];
+        let result = MilestoneStore::membership_of(&milestones, &t1);
+
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].id, MilestoneId::new("M-1").unwrap());
-        assert_eq!(result[1].id, MilestoneId::new("M-2").unwrap());
+        assert!(result.iter().any(|m| m.id == m1.id));
+        assert!(result.iter().any(|m| m.id == m2.id));
     }
 
     #[test]
-    fn milestones_containing_ticket_not_in_any() {
-        let milestones = vec![
-            make_milestone("M-1", vec!["T-1", "T-2"]),
-            make_milestone("M-2", vec!["T-3", "T-4"]),
-        ];
-        let ticket = TicketId::new("T-5").unwrap();
-        let result = milestones_containing(&milestones, &ticket);
-        assert!(result.is_empty());
+    fn membership_of_all_milestones_when_in_all() {
+        let ids = test_ids();
+        let t1 = test_ticket_id("T", 1);
+
+        let m1 = test_milestone(&ids, "M-1", vec![t1.clone()]);
+        let m2 = test_milestone(&ids, "M-2", vec![t1.clone()]);
+        let m3 = test_milestone(&ids, "M-3", vec![t1.clone()]);
+
+        let milestones = [m1.clone(), m2.clone(), m3.clone()];
+        let result = MilestoneStore::membership_of(&milestones, &t1);
+
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn close_does_not_modify_original() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1)];
+        let original = test_milestone(&ids, "M-1", tickets.clone());
+
+        let mut member_states = BTreeMap::new();
+        member_states.insert(tickets[0].clone(), TicketState::Closed);
+
+        let closer = ParticipantId::system();
+        let _ = MilestoneStore::close(&original, &member_states, closer);
+
+        // Original should still be open
+        assert_eq!(original.state, MilestoneState::Open);
+        assert_eq!(original.closed_by, None);
+    }
+
+    #[test]
+    fn reopen_does_not_modify_original() {
+        let ids = test_ids();
+        let tickets = vec![test_ticket_id("T", 1)];
+        let mut original = test_milestone(&ids, "M-1", tickets.clone());
+        original.state = MilestoneState::Closed;
+        original.closed_by = Some(ParticipantId::system());
+
+        let graph = DependencyGraph::build(vec![tickets[0].clone()], vec![], vec![]);
+
+        let _ = MilestoneStore::reopen(&original, &graph);
+
+        // Original should still be closed
+        assert_eq!(original.state, MilestoneState::Closed);
+        assert_eq!(original.closed_by, Some(ParticipantId::system()));
     }
 }

@@ -104,7 +104,10 @@ impl fmt::Display for Role {
 impl FromStr for Role {
     type Err = crate::error::TmError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let norm = s.replace('_', ".").replace("long.context", "long_context").replace("computer.use", "computer_use");
+        let norm = s
+            .replace('_', ".")
+            .replace("long.context", "long_context")
+            .replace("computer.use", "computer_use");
         Role::ALL
             .iter()
             .copied()
@@ -114,7 +117,9 @@ impl FromStr for Role {
 }
 
 /// How willing a request is to be served by something other than its first choice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Tolerance {
     /// Wait for the right capability rather than degrade.
@@ -150,6 +155,9 @@ mod tests {
     #[test]
     fn config_keys_are_underscored() {
         assert_eq!(Role::CoderFast.config_key(), "coder_fast");
-        assert_eq!(Role::SynthesizerLongContext.config_key(), "synthesizer_long_context");
+        assert_eq!(
+            Role::SynthesizerLongContext.config_key(),
+            "synthesizer_long_context"
+        );
     }
 }

@@ -172,7 +172,7 @@ pub fn hybrid(
             let weighted_score = weight / (weights.rrf_k + rank as f32);
 
             let key = (path.clone(), *line_start);
-            accumulated.entry(key).or_insert_with(HashMap::new).insert(
+            accumulated.entry(key).or_default().insert(
                 signal_ranking.signal,
                 SignalContribution {
                     signal: signal_ranking.signal,
@@ -488,9 +488,11 @@ mod tests {
                 ranked: vec![("file.rs".to_string(), Some(10))],
             },
         ];
-        let mut weights = SignalWeights::default();
-        weights.semantic = 2.0;
-        weights.lexical = 0.5;
+        let weights = SignalWeights {
+            semantic: 2.0,
+            lexical: 0.5,
+            ..SignalWeights::default()
+        };
 
         let results = hybrid(&query, &ctx, &signals, weights, &|_, _| {
             ("snippet".to_string(), Some(12))
@@ -515,8 +517,10 @@ mod tests {
             signal: Signal::Semantic,
             ranked: vec![("file.rs".to_string(), Some(10))],
         }];
-        let mut weights = SignalWeights::default();
-        weights.rrf_k = 100.0;
+        let weights = SignalWeights {
+            rrf_k: 100.0,
+            ..SignalWeights::default()
+        };
 
         let results = hybrid(&query, &ctx, &signals, weights, &|_, _| {
             ("snippet".to_string(), Some(12))
@@ -800,8 +804,10 @@ mod tests {
                 ranked: vec![("file.rs".to_string(), Some(10))],
             },
         ];
-        let mut weights = SignalWeights::default();
-        weights.lexical = 0.0;
+        let weights = SignalWeights {
+            lexical: 0.0,
+            ..SignalWeights::default()
+        };
 
         let results = hybrid(&query, &ctx, &signals, weights, &|_, _| {
             ("snippet".to_string(), Some(12))

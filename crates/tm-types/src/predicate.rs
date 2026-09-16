@@ -65,7 +65,9 @@ impl Predicate {
     pub fn is_machine_checkable(&self) -> bool {
         match self {
             Predicate::Judgment { .. } => false,
-            Predicate::AllOf(ps) | Predicate::AnyOf(ps) => ps.iter().all(|p| p.is_machine_checkable()),
+            Predicate::AllOf(ps) | Predicate::AnyOf(ps) => {
+                ps.iter().all(|p| p.is_machine_checkable())
+            }
             Predicate::Not(p) => p.is_machine_checkable(),
             _ => true,
         }
@@ -95,7 +97,10 @@ impl Predicate {
     /// Combine the outcomes of children according to this predicate's shape.
     ///
     /// `leaf` settles the non-composite predicates; composition is pure.
-    pub fn evaluate(&self, leaf: &mut impl FnMut(&Predicate) -> PredicateOutcome) -> PredicateOutcome {
+    pub fn evaluate(
+        &self,
+        leaf: &mut impl FnMut(&Predicate) -> PredicateOutcome,
+    ) -> PredicateOutcome {
         match self {
             Predicate::AllOf(ps) => {
                 let mut pending: Option<PredicateOutcome> = None;
@@ -121,7 +126,10 @@ impl Predicate {
                     }
                 }
                 pending.unwrap_or_else(|| {
-                    PredicateOutcome::Unsatisfied(format!("no alternative held: {}", reasons.join("; ")))
+                    PredicateOutcome::Unsatisfied(format!(
+                        "no alternative held: {}",
+                        reasons.join("; ")
+                    ))
                 })
             }
             Predicate::Not(p) => match p.evaluate(leaf) {
@@ -167,14 +175,23 @@ mod tests {
     fn only_judgment_needs_a_model() {
         assert!(tests_pass().is_machine_checkable());
         assert!(Predicate::HumanAttested { note: "x".into() }.is_machine_checkable());
-        assert!(!Predicate::Judgment { claim: "feels right".into() }.is_machine_checkable());
-        assert!(!Predicate::AllOf(vec![tests_pass(), Predicate::Judgment { claim: "x".into() }])
-            .is_machine_checkable());
+        assert!(!Predicate::Judgment {
+            claim: "feels right".into()
+        }
+        .is_machine_checkable());
+        assert!(!Predicate::AllOf(vec![
+            tests_pass(),
+            Predicate::Judgment { claim: "x".into() }
+        ])
+        .is_machine_checkable());
     }
 
     #[test]
     fn all_of_short_circuits_on_failure() {
-        let p = Predicate::AllOf(vec![tests_pass(), Predicate::FileExists { path: "a".into() }]);
+        let p = Predicate::AllOf(vec![
+            tests_pass(),
+            Predicate::FileExists { path: "a".into() },
+        ]);
         let mut calls = 0;
         let out = p.evaluate(&mut |_| {
             calls += 1;
@@ -188,7 +205,9 @@ mod tests {
     fn judgment_defers_rather_than_failing() {
         let p = Predicate::AllOf(vec![
             tests_pass(),
-            Predicate::Judgment { claim: "satisfies intent".into() },
+            Predicate::Judgment {
+                claim: "satisfies intent".into(),
+            },
         ]);
         let out = p.evaluate(&mut |leaf| match leaf {
             Predicate::Judgment { claim } => PredicateOutcome::RequiresJudgment(claim.clone()),
@@ -200,8 +219,12 @@ mod tests {
     #[test]
     fn any_of_and_not_compose() {
         let p = Predicate::AnyOf(vec![
-            Predicate::FileExists { path: "missing".into() },
-            Predicate::Not(Box::new(Predicate::FileExists { path: "missing".into() })),
+            Predicate::FileExists {
+                path: "missing".into(),
+            },
+            Predicate::Not(Box::new(Predicate::FileExists {
+                path: "missing".into(),
+            })),
         ]);
         let out = p.evaluate(&mut |_| PredicateOutcome::Unsatisfied("absent".into()));
         assert!(out.is_satisfied());
@@ -210,18 +233,26 @@ mod tests {
     #[test]
     fn referenced_tickets_are_collected_recursively() {
         let p = Predicate::AllOf(vec![
-            Predicate::TicketClosed { ticket: TicketId::new("T-1").unwrap() },
+            Predicate::TicketClosed {
+                ticket: TicketId::new("T-1").unwrap(),
+            },
             Predicate::Not(Box::new(Predicate::TicketClosed {
                 ticket: TicketId::new("V-2").unwrap(),
             })),
         ]);
-        let refs: Vec<String> = p.referenced_tickets().iter().map(|t| t.to_string()).collect();
+        let refs: Vec<String> = p
+            .referenced_tickets()
+            .iter()
+            .map(|t| t.to_string())
+            .collect();
         assert_eq!(refs, vec!["T-1", "V-2"]);
     }
 
     #[test]
     fn predicates_round_trip_through_json() {
-        let p = Predicate::CommandSucceeds { command: vec!["cargo".into(), "test".into()] };
+        let p = Predicate::CommandSucceeds {
+            command: vec!["cargo".into(), "test".into()],
+        };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("command_succeeds"), "{s}");
         assert_eq!(serde_json::from_str::<Predicate>(&s).unwrap(), p);

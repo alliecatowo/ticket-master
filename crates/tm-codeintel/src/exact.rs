@@ -70,8 +70,9 @@ impl ExactSearch {
     pub fn literal(&self, needle: &str) -> Result<ExactSearchResult> {
         // Escape the needle as a regex literal to use the same matching logic.
         let pattern = regex::escape(needle);
-        let re = Regex::new(&pattern)
-            .map_err(|e| tm_types::TmError::parse(format!("failed to create literal regex: {}", e)))?;
+        let re = Regex::new(&pattern).map_err(|e| {
+            tm_types::TmError::parse(format!("failed to create literal regex: {}", e))
+        })?;
 
         self.search_with_pattern(&re)
     }
@@ -80,8 +81,8 @@ impl ExactSearch {
     /// same streaming/cap/ordering contract as [`ExactSearch::literal`].
     pub fn regex(&self, pattern: &str) -> Result<ExactSearchResult> {
         // Compile the regex pattern, mapping compile error to TmError::parse.
-        let re =
-            Regex::new(pattern).map_err(|e| tm_types::TmError::parse(format!("invalid regex: {}", e)))?;
+        let re = Regex::new(pattern)
+            .map_err(|e| tm_types::TmError::parse(format!("invalid regex: {}", e)))?;
 
         self.search_with_pattern(&re)
     }
@@ -422,7 +423,7 @@ mod tests {
         let result = search.literal("match").unwrap();
 
         // Should find at least the readable file, and not crash on any unreadable files
-        assert!(result.hits.len() >= 1);
+        assert!(!result.hits.is_empty());
     }
 
     #[test]
@@ -436,7 +437,7 @@ mod tests {
         let result = search.literal("").unwrap();
 
         // Empty string matches at positions 0, 1, and 2 (before/after each char and at end)
-        assert!(result.hits.len() > 0);
+        assert!(!result.hits.is_empty());
     }
 
     #[test]

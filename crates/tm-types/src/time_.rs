@@ -61,12 +61,14 @@ impl Timestamp {
         let dt = OffsetDateTime::from_unix_timestamp_nanos(self.0)
             .unwrap_or(OffsetDateTime::UNIX_EPOCH)
             .to_offset(time::UtcOffset::UTC);
-        dt.format(&Rfc3339).unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
+        dt.format(&Rfc3339)
+            .unwrap_or_else(|_| "1970-01-01T00:00:00Z".to_string())
     }
 
     /// Parse an RFC3339 timestamp.
     pub fn parse_rfc3339(s: &str) -> Result<Self, ParseTimestampError> {
-        let dt = OffsetDateTime::parse(s, &Rfc3339).map_err(|_| ParseTimestampError(s.to_string()))?;
+        let dt =
+            OffsetDateTime::parse(s, &Rfc3339).map_err(|_| ParseTimestampError(s.to_string()))?;
         Ok(Timestamp(dt.unix_timestamp_nanos()))
     }
 }
@@ -124,7 +126,10 @@ mod tests {
     #[test]
     fn serde_is_string_shaped() {
         let t = Timestamp::from_unix_seconds(0);
-        assert_eq!(serde_json::to_string(&t).unwrap(), "\"1970-01-01T00:00:00Z\"");
+        assert_eq!(
+            serde_json::to_string(&t).unwrap(),
+            "\"1970-01-01T00:00:00Z\""
+        );
         let back: Timestamp = serde_json::from_str("\"1970-01-01T00:00:00Z\"").unwrap();
         assert_eq!(back, t);
     }

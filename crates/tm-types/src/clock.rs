@@ -113,12 +113,18 @@ impl CounterIds {
 
     /// A fresh source with all counters at zero and the given RNG seed.
     pub fn seeded(seed: u64) -> Self {
-        CounterIds { counters: Mutex::new(BTreeMap::new()), rng: Mutex::new(StdRng::seed_from_u64(seed)) }
+        CounterIds {
+            counters: Mutex::new(BTreeMap::new()),
+            rng: Mutex::new(StdRng::seed_from_u64(seed)),
+        }
     }
 
     /// Restore persisted counters. Each value is the highest suffix already allocated.
     pub fn with_counters(counters: BTreeMap<String, u64>, seed: u64) -> Self {
-        CounterIds { counters: Mutex::new(counters), rng: Mutex::new(StdRng::seed_from_u64(seed)) }
+        CounterIds {
+            counters: Mutex::new(counters),
+            rng: Mutex::new(StdRng::seed_from_u64(seed)),
+        }
     }
 
     /// The current high-water mark for every counter, for persistence.
@@ -159,14 +165,21 @@ impl IdSource for CounterIds {
             IdKind::Participant => Id::new(format!("agent:local/{}", self.random_hex(6))),
             _ => {
                 let n = self.next_number(kind);
-                Id::new(format!("{}{:0width$}", kind.prefix(), n, width = kind.pad()))
+                Id::new(format!(
+                    "{}{:0width$}",
+                    kind.prefix(),
+                    n,
+                    width = kind.pad()
+                ))
             }
         }
     }
 
     fn random_hex(&self, n: usize) -> String {
         let mut rng = self.rng.lock();
-        (0..n).map(|_| std::char::from_digit(rng.random_range(0..16), 16).unwrap_or('0')).collect()
+        (0..n)
+            .map(|_| std::char::from_digit(rng.random_range(0..16), 16).unwrap_or('0'))
+            .collect()
     }
 }
 

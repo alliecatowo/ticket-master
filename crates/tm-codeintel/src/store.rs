@@ -223,12 +223,8 @@ fn apply_pragmas(conn: &Connection) -> Result<()> {
         .map_err(|e| tm_types::TmError::storage(format!("Failed to set synchronous: {}", e)))?;
     conn.pragma_update(None, "foreign_keys", "ON")
         .map_err(|e| tm_types::TmError::storage(format!("Failed to set foreign_keys: {}", e)))?;
-    conn.pragma_update(
-        None,
-        "busy_timeout",
-        Store::BUSY_TIMEOUT_MS.to_string(),
-    )
-    .map_err(|e| tm_types::TmError::storage(format!("Failed to set busy_timeout: {}", e)))?;
+    conn.pragma_update(None, "busy_timeout", Store::BUSY_TIMEOUT_MS.to_string())
+        .map_err(|e| tm_types::TmError::storage(format!("Failed to set busy_timeout: {}", e)))?;
     Ok(())
 }
 
@@ -243,12 +239,13 @@ impl Store {
     /// vectors, tokens and symbols in one statement.
     pub fn open(project_root: &Path) -> Result<Store> {
         let db_path = project_root.join(INDEX_DB_RELATIVE_PATH);
-        let tm_dir = db_path
-            .parent()
-            .ok_or_else(|| tm_types::TmError::invariant("Failed to get parent directory of index.db"))?;
+        let tm_dir = db_path.parent().ok_or_else(|| {
+            tm_types::TmError::invariant("Failed to get parent directory of index.db")
+        })?;
 
-        std::fs::create_dir_all(tm_dir)
-            .map_err(|e| tm_types::TmError::storage(format!("Failed to create .tm directory: {}", e)))?;
+        std::fs::create_dir_all(tm_dir).map_err(|e| {
+            tm_types::TmError::storage(format!("Failed to create .tm directory: {}", e))
+        })?;
 
         let conn = Connection::open(&db_path)
             .map_err(|e| tm_types::TmError::storage(format!("Failed to open index.db: {}", e)))?;
@@ -257,7 +254,9 @@ impl Store {
 
         let user_version: i64 = conn
             .pragma_query_value(None, "user_version", |row| row.get(0))
-            .map_err(|e| tm_types::TmError::storage(format!("Failed to read user_version: {}", e)))?;
+            .map_err(|e| {
+                tm_types::TmError::storage(format!("Failed to read user_version: {}", e))
+            })?;
 
         if user_version == 0 {
             let schema = r#"
@@ -355,15 +354,14 @@ CREATE TABLE IF NOT EXISTS doc_meta (
 );
             "#;
 
-            conn.execute_batch(schema)
-                .map_err(|e| tm_types::TmError::storage(format!("Failed to create schema: {}", e)))?;
+            conn.execute_batch(schema).map_err(|e| {
+                tm_types::TmError::storage(format!("Failed to create schema: {}", e))
+            })?;
 
-            conn.pragma_update(
-                None,
-                "user_version",
-                SCHEMA_VERSION.to_string(),
-            )
-            .map_err(|e| tm_types::TmError::storage(format!("Failed to set user_version: {}", e)))?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION.to_string())
+                .map_err(|e| {
+                    tm_types::TmError::storage(format!("Failed to set user_version: {}", e))
+                })?;
         } else if user_version != SCHEMA_VERSION {
             return Err(tm_types::TmError::invariant(format!(
                 "index.db schema version {} is newer than this build supports (current: {})",
@@ -385,8 +383,9 @@ CREATE TABLE IF NOT EXISTS doc_meta (
     /// while a writer transaction is in flight; WAL guarantees each sees a consistent
     /// snapshot.
     pub fn reader(&self) -> Result<Connection> {
-        let conn = Connection::open(&self.db_path)
-            .map_err(|e| tm_types::TmError::storage(format!("Failed to open reader connection: {}", e)))?;
+        let conn = Connection::open(&self.db_path).map_err(|e| {
+            tm_types::TmError::storage(format!("Failed to open reader connection: {}", e))
+        })?;
         apply_pragmas(&conn)?;
         Ok(conn)
     }
@@ -401,11 +400,13 @@ CREATE TABLE IF NOT EXISTS doc_meta (
     /// crate is `let conn = store.writer()?; conn.execute_batch("BEGIN IMMEDIATE")?; ... ;
     /// conn.execute_batch("COMMIT")?;` wrapped so a returned `Err` rolls back.
     pub fn writer(&self) -> Result<Connection> {
-        let conn = Connection::open(&self.db_path)
-            .map_err(|e| tm_types::TmError::storage(format!("Failed to open writer connection: {}", e)))?;
+        let conn = Connection::open(&self.db_path).map_err(|e| {
+            tm_types::TmError::storage(format!("Failed to open writer connection: {}", e))
+        })?;
         apply_pragmas(&conn)?;
-        conn.execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| tm_types::TmError::storage(format!("Failed to begin transaction: {}", e)))?;
+        conn.execute_batch("BEGIN IMMEDIATE").map_err(|e| {
+            tm_types::TmError::storage(format!("Failed to begin transaction: {}", e))
+        })?;
         Ok(conn)
     }
 
@@ -432,9 +433,9 @@ CREATE TABLE IF NOT EXISTS doc_meta (
 
         let mut result = Vec::new();
         for row in rows {
-            result.push(
-                row.map_err(|e| tm_types::TmError::storage(format!("Failed to read file row: {}", e)))?,
-            );
+            result.push(row.map_err(|e| {
+                tm_types::TmError::storage(format!("Failed to read file row: {}", e))
+            })?);
         }
         Ok(result)
     }
@@ -458,7 +459,9 @@ CREATE TABLE IF NOT EXISTS doc_meta (
                 })
             })
             .optional()
-            .map_err(|e| tm_types::TmError::storage(format!("Failed to query file by path: {}", e)))?;
+            .map_err(|e| {
+                tm_types::TmError::storage(format!("Failed to query file by path: {}", e))
+            })?;
 
         Ok(result)
     }

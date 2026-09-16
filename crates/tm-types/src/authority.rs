@@ -142,7 +142,9 @@ impl NetworkAuthority {
         if self.docs && Self::DOC_HOSTS.contains(&host) {
             return true;
         }
-        self.allowlist.iter().any(|h| h == host || host.ends_with(&format!(".{h}")))
+        self.allowlist
+            .iter()
+            .any(|h| h == host || host.ends_with(&format!(".{h}")))
     }
 }
 
@@ -228,8 +230,17 @@ impl Authority {
     /// Full authority. Held by the project itself and never leased out wholesale.
     pub fn root() -> Self {
         Authority {
-            repository: RepoAuthority { read: PatternSet::all(), write: PatternSet::all() },
-            git: GitAuthority { commit: true, branch: true, merge: true, push: true, force: true },
+            repository: RepoAuthority {
+                read: PatternSet::all(),
+                write: PatternSet::all(),
+            },
+            git: GitAuthority {
+                commit: true,
+                branch: true,
+                merge: true,
+                push: true,
+                force: true,
+            },
             tickets: TicketAuthority {
                 create_children: true,
                 delegate_children: true,
@@ -246,7 +257,11 @@ impl Authority {
                 reopen_milestone: true,
                 modify_harness: true,
             },
-            network: NetworkAuthority { docs: true, arbitrary: true, allowlist: BTreeSet::new() },
+            network: NetworkAuthority {
+                docs: true,
+                arbitrary: true,
+                allowlist: BTreeSet::new(),
+            },
             shell: ShellAuthority {
                 enabled: true,
                 allow: PatternSet::all(),
@@ -278,7 +293,13 @@ impl Authority {
 
     /// Read-only exploration: read anything, change nothing.
     pub fn read_only() -> Self {
-        Authority { repository: RepoAuthority { read: PatternSet::all(), ..Default::default() }, ..Authority::none() }
+        Authority {
+            repository: RepoAuthority {
+                read: PatternSet::all(),
+                ..Default::default()
+            },
+            ..Authority::none()
+        }
     }
 
     /// True when `other` is entirely contained by `self`.
@@ -307,32 +328,60 @@ impl Authority {
             ("git.merge", self.git.merge, other.git.merge),
             ("git.push", self.git.push, other.git.push),
             ("git.force", self.git.force, other.git.force),
-            ("tickets.create_children", self.tickets.create_children, other.tickets.create_children),
+            (
+                "tickets.create_children",
+                self.tickets.create_children,
+                other.tickets.create_children,
+            ),
             (
                 "tickets.delegate_children",
                 self.tickets.delegate_children,
                 other.tickets.delegate_children,
             ),
-            ("tickets.modify_siblings", self.tickets.modify_siblings, other.tickets.modify_siblings),
+            (
+                "tickets.modify_siblings",
+                self.tickets.modify_siblings,
+                other.tickets.modify_siblings,
+            ),
             ("tickets.close", self.tickets.close, other.tickets.close),
             ("tickets.cancel", self.tickets.cancel, other.tickets.cancel),
             ("tickets.reopen", self.tickets.reopen, other.tickets.reopen),
-            ("project.modify_spec", self.project.modify_spec, other.project.modify_spec),
-            ("project.modify_vision", self.project.modify_vision, other.project.modify_vision),
+            (
+                "project.modify_spec",
+                self.project.modify_spec,
+                other.project.modify_spec,
+            ),
+            (
+                "project.modify_vision",
+                self.project.modify_vision,
+                other.project.modify_vision,
+            ),
             (
                 "project.modify_milestones",
                 self.project.modify_milestones,
                 other.project.modify_milestones,
             ),
-            ("project.close_milestone", self.project.close_milestone, other.project.close_milestone),
+            (
+                "project.close_milestone",
+                self.project.close_milestone,
+                other.project.close_milestone,
+            ),
             (
                 "project.reopen_milestone",
                 self.project.reopen_milestone,
                 other.project.reopen_milestone,
             ),
-            ("project.modify_harness", self.project.modify_harness, other.project.modify_harness),
+            (
+                "project.modify_harness",
+                self.project.modify_harness,
+                other.project.modify_harness,
+            ),
             ("network.docs", self.network.docs, other.network.docs),
-            ("network.arbitrary", self.network.arbitrary, other.network.arbitrary),
+            (
+                "network.arbitrary",
+                self.network.arbitrary,
+                other.network.arbitrary,
+            ),
             ("shell.enabled", self.shell.enabled, other.shell.enabled),
         ] {
             if !bool_ok(p, c) {
@@ -344,7 +393,9 @@ impl Authority {
                 let covered = self.network.allowlist.contains(host)
                     || (self.network.docs && NetworkAuthority::DOC_HOSTS.contains(&host.as_str()));
                 if !covered {
-                    out.push(format!("network host {host} is not permitted by the grantor"));
+                    out.push(format!(
+                        "network host {host} is not permitted by the grantor"
+                    ));
                 }
             }
         }
@@ -391,7 +442,8 @@ impl Authority {
             },
             tickets: TicketAuthority {
                 create_children: self.tickets.create_children && other.tickets.create_children,
-                delegate_children: self.tickets.delegate_children && other.tickets.delegate_children,
+                delegate_children: self.tickets.delegate_children
+                    && other.tickets.delegate_children,
                 modify_siblings: self.tickets.modify_siblings && other.tickets.modify_siblings,
                 close: self.tickets.close && other.tickets.close,
                 cancel: self.tickets.cancel && other.tickets.cancel,
@@ -400,7 +452,8 @@ impl Authority {
             project: ProjectAuthority {
                 modify_spec: self.project.modify_spec && other.project.modify_spec,
                 modify_vision: self.project.modify_vision && other.project.modify_vision,
-                modify_milestones: self.project.modify_milestones && other.project.modify_milestones,
+                modify_milestones: self.project.modify_milestones
+                    && other.project.modify_milestones,
                 close_milestone: self.project.close_milestone && other.project.close_milestone,
                 reopen_milestone: self.project.reopen_milestone && other.project.reopen_milestone,
                 modify_harness: self.project.modify_harness && other.project.modify_harness,
@@ -473,7 +526,10 @@ impl Authority {
                 if self.shell.permits(command) {
                     Decision::Allow
                 } else {
-                    deny(format!("no shell authority for `{}`", ShellAuthority::command_line(command)))
+                    deny(format!(
+                        "no shell authority for `{}`",
+                        ShellAuthority::command_line(command)
+                    ))
                 }
             }
             Action::Git { op } => {
@@ -556,19 +612,28 @@ mod tests {
                 read: PatternSet::all(),
                 write: PatternSet::parse(["src/auth/**", "tests/auth/**"]).unwrap(),
             },
-            git: GitAuthority { commit: true, ..Default::default() },
+            git: GitAuthority {
+                commit: true,
+                ..Default::default()
+            },
             tickets: TicketAuthority {
                 create_children: true,
                 delegate_children: true,
                 ..Default::default()
             },
-            network: NetworkAuthority { docs: true, ..Default::default() },
+            network: NetworkAuthority {
+                docs: true,
+                ..Default::default()
+            },
             shell: ShellAuthority {
                 enabled: true,
                 allow: PatternSet::parse(["cargo*", "git*"]).unwrap(),
                 deny: PatternSet::parse(["*rm -rf*"]).unwrap(),
             },
-            resources: ResourceAuthority { max_workers: 4, max_concurrent_commands: 2 },
+            resources: ResourceAuthority {
+                max_workers: 4,
+                max_concurrent_commands: 2,
+            },
             budget: Budget::new(180_000, 3_000_000, 3_600),
             ..Authority::none()
         }
@@ -587,7 +652,10 @@ mod tests {
     fn a_child_cannot_widen_the_repository_scope() {
         let parent = scoped();
         let greedy = Authority {
-            repository: RepoAuthority { read: PatternSet::all(), write: PatternSet::all() },
+            repository: RepoAuthority {
+                read: PatternSet::all(),
+                write: PatternSet::all(),
+            },
             ..Authority::none()
         };
         let err = parent.attenuate(&greedy).unwrap_err();
@@ -607,7 +675,11 @@ mod tests {
     fn a_child_cannot_manufacture_a_boolean_power() {
         let parent = scoped();
         let greedy = Authority {
-            git: GitAuthority { commit: true, push: true, ..Default::default() },
+            git: GitAuthority {
+                commit: true,
+                push: true,
+                ..Default::default()
+            },
             ..Authority::none()
         };
         let err = parent.attenuate(&greedy).unwrap_err();
@@ -628,7 +700,12 @@ mod tests {
         // A request that simply omits the denial inherits it rather than being refused.
         let granted = parent.attenuate(&silent).unwrap();
         assert!(granted.shell.deny.matches_text("cargo run -- rm -rf /"));
-        assert!(!granted.shell.permits(&["cargo".into(), "run".into(), "--".into(), "rm -rf /".into()]));
+        assert!(!granted.shell.permits(&[
+            "cargo".into(),
+            "run".into(),
+            "--".into(),
+            "rm -rf /".into()
+        ]));
 
         // And containment on its own still treats a dropped denial as an escalation.
         assert!(!parent.contains(&silent));
@@ -642,8 +719,14 @@ mod tests {
     fn the_default_authority_grants_nothing() {
         let a = Authority::default();
         assert_eq!(a, Authority::none());
-        assert!(!a.permits(&Action::ReadPath { path: "any".into() }).is_allowed());
-        assert!(!a.permits(&Action::Spend { amount: Spend::tokens(1) }).is_allowed());
+        assert!(!a
+            .permits(&Action::ReadPath { path: "any".into() })
+            .is_allowed());
+        assert!(!a
+            .permits(&Action::Spend {
+                amount: Spend::tokens(1)
+            })
+            .is_allowed());
         assert!(!a.permits(&Action::SpawnWorker { live: 1 }).is_allowed());
         assert!(Authority::root().contains(&a));
     }
@@ -662,7 +745,10 @@ mod tests {
                 allow: PatternSet::parse(["cargo*"]).unwrap(),
                 deny: PatternSet::parse(["*rm -rf*"]).unwrap(),
             },
-            resources: ResourceAuthority { max_workers: 1, max_concurrent_commands: 1 },
+            resources: ResourceAuthority {
+                max_workers: 1,
+                max_concurrent_commands: 1,
+            },
             budget: Budget::new(1_000, 1_000, 60),
             ..Authority::none()
         };
@@ -674,28 +760,58 @@ mod tests {
     fn budget_delegation_respects_what_is_left() {
         let mut parent = scoped();
         parent.budget.try_spend(Spend::tokens(179_000)).unwrap();
-        let child = Authority { budget: Budget::new(2_000, 0, 0), ..Authority::none() };
+        let child = Authority {
+            budget: Budget::new(2_000, 0, 0),
+            ..Authority::none()
+        };
         assert!(parent.attenuate(&child).is_err());
-        let smaller = Authority { budget: Budget::new(1_000, 0, 0), ..Authority::none() };
+        let smaller = Authority {
+            budget: Budget::new(1_000, 0, 0),
+            ..Authority::none()
+        };
         assert!(parent.attenuate(&smaller).is_ok());
     }
 
     #[test]
     fn permits_gates_each_action_kind() {
         let a = scoped();
-        assert!(a.permits(&Action::ReadPath { path: "docs/x.md".into() }).is_allowed());
-        assert!(a.permits(&Action::WritePath { path: "src/auth/mod.rs".into() }).is_allowed());
-        assert!(!a.permits(&Action::WritePath { path: "src/parser/mod.rs".into() }).is_allowed());
         assert!(a
-            .permits(&Action::RunCommand { command: vec!["cargo".into(), "test".into()] })
+            .permits(&Action::ReadPath {
+                path: "docs/x.md".into()
+            })
+            .is_allowed());
+        assert!(a
+            .permits(&Action::WritePath {
+                path: "src/auth/mod.rs".into()
+            })
             .is_allowed());
         assert!(!a
-            .permits(&Action::RunCommand { command: vec!["curl".into(), "evil".into()] })
+            .permits(&Action::WritePath {
+                path: "src/parser/mod.rs".into()
+            })
+            .is_allowed());
+        assert!(a
+            .permits(&Action::RunCommand {
+                command: vec!["cargo".into(), "test".into()]
+            })
+            .is_allowed());
+        assert!(!a
+            .permits(&Action::RunCommand {
+                command: vec!["curl".into(), "evil".into()]
+            })
             .is_allowed());
         assert!(a.permits(&Action::Git { op: GitOp::Commit }).is_allowed());
         assert!(!a.permits(&Action::Git { op: GitOp::Merge }).is_allowed());
-        assert!(a.permits(&Action::Ticket { op: TicketOp::CreateChild }).is_allowed());
-        assert!(!a.permits(&Action::Project { op: ProjectOp::ModifySpec }).is_allowed());
+        assert!(a
+            .permits(&Action::Ticket {
+                op: TicketOp::CreateChild
+            })
+            .is_allowed());
+        assert!(!a
+            .permits(&Action::Project {
+                op: ProjectOp::ModifySpec
+            })
+            .is_allowed());
         assert!(a.permits(&Action::SpawnWorker { live: 4 }).is_allowed());
         assert!(!a.permits(&Action::SpawnWorker { live: 5 }).is_allowed());
     }
@@ -710,20 +826,44 @@ mod tests {
     #[test]
     fn network_reach_is_host_scoped() {
         let a = scoped();
-        assert!(a.permits(&Action::NetFetch { url: "https://docs.rs/serde".into() }).is_allowed());
-        assert!(!a.permits(&Action::NetFetch { url: "https://evil.example/x".into() }).is_allowed());
+        assert!(a
+            .permits(&Action::NetFetch {
+                url: "https://docs.rs/serde".into()
+            })
+            .is_allowed());
+        assert!(!a
+            .permits(&Action::NetFetch {
+                url: "https://evil.example/x".into()
+            })
+            .is_allowed());
 
         let mut b = Authority::none();
         b.network.allowlist.insert("example.com".into());
-        assert!(b.permits(&Action::NetFetch { url: "https://api.example.com/v1".into() }).is_allowed());
-        assert!(!b.permits(&Action::NetFetch { url: "https://notexample.com/v1".into() }).is_allowed());
+        assert!(b
+            .permits(&Action::NetFetch {
+                url: "https://api.example.com/v1".into()
+            })
+            .is_allowed());
+        assert!(!b
+            .permits(&Action::NetFetch {
+                url: "https://notexample.com/v1".into()
+            })
+            .is_allowed());
     }
 
     #[test]
     fn spending_beyond_the_ceiling_is_denied() {
         let a = scoped();
-        assert!(a.permits(&Action::Spend { amount: Spend::tokens(1_000) }).is_allowed());
-        assert!(!a.permits(&Action::Spend { amount: Spend::tokens(1_000_000) }).is_allowed());
+        assert!(a
+            .permits(&Action::Spend {
+                amount: Spend::tokens(1_000)
+            })
+            .is_allowed());
+        assert!(!a
+            .permits(&Action::Spend {
+                amount: Spend::tokens(1_000_000)
+            })
+            .is_allowed());
     }
 
     #[test]
@@ -734,13 +874,20 @@ mod tests {
                 read: PatternSet::parse(["src/**"]).unwrap(),
                 write: PatternSet::parse(["src/auth/**", "src/parser/**"]).unwrap(),
             },
-            git: GitAuthority { commit: true, merge: true, ..Default::default() },
+            git: GitAuthority {
+                commit: true,
+                merge: true,
+                ..Default::default()
+            },
             shell: ShellAuthority {
                 enabled: true,
                 allow: PatternSet::parse(["cargo*"]).unwrap(),
                 deny: PatternSet::parse(["*sudo*"]).unwrap(),
             },
-            resources: ResourceAuthority { max_workers: 8, max_concurrent_commands: 1 },
+            resources: ResourceAuthority {
+                max_workers: 8,
+                max_concurrent_commands: 1,
+            },
             budget: Budget::new(50_000, 1_000_000, 600),
             ..Authority::none()
         };
@@ -757,7 +904,11 @@ mod tests {
         let parent = scoped();
         let greedy = Authority::root();
         let granted = parent.attenuate_lossy(&greedy);
-        assert!(parent.contains(&granted), "{:?}", parent.containment_failures(&granted));
+        assert!(
+            parent.contains(&granted),
+            "{:?}",
+            parent.containment_failures(&granted)
+        );
     }
 
     #[test]

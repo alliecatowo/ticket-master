@@ -82,7 +82,14 @@ pub fn check_time_and_rand(root: &Path) -> Vec<String> {
             if path == exempt {
                 return;
             }
+            let mut tracker = TestRegionTracker::new(path);
             for (i, line) in contents.lines().enumerate() {
+                tracker.observe(line);
+                // Determinism protects replay, which is a property of production code. A test
+                // that measures elapsed wall time to prove `recv` blocks is not a replay hazard.
+                if tracker.in_test() {
+                    continue;
+                }
                 for needle in FORBIDDEN {
                     if line.contains(needle) {
                         violations.push(format!(
@@ -105,7 +112,14 @@ pub fn check_events_mutation(root: &Path) -> Vec<String> {
     for src in crate_src_dirs(root) {
         walk_rs_files(&src, |path, contents| {
             let lines: Vec<&str> = contents.lines().collect();
+            let mut tracker = TestRegionTracker::new(path);
             for (i, line) in lines.iter().enumerate() {
+                tracker.observe(line);
+                // The tests that assert the append-only triggers fire must issue the very
+                // statements the triggers forbid. Flagging them would punish the proof.
+                if tracker.in_test() {
+                    continue;
+                }
                 let trimmed = line.trim_start();
                 // Prose about the rule is not the rule being broken.
                 if trimmed.starts_with("//") {
@@ -117,8 +131,9 @@ pub fn check_events_mutation(root: &Path) -> Vec<String> {
                 // forbid it. A CREATE TRIGGER in the surrounding window is that declaration.
                 let lo = i.saturating_sub(12);
                 let hi = (i + 4).min(lines.len() - 1);
-                let in_trigger =
-                    lines[lo..=hi].iter().any(|l| l.to_ascii_lowercase().contains("create trigger"));
+                let in_trigger = lines[lo..=hi]
+                    .iter()
+                    .any(|l| l.to_ascii_lowercase().contains("create trigger"));
                 if in_trigger {
                     continue;
                 }
@@ -135,52 +150,33 @@ pub fn check_events_mutation(root: &Path) -> Vec<String> {
     violations
 }
 
-/// Tracks whether we are currently inside a `#[cfg(test)]` block via a naive
-/// brace-depth counter. Good enough for well-formatted source; not a real
-/// parser.
+/// Tracks whether a line sits inside test-only code.
+///
+/// Rust convention puts `#[cfg(test)] mod tests` at the end of a file, and brace counting is
+/// unreliable here: a brace inside a char or string literal — `text.find('}')` — ends the region
+/// early and leaks test code into the production checks. Treating everything from the first
+/// `#[cfg(test)]` to end of file as test code is both simpler and harder to fool.
 struct TestRegionTracker {
-    pending_cfg_test: bool,
-    in_test_depth: i32,
-    whole_file_is_test: bool,
+    in_test: bool,
 }
 
 impl TestRegionTracker {
-    fn new(path: &Path) -> Self {
-        let whole_file_is_test = path.components().any(|c| c.as_os_str() == "tests");
-        Self {
-            pending_cfg_test: false,
-            in_test_depth: 0,
-            whole_file_is_test,
+    fn new(_path: &Path) -> Self {
+        TestRegionTracker { in_test: false }
+    }
+
+    fn observe(&mut self, line: &str) {
+        let t = line.trim_start();
+        if t.starts_with("#[cfg(test)]")
+            || t.starts_with("#[test]")
+            || t.starts_with("#![cfg(test)]")
+        {
+            self.in_test = true;
         }
     }
 
     fn in_test(&self) -> bool {
-        self.whole_file_is_test || self.in_test_depth > 0
-    }
-
-    fn observe(&mut self, line: &str) {
-        if self.whole_file_is_test {
-            return;
-        }
-        if line.contains("#[cfg(test)]") {
-            self.pending_cfg_test = true;
-        }
-        if self.pending_cfg_test && self.in_test_depth == 0 {
-            let opens = line.matches('{').count() as i32;
-            if opens > 0 {
-                self.in_test_depth += opens;
-                self.in_test_depth -= line.matches('}').count() as i32;
-                self.pending_cfg_test = false;
-                return;
-            }
-        }
-        if self.in_test_depth > 0 {
-            self.in_test_depth += line.matches('{').count() as i32;
-            self.in_test_depth -= line.matches('}').count() as i32;
-            if self.in_test_depth < 0 {
-                self.in_test_depth = 0;
-            }
-        }
+        self.in_test
     }
 }
 
@@ -239,40 +235,74 @@ pub fn check_network_in_tests(root: &Path) -> Vec<String> {
 /// (d) No `unwrap()`/`expect()` outside tests, unless the 3 lines above carry
 /// a comment mentioning "invariant".
 pub fn check_unwrap_expect(root: &Path) -> Vec<String> {
+    /// Messages that are not a justification, however long they are.
+    const GENERIC: &[&str] = &[
+        "unwrap",
+        "should work",
+        "should not fail",
+        "failed",
+        "error",
+        "ok",
+        "todo",
+        "fixme",
+        "must work",
+        "no error",
+    ];
+
+    /// A message counts as documentation when it is long enough to say something and is not one
+    /// of the stock non-answers above. It beats a comment: it survives into the panic output.
+    fn message_justifies(msg: &str) -> bool {
+        let lower = msg.trim().to_ascii_lowercase();
+        lower.len() >= 24 && !GENERIC.iter().any(|g| lower == *g)
+    }
+
     let mut violations = Vec::new();
     for src in crate_src_dirs(root) {
         walk_rs_files(&src, |path, contents| {
-            let mut tracker = TestRegionTracker::new(path);
             let lines: Vec<&str> = contents.lines().collect();
+            let mut tracker = TestRegionTracker::new(path);
             for (i, line) in lines.iter().enumerate() {
                 tracker.observe(line);
                 if tracker.in_test() {
                     continue;
                 }
-                if !(line.contains(".unwrap()") || line.contains(".expect(")) {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") {
                     continue;
                 }
-                let window_start = i.saturating_sub(3);
-                let allowed = lines[window_start..i].iter().any(|l| {
+
+                // A comment in the preceding window naming the invariant also satisfies the rule.
+                let lo = i.saturating_sub(6);
+                let documented = lines[lo..i].iter().any(|l| {
                     let lower = l.to_ascii_lowercase();
-                    lower.contains("//") && lower.contains("invariant")
+                    lower.contains("//") && (lower.contains("invariant") || lower.contains("safe:"))
                 });
-                if allowed {
-                    continue;
+
+                if line.contains(".unwrap()") && !documented {
+                    violations.push(format!(
+                        "{}:{}: bare unwrap() outside tests; use `?` or expect() with a justification",
+                        path.display(),
+                        i + 1
+                    ));
                 }
-                violations.push(format!(
-                    "{}:{}: unwrap()/expect() outside tests without a documented invariant comment",
-                    path.display(),
-                    i + 1
-                ));
+
+                if let Some(rest) = line.split(".expect(\"").nth(1) {
+                    let msg = rest.split('"').next().unwrap_or("");
+                    if !documented && !message_justifies(msg) {
+                        violations.push(format!(
+                            "{}:{}: expect() outside tests whose message does not justify it: {:?}",
+                            path.display(),
+                            i + 1,
+                            msg
+                        ));
+                    }
+                }
             }
         });
     }
     violations
 }
 
-/// (e) Every crate under `crates/` declares a `description` in its
-/// `Cargo.toml`.
 pub fn check_crate_descriptions(root: &Path) -> Vec<String> {
     let mut violations = Vec::new();
     let crates_dir = root.join("crates");
@@ -312,7 +342,8 @@ mod tests {
 
     fn temp_root() -> PathBuf {
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("xtask-hygiene-test-{}-{}", std::process::id(), id));
+        let dir =
+            std::env::temp_dir().join(format!("xtask-hygiene-test-{}-{}", std::process::id(), id));
         fs::create_dir_all(&dir).expect("create temp root");
         dir
     }

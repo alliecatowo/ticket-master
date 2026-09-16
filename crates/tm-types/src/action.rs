@@ -208,10 +208,16 @@ impl Oversight {
     /// The default steady-state policy: irreversible or outward-facing actions ask first.
     pub fn conservative() -> Self {
         Oversight {
-            approval_required: ["git.merge", "git.push", "git.force_push", "project", "tickets.reopen"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
+            approval_required: [
+                "git.merge",
+                "git.push",
+                "git.force_push",
+                "project",
+                "tickets.reopen",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
             spend_over_micros: Some(10_000_000),
         }
     }
@@ -225,7 +231,11 @@ impl Oversight {
             return base;
         }
         let class = action.class();
-        if self.approval_required.iter().any(|c| class == *c || class.starts_with(&format!("{c}."))) {
+        if self
+            .approval_required
+            .iter()
+            .any(|c| class == *c || class.starts_with(&format!("{c}.")))
+        {
             return Decision::NeedsApproval(class);
         }
         if let (Action::Spend { amount }, Some(limit)) = (action, self.spend_over_micros) {
@@ -243,20 +253,49 @@ mod tests {
 
     #[test]
     fn classes_are_stable_dotted_names() {
-        assert_eq!(Action::ReadPath { path: "a".into() }.class(), "repository.read");
-        assert_eq!(Action::Git { op: GitOp::ForcePush }.class(), "git.force_push");
-        assert_eq!(Action::Ticket { op: TicketOp::CreateChild }.class(), "tickets.create_children");
-        assert_eq!(Action::Project { op: ProjectOp::CloseMilestone }.class(), "project.close_milestone");
+        assert_eq!(
+            Action::ReadPath { path: "a".into() }.class(),
+            "repository.read"
+        );
+        assert_eq!(
+            Action::Git {
+                op: GitOp::ForcePush
+            }
+            .class(),
+            "git.force_push"
+        );
+        assert_eq!(
+            Action::Ticket {
+                op: TicketOp::CreateChild
+            }
+            .class(),
+            "tickets.create_children"
+        );
+        assert_eq!(
+            Action::Project {
+                op: ProjectOp::CloseMilestone
+            }
+            .class(),
+            "project.close_milestone"
+        );
     }
 
     #[test]
     fn oversight_escalates_by_prefix() {
         let o = Oversight::conservative();
         assert_eq!(
-            o.review(&Action::Project { op: ProjectOp::ModifySpec }, Decision::Allow),
+            o.review(
+                &Action::Project {
+                    op: ProjectOp::ModifySpec
+                },
+                Decision::Allow
+            ),
             Decision::NeedsApproval("project.modify_spec".into())
         );
-        assert_eq!(o.review(&Action::Git { op: GitOp::Commit }, Decision::Allow), Decision::Allow);
+        assert_eq!(
+            o.review(&Action::Git { op: GitOp::Commit }, Decision::Allow),
+            Decision::Allow
+        );
         assert!(matches!(
             o.review(&Action::Git { op: GitOp::Push }, Decision::Allow),
             Decision::NeedsApproval(_)
@@ -267,21 +306,39 @@ mod tests {
     fn oversight_never_softens_a_denial() {
         let o = Oversight::conservative();
         let denied = Decision::Deny("no write authority".into());
-        assert_eq!(o.review(&Action::Git { op: GitOp::Push }, denied.clone()), denied);
+        assert_eq!(
+            o.review(&Action::Git { op: GitOp::Push }, denied.clone()),
+            denied
+        );
     }
 
     #[test]
     fn large_spends_ask_first() {
         let o = Oversight::conservative();
-        let small = Action::Spend { amount: Spend::dollars_micros(1_000_000) };
-        let large = Action::Spend { amount: Spend::dollars_micros(11_000_000) };
+        let small = Action::Spend {
+            amount: Spend::dollars_micros(1_000_000),
+        };
+        let large = Action::Spend {
+            amount: Spend::dollars_micros(11_000_000),
+        };
         assert_eq!(o.review(&small, Decision::Allow), Decision::Allow);
-        assert!(matches!(o.review(&large, Decision::Allow), Decision::NeedsApproval(_)));
+        assert!(matches!(
+            o.review(&large, Decision::Allow),
+            Decision::NeedsApproval(_)
+        ));
     }
 
     #[test]
     fn autonomous_policy_asks_nothing() {
         let o = Oversight::autonomous();
-        assert_eq!(o.review(&Action::Git { op: GitOp::ForcePush }, Decision::Allow), Decision::Allow);
+        assert_eq!(
+            o.review(
+                &Action::Git {
+                    op: GitOp::ForcePush
+                },
+                Decision::Allow
+            ),
+            Decision::Allow
+        );
     }
 }

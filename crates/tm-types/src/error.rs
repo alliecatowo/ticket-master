@@ -61,7 +61,10 @@ pub enum TmError {
 impl TmError {
     /// Build a [`TmError::NotFound`].
     pub fn not_found(kind: &'static str, id: impl fmt::Display) -> Self {
-        TmError::NotFound { kind, id: id.to_string() }
+        TmError::NotFound {
+            kind,
+            id: id.to_string(),
+        }
     }
 
     /// Build a [`TmError::Conflict`].
@@ -121,6 +124,9 @@ mod tests {
 
     #[test]
     fn not_found_renders_kind_and_id() {
-        assert_eq!(TmError::not_found("ticket", "T-1").to_string(), "not found: ticket T-1");
+        assert_eq!(
+            TmError::not_found("ticket", "T-1").to_string(),
+            "not found: ticket T-1"
+        );
     }
 }

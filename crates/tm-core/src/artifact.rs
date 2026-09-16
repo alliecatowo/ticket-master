@@ -1,36 +1,30 @@
-//! Artifacts and evidence: content-addressed storage plus the records that link a ticket to
-//! proof of something about it.
+//! Artifacts and evidence: content-addressed storage (`SPEC.md` §4.6).
 //!
-//! Artifacts up to 64 KiB live inline in SQLite; larger ones spill to
-//! `.tm/artifacts/<hash>` (`SPEC.md` §4.6). Hashing is `blake3`, giving natural deduplication:
-//! storing the same bytes twice yields the same `ArtifactId`-independent content hash (the
-//! `ArtifactId` itself is still a fresh random id per store call — see `IMPL` note on
-//! `store.rs::store_artifact` — but `hash` lets callers detect identical content cheaply). This
-//! module owns the pure classification/threshold logic; `store.rs` owns the actual filesystem
-//! and SQLite I/O, since content-addressed spill-to-disk is I/O by definition.
+//! Artifacts are addressed by their blake3 hash. Small ones (<= 64 KiB) live inline in SQLite;
+//! larger ones spill to `.tm/artifacts/<hash>` on disk. This module owns the pure
+//! hashing/threshold/path logic; `Store` owns the actual filesystem and SQLite I/O.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::Value as Json;
 use tm_types::{ArtifactId, ParticipantId, TicketId, Timestamp};
 
-/// Bytes at or below this size are stored inline in the `artifacts.inline` column; larger bytes
-/// spill to `.tm/artifacts/<hash>` on disk. `SPEC.md` §4.6.
+/// Bytes at or below this size are stored inline in SQLite rather than spilled to disk.
 pub const INLINE_LIMIT_BYTES: usize = 64 * 1024;
 
-/// What kind of thing an artifact's bytes represent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What kind of thing an artifact captures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtifactKind {
-    /// Captured stdout/stderr of a command.
+    /// Captured stdout/stderr of a run command.
     CommandOutput,
     /// A unified diff / patch.
     Patch,
     /// An arbitrary file snapshot.
     File,
-    /// A structured or prose report.
+    /// A generated report (verification, audit, benchmark writeup).
     Report,
-    /// A generated index (e.g. code intelligence output).
+    /// A code/search index snapshot.
     Index,
     /// Benchmark results.
     Benchmark,
@@ -39,276 +33,315 @@ pub enum ArtifactKind {
 }
 
 /// Where an artifact's bytes actually live.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArtifactStorage {
-    /// Stored directly in the `artifacts.inline` column.
+    /// Bytes stored directly in the `artifacts` table.
     Inline(Vec<u8>),
-    /// Spilled to disk at this path (relative to the project root's `.tm/artifacts/` directory).
+    /// Bytes spilled to `.tm/artifacts/<hash>`, relative to the project root.
     OnDisk(PathBuf),
 }
 
-/// A content-addressed piece of evidence or output. See `SPEC.md` §4.6.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// A content-addressed artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artifact {
-    /// Stable identifier.
+    /// Identity.
     pub id: ArtifactId,
-    /// What kind of content this is.
+    /// What kind of artifact this is.
     pub kind: ArtifactKind,
-    /// IANA media type of the content, e.g. `text/plain`, `application/json`.
+    /// MIME-ish media type, e.g. `text/plain`, `application/json`.
     pub media_type: String,
-    /// Length of the content in bytes.
+    /// Length of the artifact's bytes, regardless of storage location.
     pub bytes_len: u64,
-    /// `blake3` hash of the content, hex-encoded lowercase.
+    /// The blake3 hash of the artifact's bytes, hex-encoded.
     pub hash: String,
-    /// Where the bytes actually live.
+    /// Where the bytes live.
     pub storage: ArtifactStorage,
-    /// Arbitrary structured metadata (e.g. exit code, command line).
-    pub meta: Value,
+    /// Free-form metadata (e.g. the command that produced a `CommandOutput`).
+    pub meta: Json,
 }
 
-/// A record linking a ticket to an artifact that proves something about it. Verifiers read
-/// evidence; workers produce it.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Evidence {
-    /// The ticket this evidence is about.
-    pub ticket: TicketId,
-    /// What kind of evidence this is.
-    pub kind: EvidenceKind,
-    /// The artifact carrying the actual content.
-    pub artifact: ArtifactId,
-    /// Who produced this evidence. Enforced elsewhere (`invariants.rs`) to differ from any
-    /// auditor certifying the same ticket, per the "a worker never certifies itself" rule.
-    pub produced_by: ParticipantId,
-    /// When this evidence was produced.
-    pub ts: Timestamp,
-    /// Short human-readable summary of what this evidence shows.
-    pub summary: String,
-}
-
-/// What kind of proof a piece of [`Evidence`] constitutes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What an [`Evidence`] record demonstrates about a ticket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EvidenceKind {
-    /// Output of an automated test run.
+    /// A test suite run.
     TestRun,
-    /// A diff showing the change made.
+    /// A diff review.
     Diff,
-    /// Captured command output.
+    /// Raw command output.
     CommandOutput,
-    /// A reviewer's written assessment.
+    /// A human or agent review writeup.
     Review,
-    /// A human's explicit attestation.
+    /// A human's direct attestation ([`tm_types::Predicate::HumanAttested`]).
     HumanAttestation,
 }
 
-/// `blake3` hash of `bytes`, hex-encoded lowercase — the canonical content address used for
-/// `Artifact::hash` and the on-disk spill filename.
-pub fn content_hash(bytes: &[u8]) -> String {
+/// Links a ticket to the artifact that proves something about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Evidence {
+    /// The ticket this evidence is about.
+    pub ticket: TicketId,
+    /// What it demonstrates.
+    pub kind: EvidenceKind,
+    /// The artifact backing this evidence.
+    pub artifact: ArtifactId,
+    /// Who/what produced it.
+    pub produced_by: ParticipantId,
+    /// When it was recorded.
+    pub ts: Timestamp,
+    /// One-line human-readable summary.
+    pub summary: String,
+}
+
+/// Hash `bytes` with blake3, returning the lowercase hex digest used as [`Artifact::hash`] and
+/// the `ART-<hex12>` id suffix's source material (the full hash, not truncated — `IdSource`
+/// truncates separately when minting an [`ArtifactId`]).
+pub fn hash_bytes(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
-/// Decide where `bytes` of this size should live: [`ArtifactStorage::Inline`] at or under
-/// [`INLINE_LIMIT_BYTES`], otherwise a would-be [`ArtifactStorage::OnDisk`] path under
-/// `artifacts_dir` named by `content_hash(bytes)`. Pure sizing decision; actual disk I/O (writing
-/// the file) is `store.rs::store_artifact`'s job, which is why this returns the *path* rather
-/// than performing the write.
-pub fn classify_storage(bytes: &[u8], artifacts_dir: &std::path::Path) -> ArtifactStorage {
-    if bytes.len() <= INLINE_LIMIT_BYTES {
+/// Decide storage placement for `bytes`: [`ArtifactStorage::Inline`] at or under
+/// [`INLINE_LIMIT_BYTES`], otherwise [`ArtifactStorage::OnDisk`] at
+/// `<project_root>/.tm/artifacts/<hash>`.
+pub fn plan_storage(project_root: &Path, bytes: &[u8]) -> (String, ArtifactStorage) {
+    let hash = hash_bytes(bytes);
+    let storage = if bytes.len() <= INLINE_LIMIT_BYTES {
         ArtifactStorage::Inline(bytes.to_vec())
     } else {
-        ArtifactStorage::OnDisk(artifacts_dir.join(content_hash(bytes)))
-    }
+        ArtifactStorage::OnDisk(project_root.join(".tm").join("artifacts").join(&hash))
+    };
+    (hash, storage)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
-    fn content_hash_empty() {
-        let hash = content_hash(b"");
+    fn test_hash_bytes_consistency() {
+        let bytes1 = b"hello world";
+        let hash1 = hash_bytes(bytes1);
+        let hash2 = hash_bytes(bytes1);
+        assert_eq!(hash1, hash2, "hash_bytes should be deterministic");
+    }
+
+    #[test]
+    fn test_hash_bytes_different_inputs() {
+        let hash1 = hash_bytes(b"hello");
+        let hash2 = hash_bytes(b"world");
+        assert_ne!(
+            hash1, hash2,
+            "different inputs should produce different hashes"
+        );
+    }
+
+    #[test]
+    fn test_hash_bytes_empty() {
+        let hash = hash_bytes(b"");
+        assert!(!hash.is_empty(), "hash of empty bytes should not be empty");
+        // blake3 hash of empty is well-known: af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262
+        assert_eq!(
+            hash,
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        );
+    }
+
+    #[test]
+    fn test_plan_storage_small_bytes_inline() {
+        let project_root = Path::new("/test/project");
+        let bytes = b"small content";
+        assert!(bytes.len() <= INLINE_LIMIT_BYTES);
+
+        let (hash, storage) = plan_storage(project_root, bytes);
+
+        assert!(!hash.is_empty(), "hash should not be empty");
+        match storage {
+            ArtifactStorage::Inline(content) => {
+                assert_eq!(content, bytes, "inline storage should contain exact bytes");
+            }
+            ArtifactStorage::OnDisk(_) => panic!("small bytes should be stored inline"),
+        }
+    }
+
+    #[test]
+    fn test_plan_storage_empty_bytes_inline() {
+        let project_root = Path::new("/test/project");
+        let bytes = b"";
+
+        let (hash, storage) = plan_storage(project_root, bytes);
+
+        assert_eq!(
+            hash,
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        );
+        match storage {
+            ArtifactStorage::Inline(content) => {
+                assert!(
+                    content.is_empty(),
+                    "inline storage of empty bytes should be empty"
+                );
+            }
+            ArtifactStorage::OnDisk(_) => panic!("empty bytes should be stored inline"),
+        }
+    }
+
+    #[test]
+    fn test_plan_storage_at_inline_limit() {
+        let project_root = Path::new("/test/project");
+        let bytes = vec![0u8; INLINE_LIMIT_BYTES];
+
+        let (hash, storage) = plan_storage(project_root, &bytes);
+
         assert!(!hash.is_empty());
-        assert_eq!(hash.len(), 64); // blake3 hex digest is 64 chars
-        assert_eq!(hash, hash.to_lowercase()); // lowercase as documented
-    }
-
-    #[test]
-    fn content_hash_deterministic() {
-        let data = b"hello world";
-        let hash1 = content_hash(data);
-        let hash2 = content_hash(data);
-        assert_eq!(hash1, hash2);
-    }
-
-    #[test]
-    fn content_hash_different_inputs() {
-        let hash1 = content_hash(b"hello");
-        let hash2 = content_hash(b"world");
-        assert_ne!(hash1, hash2);
-    }
-
-    #[test]
-    fn classify_storage_small_empty() {
-        let artifacts_dir = Path::new(".tm/artifacts");
-        let result = classify_storage(b"", artifacts_dir);
-        match result {
-            ArtifactStorage::Inline(data) => assert_eq!(data.len(), 0),
-            ArtifactStorage::OnDisk(_) => panic!("empty bytes should be inline"),
-        }
-    }
-
-    #[test]
-    fn classify_storage_small_data() {
-        let artifacts_dir = Path::new(".tm/artifacts");
-        let small_data = b"small";
-        let result = classify_storage(small_data, artifacts_dir);
-        match result {
-            ArtifactStorage::Inline(data) => {
-                assert_eq!(data.len(), small_data.len());
-                assert_eq!(data.as_slice(), small_data);
+        match storage {
+            ArtifactStorage::Inline(content) => {
+                assert_eq!(content.len(), INLINE_LIMIT_BYTES);
             }
-            ArtifactStorage::OnDisk(_) => panic!("small data should be inline"),
-        }
-    }
-
-    #[test]
-    fn classify_storage_at_limit() {
-        let artifacts_dir = Path::new(".tm/artifacts");
-        let at_limit = vec![42u8; INLINE_LIMIT_BYTES];
-        let result = classify_storage(&at_limit, artifacts_dir);
-        match result {
-            ArtifactStorage::Inline(data) => {
-                assert_eq!(data.len(), INLINE_LIMIT_BYTES);
+            ArtifactStorage::OnDisk(_) => {
+                panic!("bytes at INLINE_LIMIT_BYTES should be stored inline")
             }
-            ArtifactStorage::OnDisk(_) => panic!("data at inline limit should be inline"),
         }
     }
 
     #[test]
-    fn classify_storage_just_over_limit() {
-        let artifacts_dir = Path::new(".tm/artifacts");
-        let over_limit = vec![99u8; INLINE_LIMIT_BYTES + 1];
-        let result = classify_storage(&over_limit, artifacts_dir);
-        match result {
-            ArtifactStorage::Inline(_) => panic!("data over limit should be on disk"),
+    fn test_plan_storage_just_over_inline_limit() {
+        let project_root = Path::new("/test/project");
+        let bytes = vec![0u8; INLINE_LIMIT_BYTES + 1];
+
+        let (hash, storage) = plan_storage(project_root, &bytes);
+
+        assert!(!hash.is_empty());
+        match storage {
+            ArtifactStorage::Inline(_) => {
+                panic!("bytes over INLINE_LIMIT_BYTES should be stored on disk")
+            }
             ArtifactStorage::OnDisk(path) => {
-                assert!(path.starts_with(artifacts_dir));
-                let expected_hash = content_hash(&over_limit);
-                assert!(path.ends_with(&expected_hash));
+                assert!(path.to_string_lossy().contains(".tm/artifacts"));
+                assert!(path.to_string_lossy().ends_with(&hash));
             }
         }
     }
 
     #[test]
-    fn classify_storage_large_data() {
-        let artifacts_dir = Path::new(".tm/artifacts");
-        let large_data = vec![7u8; 1024 * 1024]; // 1 MiB
-        let result = classify_storage(&large_data, artifacts_dir);
-        match result {
-            ArtifactStorage::Inline(_) => panic!("large data should be on disk"),
+    fn test_plan_storage_large_bytes_ondisk() {
+        let project_root = Path::new("/test/project");
+        let bytes = vec![0xFFu8; 1024 * 1024]; // 1 MiB
+
+        let (hash, storage) = plan_storage(project_root, &bytes);
+
+        assert!(!hash.is_empty());
+        match storage {
+            ArtifactStorage::Inline(_) => panic!("large bytes should be stored on disk"),
             ArtifactStorage::OnDisk(path) => {
-                assert!(path.starts_with(artifacts_dir));
-                let expected_hash = content_hash(&large_data);
-                assert_eq!(path.file_name().unwrap(), expected_hash);
+                let path_str = path.to_string_lossy();
+                assert!(
+                    path_str.contains(".tm"),
+                    "on-disk path should contain .tm directory"
+                );
+                assert!(
+                    path_str.contains("artifacts"),
+                    "on-disk path should contain artifacts subdirectory"
+                );
+                assert!(
+                    path_str.ends_with(&hash),
+                    "on-disk path should end with hash: {}",
+                    hash
+                );
+                // Verify path structure
+                assert_eq!(path, project_root.join(".tm").join("artifacts").join(&hash));
             }
         }
     }
 
     #[test]
-    fn classify_storage_on_disk_preserves_content_hash() {
-        let artifacts_dir = Path::new("/project/.tm/artifacts");
-        let data = vec![123u8; INLINE_LIMIT_BYTES + 100];
-        let hash = content_hash(&data);
-        let result = classify_storage(&data, artifacts_dir);
-        match result {
+    fn test_plan_storage_different_project_roots() {
+        let bytes = b"test content";
+        let root1 = Path::new("/project/one");
+        let root2 = Path::new("/project/two");
+
+        let (hash1, storage1) = plan_storage(root1, bytes);
+        let (hash2, storage2) = plan_storage(root2, bytes);
+
+        assert_eq!(
+            hash1, hash2,
+            "same bytes should produce same hash regardless of project"
+        );
+        // Both should be inline since bytes are small
+        match (storage1, storage2) {
+            (ArtifactStorage::Inline(c1), ArtifactStorage::Inline(c2)) => {
+                assert_eq!(c1, c2);
+            }
+            _ => panic!("small bytes should always be inline"),
+        }
+    }
+
+    #[test]
+    fn test_plan_storage_path_with_spaces() {
+        let project_root = Path::new("/path with spaces/project");
+        let bytes = vec![0u8; INLINE_LIMIT_BYTES + 100];
+
+        let (_hash, storage) = plan_storage(project_root, bytes.as_ref());
+
+        match storage {
             ArtifactStorage::OnDisk(path) => {
-                let filename = path.file_name().unwrap().to_string_lossy();
-                assert_eq!(filename.as_ref(), hash);
+                assert!(path.starts_with(project_root));
             }
-            ArtifactStorage::Inline(_) => panic!("should be on disk"),
+            _ => panic!("large bytes should be on disk"),
         }
     }
 
     #[test]
-    fn classify_storage_inline_preserves_bytes() {
-        let artifacts_dir = Path::new(".tm/artifacts");
-        let original = b"test data for inline storage";
-        let result = classify_storage(original, artifacts_dir);
-        match result {
-            ArtifactStorage::Inline(data) => {
-                assert_eq!(data.as_slice(), original);
-            }
-            ArtifactStorage::OnDisk(_) => panic!("should be inline"),
+    fn test_artifact_kind_serialization() {
+        let kinds = [
+            ArtifactKind::CommandOutput,
+            ArtifactKind::Patch,
+            ArtifactKind::File,
+            ArtifactKind::Report,
+            ArtifactKind::Index,
+            ArtifactKind::Benchmark,
+            ArtifactKind::Transcript,
+        ];
+
+        for kind in &kinds {
+            let json = serde_json::to_value(kind).expect("should serialize");
+            let deserialized: ArtifactKind =
+                serde_json::from_value(json).expect("should deserialize");
+            assert_eq!(kind, &deserialized);
         }
     }
 
     #[test]
-    fn artifact_kind_serialize() {
-        assert_eq!(
-            serde_json::to_string(&ArtifactKind::CommandOutput).unwrap(),
-            "\"CommandOutput\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ArtifactKind::Patch).unwrap(),
-            "\"Patch\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ArtifactKind::File).unwrap(),
-            "\"File\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ArtifactKind::Report).unwrap(),
-            "\"Report\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ArtifactKind::Index).unwrap(),
-            "\"Index\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ArtifactKind::Benchmark).unwrap(),
-            "\"Benchmark\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ArtifactKind::Transcript).unwrap(),
-            "\"Transcript\""
+    fn test_evidence_kind_serialization() {
+        let kinds = [
+            EvidenceKind::TestRun,
+            EvidenceKind::Diff,
+            EvidenceKind::CommandOutput,
+            EvidenceKind::Review,
+            EvidenceKind::HumanAttestation,
+        ];
+
+        for kind in &kinds {
+            let json = serde_json::to_value(kind).expect("should serialize");
+            let deserialized: EvidenceKind =
+                serde_json::from_value(json).expect("should deserialize");
+            assert_eq!(kind, &deserialized);
+        }
+    }
+
+    #[test]
+    fn test_hash_bytes_hex_format() {
+        let hash = hash_bytes(b"test");
+        // blake3 hashes are 256-bit (32 bytes) = 64 hex characters
+        assert_eq!(hash.len(), 64, "blake3 hash should be 64 hex characters");
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()),
+            "hash should be lowercase hex"
         );
     }
 
     #[test]
-    fn evidence_kind_serialize() {
-        assert_eq!(
-            serde_json::to_string(&EvidenceKind::TestRun).unwrap(),
-            "\"TestRun\""
-        );
-        assert_eq!(
-            serde_json::to_string(&EvidenceKind::Diff).unwrap(),
-            "\"Diff\""
-        );
-        assert_eq!(
-            serde_json::to_string(&EvidenceKind::CommandOutput).unwrap(),
-            "\"CommandOutput\""
-        );
-        assert_eq!(
-            serde_json::to_string(&EvidenceKind::Review).unwrap(),
-            "\"Review\""
-        );
-        assert_eq!(
-            serde_json::to_string(&EvidenceKind::HumanAttestation).unwrap(),
-            "\"HumanAttestation\""
-        );
-    }
-
-    #[test]
-    fn artifact_storage_inline_variant() {
-        let data = vec![1, 2, 3];
-        let storage = ArtifactStorage::Inline(data.clone());
-        assert_eq!(storage, ArtifactStorage::Inline(data));
-    }
-
-    #[test]
-    fn artifact_storage_on_disk_variant() {
-        let path = PathBuf::from(".tm/artifacts/abc123");
-        let storage = ArtifactStorage::OnDisk(path.clone());
-        assert_eq!(storage, ArtifactStorage::OnDisk(path));
+    fn test_inline_limit_bytes_constant() {
+        assert_eq!(INLINE_LIMIT_BYTES, 64 * 1024);
     }
 }

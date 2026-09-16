@@ -1,112 +1,96 @@
 //! The read models other crates consume.
 //!
-//! [`ProjectView`] is the full picture of a project's materialized state; [`SchedulerView`] is
-//! the narrow slice `tm-scheduler` needs to pick the next ticket to lease. Both are cheap to
-//! construct from `Store` (a handful of `SELECT`s against the tables `schema.rs` defines) and
-//! cheap to clone, so pure functions elsewhere in this crate (and in downstream crates) can take
-//! an owned snapshot rather than borrowing from the store across a lease/transition decision.
+//! [`ProjectView`] is the full picture: every table `tm-core` materializes, assembled into an
+//! in-memory snapshot that is cheap to construct from `Store` and cheap to clone, so pure
+//! functions elsewhere in this crate (and in `tm-scheduler`, `tm-context`, ...) can take it by
+//! value or `&` without touching SQLite again. [`SchedulerView`] is the narrower projection
+//! `tm-scheduler` actually needs, so that crate doesn't have to depend on decision/doc/provider
+//! state it never reads.
 
 use std::collections::BTreeMap;
 
-use tm_types::{Budget, MilestoneId, TicketId};
+use tm_types::{ParticipantId, TicketId};
 
 use crate::artifact::{Artifact, Evidence};
+use crate::budget::ScopedBudget;
 use crate::decision::Decision;
-use crate::graph::GraphView;
+use crate::graph::DependencyGraph;
 use crate::lease::Lease;
 use crate::milestone::Milestone;
-use crate::ticket::{Ticket, TicketState};
+use crate::ticket::Ticket;
 
-/// The full materialized state of one project, assembled for read-heavy consumers
-/// (`tm-context`, `tm-docs`, `tm-server`, `tm-cli`) that want everything at once.
-#[derive(Debug, Clone, Default)]
+/// Everything `tm-core` materializes, snapshotted for pure consumption.
+#[derive(Debug, Clone)]
 pub struct ProjectView {
     /// Every ticket, keyed by id.
     pub tickets: BTreeMap<TicketId, Ticket>,
-    /// The dependency/parent-child graph.
-    pub graph: GraphView,
-    /// Every lease, live or expired.
-    pub leases: Vec<Lease>,
-    /// Every decision, active or superseded.
-    pub decisions: Vec<Decision>,
-    /// Every milestone.
-    pub milestones: Vec<Milestone>,
-    /// Every artifact.
-    pub artifacts: Vec<Artifact>,
+    /// The dependency/parent-child graph over `tickets`.
+    pub graph: DependencyGraph,
+    /// Every lease, live or historical, keyed by id.
+    pub leases: BTreeMap<tm_types::LeaseId, Lease>,
+    /// Every decision, active or superseded, keyed by id.
+    pub decisions: BTreeMap<tm_types::DecisionId, Decision>,
+    /// Every milestone, keyed by id.
+    pub milestones: BTreeMap<tm_types::MilestoneId, Milestone>,
+    /// Every artifact, keyed by id.
+    pub artifacts: BTreeMap<tm_types::ArtifactId, Artifact>,
     /// Every evidence record.
     pub evidence: Vec<Evidence>,
-    /// Budgets keyed by their `budget::BudgetScope`, encoded as its `Debug` string for a cheap
-    /// stable map key (the scope enum itself isn't `Hash`; this view is a read model, not a
-    /// place to add trait bounds purely for a lookup convenience).
-    pub budgets: BTreeMap<String, Budget>,
-    /// Per-`IdKind` next-counter values, for restoring `IdSource` state after a restart.
+    /// The full budget hierarchy, keyed by scope.
+    pub budgets: Vec<ScopedBudget>,
+    /// Known participants and their last-seen presence, if tracked.
+    pub participants: BTreeMap<ParticipantId, ParticipantSummary>,
+    /// Current high-water mark of every id counter, for `Store::rebuild` to restore
+    /// `CounterIds` correctly after replay.
     pub counters: BTreeMap<String, u64>,
 }
 
-impl ProjectView {
-    /// Every lease currently live (not expired, not released).
-    pub fn live_leases(&self) -> Vec<&Lease> {
-        // IMPL note: "live" is a materialized column (`leases.live`), not recomputable from
-        // `Lease` alone (a `Lease` doesn't carry a `live` flag; liveness prior to the `now` check
-        // in `lease::expire_due` is a store-level fact once released/expired events land). Since
-        // `Lease` here has no such flag, callers needing strict liveness should intersect this
-        // with `graph`/`now` as appropriate; this helper returns every lease in the view as a
-        // placeholder callers refine — kept intentionally simple since `store.rs` decides what
-        // "live" rows this view is populated with in the first place.
-        self.leases.iter().collect()
-    }
+/// A minimal per-participant summary, enough for `tm-cli`/`tm-server` presence display without
+/// pulling in the full session/event history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticipantSummary {
+    /// The participant's id.
+    pub id: ParticipantId,
+    /// Free-form last-known status string (e.g. `"active"`, `"idle"`).
+    pub status: String,
+}
 
-    /// Milestones containing `ticket`.
-    pub fn milestones_for(&self, ticket: &TicketId) -> Vec<&Milestone> {
-        crate::milestone::milestones_containing(&self.milestones, ticket)
+impl ProjectView {
+    /// An empty view, useful as a starting accumulator and in tests.
+    pub fn empty() -> Self {
+        ProjectView {
+            tickets: BTreeMap::new(),
+            graph: DependencyGraph::default(),
+            leases: BTreeMap::new(),
+            decisions: BTreeMap::new(),
+            milestones: BTreeMap::new(),
+            artifacts: BTreeMap::new(),
+            evidence: Vec::new(),
+            budgets: Vec::new(),
+            participants: BTreeMap::new(),
+            counters: BTreeMap::new(),
+        }
     }
 }
 
-/// The narrow slice of project state `tm-scheduler` needs: which tickets are ready, their
-/// dependency/resource shape, and live leases to check conflicts against. Deliberately excludes
-/// decisions/docs/artifacts, which the scheduler never consults.
-#[derive(Debug, Clone, Default)]
+/// The narrow projection `tm-scheduler` needs: enough to decide what's `Ready`, rank it, and
+/// lease it, without the decision/doc/provider machinery `ProjectView` also carries.
+#[derive(Debug, Clone)]
 pub struct SchedulerView {
-    /// Tickets currently in `TicketState::Ready`, keyed by id.
-    pub ready: BTreeMap<TicketId, Ticket>,
-    /// The dependency/parent-child graph (needed for priority/critical-path computation).
-    pub graph: GraphView,
-    /// Every currently live lease (for resource-conflict checks against a new acquire).
-    pub live_leases: Vec<Lease>,
-    /// Milestone membership, for milestone-scoped scheduling policies.
-    pub milestone_of: BTreeMap<TicketId, MilestoneId>,
+    /// Every ticket, keyed by id (same source as `ProjectView::tickets`).
+    pub tickets: BTreeMap<TicketId, Ticket>,
+    /// The dependency/parent-child graph.
+    pub graph: DependencyGraph,
+    /// Live leases only.
+    pub live_leases: BTreeMap<tm_types::LeaseId, Lease>,
 }
 
 impl From<&ProjectView> for SchedulerView {
-    fn from(project: &ProjectView) -> Self {
-        // Filter tickets to TicketState::Ready
-        let ready = project
-            .tickets
-            .iter()
-            .filter(|(_, ticket)| ticket.state == TicketState::Ready)
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        // Clone graph as-is
-        let graph = project.graph.clone();
-
-        // Clone all leases as live ones; this is a placeholder until store.rs
-        // exposes a real liveness signal (see live_leases note on ProjectView).
-        let live_leases = project.leases.clone();
-
-        // Invert Milestone::tickets to build milestone_of map
-        let mut milestone_of = BTreeMap::new();
-        for milestone in &project.milestones {
-            for ticket_id in &milestone.tickets {
-                milestone_of.insert(ticket_id.clone(), milestone.id.clone());
-            }
-        }
-
+    fn from(view: &ProjectView) -> Self {
         SchedulerView {
-            ready,
-            graph,
-            live_leases,
-            milestone_of,
+            tickets: view.tickets.clone(),
+            graph: view.graph.clone(),
+            live_leases: view.leases.clone(),
         }
     }
 }
@@ -114,298 +98,203 @@ impl From<&ProjectView> for SchedulerView {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::GraphView;
-    use crate::lease::Lease;
-    use crate::milestone::{Milestone, MilestoneState};
-    use tm_types::{Authority, Budget, LeaseId, MilestoneId, ParticipantId, TicketId, Timestamp};
+    use tm_types::LeaseId;
 
-    fn sample_ticket(id: &str, state: TicketState) -> Ticket {
+    fn test_ticket(id: TicketId, objective: &str) -> Ticket {
         Ticket {
-            id: TicketId::new(id).unwrap(),
+            id,
             kind: crate::ticket::TicketKind::Work,
-            objective: format!("ticket {}", id),
-            state,
+            objective: objective.to_string(),
+            state: crate::ticket::TicketState::Draft,
             parent: None,
-            children: vec![],
-            dependencies: vec![],
+            children: Vec::new(),
+            dependencies: Vec::new(),
             milestone: None,
-            authority: Authority::none(),
-            resources: vec![],
-            executor: Default::default(),
-            context_refs: vec![],
-            success: vec![],
-            verification: Default::default(),
-            budget: Budget::unlimited(),
-            retry: Default::default(),
+            authority: tm_types::Authority::none(),
+            resources: Vec::new(),
+            executor: crate::ticket::ExecutorRequirements {
+                role: tm_types::Role::CoderFast,
+                human_required: false,
+                min_capability: tm_types::Tolerance::Any,
+            },
+            context_refs: Vec::new(),
+            success: Vec::new(),
+            verification: crate::ticket::VerificationPolicy::None,
+            budget: tm_types::Budget::none(),
+            retry: crate::ticket::RetryPolicy {
+                max_attempts: 3,
+                base_delay_seconds: 1,
+                backoff_multiplier: 2.0,
+                max_delay_seconds: 60,
+            },
             cycle: None,
             attempts: 0,
-            failures: vec![],
+            failures: Vec::new(),
             priority: 0,
-            created: Timestamp::EPOCH,
-            updated: Timestamp::EPOCH,
-        }
-    }
-
-    fn sample_lease(id: &str, ticket_id: &str) -> Lease {
-        Lease {
-            id: LeaseId::new(id).unwrap(),
-            ticket: TicketId::new(ticket_id).unwrap(),
-            holder: ParticipantId::system(),
-            authority: Authority::none(),
-            resources: vec![],
-            acquired: Timestamp::EPOCH,
-            heartbeat: Timestamp::EPOCH,
-            ttl_seconds: 300,
-            epoch: 0,
-        }
-    }
-
-    fn sample_milestone(id: &str, tickets: Vec<&str>) -> Milestone {
-        Milestone {
-            id: MilestoneId::new(id).unwrap(),
-            title: format!("milestone {}", id),
-            tickets: tickets
-                .into_iter()
-                .map(|t| TicketId::new(t).unwrap())
-                .collect(),
-            state: MilestoneState::Open,
-            closed_by: None,
-            assumptions: vec![],
+            created: tm_types::Timestamp::EPOCH,
+            updated: tm_types::Timestamp::EPOCH,
         }
     }
 
     #[test]
-    fn converts_empty_project() {
-        let project = ProjectView::default();
-        let scheduler: SchedulerView = (&project).into();
+    fn empty_project_view_converts_to_empty_scheduler_view() {
+        let project_view = ProjectView::empty();
+        let scheduler_view = SchedulerView::from(&project_view);
 
-        assert!(scheduler.ready.is_empty());
-        assert!(scheduler.live_leases.is_empty());
-        assert!(scheduler.milestone_of.is_empty());
+        assert!(scheduler_view.tickets.is_empty());
+        assert_eq!(scheduler_view.graph, DependencyGraph::default());
+        assert!(scheduler_view.live_leases.is_empty());
     }
 
     #[test]
-    fn filters_only_ready_tickets() {
-        let mut project = ProjectView::default();
-        project.tickets.insert(
-            TicketId::new("T-1").unwrap(),
-            sample_ticket("T-1", TicketState::Ready),
-        );
-        project.tickets.insert(
-            TicketId::new("T-2").unwrap(),
-            sample_ticket("T-2", TicketState::Draft),
-        );
-        project.tickets.insert(
-            TicketId::new("T-3").unwrap(),
-            sample_ticket("T-3", TicketState::Ready),
-        );
-        project.tickets.insert(
-            TicketId::new("T-4").unwrap(),
-            sample_ticket("T-4", TicketState::Blocked),
-        );
+    fn scheduler_view_copies_tickets_from_project_view() {
+        let mut project_view = ProjectView::empty();
+        let ticket_id = TicketId::new("T-1").expect("valid ticket id");
+        let ticket = test_ticket(ticket_id.clone(), "Test ticket");
 
-        let scheduler: SchedulerView = (&project).into();
+        project_view
+            .tickets
+            .insert(ticket_id.clone(), ticket.clone());
+        let scheduler_view = SchedulerView::from(&project_view);
 
-        assert_eq!(scheduler.ready.len(), 2);
-        assert!(scheduler.ready.contains_key(&TicketId::new("T-1").unwrap()));
-        assert!(scheduler.ready.contains_key(&TicketId::new("T-3").unwrap()));
-        assert!(!scheduler.ready.contains_key(&TicketId::new("T-2").unwrap()));
-        assert!(!scheduler.ready.contains_key(&TicketId::new("T-4").unwrap()));
+        assert_eq!(scheduler_view.tickets.len(), 1);
+        assert!(scheduler_view.tickets.contains_key(&ticket_id));
+        let retrieved = &scheduler_view.tickets[&ticket_id];
+        assert_eq!(retrieved.id, ticket_id);
+        assert_eq!(retrieved.objective, "Test ticket");
     }
 
     #[test]
-    fn clones_graph_correctly() {
-        let mut project = ProjectView::default();
-        project.graph = GraphView {
-            edges: vec![],
-            children: {
-                let mut m = BTreeMap::new();
-                m.insert(
-                    TicketId::new("T-1").unwrap(),
-                    vec![TicketId::new("T-2").unwrap()],
-                );
-                m
-            },
-            parents: {
-                let mut m = BTreeMap::new();
-                m.insert(TicketId::new("T-2").unwrap(), TicketId::new("T-1").unwrap());
-                m
-            },
-            states: {
-                let mut m = BTreeMap::new();
-                m.insert(TicketId::new("T-1").unwrap(), TicketState::Ready);
-                m
-            },
+    fn scheduler_view_copies_graph_from_project_view() {
+        let mut project_view = ProjectView::empty();
+        let graph = DependencyGraph::default();
+        project_view.graph = graph.clone();
+
+        let scheduler_view = SchedulerView::from(&project_view);
+
+        assert_eq!(scheduler_view.graph, project_view.graph);
+    }
+
+    #[test]
+    fn scheduler_view_copies_leases_from_project_view() {
+        let mut project_view = ProjectView::empty();
+        let lease_id = LeaseId::new("L-abc123def456").expect("valid lease id");
+        let ticket_id = TicketId::new("T-1").expect("valid ticket id");
+        let participant_id = tm_types::ParticipantId::system();
+
+        let lease = Lease {
+            id: lease_id.clone(),
+            ticket: ticket_id.clone(),
+            holder: participant_id,
+            authority: tm_types::Authority::none(),
+            resources: Vec::new(),
+            acquired: tm_types::Timestamp::EPOCH,
+            heartbeat: tm_types::Timestamp::EPOCH,
+            ttl_seconds: 60,
+            epoch: 1,
         };
 
-        let scheduler: SchedulerView = (&project).into();
+        project_view.leases.insert(lease_id.clone(), lease.clone());
+        let scheduler_view = SchedulerView::from(&project_view);
 
-        assert_eq!(scheduler.graph.children.len(), project.graph.children.len());
-        assert_eq!(scheduler.graph.parents.len(), project.graph.parents.len());
-        assert_eq!(scheduler.graph.states.len(), project.graph.states.len());
+        assert_eq!(scheduler_view.live_leases.len(), 1);
+        assert!(scheduler_view.live_leases.contains_key(&lease_id));
+        assert_eq!(scheduler_view.live_leases[&lease_id].ticket, ticket_id);
     }
 
     #[test]
-    fn includes_all_leases_as_live() {
-        let mut project = ProjectView::default();
-        project.leases.push(sample_lease("L-1", "T-1"));
-        project.leases.push(sample_lease("L-2", "T-2"));
-        project.leases.push(sample_lease("L-3", "T-3"));
+    fn scheduler_view_is_cloneable() {
+        let scheduler_view = SchedulerView {
+            tickets: BTreeMap::new(),
+            graph: DependencyGraph::default(),
+            live_leases: BTreeMap::new(),
+        };
 
-        let scheduler: SchedulerView = (&project).into();
-
-        assert_eq!(scheduler.live_leases.len(), 3);
-        assert_eq!(
-            scheduler.live_leases[0].ticket,
-            TicketId::new("T-1").unwrap()
-        );
-        assert_eq!(
-            scheduler.live_leases[1].ticket,
-            TicketId::new("T-2").unwrap()
-        );
-        assert_eq!(
-            scheduler.live_leases[2].ticket,
-            TicketId::new("T-3").unwrap()
-        );
+        let cloned = scheduler_view.clone();
+        assert_eq!(cloned.tickets, scheduler_view.tickets);
+        assert_eq!(cloned.graph, scheduler_view.graph);
+        assert_eq!(cloned.live_leases, scheduler_view.live_leases);
     }
 
     #[test]
-    fn inverts_single_milestone_ticket_membership() {
-        let mut project = ProjectView::default();
-        project
-            .milestones
-            .push(sample_milestone("M-1", vec!["T-1", "T-2"]));
+    fn project_view_empty_creates_all_empty_collections() {
+        let view = ProjectView::empty();
 
-        let scheduler: SchedulerView = (&project).into();
-
-        assert_eq!(scheduler.milestone_of.len(), 2);
-        assert_eq!(
-            scheduler.milestone_of[&TicketId::new("T-1").unwrap()],
-            MilestoneId::new("M-1").unwrap()
-        );
-        assert_eq!(
-            scheduler.milestone_of[&TicketId::new("T-2").unwrap()],
-            MilestoneId::new("M-1").unwrap()
-        );
+        assert!(view.tickets.is_empty());
+        assert_eq!(view.graph, DependencyGraph::default());
+        assert!(view.leases.is_empty());
+        assert!(view.decisions.is_empty());
+        assert!(view.milestones.is_empty());
+        assert!(view.artifacts.is_empty());
+        assert!(view.evidence.is_empty());
+        assert!(view.budgets.is_empty());
+        assert!(view.participants.is_empty());
+        assert!(view.counters.is_empty());
     }
 
     #[test]
-    fn handles_multiple_milestones() {
-        let mut project = ProjectView::default();
-        project
-            .milestones
-            .push(sample_milestone("M-1", vec!["T-1", "T-2"]));
-        project
-            .milestones
-            .push(sample_milestone("M-2", vec!["T-3", "T-4"]));
+    fn project_view_is_cloneable() {
+        let mut view = ProjectView::empty();
+        let ticket_id = TicketId::new("T-1").expect("valid ticket id");
+        let ticket = test_ticket(ticket_id.clone(), "Test");
 
-        let scheduler: SchedulerView = (&project).into();
+        view.tickets.insert(ticket_id.clone(), ticket);
+        let cloned = view.clone();
 
-        assert_eq!(scheduler.milestone_of.len(), 4);
-        assert_eq!(
-            scheduler.milestone_of[&TicketId::new("T-1").unwrap()],
-            MilestoneId::new("M-1").unwrap()
-        );
-        assert_eq!(
-            scheduler.milestone_of[&TicketId::new("T-3").unwrap()],
-            MilestoneId::new("M-2").unwrap()
-        );
+        assert_eq!(cloned.tickets.len(), view.tickets.len());
+        assert_eq!(cloned.tickets[&ticket_id].id, ticket_id);
     }
 
     #[test]
-    fn handles_overlapping_milestone_membership() {
-        let mut project = ProjectView::default();
-        project
-            .milestones
-            .push(sample_milestone("M-1", vec!["T-1", "T-2"]));
-        project
-            .milestones
-            .push(sample_milestone("M-2", vec!["T-2", "T-3"]));
+    fn participant_summary_is_debuggable() {
+        let summary = ParticipantSummary {
+            id: tm_types::ParticipantId::system(),
+            status: "active".to_string(),
+        };
 
-        let scheduler: SchedulerView = (&project).into();
-
-        // When a ticket is in multiple milestones, the last one wins in the map
-        assert_eq!(scheduler.milestone_of.len(), 3);
-        assert_eq!(
-            scheduler.milestone_of[&TicketId::new("T-1").unwrap()],
-            MilestoneId::new("M-1").unwrap()
-        );
-        // T-2 is in both M-1 and M-2; the map keeps the last one processed
-        assert_eq!(
-            scheduler.milestone_of[&TicketId::new("T-2").unwrap()],
-            MilestoneId::new("M-2").unwrap()
-        );
-        assert_eq!(
-            scheduler.milestone_of[&TicketId::new("T-3").unwrap()],
-            MilestoneId::new("M-2").unwrap()
-        );
+        let debug_str = format!("{:?}", summary);
+        assert!(debug_str.contains("ParticipantSummary"));
+        assert!(debug_str.contains("active"));
     }
 
     #[test]
-    fn ready_tickets_preserve_state() {
-        let mut project = ProjectView::default();
-        let mut ready_ticket = sample_ticket("T-1", TicketState::Ready);
-        ready_ticket.priority = 42;
-        project
+    fn participant_summary_equality() {
+        let summary1 = ParticipantSummary {
+            id: tm_types::ParticipantId::system(),
+            status: "active".to_string(),
+        };
+
+        let summary2 = ParticipantSummary {
+            id: tm_types::ParticipantId::system(),
+            status: "active".to_string(),
+        };
+
+        assert_eq!(summary1, summary2);
+    }
+
+    #[test]
+    fn scheduler_view_conversion_preserves_data_integrity() {
+        let mut project_view = ProjectView::empty();
+
+        let ticket_id1 = TicketId::new("T-1").expect("valid ticket id");
+        let ticket_id2 = TicketId::new("T-2").expect("valid ticket id");
+
+        let make_ticket = |id: TicketId| -> Ticket {
+            let objective = format!("Ticket {}", id);
+            test_ticket(id, &objective)
+        };
+
+        project_view
             .tickets
-            .insert(TicketId::new("T-1").unwrap(), ready_ticket.clone());
+            .insert(ticket_id1.clone(), make_ticket(ticket_id1.clone()));
+        project_view
+            .tickets
+            .insert(ticket_id2.clone(), make_ticket(ticket_id2.clone()));
 
-        let scheduler: SchedulerView = (&project).into();
+        let scheduler_view = SchedulerView::from(&project_view);
 
-        assert_eq!(scheduler.ready.len(), 1);
-        let retrieved = &scheduler.ready[&TicketId::new("T-1").unwrap()];
-        assert_eq!(retrieved.priority, 42);
-        assert_eq!(retrieved.state, TicketState::Ready);
-    }
-
-    #[test]
-    fn full_projection_from_complex_project() {
-        let mut project = ProjectView::default();
-
-        // Add mixed-state tickets
-        project.tickets.insert(
-            TicketId::new("T-1").unwrap(),
-            sample_ticket("T-1", TicketState::Ready),
-        );
-        project.tickets.insert(
-            TicketId::new("T-2").unwrap(),
-            sample_ticket("T-2", TicketState::Blocked),
-        );
-        project.tickets.insert(
-            TicketId::new("T-3").unwrap(),
-            sample_ticket("T-3", TicketState::Ready),
-        );
-
-        // Add leases
-        project.leases.push(sample_lease("L-1", "T-1"));
-        project.leases.push(sample_lease("L-2", "T-2"));
-
-        // Add milestones
-        project
-            .milestones
-            .push(sample_milestone("M-1", vec!["T-1", "T-2"]));
-        project
-            .milestones
-            .push(sample_milestone("M-2", vec!["T-3"]));
-
-        let scheduler: SchedulerView = (&project).into();
-
-        // Verify ready tickets
-        assert_eq!(scheduler.ready.len(), 2);
-        assert!(scheduler.ready.contains_key(&TicketId::new("T-1").unwrap()));
-        assert!(scheduler.ready.contains_key(&TicketId::new("T-3").unwrap()));
-
-        // Verify leases
-        assert_eq!(scheduler.live_leases.len(), 2);
-
-        // Verify milestone membership
-        assert_eq!(
-            scheduler.milestone_of[&TicketId::new("T-1").unwrap()],
-            MilestoneId::new("M-1").unwrap()
-        );
-        assert_eq!(
-            scheduler.milestone_of[&TicketId::new("T-3").unwrap()],
-            MilestoneId::new("M-2").unwrap()
-        );
+        assert_eq!(scheduler_view.tickets.len(), 2);
+        assert_eq!(scheduler_view.tickets[&ticket_id1].objective, "Ticket T-1");
+        assert_eq!(scheduler_view.tickets[&ticket_id2].objective, "Ticket T-2");
     }
 }

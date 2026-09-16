@@ -41,7 +41,6 @@ pub struct CodeIntel {
     write_lock: Mutex<()>,
 }
 
-
 /// Tokenize `text` into normalized (lowercased, alphanumeric-run) tokens with per-token
 /// occurrence counts, for populating the `tokens` inverted index alongside a chunk.
 fn tokenize_for_index(text: &str) -> HashMap<String, u32> {
@@ -249,8 +248,9 @@ impl CodeIntel {
                 delta.files_removed += 1;
             }
 
-            conn.execute_batch("COMMIT")
-                .map_err(|e| tm_types::TmError::storage(format!("Failed to commit index update: {e}")))?;
+            conn.execute_batch("COMMIT").map_err(|e| {
+                tm_types::TmError::storage(format!("Failed to commit index update: {e}"))
+            })?;
         }
 
         delta.commits_ingested = HistoryIndex::new(Arc::clone(&self.store), &self.project_root)

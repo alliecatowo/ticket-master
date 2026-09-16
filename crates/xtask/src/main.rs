@@ -39,8 +39,7 @@ fn main() -> ExitCode {
 /// Walks up from `CARGO_MANIFEST_DIR` to find the directory containing the
 /// workspace's root `Cargo.toml` (the one with a `[workspace]` table).
 fn workspace_root() -> Result<PathBuf> {
-    let manifest_dir =
-        env::var("CARGO_MANIFEST_DIR").context("CARGO_MANIFEST_DIR is not set")?;
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").context("CARGO_MANIFEST_DIR is not set")?;
     let mut dir = PathBuf::from(manifest_dir);
     loop {
         let candidate = dir.join("Cargo.toml");
@@ -77,7 +76,14 @@ fn verify() -> Result<()> {
     run_cargo(
         &root,
         "clippy",
-        &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"],
+        &[
+            "clippy",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
     )?;
     run_cargo(&root, "test", &["test", "--workspace"])?;
     hygiene_gate(&root)?;

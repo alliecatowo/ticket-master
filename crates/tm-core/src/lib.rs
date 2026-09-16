@@ -1,16 +1,26 @@
 //! Ticketmaster Core: the authoritative project state and the deterministic transitions over it.
 //!
 //! This is the keystone crate. `tm-scheduler`, `tm-context`, `tm-docs`, `tm-harness`, `tm-agent`,
-//! `tm-genesis`, `tm-mirror`, `tm-server` and `tm-cli` all build their view of a project on the
-//! API defined here, so the public surface must be coherent, complete and hard to misuse.
+//! `tm-genesis`, `tm-mirror`, `tm-server` and `tm-cli` all build on the API defined here, so the
+//! public surface must stay coherent, complete and hard to misuse.
 //!
-//! Core is boring by design: no inference happens here. Every transition this crate performs is
-//! a pure function of project state (`machine.rs`, `graph.rs`, `lease.rs::expire_due`). Every row
-//! of every materialized table (`schema.rs`) is derivable by replaying the event log from `seq 0`
-//! through the single `apply` function in `materialize.rs` — the live write path and
-//! `Store::rebuild()`'s replay path are the same code, so they can never drift. A state change
-//! and the events that record it commit together, in one SQLite transaction, via the [`tm_events`]
-//! `Tx` handle.
+//! Core is deliberately boring: no inference happens here. Every transition this crate performs
+//! is a pure function of project state. The load-bearing invariants:
+//!
+//! * Every row of every materialized table ([`schema`]) is derivable by replaying the event log
+//!   from `seq` 0. [`store::Store::rebuild`] drops the views and replays; [`materialize::apply`]
+//!   is the *only* function that turns an event into a state change, shared by the live path and
+//!   the replay path.
+//! * A state change and the events that record it commit in the same SQLite transaction, via the
+//!   [`tm_events::log::Tx`] handle `tm-events` exposes.
+//! * Ticket transition legality is a pure total function over `(state, trigger)`, see
+//!   [`machine::transition`].
+//! * A worker never certifies itself: [`invariants`] enforces that the auditor differs from the
+//!   executor, and that a submission carries evidence.
+//! * A dead worker cannot block the project: [`lease::expire_due`] is a pure sweep that reverts
+//!   authority and returns the ticket to `Ready` with an attempt counted.
+//! * Cycles in the dependency graph ([`graph`]) are legal only when every edge in the cycle is a
+//!   `Loop` edge carrying a [`ticket::CycleBudget`]; everything else must be acyclic.
 //!
 //! See `SPEC.md` §4.
 
@@ -32,18 +42,18 @@ pub mod ticket;
 pub mod view;
 
 pub use artifact::{Artifact, ArtifactKind, ArtifactStorage, Evidence, EvidenceKind};
-pub use budget::{BudgetScope, ExhaustedScope, record_usage};
-pub use decision::{Decision, DecisionRecord};
-pub use graph::{DependencyEdge, GraphView};
+pub use budget::{BudgetLedger, BudgetScope, ExhaustedScope};
+pub use decision::{Decision, DecisionStore};
+pub use graph::{CycleViolation, DependencyEdge, DependencyGraph};
 pub use invariants::{check_invariants, Violation};
-pub use lease::{Lease, ReversionAction};
-pub use machine::{can_lease, is_live, is_terminal, transition, InvalidTransition};
+pub use lease::{Lease, LeaseStore, ReversionAction};
+pub use machine::{InvalidTransition, TransitionTable};
 pub use materialize::{apply, replay};
-pub use milestone::{Milestone, MilestoneState};
+pub use milestone::{Milestone, MilestoneState, MilestoneStore};
+pub use schema::drop_views;
 pub use store::Store;
 pub use ticket::{
-    ContextRef, CycleBudget, DependencyKind, ExecutorRequirements, FailureClass, FailureRecord,
-    ResourceClaim, ResourceMode, RetryPolicy, Ticket, TicketKind, TicketState, Trigger,
-    VerificationPolicy,
+    ContextRef, DependencyKind, ExecutorRequirements, FailureClass, FailureRecord, ResourceClaim,
+    ResourceMode, RetryPolicy, Ticket, TicketKind, TicketState, Trigger, VerificationPolicy,
 };
 pub use view::{ProjectView, SchedulerView};
