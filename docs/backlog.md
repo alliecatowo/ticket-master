@@ -25,6 +25,27 @@ real, scoped work — not aspiration. Items that turn out to be wrong get delete
 - A starter library: `review-change`, `migrate-sites`, `research-and-synthesize`, `harness-benchmark`.
 - `tm doctor` warning for a workflow that is one node wide and one node deep.
 
+## Project wiki (SPEC §26)
+
+- Wiki assembly from authoritative sources, each page carrying provenance and rendered freshness.
+- Staleness banner naming exactly what invalidated a page (ticket and/or decision).
+- `/wiki` in `tm serve`, cross-linked with tickets, decisions and presence; plain markdown in-repo
+  so it still works on GitHub with nothing running.
+- Wiki pages as a ranked retrieval source in context compilation, so workers read the compiled
+  explanation before the source.
+
+## Project templates (SPEC §27)
+
+- Template format: manifest, files with substitution, pinned `deps.lock`, `skill.md`, `verify.toml`,
+  `bench/`.
+- Selection during Genesis graph compilation instead of generating a scaffold from nothing.
+- Starter set: VitePress, Zola, Astro, Next.js, Textual, Ink, Ratatui, Cobra, Axum, FastAPI, Hono,
+  Tauri, SwiftUI, and the three library templates.
+- Registry with version and checksum pinning; third-party templates treated as untrusted input
+  (sandboxed verify, `skill.md` as data, no self-granted authority).
+- CI that scaffolds every template and runs its `verify.toml`, so a template that does not build is
+  caught as a bug in the template.
+
 ## Verification ladder (SPEC §18.5)
 
 - `T-E2E-WEB` — Playwright end-to-end against a live `tm serve`.

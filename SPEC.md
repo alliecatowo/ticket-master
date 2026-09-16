@@ -1516,3 +1516,119 @@ The discipline from the loop/graph guidance applies to us too: *do not turn a si
 into a multi-agent graph because the syntax makes it easy.* The DSL is for genuinely multi-stage
 work with real ordering or fan-out. `tm doctor` should warn on a workflow whose graph is one node
 wide and one node deep, because that is a prompt wearing a costume.
+
+---
+
+## 26. The project wiki
+
+One place where everything about the project is written down, always current, and cheap to read —
+for humans and for agents.
+
+### 26.1 Why it is not just docs with a nicer URL
+
+`tm-docs` (§9) already knows what each document is derived from and when that basis changed. The
+wiki is the surface that makes that worth having: a browsable, always-current view of project
+knowledge, assembled from authoritative state rather than maintained by hand alongside it.
+
+The part that matters for cost: **the wiki is persisted context compilation.** Today every worker
+that needs to understand the scheduler re-derives it from source, at frontier prices, and throws the
+result away. A wiki page is that derivation written once, kept fresh by provenance, and read for a
+few hundred tokens. It is the same argument as §24.1 applied to knowledge instead of packs —
+stop paying repeatedly for a conclusion the project already reached.
+
+### 26.2 Contents
+
+Assembled from the authoritative sources, each page carrying its provenance and freshness:
+
+| Page family | Derived from |
+|---|---|
+| Architecture and subsystem maps | crate/module structure, symbol graph, decisions |
+| API reference | public signatures and doc comments |
+| Decision history | `decisions`, with supersession chains |
+| "Why is this like this" | git history, the commits and tickets that produced a file |
+| Ticket and milestone history | project state |
+| Conventions and onboarding | harness config, human-written prose |
+| Glossary | project vocabulary, cross-linked |
+
+Human-written pages are first-class and never overwritten (§9), they simply live alongside the
+generated ones and are tracked the same way.
+
+### 26.3 Freshness is visible, not assumed
+
+A page renders its own state. A stale page says so, at the top, naming what invalidated it:
+
+```
+architecture/provider-fabric        STALE
+  invalidated by T-512 (changed src/providers/**) and D-027 (superseded)
+  last verified: 2026-09-14
+```
+
+That is the whole point: a wiki that can be confidently wrong is worse than no wiki, so the system
+refuses to present knowledge as current when its basis has moved. `tm docs check` already fails on
+staleness; the wiki makes the same fact legible to a person skimming.
+
+### 26.4 Access
+
+- **In-repo** as plain markdown under `docs/`, so it works on GitHub and in any editor with no
+  server running.
+- **Served** at `/wiki` by `tm serve`, cross-linked with tickets, decisions and presence.
+- **To agents** as a retrieval source in context compilation (§8.1), ranked alongside code and
+  history — so a worker reads the compiled explanation first and the source only when it needs
+  detail the page does not carry.
+
+---
+
+## 27. Project templates
+
+Scaffolding with genuinely good defaults, chosen from a list rather than generated from nothing.
+
+### 27.1 Why templates instead of generation
+
+Asking a model to produce a Next.js or Zola project from scratch is expensive, slow, and different
+every time — three properties Ticketmaster is otherwise built to avoid. A template is ordinary
+software: deterministic, reviewable, versioned, and free to apply. The model's judgment is then
+spent on what is actually specific to this project instead of on re-deriving a lint config.
+
+So during Genesis (§12), when the spec calls for a documentation site or a terminal UI, the graph
+compiler **selects a template and parameterizes it** rather than emitting tickets to invent one.
+
+### 27.2 What a template is
+
+More than a file tree. A template carries everything needed to make the result good *and* to keep it
+good:
+
+```
+template/
+  manifest.toml      # id, version, params, capability tags, license
+  files/             # the scaffold, with parameter substitution
+  deps.lock          # pinned dependency versions, so output is reproducible
+  skill.md           # conventions taught to any agent working in this stack
+  verify.toml        # the commands that prove the scaffold works (build, test, lint)
+  bench/             # representative tasks for benchmarking harness changes (§10)
+```
+
+`skill.md` is the piece that compounds: a template does not just produce files, it teaches the agent
+the idioms of that stack, so the agent does less work and makes fewer stack-specific mistakes. And
+`verify.toml` means a freshly scaffolded project is green from its first commit — a template that
+does not build is a bug in the template, caught by CI, not a surprise for the user.
+
+### 27.3 Starter set
+
+Documentation and web: VitePress, Zola, Astro, Next.js.
+Terminal: Textual (Python), Ink (React), Ratatui (Rust), Cobra (Go).
+Services: Axum (Rust), FastAPI (Python), Hono (TypeScript).
+Desktop: Tauri, SwiftUI.
+Library: Rust crate, TypeScript package, Python package.
+
+Each one opinionated — formatting, linting, testing, CI, and a sane project layout already wired —
+because the value is in the defaults, not in the file count.
+
+### 27.4 Community templates
+
+Templates are a registry, not a hardcoded list. A project can add one by path, git URL, or registry
+id, pinned by version and checksum for the same reproducibility reason browsers are pinned (§19.1a).
+
+Third-party templates are untrusted input: their `verify.toml` runs in the same authority sandbox as
+any other command, `skill.md` is treated as data rather than instructions, and a template can
+declare capability requirements but never grant itself authority. A template is a starting point
+someone else wrote, not a licence to run arbitrary code with the project's permissions.

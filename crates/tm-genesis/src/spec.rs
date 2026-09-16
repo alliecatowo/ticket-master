@@ -299,7 +299,7 @@ mod tests {
             non_goals: vec!["Not a full project management tool".to_string()],
             architectural_character: "Simple and boring".to_string(),
             spiritually_wrong: vec!["Overly complex UI".to_string()],
-            created: tm_types::Timestamp::from_secs_since_epoch(1000),
+            created: tm_types::Timestamp::from_unix_seconds(1000),
         }
     }
 
@@ -347,7 +347,7 @@ mod tests {
     async fn compile_spec_happy_path() {
         let vision = sample_vision();
         let clock = Arc::new(FixedClock::new(
-            tm_types::Timestamp::from_secs_since_epoch(5000),
+            tm_types::Timestamp::from_unix_seconds(5000),
             TestIds,
         ));
         let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock);
@@ -367,7 +367,7 @@ mod tests {
                 cache_write_tokens: 0,
             },
             latency: std::time::Duration::from_millis(100),
-            received_at: tm_types::Timestamp::from_secs_since_epoch(5000),
+            received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
         let req = tm_provider::types::CompletionRequest {
@@ -419,7 +419,7 @@ mod tests {
         assert_eq!(spec.source_vision, None);
         assert_eq!(
             spec.created,
-            tm_types::Timestamp::from_secs_since_epoch(5000)
+            tm_types::Timestamp::from_unix_seconds(5000)
         );
     }
 
@@ -427,7 +427,7 @@ mod tests {
     async fn compile_spec_rejects_empty_v0_criteria() {
         let vision = sample_vision();
         let clock = Arc::new(FixedClock::new(
-            tm_types::Timestamp::from_secs_since_epoch(5000),
+            tm_types::Timestamp::from_unix_seconds(5000),
             TestIds,
         ));
         let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock);
@@ -456,7 +456,7 @@ mod tests {
             }],
             usage: Usage::default(),
             latency: std::time::Duration::from_millis(0),
-            received_at: tm_types::Timestamp::from_secs_since_epoch(5000),
+            received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
         let req = tm_provider::types::CompletionRequest {
@@ -487,7 +487,7 @@ mod tests {
     async fn compile_spec_rejects_empty_v1_criteria() {
         let vision = sample_vision();
         let clock = Arc::new(FixedClock::new(
-            tm_types::Timestamp::from_secs_since_epoch(5000),
+            tm_types::Timestamp::from_unix_seconds(5000),
             TestIds,
         ));
         let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock);
@@ -516,7 +516,7 @@ mod tests {
             }],
             usage: Usage::default(),
             latency: std::time::Duration::from_millis(0),
-            received_at: tm_types::Timestamp::from_secs_since_epoch(5000),
+            received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
         let req = tm_provider::types::CompletionRequest {
@@ -547,7 +547,7 @@ mod tests {
     async fn compile_spec_rejects_empty_requirements() {
         let vision = sample_vision();
         let clock = Arc::new(FixedClock::new(
-            tm_types::Timestamp::from_secs_since_epoch(5000),
+            tm_types::Timestamp::from_unix_seconds(5000),
             TestIds,
         ));
         let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock);
@@ -576,7 +576,7 @@ mod tests {
             }],
             usage: Usage::default(),
             latency: std::time::Duration::from_millis(0),
-            received_at: tm_types::Timestamp::from_secs_since_epoch(5000),
+            received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
         let req = tm_provider::types::CompletionRequest {
@@ -607,7 +607,7 @@ mod tests {
     async fn compile_spec_rejects_malformed_json() {
         let vision = sample_vision();
         let clock = Arc::new(FixedClock::new(
-            tm_types::Timestamp::from_secs_since_epoch(5000),
+            tm_types::Timestamp::from_unix_seconds(5000),
             TestIds,
         ));
         let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock);
@@ -622,7 +622,7 @@ mod tests {
             }],
             usage: Usage::default(),
             latency: std::time::Duration::from_millis(0),
-            received_at: tm_types::Timestamp::from_secs_since_epoch(5000),
+            received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
         let req = tm_provider::types::CompletionRequest {
@@ -730,7 +730,7 @@ mod tests {
                 objective: "v1".to_string(),
                 exit_criteria: vec![Predicate::TestsPass { suite: None }],
             },
-            created: tm_types::Timestamp::from_secs_since_epoch(1000),
+            created: tm_types::Timestamp::from_unix_seconds(1000),
         };
         assert_eq!(spec.requirements.len(), 1);
         assert_eq!(spec.architecture, "Simple");
@@ -765,7 +765,7 @@ mod tests {
                 objective: "v1".to_string(),
                 exit_criteria: vec![Predicate::TestsPass { suite: None }],
             },
-            created: tm_types::Timestamp::from_secs_since_epoch(1000),
+            created: tm_types::Timestamp::from_unix_seconds(1000),
         };
         let json = serde_json::to_string(&spec).expect("serialize");
         let spec2 = serde_json::from_str::<Specification>(&json).expect("deserialize");

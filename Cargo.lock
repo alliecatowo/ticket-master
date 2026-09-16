@@ -2191,6 +2191,7 @@ dependencies = [
 name = "tm-genesis"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "git2",
  "serde",
  "serde_json",

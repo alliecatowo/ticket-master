@@ -20,13 +20,13 @@ use serde::{Deserialize, Serialize};
 use tm_core::graph::{DependencyEdge, DependencyGraph};
 use tm_core::invariants::{check_invariants, Violation};
 use tm_core::ticket::{
-    ContextRef, DependencyKind, ExecutorRequirements, ResourceClaim, RetryPolicy as TicketRetryPolicy,
-    Ticket, TicketKind, TicketState, VerificationPolicy,
+    ContextRef, DependencyKind, ExecutorRequirements, ResourceClaim,
+    RetryPolicy as TicketRetryPolicy, Ticket, TicketKind, TicketState, VerificationPolicy,
 };
 use tm_core::{ProjectView, Store};
 use tm_types::{
-    ArtifactId, Authority, Budget, Clock, IdSource, MilestoneId, ParticipantId, Predicate, Result as TmResult,
-    TicketId, Timestamp, TmError,
+    ArtifactId, Authority, Budget, Clock, IdSource, MilestoneId, ParticipantId, Predicate,
+    Result as TmResult, TicketId, Timestamp, TmError,
 };
 
 use crate::spec::Specification;
@@ -148,7 +148,11 @@ pub enum CompilationError {
 /// is checked here rather than deferred to `validate_graph`.
 fn check_dangling_refs(proposal: &GraphCompilation) -> Result<(), CompilationError> {
     let ticket_refs: BTreeSet<&Ref> = proposal.tickets.iter().map(|t| &t.ticket_ref).collect();
-    let milestone_refs: BTreeSet<&Ref> = proposal.milestones.iter().map(|m| &m.milestone_ref).collect();
+    let milestone_refs: BTreeSet<&Ref> = proposal
+        .milestones
+        .iter()
+        .map(|m| &m.milestone_ref)
+        .collect();
 
     for ticket in &proposal.tickets {
         if let Some(parent_ref) = &ticket.parent_ref {
@@ -193,7 +197,9 @@ fn effective_authority(ticket: &ProposedTicket, domains: &[AuthorityDomain]) -> 
     domains
         .iter()
         .filter(|domain| domain.applies_to.iter().any(|r| r == &ticket.ticket_ref))
-        .fold(ticket.authority.clone(), |acc, domain| acc.intersect(&domain.authority))
+        .fold(ticket.authority.clone(), |acc, domain| {
+            acc.intersect(&domain.authority)
+        })
 }
 
 /// The wire shape `propose_graph` asks the model for: a [`GraphCompilation`] minus the fields
@@ -207,7 +213,10 @@ struct ProposedGraphPayload {
     authority_domains: Vec<AuthorityDomain>,
 }
 
-fn build_compile_request(spec: &Specification, prior_violations: &[Violation]) -> tm_provider::CompletionRequest {
+fn build_compile_request(
+    spec: &Specification,
+    prior_violations: &[Violation],
+) -> tm_provider::CompletionRequest {
     let mut prompt = String::new();
     prompt.push_str(
         "Compile this Specification into a GraphCompilation: tickets, dependencies, milestones \
@@ -217,7 +226,10 @@ fn build_compile_request(spec: &Specification, prior_violations: &[Violation]) -
     prompt.push_str(&format!("Architecture: {}\n", spec.architecture));
     prompt.push_str(&format!("Interfaces: {:#?}\n", spec.interfaces));
     prompt.push_str(&format!("Data model: {}\n", spec.data_model));
-    prompt.push_str(&format!("Technology choices: {:#?}\n", spec.technology_choices));
+    prompt.push_str(&format!(
+        "Technology choices: {:#?}\n",
+        spec.technology_choices
+    ));
     prompt.push_str(&format!("Quality bar: {}\n", spec.quality_bar));
     prompt.push_str(&format!("Security model: {}\n", spec.security_model));
     prompt.push_str(&format!("Testing strategy: {}\n", spec.testing_strategy));
@@ -292,8 +304,8 @@ pub async fn propose_graph(
         .await
         .map_err(|e| TmError::Provider(e.to_string()))?;
     let text = first_text_block(&completion)?;
-    let payload: ProposedGraphPayload =
-        serde_json::from_str(&text).map_err(|e| TmError::parse(format!("malformed GraphCompilation JSON: {e}")))?;
+    let payload: ProposedGraphPayload = serde_json::from_str(&text)
+        .map_err(|e| TmError::parse(format!("malformed GraphCompilation JSON: {e}")))?;
 
     let proposal = GraphCompilation {
         source_spec: None,
@@ -337,7 +349,10 @@ pub fn validate_graph(proposal: &GraphCompilation, existing: &ProjectView) -> Ve
         .collect();
 
     for dep in &proposal.dependencies {
-        if let (Some(from), Some(to)) = (placeholders.get(&dep.from_ref), placeholders.get(&dep.to_ref)) {
+        if let (Some(from), Some(to)) = (
+            placeholders.get(&dep.from_ref),
+            placeholders.get(&dep.to_ref),
+        ) {
             edges.push(DependencyEdge {
                 from: from.clone(),
                 to: to.clone(),
@@ -358,7 +373,11 @@ pub fn validate_graph(proposal: &GraphCompilation, existing: &ProjectView) -> Ve
 
     for ticket in &proposal.tickets {
         let id = placeholders[&ticket.ticket_ref].clone();
-        let parent = ticket.parent_ref.as_ref().and_then(|p| placeholders.get(p)).cloned();
+        let parent = ticket
+            .parent_ref
+            .as_ref()
+            .and_then(|p| placeholders.get(p))
+            .cloned();
         let dependencies: Vec<TicketId> = proposal
             .dependencies
             .iter()
@@ -418,9 +437,13 @@ fn ticket_creation_order(proposal: &GraphCompilation) -> Result<Vec<Ref>, Compil
     let mut order = Vec::new();
 
     while !remaining.is_empty() {
-        let (ready, blocked): (Vec<&ProposedTicket>, Vec<&ProposedTicket>) = remaining
-            .into_iter()
-            .partition(|t| t.parent_ref.as_ref().map(|p| resolved.contains(p)).unwrap_or(true));
+        let (ready, blocked): (Vec<&ProposedTicket>, Vec<&ProposedTicket>) =
+            remaining.into_iter().partition(|t| {
+                t.parent_ref
+                    .as_ref()
+                    .map(|p| resolved.contains(p))
+                    .unwrap_or(true)
+            });
 
         if ready.is_empty() {
             let unresolved = blocked[0]
@@ -442,7 +465,12 @@ fn ticket_creation_order(proposal: &GraphCompilation) -> Result<Vec<Ref>, Compil
 /// Best-effort compensation for a `commit_graph` failure: cancel every ticket already created in
 /// this call (ignoring cancellation failures — this is already the failure path) and return
 /// `err` unchanged, so the caller sees the original cause.
-fn rollback_tickets(store: &Store, tickets: &BTreeMap<Ref, TicketId>, actor: &ParticipantId, err: TmError) -> TmError {
+fn rollback_tickets(
+    store: &Store,
+    tickets: &BTreeMap<Ref, TicketId>,
+    actor: &ParticipantId,
+    err: TmError,
+) -> TmError {
     for id in tickets.values() {
         let _ = store.cancel(
             id,
@@ -473,9 +501,17 @@ fn rollback_tickets(store: &Store, tickets: &BTreeMap<Ref, TicketId>, actor: &Pa
 /// [`CompilationError::DanglingRef`] if `proposal` contains a `Ref` unresolved after every
 /// ticket/milestone in it has been processed (should not happen if `propose_graph`'s
 /// dangling-ref check ran, but re-checked here as a last line of defense before committing).
-pub fn commit_graph(store: &Store, proposal: &GraphCompilation, actor: ParticipantId) -> TmResult<CommitOutcome> {
+pub fn commit_graph(
+    store: &Store,
+    proposal: &GraphCompilation,
+    actor: ParticipantId,
+) -> TmResult<CommitOutcome> {
     let order = ticket_creation_order(proposal)?;
-    let by_ref: BTreeMap<&Ref, &ProposedTicket> = proposal.tickets.iter().map(|t| (&t.ticket_ref, t)).collect();
+    let by_ref: BTreeMap<&Ref, &ProposedTicket> = proposal
+        .tickets
+        .iter()
+        .map(|t| (&t.ticket_ref, t))
+        .collect();
 
     let mut tickets: BTreeMap<Ref, TicketId> = BTreeMap::new();
     let mut milestones: BTreeMap<Ref, MilestoneId> = BTreeMap::new();
@@ -486,7 +522,14 @@ pub fn commit_graph(store: &Store, proposal: &GraphCompilation, actor: Participa
         let parent = match &proposed.parent_ref {
             Some(p) => match tickets.get(p) {
                 Some(id) => Some(id.clone()),
-                None => return Err(rollback_tickets(store, &tickets, &actor, CompilationError::DanglingRef(p.clone()).into())),
+                None => {
+                    return Err(rollback_tickets(
+                        store,
+                        &tickets,
+                        &actor,
+                        CompilationError::DanglingRef(p.clone()).into(),
+                    ))
+                }
             },
             None => None,
         };
@@ -568,7 +611,11 @@ pub fn commit_graph(store: &Store, proposal: &GraphCompilation, actor: Participa
         }
     }
 
-    Ok(CommitOutcome { events, tickets, milestones })
+    Ok(CommitOutcome {
+        events,
+        tickets,
+        milestones,
+    })
 }
 
 /// Bounds on [`compile_with_retry`]'s regenerate-on-violation loop.
@@ -657,7 +704,10 @@ mod tests {
 
     use tempfile::TempDir;
     use tm_provider::mock::ScriptedFailure;
-    use tm_provider::{Candidate, Completion, ContentBlock, MockProvider, ModelId, ProviderError, StopReason, Usage};
+    use tm_provider::{
+        Candidate, Completion, ContentBlock, MockProvider, ModelId, ProviderError, StopReason,
+        Usage,
+    };
     use tm_types::{CounterIds, FixedClock, Role, Tolerance};
 
     use crate::spec::{MilestoneOutline, ReleaseDefinition, Requirement};
@@ -753,7 +803,9 @@ mod tests {
         Completion {
             model: ModelId::new("mock", "mock-1"),
             candidates: vec![Candidate {
-                content: vec![ContentBlock::Text { text: text.to_string() }],
+                content: vec![ContentBlock::Text {
+                    text: text.to_string(),
+                }],
                 stop_reason: StopReason::EndTurn,
             }],
             usage: Usage::default(),
@@ -771,7 +823,9 @@ mod tests {
     #[test]
     fn dangling_refs_are_rejected_in_a_parent_ref() {
         let p = proposal(vec![ticket("t1", Some("missing"))]);
-        assert!(matches!(check_dangling_refs(&p), Err(CompilationError::DanglingRef(r)) if r == "missing"));
+        assert!(
+            matches!(check_dangling_refs(&p), Err(CompilationError::DanglingRef(r)) if r == "missing")
+        );
     }
 
     #[test]
@@ -782,7 +836,9 @@ mod tests {
             to_ref: "ghost".to_string(),
             kind: DependencyKind::Hard,
         });
-        assert!(matches!(check_dangling_refs(&p), Err(CompilationError::DanglingRef(r)) if r == "ghost"));
+        assert!(
+            matches!(check_dangling_refs(&p), Err(CompilationError::DanglingRef(r)) if r == "ghost")
+        );
     }
 
     #[test]
@@ -802,14 +858,20 @@ mod tests {
         };
         let effective = effective_authority(&t, std::slice::from_ref(&domain));
         assert!(!effective.git.commit);
-        assert!(effective.repository.read.is_subset_of(&Authority::root().repository.read));
+        assert!(effective
+            .repository
+            .read
+            .is_subset_of(&Authority::root().repository.read));
     }
 
     // -- ticket_creation_order -----------------------------------------------------------------
 
     #[test]
     fn ticket_creation_order_places_parents_before_children() {
-        let p = proposal(vec![ticket("child", Some("parent")), ticket("parent", None)]);
+        let p = proposal(vec![
+            ticket("child", Some("parent")),
+            ticket("parent", None),
+        ]);
         let order = ticket_creation_order(&p).unwrap();
         assert_eq!(order, vec!["parent".to_string(), "child".to_string()]);
     }
@@ -817,7 +879,10 @@ mod tests {
     #[test]
     fn ticket_creation_order_rejects_a_parent_cycle() {
         let p = proposal(vec![ticket("a", Some("b")), ticket("b", Some("a"))]);
-        assert!(matches!(ticket_creation_order(&p), Err(CompilationError::DanglingRef(_))));
+        assert!(matches!(
+            ticket_creation_order(&p),
+            Err(CompilationError::DanglingRef(_))
+        ));
     }
 
     // -- validate_graph ---------------------------------------------------------------------
@@ -901,9 +966,19 @@ mod tests {
         let parent_id = outcome.tickets["parent"].clone();
         let child_id = outcome.tickets["child"].clone();
         assert_eq!(view.tickets[&child_id].parent, Some(parent_id.clone()));
-        assert_eq!(view.tickets[&child_id].milestone, Some(outcome.milestones["m1"].clone()));
-        assert_eq!(view.tickets[&parent_id].milestone, Some(outcome.milestones["m1"].clone()));
-        assert!(view.graph.edges().iter().any(|e| e.from == child_id && e.to == parent_id));
+        assert_eq!(
+            view.tickets[&child_id].milestone,
+            Some(outcome.milestones["m1"].clone())
+        );
+        assert_eq!(
+            view.tickets[&parent_id].milestone,
+            Some(outcome.milestones["m1"].clone())
+        );
+        assert!(view
+            .graph
+            .edges()
+            .iter()
+            .any(|e| e.from == child_id && e.to == parent_id));
     }
 
     #[test]
@@ -943,7 +1018,9 @@ mod tests {
         };
         provider.script_response(&request, completion_with(&payload_json(&payload)));
 
-        let graph = propose_graph(&spec, &[], 1, &provider).await.expect("propose succeeds");
+        let graph = propose_graph(&spec, &[], 1, &provider)
+            .await
+            .expect("propose succeeds");
         assert_eq!(graph.tickets.len(), 1);
         assert_eq!(graph.attempt, 1);
         assert_eq!(graph.source_spec, None);
@@ -1051,7 +1128,10 @@ mod tests {
 
         // Compute what `compile_with_retry` will feed back on attempt 2, to script that exact
         // follow-up request.
-        let first_violations = validate_graph(&proposal(bad_payload.tickets.clone()), &store.view().unwrap());
+        let first_violations = validate_graph(
+            &proposal(bad_payload.tickets.clone()),
+            &store.view().unwrap(),
+        );
         assert!(!first_violations.is_empty());
         let second_request = build_compile_request(&spec, &first_violations);
         let good_payload = ProposedGraphPayload {
@@ -1060,7 +1140,10 @@ mod tests {
             milestones: vec![],
             authority_domains: vec![],
         };
-        provider.script_response(&second_request, completion_with(&payload_json(&good_payload)));
+        provider.script_response(
+            &second_request,
+            completion_with(&payload_json(&good_payload)),
+        );
 
         let outcome = compile_with_retry(
             &spec,

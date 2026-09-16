@@ -301,7 +301,7 @@ mod tests {
                     cache_write_tokens: 0,
                 },
                 latency: std::time::Duration::from_millis(100),
-                received_at: tm_types::Timestamp::unix_epoch(),
+                received_at: tm_types::Timestamp::from_unix_seconds(0),
             })
         }
 
@@ -330,10 +330,10 @@ mod tests {
 
         let seed = Seed::new(
             "build a project manager".to_string(),
-            &FixedClock::at_epoch(),
+            &FixedClock::epoch(),
         );
         let provider = TestProvider::new(response.to_string());
-        let clock = FixedClock::at_epoch();
+        let clock = FixedClock::epoch();
 
         let vision = compile_vision(&seed, &provider, &clock).await.unwrap();
 
@@ -355,7 +355,7 @@ mod tests {
             vec!["storing PII", "using blockchain"]
         );
         assert!(vision.source_seed.is_none());
-        assert_eq!(vision.created, tm_types::Timestamp::unix_epoch());
+        assert_eq!(vision.created, tm_types::Timestamp::from_unix_seconds(0));
     }
 
     #[tokio::test]
@@ -387,9 +387,9 @@ mod tests {
             }
         }
 
-        let seed = Seed::new("test".to_string(), &FixedClock::at_epoch());
+        let seed = Seed::new("test".to_string(), &FixedClock::epoch());
         let provider = FailingProvider;
-        let clock = FixedClock::at_epoch();
+        let clock = FixedClock::epoch();
 
         let result = compile_vision(&seed, &provider, &clock).await;
         assert!(result.is_err());
@@ -402,9 +402,9 @@ mod tests {
     #[tokio::test]
     async fn test_compile_vision_parse_error_invalid_json() {
         let response = "not valid json";
-        let seed = Seed::new("test".to_string(), &FixedClock::at_epoch());
+        let seed = Seed::new("test".to_string(), &FixedClock::epoch());
         let provider = TestProvider::new(response.to_string());
-        let clock = FixedClock::at_epoch();
+        let clock = FixedClock::epoch();
 
         let result = compile_vision(&seed, &provider, &clock).await;
         assert!(result.is_err());
@@ -426,9 +426,9 @@ mod tests {
             "spiritually_wrong": []
         }"#;
 
-        let seed = Seed::new("test".to_string(), &FixedClock::at_epoch());
+        let seed = Seed::new("test".to_string(), &FixedClock::epoch());
         let provider = TestProvider::new(response.to_string());
-        let clock = FixedClock::at_epoch();
+        let clock = FixedClock::epoch();
 
         let result = compile_vision(&seed, &provider, &clock).await;
         assert!(result.is_err());
@@ -452,9 +452,9 @@ mod tests {
             "spiritually_wrong": []
         }"#;
 
-        let seed = Seed::new("test".to_string(), &FixedClock::at_epoch());
+        let seed = Seed::new("test".to_string(), &FixedClock::epoch());
         let provider = TestProvider::new(response.to_string());
-        let clock = FixedClock::at_epoch();
+        let clock = FixedClock::epoch();
 
         let result = compile_vision(&seed, &provider, &clock).await;
         assert!(result.is_err());
@@ -479,9 +479,9 @@ mod tests {
             "spiritually_wrong": []
         }"#;
 
-        let seed = Seed::new("test".to_string(), &FixedClock::at_epoch());
+        let seed = Seed::new("test".to_string(), &FixedClock::epoch());
         let provider = TestProvider::new(response.to_string());
-        let clock = FixedClock::at_epoch();
+        let clock = FixedClock::epoch();
 
         let result = compile_vision(&seed, &provider, &clock).await;
         assert!(result.is_err());
@@ -506,9 +506,9 @@ mod tests {
             "spiritually_wrong": []
         }"#;
 
-        let seed = Seed::new("test".to_string(), &FixedClock::at_epoch());
+        let seed = Seed::new("test".to_string(), &FixedClock::epoch());
         let provider = TestProvider::new(response.to_string());
-        let clock = FixedClock::at_epoch();
+        let clock = FixedClock::epoch();
 
         let result = compile_vision(&seed, &provider, &clock).await;
         assert!(result.is_err());
@@ -533,9 +533,9 @@ mod tests {
             "spiritually_wrong": []
         }"#;
 
-        let seed = Seed::new("test".to_string(), &FixedClock::at_epoch());
+        let seed = Seed::new("test".to_string(), &FixedClock::epoch());
         let provider = TestProvider::new(response.to_string());
-        let clock = FixedClock::at_epoch();
+        let clock = FixedClock::epoch();
 
         let vision = compile_vision(&seed, &provider, &clock).await.unwrap();
 
@@ -568,7 +568,7 @@ mod tests {
                         cache_write_tokens: 0,
                     },
                     latency: std::time::Duration::from_millis(0),
-                    received_at: tm_types::Timestamp::unix_epoch(),
+                    received_at: tm_types::Timestamp::from_unix_seconds(0),
                 })
             }
 
@@ -582,9 +582,9 @@ mod tests {
             }
         }
 
-        let seed = Seed::new("test".to_string(), &FixedClock::at_epoch());
+        let seed = Seed::new("test".to_string(), &FixedClock::epoch());
         let provider = EmptyProvider;
-        let clock = FixedClock::at_epoch();
+        let clock = FixedClock::epoch();
 
         let result = compile_vision(&seed, &provider, &clock).await;
         assert!(result.is_err());
@@ -608,7 +608,7 @@ mod tests {
             non_goals: vec![],
             architectural_character: "test".to_string(),
             spiritually_wrong: vec![],
-            created: tm_types::Timestamp::unix_epoch(),
+            created: tm_types::Timestamp::from_unix_seconds(0),
         };
 
         assert!(!vision.is_anchored());
@@ -626,7 +626,7 @@ mod tests {
             non_goals: vec![],
             architectural_character: "test".to_string(),
             spiritually_wrong: vec![],
-            created: tm_types::Timestamp::unix_epoch(),
+            created: tm_types::Timestamp::from_unix_seconds(0),
         };
 
         assert!(vision.is_anchored());
