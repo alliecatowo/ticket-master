@@ -10,9 +10,11 @@
 //! whatever gate [`crate::tools::ToolRegistry`] already applied before dispatch, so a bug in
 //! the tool layer can't turn into an out-of-scope write.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
-use tm_types::{Authority, Result};
+use similar::{ChangeTag, TextDiff};
+use tm_core::artifact::hash_bytes;
+use tm_types::{Authority, Result, TmError};
 
 /// One requested edit. Every variant that touches existing content carries an
 /// `expected_hash`: the blake3 hex hash of the content the caller last read, used to detect a
@@ -176,26 +178,529 @@ impl PatchEngine {
     /// - [`PatchError::InvalidRange`] for a [`Edit::RangeReplace`] whose byte range doesn't fall
     ///   on the current content's boundaries (`byte_start <= byte_end <= content.len()`).
     /// - [`PatchError::Io`] for any underlying read/write failure.
-    // IMPL: (1) validate + resolve the path; (2) authority scope check first, before any I/O,
-    // so a denied write never touches disk; (3) read current bytes (empty/absent as "no file"
-    // for Create); (4) hash current content with `tm_core::artifact::hash_bytes` and compare to
-    // `expected_hash`/existence, short-circuiting to `Conflict` on mismatch — the "never a
-    // blind overwrite" invariant lives entirely in this comparison; (5) compute the new content
-    // per variant (`RangeReplace` splices `replacement` into `[byte_start, byte_end)`, checked
-    // against current content length first); (6) write atomically (write to a temp file in the
-    // same directory, then rename, so a crash mid-write never leaves a partial file); (7) build
-    // the unified diff via `similar::TextDiff::from_lines(...).unified_diff()` and a
-    // `DiffSummary` from the same diff's change tally; (8) return the assembled `Patch`.
     pub fn apply(&self, edit: &Edit) -> PatchOutcome {
-        todo!("resolve+scope-check the path, detect conflicts against expected_hash, write atomically, and build a similar-based unified diff and DiffSummary")
+        let path = edit.path();
+        let abs = self.resolve(path)?;
+        if !self.authority.repository.write.matches(path) {
+            return Err(PatchError::OutOfScope {
+                path: path.to_string(),
+            });
+        }
+        let existing = self.read_existing(&abs, path)?;
+
+        match edit {
+            Edit::Create { path: p, content } => {
+                if existing.is_some() {
+                    return Err(PatchError::Conflict {
+                        path: p.clone(),
+                        detail: "file already exists".to_string(),
+                    });
+                }
+                self.write_atomic(&abs, path, content.as_bytes())?;
+                let diff = TextDiff::from_lines("", content.as_str());
+                Ok(Patch {
+                    path: p.clone(),
+                    unified_diff: unified_diff_text(&diff, p),
+                    hash_before: None,
+                    hash_after: Some(hash_bytes(content.as_bytes())),
+                    summary: diff_summary(&diff, true, false),
+                })
+            }
+            Edit::Write {
+                path: p,
+                content,
+                expected_hash,
+            } => {
+                check_expectation(p, existing.as_deref(), expected_hash)?;
+                let before = existing.unwrap_or_default();
+                self.write_atomic(&abs, path, content.as_bytes())?;
+                let diff = TextDiff::from_lines(before.as_str(), content.as_str());
+                Ok(Patch {
+                    path: p.clone(),
+                    unified_diff: unified_diff_text(&diff, p),
+                    hash_before: Some(hash_bytes(before.as_bytes())),
+                    hash_after: Some(hash_bytes(content.as_bytes())),
+                    summary: diff_summary(&diff, false, false),
+                })
+            }
+            Edit::Delete {
+                path: p,
+                expected_hash,
+            } => {
+                check_expectation(p, existing.as_deref(), expected_hash)?;
+                let before = existing.ok_or_else(|| PatchError::Conflict {
+                    path: p.clone(),
+                    detail: "file no longer exists".to_string(),
+                })?;
+                self.remove_file(&abs, path)?;
+                let diff = TextDiff::from_lines(before.as_str(), "");
+                Ok(Patch {
+                    path: p.clone(),
+                    unified_diff: unified_diff_text(&diff, p),
+                    hash_before: Some(hash_bytes(before.as_bytes())),
+                    hash_after: None,
+                    summary: diff_summary(&diff, false, true),
+                })
+            }
+            Edit::RangeReplace {
+                path: p,
+                byte_start,
+                byte_end,
+                replacement,
+                expected_hash,
+            } => {
+                check_expectation(p, existing.as_deref(), expected_hash)?;
+                let before = existing.ok_or_else(|| PatchError::Conflict {
+                    path: p.clone(),
+                    detail: "file no longer exists".to_string(),
+                })?;
+                if *byte_start > *byte_end
+                    || *byte_end > before.len()
+                    || !before.is_char_boundary(*byte_start)
+                    || !before.is_char_boundary(*byte_end)
+                {
+                    return Err(PatchError::InvalidRange {
+                        path: p.clone(),
+                        byte_start: *byte_start,
+                        byte_end: *byte_end,
+                    });
+                }
+                let mut after = String::with_capacity(
+                    before.len() - (byte_end - byte_start) + replacement.len(),
+                );
+                after.push_str(&before[..*byte_start]);
+                after.push_str(replacement);
+                after.push_str(&before[*byte_end..]);
+                self.write_atomic(&abs, path, after.as_bytes())?;
+                let diff = TextDiff::from_lines(before.as_str(), after.as_str());
+                Ok(Patch {
+                    path: p.clone(),
+                    unified_diff: unified_diff_text(&diff, p),
+                    hash_before: Some(hash_bytes(before.as_bytes())),
+                    hash_after: Some(hash_bytes(after.as_bytes())),
+                    summary: diff_summary(&diff, false, false),
+                })
+            }
+        }
     }
 
     /// Whether `path` (relative to `self.root`) falls within the engine's write scope, without
     /// attempting any edit. Exposed so [`crate::tools::ToolRegistry`] can pre-flight a
     /// `fs.*`/`edit.*` tool call's `Action::WritePath` before even constructing an [`Edit`].
-    // IMPL: join `path` to `self.root`, reject `..`/absolute components, then delegate to
-    // `self.authority.repository.write.matches(path)`.
     pub fn in_write_scope(&self, path: &str) -> Result<bool> {
-        todo!("resolve path safely and check tm_types::PatternSet::matches against the write scope")
+        self.resolve(path)
+            .map(|_| self.authority.repository.write.matches(path))
+            .map_err(|e| TmError::Parse(e.to_string()))
+    }
+
+    /// Resolve `path` (relative to `self.root`) to an absolute path, rejecting anything that
+    /// escapes the root or isn't representable as UTF-8 once joined.
+    fn resolve(&self, path: &str) -> std::result::Result<PathBuf, PatchError> {
+        let candidate = Path::new(path);
+        if candidate.is_absolute()
+            || candidate
+                .components()
+                .any(|c| matches!(c, Component::ParentDir))
+        {
+            return Err(PatchError::InvalidPath(path.to_string()));
+        }
+        let joined = self.root.join(candidate);
+        if joined.to_str().is_none() {
+            return Err(PatchError::InvalidPath(path.to_string()));
+        }
+        Ok(joined)
+    }
+
+    /// Read the current content at `abs`, returning `None` when no file exists there yet.
+    fn read_existing(
+        &self,
+        abs: &Path,
+        path: &str,
+    ) -> std::result::Result<Option<String>, PatchError> {
+        match std::fs::read(abs) {
+            Ok(bytes) => String::from_utf8(bytes)
+                .map(Some)
+                .map_err(|_| PatchError::Io {
+                    path: path.to_string(),
+                    detail: "file is not valid UTF-8".to_string(),
+                }),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(PatchError::Io {
+                path: path.to_string(),
+                detail: e.to_string(),
+            }),
+        }
+    }
+
+    /// Write `bytes` to `abs` via a temp file in the same directory followed by a rename, so a
+    /// crash mid-write never leaves a partial file behind.
+    fn write_atomic(
+        &self,
+        abs: &Path,
+        path: &str,
+        bytes: &[u8],
+    ) -> std::result::Result<(), PatchError> {
+        let dir = abs.parent().ok_or_else(|| PatchError::Io {
+            path: path.to_string(),
+            detail: "target has no parent directory".to_string(),
+        })?;
+        std::fs::create_dir_all(dir).map_err(|e| PatchError::Io {
+            path: path.to_string(),
+            detail: e.to_string(),
+        })?;
+        let file_name = abs
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("patch-target");
+        let tmp = dir.join(format!(".{file_name}.tmp-patch"));
+        std::fs::write(&tmp, bytes).map_err(|e| PatchError::Io {
+            path: path.to_string(),
+            detail: e.to_string(),
+        })?;
+        std::fs::rename(&tmp, abs).map_err(|e| PatchError::Io {
+            path: path.to_string(),
+            detail: e.to_string(),
+        })
+    }
+
+    /// Remove the file at `abs`.
+    fn remove_file(&self, abs: &Path, path: &str) -> std::result::Result<(), PatchError> {
+        std::fs::remove_file(abs).map_err(|e| PatchError::Io {
+            path: path.to_string(),
+            detail: e.to_string(),
+        })
+    }
+}
+
+/// Check an edit's `expected_hash`/existence claim against what's actually on disk right now.
+/// `None` means "I never observed this path", which is only consistent with the path not
+/// currently existing; `Some(hash)` must match the current content's hash exactly.
+fn check_expectation(
+    path: &str,
+    existing: Option<&str>,
+    expected_hash: &Option<String>,
+) -> std::result::Result<(), PatchError> {
+    match (expected_hash, existing) {
+        (None, None) => Ok(()),
+        (None, Some(_)) => Err(PatchError::Conflict {
+            path: path.to_string(),
+            detail: "file already exists but no expected hash was supplied".to_string(),
+        }),
+        (Some(_), None) => Err(PatchError::Conflict {
+            path: path.to_string(),
+            detail: "file no longer exists".to_string(),
+        }),
+        (Some(expected), Some(content)) => {
+            let actual = hash_bytes(content.as_bytes());
+            if &actual == expected {
+                Ok(())
+            } else {
+                Err(PatchError::Conflict {
+                    path: path.to_string(),
+                    detail: format!("expected hash {expected}, found {actual}"),
+                })
+            }
+        }
+    }
+}
+
+/// Tally a `similar` diff's changes into a [`DiffSummary`].
+fn diff_summary<'a>(diff: &TextDiff<'a, 'a, 'a, str>, created: bool, deleted: bool) -> DiffSummary {
+    let mut lines_added = 0;
+    let mut lines_removed = 0;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => lines_added += 1,
+            ChangeTag::Delete => lines_removed += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+    DiffSummary {
+        lines_added,
+        lines_removed,
+        created,
+        deleted,
+    }
+}
+
+/// Render a `similar` diff as unified-diff text headed with `a/<path>` / `b/<path>`.
+fn unified_diff_text<'a>(diff: &'a TextDiff<'a, 'a, 'a, str>, path: &str) -> String {
+    diff.unified_diff()
+        .header(&format!("a/{path}"), &format!("b/{path}"))
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tm_types::{PatternSet, RepoAuthority};
+
+    fn engine_with_scope(root: &Path, patterns: &[&str]) -> PatchEngine {
+        let authority = Authority {
+            repository: RepoAuthority {
+                read: PatternSet::all(),
+                write: PatternSet::parse(patterns.iter().map(|s| s.to_string())).unwrap(),
+            },
+            ..Authority::default()
+        };
+        PatchEngine::new(root.to_path_buf(), authority)
+    }
+
+    fn full_access_engine(root: &Path) -> PatchEngine {
+        engine_with_scope(root, &["**"])
+    }
+
+    #[test]
+    fn create_writes_a_new_file_and_reports_added_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = full_access_engine(dir.path());
+        let patch = engine
+            .apply(&Edit::Create {
+                path: "hello.txt".to_string(),
+                content: "hi\nthere\n".to_string(),
+            })
+            .unwrap();
+        assert_eq!(patch.hash_before, None);
+        assert!(patch.summary.created);
+        assert_eq!(patch.summary.lines_added, 2);
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("hello.txt")).unwrap(),
+            "hi\nthere\n"
+        );
+    }
+
+    #[test]
+    fn create_conflicts_when_the_file_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.txt"), "existing").unwrap();
+        let engine = full_access_engine(dir.path());
+        let err = engine
+            .apply(&Edit::Create {
+                path: "hello.txt".to_string(),
+                content: "new".to_string(),
+            })
+            .unwrap_err();
+        assert!(matches!(err, PatchError::Conflict { .. }));
+    }
+
+    #[test]
+    fn write_with_matching_hash_replaces_content() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "old\n").unwrap();
+        let engine = full_access_engine(dir.path());
+        let hash = hash_bytes(b"old\n");
+        let patch = engine
+            .apply(&Edit::Write {
+                path: "f.txt".to_string(),
+                content: "new\n".to_string(),
+                expected_hash: Some(hash),
+            })
+            .unwrap();
+        assert_eq!(patch.hash_after, Some(hash_bytes(b"new\n")));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "new\n"
+        );
+    }
+
+    #[test]
+    fn write_with_stale_hash_is_a_conflict_and_does_not_touch_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "current\n").unwrap();
+        let engine = full_access_engine(dir.path());
+        let err = engine
+            .apply(&Edit::Write {
+                path: "f.txt".to_string(),
+                content: "new\n".to_string(),
+                expected_hash: Some(hash_bytes(b"stale\n")),
+            })
+            .unwrap_err();
+        assert!(matches!(err, PatchError::Conflict { .. }));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "current\n"
+        );
+    }
+
+    #[test]
+    fn write_with_no_hash_conflicts_if_the_file_already_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "current\n").unwrap();
+        let engine = full_access_engine(dir.path());
+        let err = engine
+            .apply(&Edit::Write {
+                path: "f.txt".to_string(),
+                content: "new\n".to_string(),
+                expected_hash: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, PatchError::Conflict { .. }));
+    }
+
+    #[test]
+    fn write_with_no_hash_creates_when_the_file_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = full_access_engine(dir.path());
+        let patch = engine
+            .apply(&Edit::Write {
+                path: "fresh.txt".to_string(),
+                content: "hi\n".to_string(),
+                expected_hash: None,
+            })
+            .unwrap();
+        assert_eq!(patch.hash_before, Some(hash_bytes(b"")));
+    }
+
+    #[test]
+    fn delete_removes_the_file_when_hash_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("gone.txt"), "bye\n").unwrap();
+        let engine = full_access_engine(dir.path());
+        let patch = engine
+            .apply(&Edit::Delete {
+                path: "gone.txt".to_string(),
+                expected_hash: Some(hash_bytes(b"bye\n")),
+            })
+            .unwrap();
+        assert!(patch.summary.deleted);
+        assert_eq!(patch.hash_after, None);
+        assert!(!dir.path().join("gone.txt").exists());
+    }
+
+    #[test]
+    fn delete_of_a_missing_file_is_a_conflict() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = full_access_engine(dir.path());
+        let err = engine
+            .apply(&Edit::Delete {
+                path: "missing.txt".to_string(),
+                expected_hash: None,
+            })
+            .unwrap_err();
+        assert!(matches!(err, PatchError::Conflict { .. }));
+    }
+
+    #[test]
+    fn range_replace_splices_into_the_middle_of_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("r.txt"), "abcdef").unwrap();
+        let engine = full_access_engine(dir.path());
+        let patch = engine
+            .apply(&Edit::RangeReplace {
+                path: "r.txt".to_string(),
+                byte_start: 2,
+                byte_end: 4,
+                replacement: "XY".to_string(),
+                expected_hash: Some(hash_bytes(b"abcdef")),
+            })
+            .unwrap();
+        assert_eq!(patch.hash_after, Some(hash_bytes(b"abXYef")));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("r.txt")).unwrap(),
+            "abXYef"
+        );
+    }
+
+    #[test]
+    fn range_replace_rejects_an_out_of_bounds_range() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("r.txt"), "abc").unwrap();
+        let engine = full_access_engine(dir.path());
+        let err = engine
+            .apply(&Edit::RangeReplace {
+                path: "r.txt".to_string(),
+                byte_start: 1,
+                byte_end: 10,
+                replacement: "z".to_string(),
+                expected_hash: Some(hash_bytes(b"abc")),
+            })
+            .unwrap_err();
+        assert!(matches!(err, PatchError::InvalidRange { .. }));
+    }
+
+    #[test]
+    fn range_replace_rejects_a_start_after_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("r.txt"), "abc").unwrap();
+        let engine = full_access_engine(dir.path());
+        let err = engine
+            .apply(&Edit::RangeReplace {
+                path: "r.txt".to_string(),
+                byte_start: 2,
+                byte_end: 1,
+                replacement: "z".to_string(),
+                expected_hash: Some(hash_bytes(b"abc")),
+            })
+            .unwrap_err();
+        assert!(matches!(err, PatchError::InvalidRange { .. }));
+    }
+
+    #[test]
+    fn apply_outside_the_write_scope_is_refused_before_any_io() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine_with_scope(dir.path(), &["src/**"]);
+        let err = engine
+            .apply(&Edit::Create {
+                path: "secrets.txt".to_string(),
+                content: "nope".to_string(),
+            })
+            .unwrap_err();
+        assert!(matches!(err, PatchError::OutOfScope { .. }));
+        assert!(!dir.path().join("secrets.txt").exists());
+    }
+
+    #[test]
+    fn apply_rejects_a_path_that_escapes_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = full_access_engine(dir.path());
+        let err = engine
+            .apply(&Edit::Create {
+                path: "../escape.txt".to_string(),
+                content: "nope".to_string(),
+            })
+            .unwrap_err();
+        assert!(matches!(err, PatchError::InvalidPath(_)));
+    }
+
+    #[test]
+    fn apply_rejects_an_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = full_access_engine(dir.path());
+        let err = engine
+            .apply(&Edit::Create {
+                path: "/etc/passwd".to_string(),
+                content: "nope".to_string(),
+            })
+            .unwrap_err();
+        assert!(matches!(err, PatchError::InvalidPath(_)));
+    }
+
+    #[test]
+    fn in_write_scope_reports_true_only_within_the_authority_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = engine_with_scope(dir.path(), &["src/**"]);
+        assert!(engine.in_write_scope("src/lib.rs").unwrap());
+        assert!(!engine.in_write_scope("docs/readme.md").unwrap());
+    }
+
+    #[test]
+    fn in_write_scope_errors_on_an_escaping_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = full_access_engine(dir.path());
+        assert!(engine.in_write_scope("../escape.txt").is_err());
+    }
+
+    #[test]
+    fn unified_diff_names_the_touched_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = full_access_engine(dir.path());
+        let patch = engine
+            .apply(&Edit::Create {
+                path: "named.txt".to_string(),
+                content: "one\n".to_string(),
+            })
+            .unwrap();
+        assert!(patch.unified_diff.contains("named.txt"));
+        assert!(patch.unified_diff.contains("+one"));
     }
 }

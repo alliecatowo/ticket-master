@@ -56,9 +56,6 @@ impl PanicStop {
     /// True when the cursor moving from `agent_last_point` (the position the session itself
     /// last set) to `observed_point` (what a poll just read back) indicates a human moved the
     /// physical mouse, and the session must stop.
-    // IMPL: trigger when the Euclidean distance between the two points exceeds
-    // `config.mouse_move_threshold_px`. Pure, no I/O; NaN inputs are treated as already
-    // triggered (fail safe, never fail open).
     pub fn mouse_moved(&self, agent_last_point: Point, observed_point: Point) -> bool {
         let dx = observed_point.x - agent_last_point.x;
         let dy = observed_point.y - agent_last_point.y;
@@ -137,12 +134,6 @@ impl ComputerSession {
 
     /// Observe the desktop: element tree with refs, falling back to a screenshot when the tree
     /// is unavailable or the caller asks for one explicitly via `force_screenshot`.
-    // IMPL: call `backend.element_tree(None)`; on `Ok`, set `tree = Some(..)` and
-    // `screenshot = None` unless `force_screenshot`, in which case also call
-    // `backend.screenshot(None)`. On an element-tree `Err` that is specifically
-    // `ComputerError::BackendUnavailable` (tree genuinely not offered right now), fall back to
-    // `backend.screenshot(None)` alone rather than propagating the error — any other error
-    // (e.g. `PermissionMissing`) propagates, since a screenshot would fail for the same reason.
     pub async fn snapshot(&self, at: Timestamp, force_screenshot: bool) -> TmResult<Snapshot> {
         let captured_at = at;
         let tree_result = self.backend.element_tree(None).await;
@@ -178,12 +169,6 @@ impl ComputerSession {
 
     /// Perform one input action, enforcing approval and the panic stop before it reaches the
     /// backend.
-    // IMPL: return `ComputerError::ApprovalRequired` (mapped to `TmError::AuthorityDenied`) when
-    // `!self.is_approved()`. For `InputAction::KeyChord(c)` matching `self.panic_stop`'s abort
-    // chord, trigger the stop (see `ComputerSession::panic_stop_check`) instead of forwarding
-    // the action. Otherwise forward to `self.backend.input`, and on success where the action
-    // moved the cursor (`Click`/`DoubleClick`/`RightClick`/`Drag`/`Scroll` with a `Point`
-    // target), update `self.last_agent_point` so the next panic-stop poll has a baseline.
     pub async fn act(&mut self, action: InputAction) -> TmResult<()> {
         if !self.is_approved() {
             return Err(crate::ComputerError::ApprovalRequired.into());
@@ -252,11 +237,6 @@ impl ComputerSession {
     /// Feed an out-of-band cursor observation (from a backend's background poll) through the
     /// panic-stop policy; on trigger, revokes this session's ability to act and returns the
     /// resulting error so the caller can propagate a lease revocation.
-    // IMPL: only meaningful for `SessionMode::Attended`; a `Headless` session's poll is a no-op
-    // returning `Ok(())`. Compare `observed` against `self.last_agent_point` (treat `None` as
-    // "no baseline yet", never a trigger) via `self.panic_stop.mouse_moved`; on trigger, set
-    // `self.approved = false` so `is_approved` starts refusing further `act` calls, and return
-    // `Err(ComputerError::PanicStop(..).into())`.
     pub fn panic_stop_check(&mut self, observed: Point) -> TmResult<()> {
         match self.mode {
             SessionMode::Headless { .. } => Ok(()),
@@ -324,7 +304,7 @@ impl ComputerSession {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::{Modifier, Rect};
+    use crate::input::{Modifier, MouseButton, Rect, ScrollDelta};
 
     #[test]
     fn panic_stop_mouse_moved_exceeds_threshold() {
@@ -579,6 +559,264 @@ mod tests {
         let result = session.panic_stop_check(Point::new(15.0, 0.0));
         assert!(result.is_err());
         assert!(!session.is_approved());
+    }
+
+    #[tokio::test]
+    async fn snapshot_tree_available_no_screenshot() {
+        let backend = MockBackend::new();
+        let mode = SessionMode::Headless {
+            display: ":1".to_string(),
+        };
+        let panic_stop = PanicStop::new(PanicStopConfig {
+            abort_chord: None,
+            mouse_move_threshold_px: 5.0,
+        });
+        let session = ComputerSession::new(Box::new(backend), mode, panic_stop);
+        let snapshot = session.snapshot(Timestamp::EPOCH, false).await.unwrap();
+        assert!(snapshot.tree.is_some());
+        assert!(snapshot.screenshot.is_none());
+        assert_eq!(snapshot.captured_at, Timestamp::EPOCH);
+    }
+
+    #[tokio::test]
+    async fn snapshot_tree_available_with_force_screenshot() {
+        let backend = MockBackend::new();
+        let mode = SessionMode::Headless {
+            display: ":1".to_string(),
+        };
+        let panic_stop = PanicStop::new(PanicStopConfig {
+            abort_chord: None,
+            mouse_move_threshold_px: 5.0,
+        });
+        let session = ComputerSession::new(Box::new(backend), mode, panic_stop);
+        let snapshot = session.snapshot(Timestamp::EPOCH, true).await.unwrap();
+        assert!(snapshot.tree.is_some());
+        assert!(snapshot.screenshot.is_some());
+    }
+
+    #[tokio::test]
+    async fn snapshot_tree_unavailable_falls_back_to_screenshot() {
+        let backend = BackendNoTree::new();
+        let mode = SessionMode::Headless {
+            display: ":1".to_string(),
+        };
+        let panic_stop = PanicStop::new(PanicStopConfig {
+            abort_chord: None,
+            mouse_move_threshold_px: 5.0,
+        });
+        let session = ComputerSession::new(Box::new(backend), mode, panic_stop);
+        let snapshot = session.snapshot(Timestamp::EPOCH, false).await.unwrap();
+        assert!(snapshot.tree.is_none());
+        assert!(snapshot.screenshot.is_some());
+    }
+
+    #[tokio::test]
+    async fn act_unapproved_attended_session_fails() {
+        let backend = MockBackend::new();
+        let mode = SessionMode::Attended;
+        let panic_stop = PanicStop::new(PanicStopConfig {
+            abort_chord: None,
+            mouse_move_threshold_px: 5.0,
+        });
+        let mut session = ComputerSession::new(Box::new(backend), mode, panic_stop);
+        let action = InputAction::TypeText("hello".to_string());
+        let result = session.act(action).await;
+        assert!(result.is_err());
+        assert!(!session.is_approved());
+    }
+
+    #[tokio::test]
+    async fn act_abort_chord_revokes_approval() {
+        let backend = MockBackend::new();
+        let chord = KeyChord {
+            modifiers: [Modifier::Ctrl, Modifier::Alt].into_iter().collect(),
+            key: "Escape".to_string(),
+        };
+        let mode = SessionMode::Attended;
+        let panic_stop = PanicStop::new(PanicStopConfig {
+            abort_chord: Some(chord.clone()),
+            mouse_move_threshold_px: 5.0,
+        });
+        let mut session = ComputerSession::new(Box::new(backend), mode, panic_stop);
+        session.approve(Timestamp::EPOCH);
+        assert!(session.is_approved());
+        let action = InputAction::KeyChord(chord);
+        let result = session.act(action).await;
+        assert!(result.is_err());
+        assert!(!session.is_approved());
+    }
+
+    #[tokio::test]
+    async fn act_click_updates_cursor_baseline() {
+        let backend = MockBackend::new();
+        let mode = SessionMode::Attended;
+        let panic_stop = PanicStop::new(PanicStopConfig {
+            abort_chord: None,
+            mouse_move_threshold_px: 5.0,
+        });
+        let mut session = ComputerSession::new(Box::new(backend), mode, panic_stop);
+        session.approve(Timestamp::EPOCH);
+        assert!(session.last_agent_point.is_none());
+        let point = Point::new(100.0, 200.0);
+        let action = InputAction::Click {
+            target: InputTarget::Point(point),
+            button: MouseButton::Left,
+        };
+        session.act(action).await.unwrap();
+        assert_eq!(session.last_agent_point, Some(point));
+    }
+
+    #[tokio::test]
+    async fn act_type_text_does_not_update_cursor() {
+        let backend = MockBackend::new();
+        let mode = SessionMode::Attended;
+        let panic_stop = PanicStop::new(PanicStopConfig {
+            abort_chord: None,
+            mouse_move_threshold_px: 5.0,
+        });
+        let mut session = ComputerSession::new(Box::new(backend), mode, panic_stop);
+        session.approve(Timestamp::EPOCH);
+        session.last_agent_point = Some(Point::new(50.0, 50.0));
+        let original_point = session.last_agent_point;
+        let action = InputAction::TypeText("test".to_string());
+        session.act(action).await.unwrap();
+        assert_eq!(session.last_agent_point, original_point);
+    }
+
+    #[tokio::test]
+    async fn act_headless_always_allowed() {
+        let backend = MockBackend::new();
+        let mode = SessionMode::Headless {
+            display: ":1".to_string(),
+        };
+        let panic_stop = PanicStop::new(PanicStopConfig {
+            abort_chord: None,
+            mouse_move_threshold_px: 5.0,
+        });
+        let mut session = ComputerSession::new(Box::new(backend), mode, panic_stop);
+        assert!(session.is_approved());
+        let action = InputAction::TypeText("hello".to_string());
+        let result = session.act(action).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn act_double_click_updates_cursor() {
+        let backend = MockBackend::new();
+        let mode = SessionMode::Attended;
+        let panic_stop = PanicStop::new(PanicStopConfig {
+            abort_chord: None,
+            mouse_move_threshold_px: 5.0,
+        });
+        let mut session = ComputerSession::new(Box::new(backend), mode, panic_stop);
+        session.approve(Timestamp::EPOCH);
+        let point = Point::new(150.0, 250.0);
+        let action = InputAction::DoubleClick {
+            target: InputTarget::Point(point),
+        };
+        session.act(action).await.unwrap();
+        assert_eq!(session.last_agent_point, Some(point));
+    }
+
+    #[tokio::test]
+    async fn act_scroll_with_point_updates_cursor() {
+        let backend = MockBackend::new();
+        let mode = SessionMode::Attended;
+        let panic_stop = PanicStop::new(PanicStopConfig {
+            abort_chord: None,
+            mouse_move_threshold_px: 5.0,
+        });
+        let mut session = ComputerSession::new(Box::new(backend), mode, panic_stop);
+        session.approve(Timestamp::EPOCH);
+        let point = Point::new(300.0, 400.0);
+        let action = InputAction::Scroll {
+            target: InputTarget::Point(point),
+            delta: ScrollDelta { dx: 0.0, dy: 3.0 },
+        };
+        session.act(action).await.unwrap();
+        assert_eq!(session.last_agent_point, Some(point));
+    }
+
+    // Mock backend that fails element_tree to test screenshot fallback
+    struct BackendNoTree;
+
+    impl BackendNoTree {
+        fn new() -> Self {
+            BackendNoTree
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Backend for BackendNoTree {
+        fn kind(&self) -> crate::backend::BackendKind {
+            crate::backend::BackendKind::X11
+        }
+
+        async fn probe(&self) -> TmResult<Capabilities> {
+            Ok(Capabilities {
+                backend: crate::backend::BackendKind::X11,
+                input: true,
+                capture: true,
+                element_tree: false,
+                headless: true,
+                notes: vec![],
+            })
+        }
+
+        async fn input(&self, _action: InputAction) -> TmResult<()> {
+            Ok(())
+        }
+
+        async fn screenshot(&self, _display: Option<&str>) -> TmResult<Screenshot> {
+            Ok(Screenshot {
+                png_bytes: vec![],
+                bounds: Rect::new(Point::new(0.0, 0.0), 1920.0, 1080.0),
+            })
+        }
+
+        async fn element_tree(&self, _max_depth: Option<u32>) -> TmResult<ElementNode> {
+            Err(crate::ComputerError::BackendUnavailable {
+                backend: "test".to_string(),
+                reason: "tree not available".to_string(),
+            }
+            .into())
+        }
+
+        async fn displays(&self) -> TmResult<Vec<DisplayInfo>> {
+            Ok(vec![])
+        }
+
+        async fn windows(&self) -> TmResult<Vec<WindowInfo>> {
+            Ok(vec![])
+        }
+
+        async fn focus_window(&self, _window_id: &str) -> TmResult<()> {
+            Ok(())
+        }
+
+        async fn move_window(&self, _window_id: &str, _to: Point) -> TmResult<()> {
+            Ok(())
+        }
+
+        async fn resize_window(&self, _window_id: &str, _width: f64, _height: f64) -> TmResult<()> {
+            Ok(())
+        }
+
+        async fn clipboard_get(&self) -> TmResult<Option<String>> {
+            Ok(None)
+        }
+
+        async fn clipboard_set(&self, _text: &str) -> TmResult<()> {
+            Ok(())
+        }
+
+        async fn launch(&self, _app: &str) -> TmResult<()> {
+            Ok(())
+        }
+
+        async fn quit(&self, _app: &str) -> TmResult<()> {
+            Ok(())
+        }
     }
 
     // Mock backend for testing

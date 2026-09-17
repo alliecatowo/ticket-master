@@ -29,6 +29,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::Json;
 use serde::Serialize;
 use tm_core::Store;
 use tm_events::{EventHub, EventLog};
@@ -105,12 +106,25 @@ impl AppState {
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdSource>,
     ) -> tm_types::Result<Self> {
-        // IMPL: Store::open_with(&config.project_root, clock.clone(), ids.clone())?, and
-        // EventLog::open_with_clock(&config.project_root.join(".tm").join("project.db"),
-        // clock.clone())?, both wrapped in Arc::new. presence/approvals/broadcaster start empty
-        // (PresenceTable::new(), ApprovalRegistry::new(), EventHub::new()); providers/harness
-        // start None (callers that want them wired set AppState's fields after open()).
-        todo!("open Store and a read-only EventLog on the same db path, empty presence/approvals")
+        let store = Arc::new(Store::open_with(
+            &config.project_root,
+            clock.clone(),
+            ids.clone(),
+        )?);
+        let db_path = config.project_root.join(".tm").join("project.db");
+        let events = Arc::new(EventLog::open_with_clock(&db_path, clock.clone())?);
+        Ok(AppState {
+            store,
+            events,
+            broadcaster: Arc::new(EventHub::new()),
+            presence: Arc::new(PresenceTable::new()),
+            approvals: Arc::new(ApprovalRegistry::new()),
+            config,
+            clock,
+            ids,
+            providers: None,
+            harness: None,
+        })
     }
 
     /// Spawn the background task that turns `store`'s commits into `broadcaster` publishes.
@@ -123,10 +137,37 @@ impl AppState {
     /// `config.broadcast_poll_interval`. Runs until `self` (specifically `events`) is dropped;
     /// callers keep the returned `JoinHandle` only to abort it on shutdown.
     pub fn spawn_broadcast_poller(self: &Arc<Self>) -> tokio::task::JoinHandle<()> {
-        // IMPL: tokio::spawn(async move { loop { read_from + publish + sleep } }); a poll
-        // error (I/O hiccup) should be logged via `tracing::warn!` and retried next tick, never
-        // panic — this task must never crash the server.
-        todo!("spawn a tokio task polling `events` and publishing new events to `broadcaster`")
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let page_size = state.config.sse_replay_page_size;
+            let poll_interval = state.config.broadcast_poll_interval;
+            let mut last_seq = match state.events.head() {
+                Ok(head) => head,
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to read event log head on broadcast poller startup: {}",
+                        e
+                    );
+                    0
+                }
+            };
+
+            loop {
+                match state.events.read_from(last_seq + 1, page_size) {
+                    Ok(events) => {
+                        for event in events {
+                            state.broadcaster.publish(&event);
+                            last_seq = event.seq;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("broadcast poller read_from failed: {}", e);
+                    }
+                }
+
+                tokio::time::sleep(poll_interval).await;
+            }
+        })
     }
 }
 
@@ -170,27 +211,261 @@ pub struct ErrorBody {
 ///   a legal-but-currently-blocked state transition)
 /// - `Storage`, `Provider`, `Io`, `Parse`, `Invariant` → 500 Internal Server Error
 pub fn status_for(err: &TmError) -> StatusCode {
-    // IMPL: exhaustive match on TmError's variants (see crate docs for the full list); no
-    // catch-all `_` arm, so a new TmError variant is a compile error here, not a silent 500.
-    todo!("map each TmError variant to the status code documented above")
+    match err {
+        TmError::AuthorityDenied(_) => StatusCode::FORBIDDEN,
+        TmError::NotFound { .. } => StatusCode::NOT_FOUND,
+        TmError::Conflict(_) => StatusCode::CONFLICT,
+        TmError::InvalidTransition(_) => StatusCode::CONFLICT,
+        TmError::LeaseExpired(_) => StatusCode::CONFLICT,
+        TmError::BudgetExhausted(_) => StatusCode::CONFLICT,
+        TmError::Storage(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        TmError::Provider(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        TmError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        TmError::Parse(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        TmError::Invariant(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 /// The machine-readable error code embedded in [`ErrorBody::error`] for a given [`TmError`].
 pub fn error_code(err: &TmError) -> &'static str {
-    // IMPL: exhaustive match mirroring `status_for`, e.g. NotFound -> "not_found",
-    // AuthorityDenied -> "authority_denied", Conflict -> "conflict", InvalidTransition ->
-    // "invalid_transition", LeaseExpired -> "lease_expired", BudgetExhausted ->
-    // "budget_exhausted", Storage/Io/Provider/Parse -> "storage_error", Invariant ->
-    // "invariant_violation".
-    todo!("map each TmError variant to a stable machine-readable code")
+    match err {
+        TmError::NotFound { .. } => "not_found",
+        TmError::AuthorityDenied(_) => "authority_denied",
+        TmError::Conflict(_) => "conflict",
+        TmError::InvalidTransition(_) => "invalid_transition",
+        TmError::LeaseExpired(_) => "lease_expired",
+        TmError::BudgetExhausted(_) => "budget_exhausted",
+        TmError::Storage(_) => "storage_error",
+        TmError::Io(_) => "storage_error",
+        TmError::Provider(_) => "storage_error",
+        TmError::Parse(_) => "storage_error",
+        TmError::Invariant(_) => "invariant_violation",
+    }
 }
 
 impl IntoResponse for ServerError {
     fn into_response(self) -> Response {
-        // IMPL: build (StatusCode, Json<ErrorBody>) per variant: Domain(e) uses
-        // status_for(&e)/error_code(&e)/e.to_string(); Unauthorized -> 401 "unauthorized";
-        // BadRequest(msg) -> 400 "bad_request"/msg; ApprovalFailed(msg) -> 500
-        // "approval_failed"/msg. Then call .into_response() on the tuple.
-        todo!("render this ServerError as a (StatusCode, Json<ErrorBody>) response")
+        let (status, code, message) = match self {
+            ServerError::Domain(ref e) => (status_for(e), error_code(e), e.to_string()),
+            ServerError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "unauthorized".to_string(),
+            ),
+            ServerError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
+            ServerError::ApprovalFailed(msg) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, "approval_failed", msg)
+            }
+        };
+
+        let body = ErrorBody {
+            error: code,
+            message,
+        };
+
+        (status, Json(body)).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::path::PathBuf;
+
+    #[test]
+    fn status_for_authority_denied_is_403() {
+        let err = TmError::AuthorityDenied("test".into());
+        assert_eq!(status_for(&err), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn status_for_not_found_is_404() {
+        let err = TmError::NotFound {
+            kind: "ticket",
+            id: "T-1".to_string(),
+        };
+        assert_eq!(status_for(&err), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn status_for_conflict_is_409() {
+        let err = TmError::Conflict("test".into());
+        assert_eq!(status_for(&err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn status_for_invalid_transition_is_409() {
+        let err = TmError::InvalidTransition("test".into());
+        assert_eq!(status_for(&err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn status_for_lease_expired_is_409() {
+        let err = TmError::LeaseExpired("test".into());
+        assert_eq!(status_for(&err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn status_for_budget_exhausted_is_409() {
+        let err = TmError::BudgetExhausted("test".into());
+        assert_eq!(status_for(&err), StatusCode::CONFLICT);
+    }
+
+    #[test]
+    fn status_for_storage_is_500() {
+        let err = TmError::Storage("test".into());
+        assert_eq!(status_for(&err), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn status_for_provider_is_500() {
+        let err = TmError::Provider("test".into());
+        assert_eq!(status_for(&err), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn status_for_io_is_500() {
+        let err = TmError::Io("test".into());
+        assert_eq!(status_for(&err), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn status_for_parse_is_500() {
+        let err = TmError::Parse("test".into());
+        assert_eq!(status_for(&err), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn status_for_invariant_is_500() {
+        let err = TmError::Invariant("test".into());
+        assert_eq!(status_for(&err), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn error_code_for_not_found() {
+        let err = TmError::NotFound {
+            kind: "ticket",
+            id: "T-1".to_string(),
+        };
+        assert_eq!(error_code(&err), "not_found");
+    }
+
+    #[test]
+    fn error_code_for_authority_denied() {
+        let err = TmError::AuthorityDenied("test".into());
+        assert_eq!(error_code(&err), "authority_denied");
+    }
+
+    #[test]
+    fn error_code_for_conflict() {
+        let err = TmError::Conflict("test".into());
+        assert_eq!(error_code(&err), "conflict");
+    }
+
+    #[test]
+    fn error_code_for_invalid_transition() {
+        let err = TmError::InvalidTransition("test".into());
+        assert_eq!(error_code(&err), "invalid_transition");
+    }
+
+    #[test]
+    fn error_code_for_lease_expired() {
+        let err = TmError::LeaseExpired("test".into());
+        assert_eq!(error_code(&err), "lease_expired");
+    }
+
+    #[test]
+    fn error_code_for_budget_exhausted() {
+        let err = TmError::BudgetExhausted("test".into());
+        assert_eq!(error_code(&err), "budget_exhausted");
+    }
+
+    #[test]
+    fn error_code_for_storage() {
+        let err = TmError::Storage("test".into());
+        assert_eq!(error_code(&err), "storage_error");
+    }
+
+    #[test]
+    fn error_code_for_io() {
+        let err = TmError::Io("test".into());
+        assert_eq!(error_code(&err), "storage_error");
+    }
+
+    #[test]
+    fn error_code_for_provider() {
+        let err = TmError::Provider("test".into());
+        assert_eq!(error_code(&err), "storage_error");
+    }
+
+    #[test]
+    fn error_code_for_parse() {
+        let err = TmError::Parse("test".into());
+        assert_eq!(error_code(&err), "storage_error");
+    }
+
+    #[test]
+    fn error_code_for_invariant() {
+        let err = TmError::Invariant("test".into());
+        assert_eq!(error_code(&err), "invariant_violation");
+    }
+
+    #[test]
+    fn server_error_domain_renders_with_correct_status() {
+        let err: ServerError = TmError::NotFound {
+            kind: "ticket",
+            id: "T-1".to_string(),
+        }
+        .into();
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn server_error_unauthorized_renders_401() {
+        let err = ServerError::Unauthorized;
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn server_error_bad_request_renders_400() {
+        let err = ServerError::BadRequest("invalid input".into());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn server_error_approval_failed_renders_500() {
+        let err = ServerError::ApprovalFailed("rendezvous failed".into());
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn server_config_requires_auth_on_non_loopback() {
+        let config = ServerConfig {
+            project_root: PathBuf::from("/tmp/test"),
+            bind_addr: "127.0.0.1:8080".parse().unwrap(),
+            token: None,
+            presence_ttl_seconds: 300,
+            broadcast_poll_interval: Duration::from_secs(1),
+            sse_replay_page_size: 100,
+        };
+        assert!(!config.requires_auth());
+    }
+
+    #[test]
+    fn server_config_requires_auth_on_non_loopback_ip() {
+        let config = ServerConfig {
+            project_root: PathBuf::from("/tmp/test"),
+            bind_addr: (IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080).into(),
+            token: Some("token".into()),
+            presence_ttl_seconds: 300,
+            broadcast_poll_interval: Duration::from_secs(1),
+            sse_replay_page_size: 100,
+        };
+        assert!(config.requires_auth());
     }
 }

@@ -14,6 +14,46 @@ use tm_types::TicketId;
 
 use crate::tracker::TrackerCapabilities;
 
+#[cfg(test)]
+fn test_ticket(id: &str, kind: TicketKind, state: TicketState, objective: &str) -> Ticket {
+    use tm_core::{ExecutorRequirements, RetryPolicy, VerificationPolicy};
+    use tm_types::{Authority, Budget, Role, Timestamp, Tolerance};
+
+    Ticket {
+        id: TicketId::new(id).expect("valid test ticket id"),
+        kind,
+        objective: objective.to_string(),
+        state,
+        parent: None,
+        children: Vec::new(),
+        dependencies: Vec::new(),
+        milestone: None,
+        authority: Authority::default(),
+        resources: Vec::new(),
+        executor: ExecutorRequirements {
+            role: Role::CoderFast,
+            human_required: false,
+            min_capability: Tolerance::Preferred,
+        },
+        context_refs: Vec::new(),
+        success: Vec::new(),
+        verification: VerificationPolicy::None,
+        budget: Budget::default(),
+        retry: RetryPolicy {
+            max_attempts: 3,
+            base_delay_seconds: 10,
+            backoff_multiplier: 2.0,
+            max_delay_seconds: 120,
+        },
+        cycle: None,
+        attempts: 0,
+        failures: Vec::new(),
+        priority: 0,
+        created: Timestamp::EPOCH,
+        updated: Timestamp::EPOCH,
+    }
+}
+
 /// A degradation recorded when the target adapter can't faithfully represent something in the
 /// internal graph, so it never happens silently.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,12 +137,32 @@ impl ProjectionPolicy {
     /// [`TicketState`]'s external (debug-ish, lowercase-with-underscores) names; body ceiling is
     /// a conservative 64 KiB pending a real adapter capability.
     pub fn default_policy() -> Self {
-        // IMPL: eligible_kinds = vec![TicketKind::Work]; state_mapping = one entry per
-        // TicketState variant mapping its name (e.g. "Draft" -> "draft") to itself, built by
-        // iterating a fixed TicketState::ALL-style list (add one if tm-core doesn't already
-        // expose it, or match TicketState exhaustively) so the table stays in sync if tm-core
-        // adds a state; default_max_body_bytes = 64 * 1024.
-        todo!("construct the default projection policy")
+        const ALL_STATES: [TicketState; 14] = [
+            TicketState::Draft,
+            TicketState::Blocked,
+            TicketState::Ready,
+            TicketState::Leased,
+            TicketState::Running,
+            TicketState::Submitted,
+            TicketState::Verifying,
+            TicketState::Auditing,
+            TicketState::Rework,
+            TicketState::Replan,
+            TicketState::Recovery,
+            TicketState::Escalated,
+            TicketState::Closed,
+            TicketState::Cancelled,
+        ];
+        let mut state_mapping = BTreeMap::new();
+        for state in ALL_STATES {
+            let name = format!("{state:?}");
+            state_mapping.insert(name.clone(), name);
+        }
+        Self {
+            eligible_kinds: vec![TicketKind::Work],
+            state_mapping,
+            default_max_body_bytes: 64 * 1024,
+        }
     }
 
     /// Whether `ticket` is eligible to mirror at all.
@@ -116,11 +176,17 @@ impl ProjectionPolicy {
     /// `self.eligible_kinds` *and*, for `TicketKind::Work` specifically, `ticket.milestone` must
     /// be `Some` (the default policy's "parent is a milestone" rule).
     pub fn should_mirror(&self, ticket: &Ticket, mirror_override: Option<bool>) -> bool {
-        // IMPL: see precedence above. Machine-only hard-deny list:
-        // matches!(ticket.kind, TicketKind::Verification | TicketKind::Audit |
-        // TicketKind::Recovery) -> false immediately, before even looking at
-        // mirror_override.
-        todo!("apply the never-mirror hard denylist, then override, then default eligibility")
+        if matches!(
+            ticket.kind,
+            TicketKind::Verification | TicketKind::Audit | TicketKind::Recovery
+        ) {
+            return false;
+        }
+        if let Some(overridden) = mirror_override {
+            return overridden;
+        }
+        self.eligible_kinds.contains(&ticket.kind)
+            && (ticket.kind != TicketKind::Work || ticket.milestone.is_some())
     }
 
     /// Map an internal state to the external state to request, given the target's capability.
@@ -131,29 +197,42 @@ impl ProjectionPolicy {
         state: TicketState,
         caps: &TrackerCapabilities,
     ) -> (String, Option<Degradation>) {
-        // IMPL: internal_name = format!("{state:?}") (or a dedicated Display if tm-core adds
-        // one later). If caps.arbitrary_states: look up internal_name in self.state_mapping;
-        // if present and equal to internal_name, no degradation; if present and different,
-        // still no degradation (arbitrary states means the exact internal state *is*
-        // representable, the mapping is just a display choice) — only fall back to
-        // internal_name itself (no degradation) if absent from the table. If
-        // !caps.arbitrary_states: look up internal_name in self.state_mapping (the adapter's
-        // coarse table, e.g. every state but Closed/Cancelled -> "open"), falling back to
-        // "open" if absent; always attach StateCoarsened{internal: internal_name, external:
-        // <result>} in this branch, since precision is lost regardless of whether the coarse
-        // table happens to already agree.
-        todo!("map internal state to external state, recording coarsening when caps demand it")
+        let internal_name = format!("{state:?}");
+        if caps.arbitrary_states {
+            let external = self
+                .state_mapping
+                .get(&internal_name)
+                .cloned()
+                .unwrap_or_else(|| internal_name.clone());
+            (external, None)
+        } else {
+            let external = self
+                .state_mapping
+                .get(&internal_name)
+                .cloned()
+                .unwrap_or_else(|| "open".to_string());
+            let degradation = Degradation::StateCoarsened {
+                internal: internal_name,
+                external: external.clone(),
+            };
+            (external, Some(degradation))
+        }
     }
 
     /// Build the checklist body for descendants when `parent_child` is false. Order matches
     /// `descendants` (callers pass them in a stable order, e.g. creation order).
     pub fn checklist_rollup(&self, descendants: &[Ticket]) -> Vec<ChecklistItem> {
-        // IMPL: one ChecklistItem per descendant; `done` = matches!(descendant.state,
-        // TicketState::Closed | TicketState::Cancelled); `label` = descendant.objective.clone().
-        // Pure map, preserves input order, no filtering (a caller that wants only mirror-eligible
-        // descendants filters before calling, since eligibility is a `should_mirror` decision
-        // this function doesn't need to repeat).
-        todo!("map descendants to checklist items in input order")
+        descendants
+            .iter()
+            .map(|descendant| ChecklistItem {
+                ticket: descendant.id.clone(),
+                label: descendant.objective.clone(),
+                done: matches!(
+                    descendant.state,
+                    TicketState::Closed | TicketState::Cancelled
+                ),
+            })
+            .collect()
     }
 
     /// Project `ticket` (with its already-fetched `descendants`) for a target with the given
@@ -164,19 +243,244 @@ impl ProjectionPolicy {
         descendants: &[Ticket],
         caps: &TrackerCapabilities,
     ) -> Projection {
-        // IMPL: title = ticket.objective.clone() (or a truncated first line if it's
-        // multi-paragraph — keep it a single line, external issue titles are). body starts as
-        // ticket.objective.clone(); call self.map_state(ticket.state, caps), pushing its
-        // Degradation if any and setting state_hint. If !caps.parent_child &&
-        // !descendants.is_empty(): checklist = self.checklist_rollup(descendants), append a
-        // rendered "\n\n## Subtasks\n" + one "- [x]/[ ] <label> (<ticket id>)" line per item to
-        // body, push Degradation::ChecklistRollup{children: descendants.iter().map(|d|
-        // d.id.clone()).collect()}; else checklist = Vec::new(). If body.len() as usize >
-        // caps.max_body_bytes: truncate body to a UTF-8 char boundary at or before
-        // caps.max_body_bytes, push Degradation::BodyTruncated{original_bytes:
-        // <pre-truncation length>}. labels/milestone are populated by the caller layer (adapter
-        // or sync) from AdapterConfig::projection overrides, since this function only sees a
-        // ticket + capabilities, not config — leave them Vec::new()/None here.
-        todo!("assemble a Projection from a ticket, its descendants, and target capabilities")
+        let title = ticket
+            .objective
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let mut body = ticket.objective.clone();
+        let mut degradations = Vec::new();
+
+        let (state_hint, state_degradation) = self.map_state(ticket.state, caps);
+        if let Some(degradation) = state_degradation {
+            degradations.push(degradation);
+        }
+
+        let checklist = if !caps.parent_child && !descendants.is_empty() {
+            let items = self.checklist_rollup(descendants);
+            body.push_str("\n\n## Subtasks\n");
+            for item in &items {
+                let mark = if item.done { 'x' } else { ' ' };
+                body.push_str(&format!("- [{mark}] {} ({})\n", item.label, item.ticket));
+            }
+            degradations.push(Degradation::ChecklistRollup {
+                children: descendants.iter().map(|d| d.id.clone()).collect(),
+            });
+            items
+        } else {
+            Vec::new()
+        };
+
+        if body.len() > caps.max_body_bytes {
+            let original_bytes = body.len();
+            let mut boundary = caps.max_body_bytes;
+            while boundary > 0 && !body.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            body.truncate(boundary);
+            degradations.push(Degradation::BodyTruncated { original_bytes });
+        }
+
+        Projection {
+            ticket: ticket.id.clone(),
+            title,
+            body,
+            state_hint,
+            labels: Vec::new(),
+            milestone: None,
+            checklist,
+            degradations,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tm_types::MilestoneId;
+
+    fn full_caps(max_body_bytes: usize) -> TrackerCapabilities {
+        TrackerCapabilities {
+            parent_child: true,
+            arbitrary_states: true,
+            milestones: true,
+            labels: true,
+            comments: true,
+            max_body_bytes,
+        }
+    }
+
+    #[test]
+    fn should_mirror_denies_verification_audit_and_recovery_regardless_of_override() {
+        let policy = ProjectionPolicy::default_policy();
+        for kind in [
+            TicketKind::Verification,
+            TicketKind::Audit,
+            TicketKind::Recovery,
+        ] {
+            let mut ticket = test_ticket("T-1", kind, TicketState::Draft, "obj");
+            ticket.milestone = Some(MilestoneId::new("M-1").unwrap());
+            assert!(!policy.should_mirror(&ticket, Some(true)));
+        }
+    }
+
+    #[test]
+    fn should_mirror_override_wins_over_default_eligibility() {
+        let policy = ProjectionPolicy::default_policy();
+        let ticket = test_ticket("T-1", TicketKind::Work, TicketState::Draft, "obj");
+        assert!(policy.should_mirror(&ticket, Some(true)));
+        assert!(!policy.should_mirror(&ticket, Some(false)));
+    }
+
+    #[test]
+    fn should_mirror_work_ticket_requires_milestone_by_default() {
+        let policy = ProjectionPolicy::default_policy();
+        let mut ticket = test_ticket("T-1", TicketKind::Work, TicketState::Draft, "obj");
+        assert!(!policy.should_mirror(&ticket, None));
+        ticket.milestone = Some(MilestoneId::new("M-1").unwrap());
+        assert!(policy.should_mirror(&ticket, None));
+    }
+
+    #[test]
+    fn should_mirror_kind_outside_eligible_list_is_denied() {
+        let policy = ProjectionPolicy::default_policy();
+        let ticket = test_ticket("T-1", TicketKind::Harness, TicketState::Draft, "obj");
+        assert!(!policy.should_mirror(&ticket, None));
+    }
+
+    #[test]
+    fn map_state_with_arbitrary_states_uses_exact_internal_name_without_degradation() {
+        let policy = ProjectionPolicy::default_policy();
+        let caps = full_caps(1024);
+        let (external, degradation) = policy.map_state(TicketState::Running, &caps);
+        assert_eq!(external, "Running");
+        assert!(degradation.is_none());
+    }
+
+    #[test]
+    fn map_state_without_arbitrary_states_always_records_coarsening() {
+        let policy = ProjectionPolicy::default_policy();
+        let mut caps = full_caps(1024);
+        caps.arbitrary_states = false;
+        let (external, degradation) = policy.map_state(TicketState::Running, &caps);
+        assert_eq!(external, "Running");
+        assert_eq!(
+            degradation,
+            Some(Degradation::StateCoarsened {
+                internal: "Running".to_string(),
+                external: "Running".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn map_state_falls_back_to_open_when_coarse_table_lacks_an_entry() {
+        let mut policy = ProjectionPolicy::default_policy();
+        policy.state_mapping.remove("Running");
+        let mut caps = full_caps(1024);
+        caps.arbitrary_states = false;
+        let (external, degradation) = policy.map_state(TicketState::Running, &caps);
+        assert_eq!(external, "open");
+        assert_eq!(
+            degradation,
+            Some(Degradation::StateCoarsened {
+                internal: "Running".to_string(),
+                external: "open".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn checklist_rollup_marks_closed_and_cancelled_done_and_preserves_order() {
+        let policy = ProjectionPolicy::default_policy();
+        let descendants = vec![
+            test_ticket("T-1", TicketKind::Work, TicketState::Running, "first"),
+            test_ticket("T-2", TicketKind::Work, TicketState::Closed, "second"),
+            test_ticket("T-3", TicketKind::Work, TicketState::Cancelled, "third"),
+        ];
+        let items = policy.checklist_rollup(&descendants);
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].ticket.as_str(), "T-1");
+        assert!(!items[0].done);
+        assert!(items[1].done);
+        assert!(items[2].done);
+    }
+
+    #[test]
+    fn project_without_parent_child_rolls_up_descendants_into_checklist_body() {
+        let policy = ProjectionPolicy::default_policy();
+        let mut caps = full_caps(4096);
+        caps.parent_child = false;
+        let ticket = test_ticket("T-1", TicketKind::Work, TicketState::Ready, "parent obj");
+        let descendants = vec![test_ticket(
+            "T-2",
+            TicketKind::Work,
+            TicketState::Closed,
+            "child obj",
+        )];
+        let projection = policy.project(&ticket, &descendants, &caps);
+        assert!(projection.body.contains("## Subtasks"));
+        assert!(projection.body.contains("[x] child obj (T-2)"));
+        assert_eq!(projection.checklist.len(), 1);
+        assert!(projection
+            .degradations
+            .iter()
+            .any(|d| matches!(d, Degradation::ChecklistRollup { children } if children == &[TicketId::new("T-2").unwrap()])));
+    }
+
+    #[test]
+    fn project_with_parent_child_leaves_body_and_checklist_untouched() {
+        let policy = ProjectionPolicy::default_policy();
+        let caps = full_caps(4096);
+        let ticket = test_ticket("T-1", TicketKind::Work, TicketState::Ready, "parent obj");
+        let descendants = vec![test_ticket(
+            "T-2",
+            TicketKind::Work,
+            TicketState::Closed,
+            "child obj",
+        )];
+        let projection = policy.project(&ticket, &descendants, &caps);
+        assert_eq!(projection.body, "parent obj");
+        assert!(projection.checklist.is_empty());
+        assert!(projection.degradations.is_empty());
+    }
+
+    #[test]
+    fn project_truncates_body_exceeding_max_body_bytes_and_records_original_length() {
+        let policy = ProjectionPolicy::default_policy();
+        let caps = full_caps(5);
+        let ticket = test_ticket(
+            "T-1",
+            TicketKind::Work,
+            TicketState::Ready,
+            "much longer than five bytes",
+        );
+        let projection = policy.project(&ticket, &[], &caps);
+        assert!(projection.body.len() <= 5);
+        assert!(projection.degradations.iter().any(
+            |d| matches!(d, Degradation::BodyTruncated { original_bytes } if *original_bytes == 27)
+        ));
+    }
+
+    #[test]
+    fn project_truncation_stays_on_a_utf8_char_boundary() {
+        let policy = ProjectionPolicy::default_policy();
+        // "café" is 5 bytes ('é' is 2 bytes); a naive byte-4 cut would land mid-character.
+        let caps = full_caps(4);
+        let ticket = test_ticket("T-1", TicketKind::Work, TicketState::Ready, "café");
+        let projection = policy.project(&ticket, &[], &caps);
+        assert!(String::from_utf8(projection.body.clone().into_bytes()).is_ok());
+        assert!(projection.body.len() <= 4);
+    }
+
+    #[test]
+    fn default_policy_state_mapping_covers_every_ticket_state() {
+        let policy = ProjectionPolicy::default_policy();
+        assert_eq!(policy.state_mapping.len(), 14);
+        assert_eq!(
+            policy.state_mapping.get("Closed").map(String::as_str),
+            Some("Closed")
+        );
     }
 }

@@ -116,11 +116,10 @@ pub struct Specification {
 // `created`.
 // Errors: `TmError::Provider` on completion failure, `TmError::Parse` on malformed/incomplete/
 // disconnected output.
-pub async fn compile_spec(
-    vision: &Vision,
-    provider: &dyn tm_provider::Provider,
-    clock: &dyn Clock,
-) -> TmResult<Specification> {
+/// Build the `architect.frontier` completion request for `vision`. Exposed so tests can script
+/// [`tm_provider::MockProvider`] against the exact request [`compile_spec`] sends, rather than
+/// duplicating (and risking drift from) the prompt text here.
+pub fn build_spec_request(vision: &Vision) -> tm_provider::types::CompletionRequest {
     use tm_provider::types::{ContentBlock, Message, MessageRole};
 
     let prompt = format!(
@@ -181,7 +180,7 @@ pub async fn compile_spec(
         vision.spiritually_wrong.join("\n")
     );
 
-    let req = tm_provider::types::CompletionRequest {
+    tm_provider::types::CompletionRequest {
         system: Some(
             "You are an expert software architect specializing in specification compilation."
                 .to_string(),
@@ -196,7 +195,16 @@ pub async fn compile_spec(
         stop_sequences: vec![],
         stream: false,
         n: 1,
-    };
+    }
+}
+
+/// The Specification artifact compiled from a [`Vision`] under `architect.frontier`.
+pub async fn compile_spec(
+    vision: &Vision,
+    provider: &dyn tm_provider::Provider,
+    clock: &dyn Clock,
+) -> TmResult<Specification> {
+    let req = build_spec_request(vision);
 
     let completion = provider
         .complete(req)
@@ -286,7 +294,7 @@ mod tests {
     use std::sync::Arc;
     use tm_provider::types::{Candidate, Completion, ContentBlock, ModelId, StopReason, Usage};
     use tm_provider::MockProvider;
-    use tm_types::{FixedClock, TestIds};
+    use tm_types::FixedClock;
 
     fn sample_vision() -> Vision {
         Vision {
@@ -346,11 +354,8 @@ mod tests {
     #[tokio::test]
     async fn compile_spec_happy_path() {
         let vision = sample_vision();
-        let clock = Arc::new(FixedClock::new(
-            tm_types::Timestamp::from_unix_seconds(5000),
-            TestIds,
-        ));
-        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock);
+        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(5000)));
+        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock.clone());
 
         let scripted_completion = Completion {
             model: ModelId::new("anthropic", "claude"),
@@ -426,11 +431,8 @@ mod tests {
     #[tokio::test]
     async fn compile_spec_rejects_empty_v0_criteria() {
         let vision = sample_vision();
-        let clock = Arc::new(FixedClock::new(
-            tm_types::Timestamp::from_unix_seconds(5000),
-            TestIds,
-        ));
-        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock);
+        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(5000)));
+        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock.clone());
 
         let invalid_json = r#"{
   "requirements": [{"id": "R1", "text": "Requirement", "priority": 1}],
@@ -486,11 +488,8 @@ mod tests {
     #[tokio::test]
     async fn compile_spec_rejects_empty_v1_criteria() {
         let vision = sample_vision();
-        let clock = Arc::new(FixedClock::new(
-            tm_types::Timestamp::from_unix_seconds(5000),
-            TestIds,
-        ));
-        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock);
+        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(5000)));
+        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock.clone());
 
         let invalid_json = r#"{
   "requirements": [{"id": "R1", "text": "Requirement", "priority": 1}],
@@ -546,11 +545,8 @@ mod tests {
     #[tokio::test]
     async fn compile_spec_rejects_empty_requirements() {
         let vision = sample_vision();
-        let clock = Arc::new(FixedClock::new(
-            tm_types::Timestamp::from_unix_seconds(5000),
-            TestIds,
-        ));
-        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock);
+        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(5000)));
+        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock.clone());
 
         let invalid_json = r#"{
   "requirements": [],
@@ -606,11 +602,8 @@ mod tests {
     #[tokio::test]
     async fn compile_spec_rejects_malformed_json() {
         let vision = sample_vision();
-        let clock = Arc::new(FixedClock::new(
-            tm_types::Timestamp::from_unix_seconds(5000),
-            TestIds,
-        ));
-        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock);
+        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(5000)));
+        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock.clone());
 
         let scripted_completion = Completion {
             model: ModelId::new("anthropic", "claude"),

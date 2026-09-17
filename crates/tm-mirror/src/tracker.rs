@@ -222,18 +222,478 @@ impl Tracker for RecordingTracker {
     }
 
     async fn push(&self, projection: &Projection) -> Result<ExternalRef> {
-        // IMPL: lock `self.pushed`, push `projection.clone()`. Return a deterministic
-        // ExternalRef synthesized from `projection.ticket` (e.g. external_id =
-        // projection.ticket.to_string(), url = None) — no id generation needed, this is a
-        // recorder rather than a real adapter, so it must not depend on a Clock/IdSource.
-        todo!("record the pushed projection and return a synthesized ExternalRef")
+        self.pushed
+            .lock()
+            .expect("mutex is only ever held for the duration of a single call, never poisoned")
+            .push(projection.clone());
+        Ok(ExternalRef {
+            adapter: self.name.clone(),
+            external_id: projection.ticket.to_string(),
+            url: None,
+        })
     }
 
     async fn pull(&self, since: Timestamp) -> Result<Vec<ExternalChange>> {
-        // IMPL: lock `self.pull_calls`, push `since`. Lock `self.scripted_changes`, clone and
-        // return its current contents (do not drain: repeated pulls with no new `script_pull`
-        // call should keep returning the same script, matching a real tracker that would keep
-        // reporting the same state until it actually changes).
-        todo!("record the call and return the currently scripted changes")
+        self.pull_calls
+            .lock()
+            .expect("mutex is only ever held for the duration of a single call, never poisoned")
+            .push(since);
+        Ok(self
+            .scripted_changes
+            .lock()
+            .expect("mutex is only ever held for the duration of a single call, never poisoned")
+            .clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tm_types::Timestamp;
+
+    // Helper to create a minimal projection for testing.
+    fn test_projection(ticket_id: &str, title: &str) -> Projection {
+        Projection {
+            ticket: ticket_id.parse().expect("valid ticket id"),
+            title: title.to_string(),
+            body: "test body".to_string(),
+            state_hint: "open".to_string(),
+            labels: vec![],
+            milestone: None,
+            checklist: vec![],
+            degradations: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn recording_tracker_push_records_projection() {
+        let tracker = RecordingTracker::new(
+            "test-tracker",
+            TrackerCapabilities {
+                parent_child: true,
+                arbitrary_states: true,
+                milestones: true,
+                labels: true,
+                comments: true,
+                max_body_bytes: 1024,
+            },
+        );
+        let proj = test_projection("T-1", "Test Issue");
+
+        let result = tracker.push(&proj).await;
+        assert!(result.is_ok());
+
+        let pushed = tracker.pushed();
+        assert_eq!(pushed.len(), 1);
+        assert_eq!(pushed[0].ticket, proj.ticket);
+        assert_eq!(pushed[0].title, proj.title);
+    }
+
+    #[tokio::test]
+    async fn recording_tracker_push_returns_correct_external_ref() {
+        let tracker = RecordingTracker::new(
+            "github",
+            TrackerCapabilities {
+                parent_child: true,
+                arbitrary_states: true,
+                milestones: true,
+                labels: true,
+                comments: true,
+                max_body_bytes: 2048,
+            },
+        );
+        let proj = test_projection("T-42", "Issue Title");
+
+        let result = tracker.push(&proj).await.expect("push should succeed");
+        assert_eq!(result.adapter, "github");
+        assert_eq!(result.external_id, "T-42");
+        assert_eq!(result.url, None);
+    }
+
+    #[tokio::test]
+    async fn recording_tracker_push_multiple_calls_records_all() {
+        let tracker = RecordingTracker::new(
+            "test",
+            TrackerCapabilities {
+                parent_child: false,
+                arbitrary_states: false,
+                milestones: false,
+                labels: false,
+                comments: false,
+                max_body_bytes: 512,
+            },
+        );
+
+        let proj1 = test_projection("T-1", "First");
+        let proj2 = test_projection("T-2", "Second");
+        let proj3 = test_projection("T-3", "Third");
+
+        tracker.push(&proj1).await.expect("push 1");
+        tracker.push(&proj2).await.expect("push 2");
+        tracker.push(&proj3).await.expect("push 3");
+
+        let pushed = tracker.pushed();
+        assert_eq!(pushed.len(), 3);
+        assert_eq!(pushed[0].ticket.to_string(), "T-1");
+        assert_eq!(pushed[1].ticket.to_string(), "T-2");
+        assert_eq!(pushed[2].ticket.to_string(), "T-3");
+    }
+
+    #[tokio::test]
+    async fn recording_tracker_pull_records_since_timestamp() {
+        let tracker = RecordingTracker::new(
+            "test",
+            TrackerCapabilities {
+                parent_child: true,
+                arbitrary_states: true,
+                milestones: true,
+                labels: true,
+                comments: true,
+                max_body_bytes: 1024,
+            },
+        );
+
+        let ts1 = Timestamp::EPOCH.plus_millis(1000);
+        let ts2 = Timestamp::EPOCH.plus_millis(2000);
+
+        tracker.pull(ts1).await.expect("pull 1");
+        tracker.pull(ts2).await.expect("pull 2");
+
+        let calls = tracker.pull_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0], ts1);
+        assert_eq!(calls[1], ts2);
+    }
+
+    #[tokio::test]
+    async fn recording_tracker_pull_returns_scripted_changes() {
+        let tracker = RecordingTracker::new(
+            "test",
+            TrackerCapabilities {
+                parent_child: true,
+                arbitrary_states: true,
+                milestones: true,
+                labels: true,
+                comments: true,
+                max_body_bytes: 1024,
+            },
+        );
+
+        let change1 = ExternalChange {
+            external: ExternalRef {
+                adapter: "test".to_string(),
+                external_id: "issue-1".to_string(),
+                url: None,
+            },
+            kind: ExternalChangeKind::StatusHint {
+                state: "closed".to_string(),
+            },
+            observed_at: Timestamp::EPOCH.plus_millis(100),
+        };
+
+        let change2 = ExternalChange {
+            external: ExternalRef {
+                adapter: "test".to_string(),
+                external_id: "issue-2".to_string(),
+                url: Some("https://example.com/2".to_string()),
+            },
+            kind: ExternalChangeKind::Assigned {
+                assignee: Some("alice".to_string()),
+            },
+            observed_at: Timestamp::EPOCH.plus_millis(200),
+        };
+
+        tracker.script_pull(vec![change1.clone(), change2.clone()]);
+
+        let result = tracker
+            .pull(Timestamp::EPOCH.plus_millis(0))
+            .await
+            .expect("pull should succeed");
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], change1);
+        assert_eq!(result[1], change2);
+    }
+
+    #[tokio::test]
+    async fn recording_tracker_pull_persists_scripted_changes_across_calls() {
+        let tracker = RecordingTracker::new(
+            "test",
+            TrackerCapabilities {
+                parent_child: true,
+                arbitrary_states: true,
+                milestones: true,
+                labels: true,
+                comments: true,
+                max_body_bytes: 1024,
+            },
+        );
+
+        let change = ExternalChange {
+            external: ExternalRef {
+                adapter: "test".to_string(),
+                external_id: "issue-1".to_string(),
+                url: None,
+            },
+            kind: ExternalChangeKind::StatusHint {
+                state: "open".to_string(),
+            },
+            observed_at: Timestamp::EPOCH.plus_millis(100),
+        };
+
+        tracker.script_pull(vec![change.clone()]);
+
+        let first = tracker
+            .pull(Timestamp::EPOCH.plus_millis(0))
+            .await
+            .expect("first pull");
+        let second = tracker
+            .pull(Timestamp::EPOCH.plus_millis(0))
+            .await
+            .expect("second pull");
+
+        assert_eq!(first, vec![change.clone()]);
+        assert_eq!(second, vec![change]);
+    }
+
+    #[tokio::test]
+    async fn recording_tracker_pull_replaces_scripted_changes_on_rescripting() {
+        let tracker = RecordingTracker::new(
+            "test",
+            TrackerCapabilities {
+                parent_child: true,
+                arbitrary_states: true,
+                milestones: true,
+                labels: true,
+                comments: true,
+                max_body_bytes: 1024,
+            },
+        );
+
+        let change1 = ExternalChange {
+            external: ExternalRef {
+                adapter: "test".to_string(),
+                external_id: "issue-1".to_string(),
+                url: None,
+            },
+            kind: ExternalChangeKind::StatusHint {
+                state: "open".to_string(),
+            },
+            observed_at: Timestamp::EPOCH.plus_millis(100),
+        };
+
+        let change2 = ExternalChange {
+            external: ExternalRef {
+                adapter: "test".to_string(),
+                external_id: "issue-2".to_string(),
+                url: None,
+            },
+            kind: ExternalChangeKind::Assigned { assignee: None },
+            observed_at: Timestamp::EPOCH.plus_millis(200),
+        };
+
+        tracker.script_pull(vec![change1]);
+        let first = tracker
+            .pull(Timestamp::EPOCH.plus_millis(0))
+            .await
+            .expect("first pull");
+        assert_eq!(first.len(), 1);
+
+        tracker.script_pull(vec![change2.clone()]);
+        let second = tracker
+            .pull(Timestamp::EPOCH.plus_millis(0))
+            .await
+            .expect("second pull");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0], change2);
+    }
+
+    #[tokio::test]
+    async fn null_tracker_name_matches_input() {
+        let tracker = NullTracker::new("my-tracker");
+        assert_eq!(tracker.name(), "my-tracker");
+    }
+
+    #[tokio::test]
+    async fn null_tracker_capabilities_all_true() {
+        let tracker = NullTracker::new("test");
+        let caps = tracker.capabilities();
+        assert!(caps.parent_child);
+        assert!(caps.arbitrary_states);
+        assert!(caps.milestones);
+        assert!(caps.labels);
+        assert!(caps.comments);
+        assert_eq!(caps.max_body_bytes, usize::MAX);
+    }
+
+    #[tokio::test]
+    async fn null_tracker_push_returns_synthetic_ref() {
+        let tracker = NullTracker::new("null");
+        let proj = test_projection("T-99", "Test");
+
+        let result = tracker.push(&proj).await.expect("push should succeed");
+        assert_eq!(result.adapter, "null");
+        assert_eq!(result.external_id, "T-99");
+        assert_eq!(result.url, None);
+    }
+
+    #[tokio::test]
+    async fn null_tracker_pull_returns_empty_vec() {
+        let tracker = NullTracker::new("null");
+
+        let result = tracker
+            .pull(Timestamp::EPOCH.plus_millis(0))
+            .await
+            .expect("pull should succeed");
+        assert_eq!(result, vec![]);
+    }
+
+    #[tokio::test]
+    async fn recording_tracker_capabilities_stored() {
+        let caps = TrackerCapabilities {
+            parent_child: false,
+            arbitrary_states: false,
+            milestones: true,
+            labels: true,
+            comments: false,
+            max_body_bytes: 256,
+        };
+        let tracker = RecordingTracker::new("test", caps);
+
+        assert_eq!(tracker.capabilities(), caps);
+    }
+
+    #[tokio::test]
+    async fn recording_tracker_name_matches_input() {
+        let tracker = RecordingTracker::new(
+            "custom-adapter",
+            TrackerCapabilities {
+                parent_child: true,
+                arbitrary_states: true,
+                milestones: true,
+                labels: true,
+                comments: true,
+                max_body_bytes: 1024,
+            },
+        );
+        assert_eq!(tracker.name(), "custom-adapter");
+    }
+
+    #[tokio::test]
+    async fn recording_tracker_pull_returns_empty_before_scripting() {
+        let tracker = RecordingTracker::new(
+            "test",
+            TrackerCapabilities {
+                parent_child: true,
+                arbitrary_states: true,
+                milestones: true,
+                labels: true,
+                comments: true,
+                max_body_bytes: 1024,
+            },
+        );
+
+        let result = tracker
+            .pull(Timestamp::EPOCH.plus_millis(0))
+            .await
+            .expect("pull should succeed");
+        assert_eq!(result, vec![]);
+    }
+
+    #[tokio::test]
+    async fn external_change_comment_added_variant() {
+        let change = ExternalChange {
+            external: ExternalRef {
+                adapter: "github".to_string(),
+                external_id: "#123".to_string(),
+                url: Some("https://github.com/org/repo/issues/123".to_string()),
+            },
+            kind: ExternalChangeKind::CommentAdded {
+                author: "bob".to_string(),
+                body: "This is a comment".to_string(),
+            },
+            observed_at: Timestamp::EPOCH.plus_millis(500),
+        };
+
+        assert_eq!(change.external.adapter, "github");
+        assert_eq!(change.external.external_id, "#123");
+        match change.kind {
+            ExternalChangeKind::CommentAdded { author, body } => {
+                assert_eq!(author, "bob");
+                assert_eq!(body, "This is a comment");
+            }
+            _ => panic!("expected CommentAdded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn external_change_priority_changed_variant() {
+        let change = ExternalChange {
+            external: ExternalRef {
+                adapter: "jira".to_string(),
+                external_id: "PROJ-456".to_string(),
+                url: None,
+            },
+            kind: ExternalChangeKind::PriorityChanged {
+                priority: "High".to_string(),
+            },
+            observed_at: Timestamp::EPOCH.plus_millis(600),
+        };
+
+        match change.kind {
+            ExternalChangeKind::PriorityChanged { priority } => {
+                assert_eq!(priority, "High");
+            }
+            _ => panic!("expected PriorityChanged"),
+        }
+    }
+
+    #[tokio::test]
+    async fn external_change_issue_created_variant() {
+        let change = ExternalChange {
+            external: ExternalRef {
+                adapter: "linear".to_string(),
+                external_id: "NEW-001".to_string(),
+                url: Some("https://linear.app/team/issue/NEW-001".to_string()),
+            },
+            kind: ExternalChangeKind::IssueCreated {
+                title: "New Issue".to_string(),
+                body: "Issue body".to_string(),
+                author: "alice".to_string(),
+            },
+            observed_at: Timestamp::EPOCH.plus_millis(700),
+        };
+
+        match change.kind {
+            ExternalChangeKind::IssueCreated {
+                title,
+                body,
+                author,
+            } => {
+                assert_eq!(title, "New Issue");
+                assert_eq!(body, "Issue body");
+                assert_eq!(author, "alice");
+            }
+            _ => panic!("expected IssueCreated"),
+        }
+    }
+
+    #[tokio::test]
+    async fn external_change_assigned_unassigned() {
+        let change = ExternalChange {
+            external: ExternalRef {
+                adapter: "test".to_string(),
+                external_id: "issue-1".to_string(),
+                url: None,
+            },
+            kind: ExternalChangeKind::Assigned { assignee: None },
+            observed_at: Timestamp::EPOCH.plus_millis(300),
+        };
+
+        match change.kind {
+            ExternalChangeKind::Assigned { assignee } => {
+                assert_eq!(assignee, None);
+            }
+            _ => panic!("expected Assigned"),
+        }
     }
 }

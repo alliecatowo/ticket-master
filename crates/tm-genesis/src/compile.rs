@@ -418,7 +418,7 @@ pub fn validate_graph(proposal: &GraphCompilation, existing: &ProjectView) -> Ve
 }
 
 /// What committing a validated [`GraphCompilation`] produced.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CommitOutcome {
     /// Every event emitted while committing.
     pub events: Vec<tm_events::Event>,

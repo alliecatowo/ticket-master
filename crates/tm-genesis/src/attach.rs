@@ -542,7 +542,7 @@ mod tests {
         let report =
             attach_repository(dir.path(), &store, &clock, ParticipantId::system()).unwrap();
 
-        assert_eq!(report.root_ticket.as_str(), "T-001");
+        assert_eq!(report.root_ticket.as_str(), "T-1");
         assert_eq!(report.build_systems.len(), 1);
         assert_eq!(report.build_systems[0].name, "cargo");
         assert!(report.symbol_graph_built);
@@ -565,8 +565,8 @@ mod tests {
 
         assert!(report.build_systems.is_empty());
         assert_eq!(report.blocking_open_questions().len(), 1);
-        // T-001 is still created even though a blocking question was raised.
-        assert_eq!(report.root_ticket.as_str(), "T-001");
+        // T-1 is still created even though a blocking question was raised.
+        assert_eq!(report.root_ticket.as_str(), "T-1");
     }
 
     #[test]

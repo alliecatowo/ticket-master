@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn test_vision_is_anchored_true() {
         let vision = Vision {
-            source_seed: Some(tm_types::ArtifactId::new_v4()),
+            source_seed: Some(tm_types::ArtifactId::new("ART-9f2a1c0b77de").expect("valid test id")),
             product_thesis: "test".to_string(),
             user_experience: "test".to_string(),
             taste: "test".to_string(),

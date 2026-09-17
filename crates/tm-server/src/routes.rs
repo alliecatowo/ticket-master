@@ -1,0 +1,1680 @@
+//! The axum router and every handler in `SPEC.md` §14.
+//!
+//! This module is deliberately a thin translation layer: every handler parses a typed request
+//! body, calls straight into [`tm_core::store::Store`] (or the server-local [`crate::presence`]/
+//! [`crate::approvals`] state), and renders the result as JSON. No business logic lives here —
+//! legality of a ticket transition, budget accounting, lease conflict detection, all of that is
+//! `tm-core`'s job; this module's only responsibilities are wire shape and HTTP status mapping
+//! (via [`crate::state::ServerError`]).
+//!
+//! A handful of domain types in `tm-core` (`Lease`, `Decision`, `Milestone`, `Artifact`,
+//! `Evidence`) intentionally don't derive `Serialize` — they're pure logic types, not wire
+//! types. This module renders them by hand (the `*_json` helpers below) rather than adding
+//! `serde` derives to a crate this module doesn't own.
+//!
+//! `GET /docs` and `POST /docs` are stubs: `tm-docs` isn't wired into [`crate::state::AppState`]
+//! (no field for it), so the list is always empty and writes are refused with a clear message
+//! rather than silently discarded.
+
+use axum::extract::{Path, State};
+use axum::http::StatusCode;
+use axum::routing::{delete, get, post};
+use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::{json, Value};
+
+use tm_core::artifact::{Artifact, ArtifactStorage, Evidence};
+use tm_core::decision::Decision;
+use tm_core::lease::Lease;
+use tm_core::milestone::Milestone;
+use tm_core::store::AuditOutcome;
+use tm_core::view::ProjectView;
+use tm_core::{
+    ArtifactKind, ContextRef, EvidenceKind, ExecutorRequirements, FailureClass, ResourceClaim,
+    RetryPolicy, Ticket, TicketKind, TicketState, Trigger, VerificationPolicy,
+};
+use tm_events::Event;
+use tm_harness::HarnessEpoch;
+use tm_provider::{CandidateKey, CandidateState};
+use tm_types::{
+    ArtifactId, Authority, Budget, DecisionId, IdKind, LeaseId, MilestoneId, ParticipantId,
+    Predicate, SessionId, TicketId, TmError,
+};
+
+use crate::approvals::{ApprovalDecision, ApprovalRequest, ApprovalStatus};
+use crate::presence::{path_leases, PathLeaseSummary, PresenceEntry};
+use crate::sse::sse_handler;
+use crate::state::{AppState, ServerError};
+
+/// Build the full axum router: every handler in `SPEC.md` §14, bound to `state`.
+///
+/// Auth ([`crate::auth::authenticate`]) is applied by the caller (typically wrapped around this
+/// router via `axum::middleware::from_fn_with_state`), not inside this module, so tests here can
+/// call handlers directly without a bearer token.
+pub fn router(state: AppState) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/events", get(sse_handler))
+        .route("/state", get(get_state))
+        .route("/schema", get(get_schema))
+        .route("/tickets", get(list_tickets).post(create_ticket))
+        .route("/tickets/{id}", get(get_ticket).patch(update_ticket))
+        .route("/tickets/{id}/transition", post(transition_ticket))
+        .route("/tickets/{id}/lease", post(acquire_lease))
+        .route("/tickets/{id}/evidence", post(attach_evidence))
+        .route("/leases/{id}/heartbeat", post(heartbeat_lease))
+        .route("/leases/{id}/release", post(release_lease))
+        .route("/graph", get(get_graph))
+        .route("/decisions", get(list_decisions).post(create_decision))
+        .route("/decisions/{id}/supersede", post(supersede_decision))
+        .route("/milestones", get(list_milestones).post(create_milestone))
+        .route("/milestones/{id}/close", post(close_milestone))
+        .route("/milestones/{id}/reopen", post(reopen_milestone))
+        .route("/artifacts", get(list_artifacts).post(create_artifact))
+        .route("/artifacts/{id}", get(get_artifact))
+        .route("/docs", get(list_docs).post(create_doc))
+        .route("/approvals", get(list_approvals).post(create_approval))
+        .route("/approvals/{id}", get(get_approval))
+        .route("/approvals/{id}/decide", post(decide_approval))
+        .route("/sessions", post(create_session))
+        .route("/sessions/{id}", delete(delete_session))
+        .route("/sessions/{id}/presence", post(update_presence))
+        .route("/presence", get(get_presence))
+        .route("/providers", get(get_providers))
+        .route("/harness", get(get_harness))
+        .route("/metrics", get(get_metrics))
+        .with_state(state)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rendering helpers for tm-core types that don't derive Serialize.
+// ---------------------------------------------------------------------------------------------
+
+fn lease_json(l: &Lease) -> Value {
+    json!({
+        "id": l.id,
+        "ticket": l.ticket,
+        "holder": l.holder,
+        "authority": l.authority,
+        "resources": l.resources,
+        "acquired": l.acquired,
+        "heartbeat": l.heartbeat,
+        "ttl_seconds": l.ttl_seconds,
+        "epoch": l.epoch,
+    })
+}
+
+fn decision_json(d: &Decision) -> Value {
+    json!({
+        "id": d.id,
+        "subject": d.subject,
+        "decision": d.decision,
+        "reason": d.reason,
+        "evidence": d.evidence,
+        "affected_tickets": d.affected_tickets,
+        "affected_paths": d.affected_paths,
+        "author": d.author,
+        "ts": d.ts,
+        "supersedes": d.supersedes,
+        "superseded_by": d.superseded_by,
+    })
+}
+
+fn milestone_json(m: &Milestone) -> Value {
+    json!({
+        "id": m.id,
+        "title": m.title,
+        "tickets": m.tickets,
+        "state": m.state,
+        "closed_by": m.closed_by,
+        "assumptions": m.assumptions,
+    })
+}
+
+fn artifact_json(a: &Artifact) -> Value {
+    let storage = match &a.storage {
+        ArtifactStorage::Inline(bytes) => json!({"kind": "inline", "len": bytes.len()}),
+        ArtifactStorage::OnDisk(path) => {
+            json!({"kind": "disk", "path": path.display().to_string()})
+        }
+    };
+    json!({
+        "id": a.id,
+        "kind": a.kind,
+        "media_type": a.media_type,
+        "bytes_len": a.bytes_len,
+        "hash": a.hash,
+        "storage": storage,
+        "meta": a.meta,
+    })
+}
+
+fn evidence_json(e: &Evidence) -> Value {
+    json!({
+        "ticket": e.ticket,
+        "kind": e.kind,
+        "artifact": e.artifact,
+        "produced_by": e.produced_by,
+        "ts": e.ts,
+        "summary": e.summary,
+    })
+}
+
+fn presence_entry_json(e: &PresenceEntry) -> Value {
+    json!({
+        "participant": e.participant,
+        "ticket": e.ticket,
+        "file": e.file,
+        "action": e.action,
+        "last_seen": e.last_seen,
+        "ttl_seconds": e.ttl_seconds,
+    })
+}
+
+fn path_lease_json(p: &PathLeaseSummary) -> Value {
+    json!({
+        "lease": p.lease,
+        "ticket": p.ticket,
+        "holder": p.holder,
+        "mode": p.mode,
+        "paths": p.paths,
+    })
+}
+
+fn approval_request_json(r: &ApprovalRequest) -> Value {
+    json!({
+        "id": r.id,
+        "ticket": r.ticket,
+        "requested_by": r.requested_by,
+        "subject": r.subject,
+        "detail": r.detail,
+        "requested_at": r.requested_at,
+    })
+}
+
+fn approval_decision_json(d: &ApprovalDecision) -> Value {
+    match d {
+        ApprovalDecision::Approve { note } => json!({"approve": {"note": note}}),
+        ApprovalDecision::Deny { reason } => json!({"deny": {"reason": reason}}),
+    }
+}
+
+fn approval_status_json(s: &ApprovalStatus) -> Value {
+    match s {
+        ApprovalStatus::Pending => json!({"status": "pending"}),
+        ApprovalStatus::Decided {
+            decision,
+            decided_by,
+            decided_at,
+        } => json!({
+            "status": "decided",
+            "decision": approval_decision_json(decision),
+            "decided_by": decided_by,
+            "decided_at": decided_at,
+        }),
+    }
+}
+
+fn harness_epoch_json(e: &HarnessEpoch) -> Value {
+    json!({
+        "number": e.number,
+        "config_hash": e.config_hash,
+        "config": e.config,
+        "promoted_at": e.promoted_at,
+        "promoted_by": e.promoted_by,
+        "benchmark": e.benchmark,
+    })
+}
+
+fn graph_json(view: &ProjectView) -> Value {
+    let nodes: Vec<&TicketId> = view.graph.nodes().collect();
+    let edges: Vec<Value> = view
+        .graph
+        .edges()
+        .iter()
+        .map(|e| json!({"from": e.from, "to": e.to, "kind": e.kind}))
+        .collect();
+    json!({"nodes": nodes, "edges": edges})
+}
+
+/// Render a batch of freshly appended events as their wire form: `{seq, ts, kind, subject,
+/// actor, session, causation, correlation, payload}`.
+///
+/// # Errors
+/// Whatever [`tm_events::Payload::to_json`] returns for a payload that fails to serialize.
+fn events_json(events: &[Event]) -> tm_types::Result<Vec<Value>> {
+    events
+        .iter()
+        .map(|e| {
+            Ok(json!({
+                "seq": e.seq,
+                "ts": e.ts,
+                "kind": e.kind,
+                "subject": e.subject,
+                "actor": e.actor,
+                "session": e.session,
+                "causation": e.causation,
+                "correlation": e.correlation,
+                "payload": e.payload.to_json()?,
+                "hash": e.hash,
+            }))
+        })
+        .collect()
+}
+
+fn ticket_state_label(state: TicketState) -> String {
+    serde_json::to_value(state)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{state:?}"))
+}
+
+fn default_presence_action() -> String {
+    "active".to_string()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Request bodies
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct CreateTicketRequest {
+    kind: TicketKind,
+    objective: String,
+    #[serde(default)]
+    parent: Option<TicketId>,
+    #[serde(default)]
+    milestone: Option<MilestoneId>,
+    #[serde(default = "Authority::none")]
+    authority: Authority,
+    #[serde(default)]
+    resources: Vec<ResourceClaim>,
+    executor: ExecutorRequirements,
+    #[serde(default)]
+    context_refs: Vec<ContextRef>,
+    #[serde(default)]
+    success: Vec<Predicate>,
+    verification: VerificationPolicy,
+    #[serde(default = "Budget::none")]
+    budget: Budget,
+    retry: RetryPolicy,
+    #[serde(default)]
+    priority: i32,
+    actor: ParticipantId,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateTicketRequest {
+    fields: Value,
+    actor: ParticipantId,
+}
+
+/// The audit outcomes a client may submit; converted into [`AuditOutcome`], which is pure logic
+/// and carries no serde derive of its own.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum AuditOutcomeBody {
+    Passed,
+    RejectedMinor,
+    RejectedStructural,
+}
+
+impl From<AuditOutcomeBody> for AuditOutcome {
+    fn from(value: AuditOutcomeBody) -> Self {
+        match value {
+            AuditOutcomeBody::Passed => AuditOutcome::Passed,
+            AuditOutcomeBody::RejectedMinor => AuditOutcome::RejectedMinor,
+            AuditOutcomeBody::RejectedStructural => AuditOutcome::RejectedStructural,
+        }
+    }
+}
+
+/// `POST /tickets/:id/transition`'s body: externally tagged over every ticket-lifecycle command
+/// `tm-core` exposes, since the spec's single "transition" route is this crate's one door onto
+/// all of them, not just the generic [`Trigger`] pass-through.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TransitionRequest {
+    Activate {
+        actor: ParticipantId,
+    },
+    Trigger {
+        trigger: Trigger,
+        actor: ParticipantId,
+    },
+    Submit {
+        summary: String,
+        #[serde(default)]
+        evidence: Vec<ArtifactId>,
+        actor: ParticipantId,
+    },
+    Verify {
+        verifier: TicketId,
+        passed: bool,
+        #[serde(default)]
+        reason: Option<String>,
+        actor: ParticipantId,
+    },
+    Audit {
+        auditor: TicketId,
+        outcome: AuditOutcomeBody,
+        #[serde(default)]
+        reason: Option<String>,
+        actor: ParticipantId,
+    },
+    Close {
+        #[serde(default)]
+        reason: Option<String>,
+        actor: ParticipantId,
+    },
+    Cancel {
+        #[serde(default)]
+        reason: Option<String>,
+        actor: ParticipantId,
+    },
+    Reopen {
+        #[serde(default)]
+        reason: Option<String>,
+        actor: ParticipantId,
+    },
+    Fail {
+        class: FailureClass,
+        detail: String,
+        actor: ParticipantId,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct AcquireLeaseRequest {
+    holder: ParticipantId,
+    #[serde(default = "Authority::none")]
+    authority: Authority,
+    #[serde(default)]
+    resources: Vec<ResourceClaim>,
+    ttl_seconds: u32,
+    actor: ParticipantId,
+}
+
+/// Shared body for any endpoint whose only input is who's acting: lease heartbeat/release,
+/// milestone close/reopen.
+#[derive(Debug, Deserialize)]
+struct ActorOnlyRequest {
+    actor: ParticipantId,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttachEvidenceRequest {
+    kind: EvidenceKind,
+    artifact: ArtifactId,
+    summary: String,
+    actor: ParticipantId,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecisionRequest {
+    subject: String,
+    decision: String,
+    reason: String,
+    #[serde(default)]
+    evidence: Vec<ArtifactId>,
+    #[serde(default)]
+    affected_tickets: Vec<TicketId>,
+    #[serde(default)]
+    affected_paths: Vec<String>,
+    actor: ParticipantId,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateMilestoneRequest {
+    title: String,
+    #[serde(default)]
+    tickets: Vec<TicketId>,
+    #[serde(default)]
+    assumptions: Vec<DecisionId>,
+    actor: ParticipantId,
+}
+
+/// `bytes` travels as a JSON array of byte values rather than base64: this server has no
+/// established wire-compactness contract yet, and a plain array keeps the client generator
+/// (`GET /schema`'s consumer) from needing a bespoke binary codec on day one.
+#[derive(Debug, Deserialize)]
+struct CreateArtifactRequest {
+    kind: ArtifactKind,
+    media_type: String,
+    #[serde(default)]
+    bytes: Vec<u8>,
+    #[serde(default)]
+    meta: Value,
+    #[serde(default)]
+    ticket: Option<TicketId>,
+    actor: ParticipantId,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateApprovalRequest {
+    #[serde(default)]
+    ticket: Option<TicketId>,
+    requested_by: ParticipantId,
+    subject: String,
+    #[serde(default)]
+    detail: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ApprovalDecisionBody {
+    Approve {
+        #[serde(default)]
+        note: Option<String>,
+    },
+    Deny {
+        reason: String,
+    },
+}
+
+impl From<ApprovalDecisionBody> for ApprovalDecision {
+    fn from(value: ApprovalDecisionBody) -> Self {
+        match value {
+            ApprovalDecisionBody::Approve { note } => ApprovalDecision::Approve { note },
+            ApprovalDecisionBody::Deny { reason } => ApprovalDecision::Deny { reason },
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DecideApprovalRequest {
+    decision: ApprovalDecisionBody,
+    decided_by: ParticipantId,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CreateSessionRequest {
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PresenceUpdateRequest {
+    participant: ParticipantId,
+    #[serde(default)]
+    ticket: Option<TicketId>,
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default = "default_presence_action")]
+    action: String,
+    #[serde(default)]
+    ttl_seconds: Option<u32>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------------------------
+
+async fn health() -> Json<Value> {
+    Json(json!({"status": "ok"}))
+}
+
+async fn get_state(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
+    let view = state.store.view()?;
+    let head = state.events.head()?;
+    Ok(Json(json!({
+        "head": head,
+        "tickets": view.tickets.values().collect::<Vec<_>>(),
+        "leases": view.leases.values().map(lease_json).collect::<Vec<_>>(),
+        "decisions": view.decisions.values().map(decision_json).collect::<Vec<_>>(),
+        "milestones": view.milestones.values().map(milestone_json).collect::<Vec<_>>(),
+        "artifacts": view.artifacts.values().map(artifact_json).collect::<Vec<_>>(),
+        "evidence": view.evidence.iter().map(evidence_json).collect::<Vec<_>>(),
+        "budgets": view
+            .budgets
+            .iter()
+            .map(|b| json!({"scope": b.scope, "budget": b.budget}))
+            .collect::<Vec<_>>(),
+    })))
+}
+
+/// A hand-written, intentionally partial JSON Schema document covering the wire shapes a client
+/// generator needs first: tickets and the transition/lease command bodies. Extend as more
+/// clients come online; there is no `schemars`-style derive wired into this crate yet.
+async fn get_schema() -> Json<Value> {
+    Json(json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Ticketmaster server API",
+        "definitions": {
+            "TicketId": {"type": "string", "pattern": "^(T|V|A)-[0-9]+$"},
+            "ParticipantId": {"type": "string"},
+            "TicketKind": {
+                "type": "string",
+                "enum": ["work", "verification", "audit", "investigation", "recovery", "harness"]
+            },
+            "TicketState": {
+                "type": "string",
+                "enum": [
+                    "draft", "blocked", "ready", "leased", "running", "submitted", "verifying",
+                    "auditing", "rework", "replan", "recovery", "escalated", "closed", "cancelled"
+                ]
+            },
+            "CreateTicketRequest": {
+                "type": "object",
+                "required": ["kind", "objective", "executor", "verification", "retry", "actor"],
+                "properties": {
+                    "kind": {"$ref": "#/definitions/TicketKind"},
+                    "objective": {"type": "string"},
+                    "parent": {"$ref": "#/definitions/TicketId"},
+                    "priority": {"type": "integer"},
+                    "actor": {"$ref": "#/definitions/ParticipantId"}
+                }
+            },
+            "TransitionRequest": {
+                "type": "object",
+                "description": "externally tagged: one of activate|trigger|submit|verify|audit|close|cancel|reopen|fail"
+            }
+        }
+    }))
+}
+
+async fn list_tickets(State(state): State<AppState>) -> Result<Json<Vec<Ticket>>, ServerError> {
+    let view = state.store.view()?;
+    Ok(Json(view.tickets.into_values().collect()))
+}
+
+async fn create_ticket(
+    State(state): State<AppState>,
+    Json(body): Json<CreateTicketRequest>,
+) -> Result<(StatusCode, Json<Value>), ServerError> {
+    let events = state.store.create_ticket(
+        body.kind,
+        body.objective,
+        body.parent,
+        body.milestone,
+        body.authority,
+        body.resources,
+        body.executor,
+        body.context_refs,
+        body.success,
+        body.verification,
+        body.budget,
+        body.retry,
+        body.priority,
+        body.actor,
+    )?;
+    let ticket_id = TicketId::new(events[0].subject.as_str())?;
+    let view = state.store.view()?;
+    let ticket = view
+        .tickets
+        .get(&ticket_id)
+        .ok_or_else(|| TmError::not_found("ticket", &ticket_id))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"ticket": ticket, "events": events_json(&events)?})),
+    ))
+}
+
+async fn get_ticket(
+    State(state): State<AppState>,
+    Path(id): Path<TicketId>,
+) -> Result<Json<Ticket>, ServerError> {
+    let view = state.store.view()?;
+    let ticket = view
+        .tickets
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| TmError::not_found("ticket", &id))?;
+    Ok(Json(ticket))
+}
+
+async fn update_ticket(
+    State(state): State<AppState>,
+    Path(id): Path<TicketId>,
+    Json(body): Json<UpdateTicketRequest>,
+) -> Result<Json<Ticket>, ServerError> {
+    state.store.update_ticket(&id, body.fields, body.actor)?;
+    let view = state.store.view()?;
+    let ticket = view
+        .tickets
+        .get(&id)
+        .cloned()
+        .ok_or_else(|| TmError::not_found("ticket", &id))?;
+    Ok(Json(ticket))
+}
+
+async fn transition_ticket(
+    State(state): State<AppState>,
+    Path(id): Path<TicketId>,
+    Json(body): Json<TransitionRequest>,
+) -> Result<Json<Value>, ServerError> {
+    let events = match body {
+        TransitionRequest::Activate { actor } => state.store.activate(&id, actor)?,
+        TransitionRequest::Trigger { trigger, actor } => {
+            state.store.transition(&id, trigger, actor)?
+        }
+        TransitionRequest::Submit {
+            summary,
+            evidence,
+            actor,
+        } => state.store.submit(&id, summary, evidence, actor)?,
+        TransitionRequest::Verify {
+            verifier,
+            passed,
+            reason,
+            actor,
+        } => state.store.verify(&id, &verifier, passed, reason, actor)?,
+        TransitionRequest::Audit {
+            auditor,
+            outcome,
+            reason,
+            actor,
+        } => state
+            .store
+            .audit(&id, &auditor, outcome.into(), reason, actor)?,
+        TransitionRequest::Close { reason, actor } => state.store.close(&id, reason, actor)?,
+        TransitionRequest::Cancel { reason, actor } => state.store.cancel(&id, reason, actor)?,
+        TransitionRequest::Reopen { reason, actor } => state.store.reopen(&id, reason, actor)?,
+        TransitionRequest::Fail {
+            class,
+            detail,
+            actor,
+        } => state.store.record_failure(&id, class, detail, actor)?,
+    };
+    Ok(Json(json!({"events": events_json(&events)?})))
+}
+
+async fn acquire_lease(
+    State(state): State<AppState>,
+    Path(id): Path<TicketId>,
+    Json(body): Json<AcquireLeaseRequest>,
+) -> Result<(StatusCode, Json<Value>), ServerError> {
+    let events = state.store.acquire_lease(
+        &id,
+        body.holder,
+        body.authority,
+        body.resources,
+        body.ttl_seconds,
+        body.actor,
+    )?;
+    let view = state.store.view()?;
+    let lease = view
+        .leases
+        .values()
+        .find(|l| l.ticket == id)
+        .ok_or_else(|| TmError::invariant("lease not found immediately after acquire"))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"lease": lease_json(lease), "events": events_json(&events)?})),
+    ))
+}
+
+async fn heartbeat_lease(
+    State(state): State<AppState>,
+    Path(id): Path<LeaseId>,
+    Json(body): Json<ActorOnlyRequest>,
+) -> Result<Json<Value>, ServerError> {
+    let events = state.store.heartbeat(&id, body.actor)?;
+    Ok(Json(json!({"events": events_json(&events)?})))
+}
+
+async fn release_lease(
+    State(state): State<AppState>,
+    Path(id): Path<LeaseId>,
+    Json(body): Json<ActorOnlyRequest>,
+) -> Result<Json<Value>, ServerError> {
+    let events = state.store.release(&id, body.actor)?;
+    Ok(Json(json!({"events": events_json(&events)?})))
+}
+
+async fn attach_evidence(
+    State(state): State<AppState>,
+    Path(id): Path<TicketId>,
+    Json(body): Json<AttachEvidenceRequest>,
+) -> Result<Json<Value>, ServerError> {
+    let events =
+        state
+            .store
+            .attach_evidence(&id, body.kind, &body.artifact, body.summary, body.actor)?;
+    Ok(Json(json!({"events": events_json(&events)?})))
+}
+
+async fn get_graph(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
+    let view = state.store.view()?;
+    Ok(Json(graph_json(&view)))
+}
+
+async fn list_decisions(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
+    let view = state.store.view()?;
+    let decisions: Vec<Value> = view.decisions.values().map(decision_json).collect();
+    Ok(Json(json!(decisions)))
+}
+
+async fn create_decision(
+    State(state): State<AppState>,
+    Json(body): Json<DecisionRequest>,
+) -> Result<(StatusCode, Json<Value>), ServerError> {
+    let events = state.store.record_decision(
+        body.subject,
+        body.decision,
+        body.reason,
+        body.evidence,
+        body.affected_tickets,
+        body.affected_paths,
+        body.actor,
+    )?;
+    let decision_id = DecisionId::new(events[0].subject.as_str())?;
+    let view = state.store.view()?;
+    let decision = view
+        .decisions
+        .get(&decision_id)
+        .ok_or_else(|| TmError::not_found("decision", &decision_id))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"decision": decision_json(decision), "events": events_json(&events)?})),
+    ))
+}
+
+async fn supersede_decision(
+    State(state): State<AppState>,
+    Path(id): Path<DecisionId>,
+    Json(body): Json<DecisionRequest>,
+) -> Result<(StatusCode, Json<Value>), ServerError> {
+    let events = state.store.supersede(
+        &id,
+        body.subject,
+        body.decision,
+        body.reason,
+        body.evidence,
+        body.affected_tickets,
+        body.affected_paths,
+        body.actor,
+    )?;
+    let decision_id = DecisionId::new(events[0].subject.as_str())?;
+    let view = state.store.view()?;
+    let decision = view
+        .decisions
+        .get(&decision_id)
+        .ok_or_else(|| TmError::not_found("decision", &decision_id))?;
+    // `tm-core`'s materializer records `superseded_by` on the *old* decision row but never
+    // back-fills `supersedes` on the *new* one (`decision.created` carries no such field); this
+    // handler already knows it from the path, so patch the wire shape rather than under-report
+    // truth we have in hand.
+    let mut decision_body = decision_json(decision);
+    decision_body["supersedes"] = json!(id.as_str());
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"decision": decision_body, "events": events_json(&events)?})),
+    ))
+}
+
+async fn list_milestones(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
+    let view = state.store.view()?;
+    let milestones: Vec<Value> = view.milestones.values().map(milestone_json).collect();
+    Ok(Json(json!(milestones)))
+}
+
+async fn create_milestone(
+    State(state): State<AppState>,
+    Json(body): Json<CreateMilestoneRequest>,
+) -> Result<(StatusCode, Json<Value>), ServerError> {
+    let events =
+        state
+            .store
+            .create_milestone(body.title, body.tickets, body.assumptions, body.actor)?;
+    let milestone_id = MilestoneId::new(events[0].subject.as_str())?;
+    let view = state.store.view()?;
+    let milestone = view
+        .milestones
+        .get(&milestone_id)
+        .ok_or_else(|| TmError::not_found("milestone", &milestone_id))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"milestone": milestone_json(milestone), "events": events_json(&events)?})),
+    ))
+}
+
+async fn close_milestone(
+    State(state): State<AppState>,
+    Path(id): Path<MilestoneId>,
+    Json(body): Json<ActorOnlyRequest>,
+) -> Result<Json<Value>, ServerError> {
+    let events = state.store.close_milestone(&id, body.actor)?;
+    Ok(Json(json!({"events": events_json(&events)?})))
+}
+
+async fn reopen_milestone(
+    State(state): State<AppState>,
+    Path(id): Path<MilestoneId>,
+    Json(body): Json<ActorOnlyRequest>,
+) -> Result<Json<Value>, ServerError> {
+    let events = state.store.reopen_milestone(&id, body.actor)?;
+    Ok(Json(json!({"events": events_json(&events)?})))
+}
+
+async fn list_artifacts(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
+    let view = state.store.view()?;
+    let artifacts: Vec<Value> = view.artifacts.values().map(artifact_json).collect();
+    Ok(Json(json!(artifacts)))
+}
+
+async fn get_artifact(
+    State(state): State<AppState>,
+    Path(id): Path<ArtifactId>,
+) -> Result<Json<Value>, ServerError> {
+    let view = state.store.view()?;
+    let artifact = view
+        .artifacts
+        .get(&id)
+        .ok_or_else(|| TmError::not_found("artifact", &id))?;
+    Ok(Json(artifact_json(artifact)))
+}
+
+async fn create_artifact(
+    State(state): State<AppState>,
+    Json(body): Json<CreateArtifactRequest>,
+) -> Result<(StatusCode, Json<Value>), ServerError> {
+    let events = state.store.store_artifact(
+        body.kind,
+        body.media_type,
+        body.bytes,
+        body.meta,
+        body.ticket,
+        body.actor,
+    )?;
+    let artifact_id = ArtifactId::new(events[0].subject.as_str())?;
+    let view = state.store.view()?;
+    let artifact = view
+        .artifacts
+        .get(&artifact_id)
+        .ok_or_else(|| TmError::not_found("artifact", &artifact_id))?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"artifact": artifact_json(artifact), "events": events_json(&events)?})),
+    ))
+}
+
+/// `tm-docs` isn't wired into [`AppState`]; always reports no docs rather than guessing at a
+/// storage location.
+async fn list_docs() -> Json<Value> {
+    Json(json!({"docs": []}))
+}
+
+/// See [`list_docs`]: there is nowhere durable to put a doc yet.
+async fn create_doc() -> ServerError {
+    ServerError::BadRequest("docs storage is not wired into this server instance".to_string())
+}
+
+async fn list_approvals(State(state): State<AppState>) -> Json<Value> {
+    let pending = state.approvals.pending();
+    let rendered: Vec<Value> = pending
+        .iter()
+        .map(|p| approval_request_json(&p.request))
+        .collect();
+    Json(json!(rendered))
+}
+
+/// Opens an approval request and blocks until [`decide_approval`] (on a different request,
+/// possibly a different connection) decides it — the requesting agent's connection *is* the
+/// block, per `SPEC.md` §14.
+///
+/// # Errors
+/// [`ServerError::ApprovalFailed`] if the server drops the waiter (e.g. shutdown) before a
+/// decision lands.
+async fn create_approval(
+    State(state): State<AppState>,
+    Json(body): Json<CreateApprovalRequest>,
+) -> Result<Json<Value>, ServerError> {
+    let id = format!("AP-{}", state.ids.random_hex(12));
+    let request = ApprovalRequest {
+        id: id.clone(),
+        ticket: body.ticket,
+        requested_by: body.requested_by,
+        subject: body.subject,
+        detail: body.detail,
+        requested_at: state.clock.now(),
+    };
+    let waiter = state.approvals.open(request);
+    let decision = waiter
+        .wait()
+        .await
+        .map_err(|e| ServerError::ApprovalFailed(e.to_string()))?;
+    Ok(Json(
+        json!({"id": id, "decision": approval_decision_json(&decision)}),
+    ))
+}
+
+async fn get_approval(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ServerError> {
+    let status = state
+        .approvals
+        .get(&id)
+        .ok_or_else(|| ServerError::BadRequest(format!("unknown approval request {id}")))?;
+    Ok(Json(approval_status_json(&status)))
+}
+
+async fn decide_approval(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<DecideApprovalRequest>,
+) -> Result<Json<Value>, ServerError> {
+    let decided_at = state.clock.now();
+    let pending_request = state
+        .approvals
+        .pending()
+        .into_iter()
+        .find(|p| p.request.id == id)
+        .map(|p| p.request);
+    let (subject, verdict, reason) = match &body.decision {
+        ApprovalDecisionBody::Approve { note } => (
+            pending_request.as_ref().map(|r| r.subject.clone()),
+            "approved".to_string(),
+            note.clone().unwrap_or_default(),
+        ),
+        ApprovalDecisionBody::Deny { reason } => (
+            pending_request.as_ref().map(|r| r.subject.clone()),
+            "denied".to_string(),
+            reason.clone(),
+        ),
+    };
+    let decision: ApprovalDecision = body.decision.into();
+    state
+        .approvals
+        .decide(&id, decision, body.decided_by.clone(), decided_at)
+        .map_err(|e| ServerError::BadRequest(e.to_string()))?;
+    if let (Some(subject), Some(request)) = (subject, pending_request) {
+        state.store.record_decision(
+            subject,
+            verdict,
+            reason,
+            Vec::new(),
+            request.ticket.into_iter().collect(),
+            Vec::new(),
+            body.decided_by,
+        )?;
+    }
+    Ok(Json(json!({"id": id, "status": "decided"})))
+}
+
+/// `tm-server` doesn't hold session/transcript state itself (`SPEC.md` §14: sessions are views);
+/// this just mints a fresh id for the caller to tag its own events/presence with.
+async fn create_session(
+    State(state): State<AppState>,
+    Json(body): Json<CreateSessionRequest>,
+) -> (StatusCode, Json<Value>) {
+    let id = state.ids.next(IdKind::Session);
+    (
+        StatusCode::CREATED,
+        Json(json!({"session": id.as_str(), "label": body.label})),
+    )
+}
+
+/// No durable session record exists to delete (see [`create_session`]); always succeeds.
+async fn delete_session(Path(_id): Path<SessionId>) -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
+async fn update_presence(
+    State(state): State<AppState>,
+    Path(_session): Path<SessionId>,
+    Json(body): Json<PresenceUpdateRequest>,
+) -> Json<Value> {
+    let participant = body.participant.clone();
+    let ttl_seconds = body
+        .ttl_seconds
+        .unwrap_or(state.config.presence_ttl_seconds);
+    state.presence.upsert(PresenceEntry {
+        participant: body.participant,
+        ticket: body.ticket,
+        file: body.file,
+        action: body.action,
+        last_seen: state.clock.now(),
+        ttl_seconds,
+    });
+    Json(json!({"participant": participant}))
+}
+
+async fn get_presence(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
+    state.presence.sweep_expired(state.clock.now());
+    let participants: Vec<Value> = state
+        .presence
+        .snapshot()
+        .iter()
+        .map(presence_entry_json)
+        .collect();
+    let view = state.store.view()?;
+    let leases: Vec<Value> = path_leases(&view).iter().map(path_lease_json).collect();
+    Ok(Json(
+        json!({"participants": participants, "path_leases": leases}),
+    ))
+}
+
+async fn get_providers(State(state): State<AppState>) -> Json<Value> {
+    let Some(providers) = &state.providers else {
+        return Json(json!({"candidates": []}));
+    };
+    let guard = providers.lock().unwrap_or_else(|p| p.into_inner());
+    let candidates: Vec<Value> = guard
+        .candidates()
+        .map(|(key, candidate): (&CandidateKey, &CandidateState)| {
+            json!({"key": key, "state": candidate})
+        })
+        .collect();
+    Json(json!({"candidates": candidates}))
+}
+
+async fn get_harness(State(state): State<AppState>) -> Json<Value> {
+    match &state.harness {
+        Some(registry) => Json(json!({"current": harness_epoch_json(registry.current())})),
+        None => Json(json!({"current": Value::Null})),
+    }
+}
+
+async fn get_metrics(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
+    let view = state.store.view()?;
+    let head = state.events.head()?;
+    let mut by_state: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for ticket in view.tickets.values() {
+        *by_state
+            .entry(ticket_state_label(ticket.state))
+            .or_insert(0) += 1;
+    }
+    Ok(Json(json!({
+        "event_head": head,
+        "ticket_count": view.tickets.len(),
+        "tickets_by_state": by_state,
+        "lease_count": view.leases.len(),
+        "decision_count": view.decisions.len(),
+        "milestone_count": view.milestones.len(),
+        "artifact_count": view.artifacts.len(),
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tempfile::TempDir;
+    use tm_types::{Clock, CounterIds, FixedClock, IdSource, Role, Tolerance};
+
+    use crate::state::ServerConfig;
+
+    fn test_state() -> (TempDir, AppState) {
+        let dir = TempDir::new().expect("tempdir");
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let config = ServerConfig {
+            project_root: dir.path().to_path_buf(),
+            bind_addr: "127.0.0.1:0".parse().expect("valid loopback addr"),
+            token: None,
+            presence_ttl_seconds: 60,
+            broadcast_poll_interval: Duration::from_millis(10),
+            sse_replay_page_size: 100,
+        };
+        let state = AppState::open(config, clock, ids).expect("open app state");
+        (dir, state)
+    }
+
+    fn executor() -> ExecutorRequirements {
+        ExecutorRequirements {
+            role: Role::CoderFast,
+            human_required: false,
+            min_capability: Tolerance::Any,
+        }
+    }
+
+    fn retry() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay_seconds: 1,
+            backoff_multiplier: 2.0,
+            max_delay_seconds: 60,
+        }
+    }
+
+    fn actor() -> ParticipantId {
+        ParticipantId::system()
+    }
+
+    fn create_ticket_body() -> CreateTicketRequest {
+        CreateTicketRequest {
+            kind: TicketKind::Work,
+            objective: "do the thing".to_string(),
+            parent: None,
+            milestone: None,
+            authority: Authority::none(),
+            resources: Vec::new(),
+            executor: executor(),
+            context_refs: Vec::new(),
+            success: Vec::new(),
+            verification: VerificationPolicy::None,
+            budget: Budget::none(),
+            retry: retry(),
+            priority: 0,
+            actor: actor(),
+        }
+    }
+
+    async fn make_ticket(state: &AppState) -> TicketId {
+        let (_, Json(body)) = create_ticket(State(state.clone()), Json(create_ticket_body()))
+            .await
+            .expect("create ticket");
+        let id = body["ticket"]["id"]
+            .as_str()
+            .expect("ticket id")
+            .to_string();
+        TicketId::new(id).expect("valid ticket id")
+    }
+
+    fn status_of(err: ServerError) -> StatusCode {
+        err.into_response().status()
+    }
+
+    #[tokio::test]
+    async fn health_reports_ok() {
+        let Json(body) = health().await;
+        assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn create_ticket_then_fetch_it() {
+        let (_dir, state) = test_state();
+        let id = make_ticket(&state).await;
+        let Json(ticket) = get_ticket(State(state), Path(id.clone()))
+            .await
+            .expect("get ticket");
+        assert_eq!(ticket.id, id);
+        assert_eq!(ticket.objective, "do the thing");
+        assert_eq!(ticket.state, TicketState::Draft);
+    }
+
+    #[tokio::test]
+    async fn get_missing_ticket_is_not_found() {
+        let (_dir, state) = test_state();
+        let missing = TicketId::new("T-999").expect("valid shape");
+        let err = get_ticket(State(state), Path(missing)).await.unwrap_err();
+        assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_tickets_reports_every_created_ticket() {
+        let (_dir, state) = test_state();
+        make_ticket(&state).await;
+        make_ticket(&state).await;
+        let Json(tickets) = list_tickets(State(state)).await.expect("list tickets");
+        assert_eq!(tickets.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn update_ticket_changes_objective() {
+        let (_dir, state) = test_state();
+        let id = make_ticket(&state).await;
+        let body = UpdateTicketRequest {
+            fields: json!({"priority": 5}),
+            actor: actor(),
+        };
+        let Json(ticket) = update_ticket(State(state), Path(id), Json(body))
+            .await
+            .expect("update ticket");
+        assert_eq!(ticket.priority, 5);
+    }
+
+    #[tokio::test]
+    async fn update_missing_ticket_is_not_found() {
+        let (_dir, state) = test_state();
+        let missing = TicketId::new("T-999").expect("valid shape");
+        let body = UpdateTicketRequest {
+            fields: json!({}),
+            actor: actor(),
+        };
+        let err = update_ticket(State(state), Path(missing), Json(body))
+            .await
+            .unwrap_err();
+        assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn transition_activate_moves_ticket_out_of_draft() {
+        let (_dir, state) = test_state();
+        let id = make_ticket(&state).await;
+        transition_ticket(
+            State(state.clone()),
+            Path(id.clone()),
+            Json(TransitionRequest::Activate { actor: actor() }),
+        )
+        .await
+        .expect("activate");
+        let Json(ticket) = get_ticket(State(state), Path(id))
+            .await
+            .expect("get ticket");
+        assert_ne!(ticket.state, TicketState::Draft);
+    }
+
+    #[tokio::test]
+    async fn transition_on_missing_ticket_is_not_found() {
+        let (_dir, state) = test_state();
+        let missing = TicketId::new("T-999").expect("valid shape");
+        let err = transition_ticket(
+            State(state),
+            Path(missing),
+            Json(TransitionRequest::Activate { actor: actor() }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn transition_generic_trigger_reports_invalid_transition_as_conflict() {
+        let (_dir, state) = test_state();
+        let id = make_ticket(&state).await;
+        // A Draft ticket cannot receive LeaseAcquired directly.
+        let err = transition_ticket(
+            State(state),
+            Path(id),
+            Json(TransitionRequest::Trigger {
+                trigger: Trigger::LeaseAcquired,
+                actor: actor(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status_of(err), StatusCode::CONFLICT);
+    }
+
+    async fn make_ready_ticket(state: &AppState) -> TicketId {
+        let id = make_ticket(state).await;
+        transition_ticket(
+            State(state.clone()),
+            Path(id.clone()),
+            Json(TransitionRequest::Activate { actor: actor() }),
+        )
+        .await
+        .expect("activate");
+        id
+    }
+
+    #[tokio::test]
+    async fn acquire_heartbeat_release_lease_roundtrip() {
+        let (_dir, state) = test_state();
+        let id = make_ready_ticket(&state).await;
+        let (status, Json(body)) = acquire_lease(
+            State(state.clone()),
+            Path(id.clone()),
+            Json(AcquireLeaseRequest {
+                holder: actor(),
+                authority: Authority::none(),
+                resources: Vec::new(),
+                ttl_seconds: 60,
+                actor: actor(),
+            }),
+        )
+        .await
+        .expect("acquire lease");
+        assert_eq!(status, StatusCode::CREATED);
+        let lease_id_str = body["lease"]["id"].as_str().expect("lease id").to_string();
+        let lease_id = LeaseId::new(lease_id_str).expect("valid lease id");
+
+        let Json(hb) = heartbeat_lease(
+            State(state.clone()),
+            Path(lease_id.clone()),
+            Json(ActorOnlyRequest { actor: actor() }),
+        )
+        .await
+        .expect("heartbeat");
+        assert!(!hb["events"].as_array().expect("events array").is_empty());
+
+        let Json(rel) = release_lease(
+            State(state),
+            Path(lease_id),
+            Json(ActorOnlyRequest { actor: actor() }),
+        )
+        .await
+        .expect("release");
+        assert!(!rel["events"].as_array().expect("events array").is_empty());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_on_unknown_lease_is_not_found() {
+        let (_dir, state) = test_state();
+        let missing = LeaseId::new("L-000000000000").expect("valid shape");
+        let err = heartbeat_lease(
+            State(state),
+            Path(missing),
+            Json(ActorOnlyRequest { actor: actor() }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn attach_evidence_records_an_event() {
+        let (_dir, state) = test_state();
+        let id = make_ticket(&state).await;
+        let (_, Json(artifact_body)) = create_artifact(
+            State(state.clone()),
+            Json(CreateArtifactRequest {
+                kind: ArtifactKind::Report,
+                media_type: "text/plain".to_string(),
+                bytes: b"ok".to_vec(),
+                meta: json!({}),
+                ticket: Some(id.clone()),
+                actor: actor(),
+            }),
+        )
+        .await
+        .expect("create artifact");
+        let artifact_id_str = artifact_body["artifact"]["id"]
+            .as_str()
+            .expect("artifact id")
+            .to_string();
+        let artifact_id = ArtifactId::new(artifact_id_str).expect("valid artifact id");
+
+        let Json(evidence_body) = attach_evidence(
+            State(state),
+            Path(id),
+            Json(AttachEvidenceRequest {
+                kind: EvidenceKind::Review,
+                artifact: artifact_id,
+                summary: "looks fine".to_string(),
+                actor: actor(),
+            }),
+        )
+        .await
+        .expect("attach evidence");
+        assert!(!evidence_body["events"]
+            .as_array()
+            .expect("events array")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn graph_reports_dependency_edge() {
+        let (_dir, state) = test_state();
+        let a = make_ticket(&state).await;
+        let b = make_ticket(&state).await;
+        state
+            .store
+            .add_dependency(&b, &a, tm_core::DependencyKind::Hard, actor())
+            .expect("add dependency");
+        let Json(graph) = get_graph(State(state)).await.expect("get graph");
+        let edges = graph["edges"].as_array().expect("edges array");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["from"], b.as_str());
+        assert_eq!(edges[0]["to"], a.as_str());
+    }
+
+    #[tokio::test]
+    async fn create_and_list_decisions() {
+        let (_dir, state) = test_state();
+        let (status, Json(body)) = create_decision(
+            State(state.clone()),
+            Json(DecisionRequest {
+                subject: "use sqlite".to_string(),
+                decision: "yes".to_string(),
+                reason: "simplicity".to_string(),
+                evidence: Vec::new(),
+                affected_tickets: Vec::new(),
+                affected_paths: Vec::new(),
+                actor: actor(),
+            }),
+        )
+        .await
+        .expect("create decision");
+        assert_eq!(status, StatusCode::CREATED);
+        let decision_id_str = body["decision"]["id"]
+            .as_str()
+            .expect("decision id")
+            .to_string();
+
+        let Json(list) = list_decisions(State(state)).await.expect("list decisions");
+        let decisions = list.as_array().expect("array");
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions[0]["id"], decision_id_str);
+    }
+
+    #[tokio::test]
+    async fn supersede_decision_links_the_two_records() {
+        let (_dir, state) = test_state();
+        let (_, Json(first)) = create_decision(
+            State(state.clone()),
+            Json(DecisionRequest {
+                subject: "use sqlite".to_string(),
+                decision: "yes".to_string(),
+                reason: "simplicity".to_string(),
+                evidence: Vec::new(),
+                affected_tickets: Vec::new(),
+                affected_paths: Vec::new(),
+                actor: actor(),
+            }),
+        )
+        .await
+        .expect("create decision");
+        let first_id = DecisionId::new(first["decision"]["id"].as_str().expect("id").to_string())
+            .expect("valid decision id");
+
+        let (_, Json(second)) = supersede_decision(
+            State(state),
+            Path(first_id.clone()),
+            Json(DecisionRequest {
+                subject: "use sqlite".to_string(),
+                decision: "no, postgres".to_string(),
+                reason: "scale".to_string(),
+                evidence: Vec::new(),
+                affected_tickets: Vec::new(),
+                affected_paths: Vec::new(),
+                actor: actor(),
+            }),
+        )
+        .await
+        .expect("supersede decision");
+        assert_eq!(second["decision"]["supersedes"], first_id.as_str());
+    }
+
+    #[tokio::test]
+    async fn create_close_reopen_milestone() {
+        let (_dir, state) = test_state();
+        let id = make_ticket(&state).await;
+        // Milestone membership requires the ticket to exist; close requires it terminal.
+        let (_, Json(created)) = create_milestone(
+            State(state.clone()),
+            Json(CreateMilestoneRequest {
+                title: "v1".to_string(),
+                tickets: vec![id.clone()],
+                assumptions: Vec::new(),
+                actor: actor(),
+            }),
+        )
+        .await
+        .expect("create milestone");
+        let milestone_id = MilestoneId::new(
+            created["milestone"]["id"]
+                .as_str()
+                .expect("milestone id")
+                .to_string(),
+        )
+        .expect("valid milestone id");
+
+        // Member ticket is still Draft, so close must fail with a conflict/invariant error.
+        let close_err = close_milestone(
+            State(state.clone()),
+            Path(milestone_id.clone()),
+            Json(ActorOnlyRequest { actor: actor() }),
+        )
+        .await
+        .unwrap_err();
+        assert_ne!(status_of(close_err), StatusCode::OK);
+
+        let Json(list) = list_milestones(State(state))
+            .await
+            .expect("list milestones");
+        assert_eq!(list.as_array().expect("array").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn create_artifact_then_get_it() {
+        let (_dir, state) = test_state();
+        let (status, Json(body)) = create_artifact(
+            State(state.clone()),
+            Json(CreateArtifactRequest {
+                kind: ArtifactKind::CommandOutput,
+                media_type: "text/plain".to_string(),
+                bytes: b"hello".to_vec(),
+                meta: json!({"cmd": "echo hello"}),
+                ticket: None,
+                actor: actor(),
+            }),
+        )
+        .await
+        .expect("create artifact");
+        assert_eq!(status, StatusCode::CREATED);
+        let id = ArtifactId::new(body["artifact"]["id"].as_str().expect("id").to_string())
+            .expect("valid artifact id");
+
+        let Json(fetched) = get_artifact(State(state), Path(id))
+            .await
+            .expect("get artifact");
+        assert_eq!(fetched["media_type"], "text/plain");
+        assert_eq!(fetched["bytes_len"], 5);
+    }
+
+    #[tokio::test]
+    async fn get_missing_artifact_is_not_found() {
+        let (_dir, state) = test_state();
+        let missing = ArtifactId::new("ART-000000000000").expect("valid shape");
+        let err = get_artifact(State(state), Path(missing)).await.unwrap_err();
+        assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn docs_list_is_always_empty_and_writes_are_refused() {
+        let Json(list) = list_docs().await;
+        assert_eq!(list["docs"].as_array().expect("array").len(), 0);
+        let err = create_doc().await;
+        assert_eq!(status_of(err), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn approval_open_blocks_until_decided_then_records_a_decision() {
+        let (_dir, state) = test_state();
+        let opener_state = state.clone();
+        let handle = tokio::spawn(async move {
+            create_approval(
+                State(opener_state),
+                Json(CreateApprovalRequest {
+                    ticket: None,
+                    requested_by: actor(),
+                    subject: "force-push to main".to_string(),
+                    detail: "recovering from a bad rebase".to_string(),
+                }),
+            )
+            .await
+        });
+
+        // Give the opener a chance to register before we try to list/decide it.
+        tokio::task::yield_now().await;
+        let mut pending = Vec::new();
+        for _ in 0..50 {
+            let Json(list) = list_approvals(State(state.clone())).await;
+            pending = list.as_array().expect("array").clone();
+            if !pending.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(pending.len(), 1);
+        let approval_id = pending[0]["id"].as_str().expect("approval id").to_string();
+
+        let Json(decided) = decide_approval(
+            State(state),
+            Path(approval_id),
+            Json(DecideApprovalRequest {
+                decision: ApprovalDecisionBody::Approve {
+                    note: Some("looks safe".to_string()),
+                },
+                decided_by: actor(),
+            }),
+        )
+        .await
+        .expect("decide approval");
+        assert_eq!(decided["status"], "decided");
+
+        let opened = handle.await.expect("task join").expect("create_approval");
+        let Json(opened_body) = opened;
+        assert_eq!(opened_body["decision"]["approve"]["note"], "looks safe");
+    }
+
+    #[tokio::test]
+    async fn get_unknown_approval_is_bad_request() {
+        let (_dir, state) = test_state();
+        let err = get_approval(State(state), Path("AP-unknown".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(status_of(err), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn create_session_then_delete_it() {
+        let (_dir, state) = test_state();
+        let (status, Json(body)) =
+            create_session(State(state), Json(CreateSessionRequest { label: None })).await;
+        assert_eq!(status, StatusCode::CREATED);
+        let id = SessionId::new(body["session"].as_str().expect("session id").to_string())
+            .expect("valid session id");
+        let delete_status = delete_session(Path(id)).await;
+        assert_eq!(delete_status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn presence_update_then_list() {
+        let (_dir, state) = test_state();
+        let session = SessionId::new("S-1").expect("valid shape");
+        let participant = ParticipantId::new("human:alice").expect("valid participant");
+        update_presence(
+            State(state.clone()),
+            Path(session),
+            Json(PresenceUpdateRequest {
+                participant: participant.clone(),
+                ticket: None,
+                file: Some("src/main.rs".to_string()),
+                action: "editing".to_string(),
+                ttl_seconds: Some(120),
+            }),
+        )
+        .await;
+        let Json(presence) = get_presence(State(state)).await.expect("get presence");
+        let participants = presence["participants"].as_array().expect("array");
+        assert_eq!(participants.len(), 1);
+        assert_eq!(participants[0]["participant"], participant.as_str());
+    }
+
+    #[tokio::test]
+    async fn providers_reports_empty_when_unwired() {
+        let (_dir, state) = test_state();
+        let Json(body) = get_providers(State(state)).await;
+        assert_eq!(body["candidates"].as_array().expect("array").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn harness_reports_null_when_unwired() {
+        let (_dir, state) = test_state();
+        let Json(body) = get_harness(State(state)).await;
+        assert!(body["current"].is_null());
+    }
+
+    #[tokio::test]
+    async fn metrics_counts_tickets_by_state() {
+        let (_dir, state) = test_state();
+        make_ticket(&state).await;
+        make_ready_ticket(&state).await;
+        let Json(metrics) = get_metrics(State(state)).await.expect("get metrics");
+        assert_eq!(metrics["ticket_count"], 2);
+        assert_eq!(metrics["tickets_by_state"]["draft"], 1);
+    }
+
+    #[tokio::test]
+    async fn schema_endpoint_returns_a_document_with_definitions() {
+        let Json(schema) = get_schema().await;
+        assert!(schema["definitions"]["TicketId"].is_object());
+    }
+}

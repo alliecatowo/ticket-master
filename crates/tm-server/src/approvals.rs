@@ -116,24 +116,43 @@ impl ApprovalRegistry {
     /// Open a new request, returning the [`ApprovalWaiter`] the requesting handler should
     /// `.await` to block until a decision lands.
     pub fn open(&self, request: ApprovalRequest) -> ApprovalWaiter {
-        // IMPL: tokio::sync::oneshot::channel(); lock entries, insert Entry { request:
-        // request.clone(), waiter: Some(tx), result: None } keyed by request.id.clone(); return
-        // ApprovalWaiter { id: request.id, receiver: rx }.
-        todo!("register a pending entry with a fresh oneshot channel, return its waiter half")
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let id = request.id.clone();
+        let entry = Entry {
+            request: request.clone(),
+            waiter: Some(tx),
+            result: None,
+        };
+        self.entries.lock().unwrap().insert(id.clone(), entry);
+        ApprovalWaiter { id, receiver: rx }
     }
 
     /// Every currently-pending request, for `GET /approvals`.
     pub fn pending(&self) -> Vec<PendingApproval> {
-        // IMPL: lock, filter entries where result.is_none(), map to PendingApproval { request:
-        // entry.request.clone() }, collect in BTreeMap (id) order.
-        todo!("list every entry with no decision yet")
+        let entries = self.entries.lock().unwrap();
+        entries
+            .values()
+            .filter(|entry| entry.result.is_none())
+            .map(|entry| PendingApproval {
+                request: entry.request.clone(),
+            })
+            .collect()
     }
 
     /// Look up one request's current status.
     pub fn get(&self, id: &ApprovalId) -> Option<ApprovalStatus> {
-        // IMPL: lock, look up id; None -> None; Some(entry) with result -> Decided { .. }; Some
-        // with no result -> Pending.
-        todo!("report Pending or Decided for this request id")
+        let entries = self.entries.lock().unwrap();
+        entries.get(id).map(|entry| {
+            if let Some((decision, decided_by, decided_at)) = &entry.result {
+                ApprovalStatus::Decided {
+                    decision: decision.clone(),
+                    decided_by: decided_by.clone(),
+                    decided_at: *decided_at,
+                }
+            } else {
+                ApprovalStatus::Pending
+            }
+        })
     }
 
     /// Record a decision and wake the waiting requester.
@@ -150,12 +169,23 @@ impl ApprovalRegistry {
         decided_by: ParticipantId,
         decided_at: Timestamp,
     ) -> Result<(), ApprovalError> {
-        // IMPL: lock, get_mut(id).ok_or(NotFound); if entry.result.is_some() ->
-        // AlreadyDecided; else set entry.result = Some((decision.clone(), decided_by,
-        // decided_at)); take entry.waiter and, if Some(tx), tx.send(decision) — a Err from
-        // send() means the receiver was dropped, map that (and a None waiter, meaning open()
-        // was never called with this exact path) to WaiterGone; otherwise Ok(()).
-        todo!("record the decision, wake the waiter if still listening")
+        let mut entries = self.entries.lock().unwrap();
+        let entry = entries
+            .get_mut(id)
+            .ok_or_else(|| ApprovalError::NotFound(id.clone()))?;
+
+        if entry.result.is_some() {
+            return Err(ApprovalError::AlreadyDecided(id.clone()));
+        }
+
+        entry.result = Some((decision.clone(), decided_by, decided_at));
+
+        if let Some(tx) = entry.waiter.take() {
+            tx.send(decision)
+                .map_err(|_| ApprovalError::WaiterGone(id.clone()))
+        } else {
+            Err(ApprovalError::WaiterGone(id.clone()))
+        }
     }
 }
 
@@ -180,7 +210,244 @@ impl ApprovalWaiter {
     /// [`ApprovalError::WaiterGone`] if the sender was dropped without ever deciding (server
     /// shutdown while this request was still pending).
     pub async fn wait(self) -> Result<ApprovalDecision, ApprovalError> {
-        // IMPL: self.receiver.await.map_err(|_| ApprovalError::WaiterGone(self.id)).
-        todo!("await the oneshot receiver, translating a dropped sender into WaiterGone")
+        self.receiver
+            .await
+            .map_err(|_| ApprovalError::WaiterGone(self.id))
+    }
+}
+
+/// Public alias for the registry backing approvals.
+pub type ApprovalStore = ApprovalRegistry;
+
+/// Public alias for an approval request.
+pub type Approval = ApprovalRequest;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tm_types::{Clock, FixedClock, IdKind, IdSource, ParticipantId, TestIds};
+
+    fn make_request(id: &str) -> ApprovalRequest {
+        let clock = FixedClock::epoch();
+        let ids = TestIds::new();
+        ApprovalRequest {
+            id: id.to_string(),
+            ticket: None,
+            requested_by: ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"),
+            subject: "test subject".to_string(),
+            detail: "test detail".to_string(),
+            requested_at: clock.now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn happy_path_approve_and_wait() {
+        let registry = ApprovalRegistry::new();
+        let req = make_request("req-1");
+        let waiter = registry.open(req);
+
+        let ids = TestIds::new();
+        let clock = FixedClock::epoch();
+        let decision = ApprovalDecision::Approve {
+            note: Some("looks good".to_string()),
+        };
+
+        registry
+            .decide(&"req-1".to_string(), decision.clone(), ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"), clock.now())
+            .unwrap();
+
+        let result = waiter.wait().await.unwrap();
+        assert_eq!(result, decision);
+    }
+
+    #[tokio::test]
+    async fn happy_path_deny_and_wait() {
+        let registry = ApprovalRegistry::new();
+        let req = make_request("req-2");
+        let waiter = registry.open(req);
+
+        let ids = TestIds::new();
+        let clock = FixedClock::epoch();
+        let decision = ApprovalDecision::Deny {
+            reason: "not approved".to_string(),
+        };
+
+        registry
+            .decide(&"req-2".to_string(), decision.clone(), ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"), clock.now())
+            .unwrap();
+
+        let result = waiter.wait().await.unwrap();
+        assert_eq!(result, decision);
+    }
+
+    #[test]
+    fn get_returns_none_for_unknown() {
+        let registry = ApprovalRegistry::new();
+        assert_eq!(registry.get(&"unknown".to_string()), None);
+    }
+
+    #[test]
+    fn get_returns_pending() {
+        let registry = ApprovalRegistry::new();
+        let req = make_request("req-3");
+        let _waiter = registry.open(req);
+
+        assert_eq!(registry.get(&"req-3".to_string()), Some(ApprovalStatus::Pending));
+    }
+
+    #[test]
+    fn get_returns_decided() {
+        let registry = ApprovalRegistry::new();
+        let req = make_request("req-4");
+        let _waiter = registry.open(req);
+
+        let ids = TestIds::new();
+        let clock = FixedClock::epoch();
+        let decided_by = ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id");
+        let decided_at = clock.now();
+        let decision = ApprovalDecision::Approve { note: None };
+
+        registry
+            .decide(&"req-4".to_string(), decision.clone(), decided_by.clone(), decided_at)
+            .ok();
+
+        if let Some(ApprovalStatus::Decided {
+            decision: d,
+            decided_by: db,
+            decided_at: da,
+        }) = registry.get(&"req-4".to_string())
+        {
+            assert_eq!(d, decision);
+            assert_eq!(db, decided_by);
+            assert_eq!(da, decided_at);
+        } else {
+            panic!("expected Decided status");
+        }
+    }
+
+    #[test]
+    fn decide_not_found() {
+        let registry = ApprovalRegistry::new();
+        let ids = TestIds::new();
+        let clock = FixedClock::epoch();
+
+        let err = registry.decide(
+            &"unknown".to_string(),
+            ApprovalDecision::Approve { note: None },
+            ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"),
+            clock.now(),
+        );
+
+        assert_eq!(err, Err(ApprovalError::NotFound("unknown".to_string())));
+    }
+
+    #[test]
+    fn decide_already_decided() {
+        let registry = ApprovalRegistry::new();
+        let req = make_request("req-5");
+        let _waiter = registry.open(req);
+
+        let ids = TestIds::new();
+        let clock = FixedClock::epoch();
+        let decision = ApprovalDecision::Approve { note: None };
+
+        registry
+            .decide(&"req-5".to_string(), decision.clone(), ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"), clock.now())
+            .ok();
+
+        let err = registry.decide(&"req-5".to_string(), decision, ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"), clock.now());
+
+        assert_eq!(err, Err(ApprovalError::AlreadyDecided("req-5".to_string())));
+    }
+
+    #[test]
+    fn decide_waiter_gone() {
+        let registry = ApprovalRegistry::new();
+        let req = make_request("req-6");
+        let waiter = registry.open(req);
+
+        drop(waiter);
+
+        let ids = TestIds::new();
+        let clock = FixedClock::epoch();
+        let decision = ApprovalDecision::Approve { note: None };
+
+        let err = registry.decide(&"req-6".to_string(), decision, ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"), clock.now());
+
+        assert_eq!(err, Err(ApprovalError::WaiterGone("req-6".to_string())));
+
+        if let Some(ApprovalStatus::Decided { .. }) = registry.get(&"req-6".to_string()) {
+        } else {
+            panic!("decision should be recorded even if waiter gone");
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_sender_dropped() {
+        let registry = ApprovalRegistry::new();
+        let req = make_request("req-7");
+        let waiter = registry.open(req);
+
+        drop(registry);
+
+        let err = waiter.wait().await;
+        assert_eq!(err, Err(ApprovalError::WaiterGone("req-7".to_string())));
+    }
+
+    #[test]
+    fn pending_empty_initially() {
+        let registry = ApprovalRegistry::new();
+        assert_eq!(registry.pending().len(), 0);
+    }
+
+    #[test]
+    fn pending_lists_all_pending() {
+        let registry = ApprovalRegistry::new();
+        let req1 = make_request("req-8");
+        let req2 = make_request("req-9");
+        let req3 = make_request("req-10");
+
+        let _w1 = registry.open(req1.clone());
+        let _w2 = registry.open(req2.clone());
+        let _w3 = registry.open(req3.clone());
+
+        // `pending` makes no ordering promise (the registry keys by id in a `BTreeMap`, so the
+        // order is lexicographic, not insertion order); assert membership instead of position.
+        let pending = registry.pending();
+        let mut ids: Vec<&str> = pending.iter().map(|p| p.request.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["req-10", "req-8", "req-9"]);
+    }
+
+    #[test]
+    fn pending_excludes_decided() {
+        let registry = ApprovalRegistry::new();
+        let req1 = make_request("req-11");
+        let req2 = make_request("req-12");
+
+        let _w1 = registry.open(req1);
+        let _w2 = registry.open(req2);
+
+        let ids = TestIds::new();
+        let clock = FixedClock::epoch();
+
+        registry
+            .decide(
+                &"req-11".to_string(),
+                ApprovalDecision::Approve { note: None },
+                ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"),
+                clock.now(),
+            )
+            .ok();
+
+        let pending = registry.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].request.id, "req-12");
+    }
+
+    #[test]
+    fn default_creates_empty_registry() {
+        let registry = ApprovalRegistry::default();
+        assert_eq!(registry.pending().len(), 0);
     }
 }

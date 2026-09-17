@@ -30,9 +30,9 @@ pub mod routes;
 pub mod sse;
 pub mod state;
 
-pub use approvals::{Approval, ApprovalDecision, ApprovalStatus, ApprovalStore};
-pub use auth::{authenticate, AuthConfig, AuthError};
-pub use presence::{PresenceEntry, PresenceStore, SurfacedLease};
+pub use approvals::{ApprovalDecision, ApprovalRegistry, ApprovalRequest, ApprovalStatus};
+pub use auth::{resolve_token, token_matches, AuthError, BindAddress};
+pub use presence::{PathLeaseSummary, PresenceEntry, PresenceTable};
 pub use routes::router;
-pub use sse::{event_stream, SseEvent};
-pub use state::{AppState, ApiError};
+pub use sse::sse_handler;
+pub use state::{AppState, ServerError};

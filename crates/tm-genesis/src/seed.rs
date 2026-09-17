@@ -42,7 +42,7 @@ impl Constraint {
 /// A reasonable default Genesis adopted instead of asking a human, so it can proceed. Recorded
 /// as a `genesis.assumption_recorded` event; cheap to supersede later by recording a new
 /// [`Assumption`] (or a full [`tm_core::Decision`]) rather than editing this one.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Assumption {
     /// The assumption, in prose, e.g. "target audience is developers, not end users".
     pub text: String,
@@ -239,7 +239,7 @@ pub async fn analyze_prompt(
     let explicit_constraints = parsed.explicit_constraints.unwrap_or_default();
     let inferred_constraints = parsed.inferred_constraints.unwrap_or_default();
     let mut assumptions = parsed.assumptions.unwrap_or_default();
-    let mut unresolved_questions = parsed.unresolved_questions.unwrap_or_default();
+    let unresolved_questions = parsed.unresolved_questions.unwrap_or_default();
 
     // Bias to action: convert trivial or non-blocking questions to assumptions.
     let inferred_constraint_texts: std::collections::HashSet<_> = inferred_constraints
@@ -319,13 +319,18 @@ fn is_trivial_question(
     explicit_texts: &std::collections::HashSet<String>,
 ) -> bool {
     let q_lower = question.text.to_lowercase();
-    // If the question text is very similar to an existing constraint, it's trivial.
+    // Words longer than 3 characters, so common stopwords ("is", "it", "the") don't cause
+    // false positives; a shared distinctive word is enough to call the question a duplicate.
+    let words = |s: &str| -> std::collections::HashSet<String> {
+        s.split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 3)
+            .map(str::to_string)
+            .collect()
+    };
+    let q_words = words(&q_lower);
     for text in inferred_texts.iter().chain(explicit_texts.iter()) {
-        if text.len() > 10 {
-            // Very loose similarity check: if the constraint text is a substring or vice versa.
-            if text.contains(&q_lower) || q_lower.contains(text) {
-                return true;
-            }
+        if !q_words.is_disjoint(&words(text)) {
+            return true;
         }
     }
     false
@@ -407,7 +412,7 @@ mod tests {
     #[test]
     fn seed_blocking_open_questions_filters_correctly() {
         let mut seed = Seed::new("prompt".into(), &FixedClock::epoch());
-        let mut q1 = Question::new("blocking open", true, "reason");
+        let q1 = Question::new("blocking open", true, "reason");
         let mut q2 = Question::new("blocking resolved", true, "reason");
         q2.resolution = Some("answer".into());
         let q3 = Question::new("non-blocking open", false, "reason");
