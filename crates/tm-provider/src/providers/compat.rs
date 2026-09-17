@@ -102,7 +102,11 @@ pub struct CompatConfig {
 impl CompatConfig {
     /// Start a config with the OpenAI-standard defaults: Bearer auth, `/chat/completions` and
     /// `/embeddings` under `base_url`, 3 retries, a 120s timeout, no extra headers.
-    pub fn new(id: impl Into<String>, base_url: impl Into<String>, model: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
         CompatConfig {
             id: id.into(),
             base_url: base_url.into(),
@@ -183,7 +187,11 @@ impl CompatProvider {
             .timeout(config.timeout)
             .build()
             .map_err(|e| ProviderError::Unavailable(format!("failed to build HTTP client: {e}")))?;
-        Ok(CompatProvider { config, http, clock })
+        Ok(CompatProvider {
+            config,
+            http,
+            clock,
+        })
     }
 
     /// Build a provider by reading `{prefix}_API_KEY` (optional — omitted entirely for
@@ -203,8 +211,7 @@ impl CompatProvider {
         let model_var = format!("{prefix}_MODEL");
         let api_key_var = format!("{prefix}_API_KEY");
 
-        let base_url =
-            std::env::var(&base_url_var).map_err(|_| missing_env_var(&base_url_var))?;
+        let base_url = std::env::var(&base_url_var).map_err(|_| missing_env_var(&base_url_var))?;
         let model = std::env::var(&model_var).map_err(|_| missing_env_var(&model_var))?;
         let api_key = std::env::var(&api_key_var).ok();
 
@@ -265,13 +272,16 @@ impl CompatProvider {
             let body_bytes = response
                 .bytes()
                 .await
-                .map_err(|e| ProviderError::Unavailable(format!("failed to read response body: {e}")))?
+                .map_err(|e| {
+                    ProviderError::Unavailable(format!("failed to read response body: {e}"))
+                })?
                 .to_vec();
 
             match classify_status(status, retry_after_header.as_deref(), &body_bytes) {
                 Ok(()) => {
                     let finished = self.clock.now();
-                    let latency = Duration::from_millis(finished.millis_since(started).max(0) as u64);
+                    let latency =
+                        Duration::from_millis(finished.millis_since(started).max(0) as u64);
                     return Ok((body_bytes, latency, finished));
                 }
                 Err(err) => {
@@ -301,9 +311,21 @@ impl Provider for CompatProvider {
 
         if req.stream {
             let chunks = parse_sse_body(&body)?;
-            assemble_streamed_completion(&chunks, &self.config.model, &self.config.id, latency, received_at)
+            assemble_streamed_completion(
+                &chunks,
+                &self.config.model,
+                &self.config.id,
+                latency,
+                received_at,
+            )
         } else {
-            parse_wire_response(&body, &self.config.model, &self.config.id, latency, received_at)
+            parse_wire_response(
+                &body,
+                &self.config.model,
+                &self.config.id,
+                latency,
+                received_at,
+            )
         }
     }
 
@@ -681,7 +703,11 @@ pub struct WireEmbedDatum {
 
 // ---- shaping: crate::types -> wire (pure, unit-tested against recorded JSON) -----------------
 
-fn wire_tool_call_from_content_block(id: &str, name: &str, input: &serde_json::Value) -> WireToolCall {
+fn wire_tool_call_from_content_block(
+    id: &str,
+    name: &str,
+    input: &serde_json::Value,
+) -> WireToolCall {
     WireToolCall {
         id: id.to_string(),
         kind: "function".to_string(),
@@ -845,9 +871,9 @@ pub fn build_wire_request(model: &str, req: &CompletionRequest) -> WireRequest {
         stop: req.stop_sequences.clone(),
         stream: req.stream,
         n: if req.n > 1 { Some(req.n) } else { None },
-        stream_options: req
-            .stream
-            .then_some(WireStreamOptions { include_usage: true }),
+        stream_options: req.stream.then_some(WireStreamOptions {
+            include_usage: true,
+        }),
     }
 }
 
@@ -876,9 +902,10 @@ fn wire_message_to_content(msg: &WireResponseMessage) -> Result<Vec<ContentBlock
         }
     }
     for tc in &msg.tool_calls {
-        let input: serde_json::Value = serde_json::from_str(&tc.function.arguments).map_err(|e| {
-            ProviderError::MalformedResponse(format!("tool call arguments not valid JSON: {e}"))
-        })?;
+        let input: serde_json::Value =
+            serde_json::from_str(&tc.function.arguments).map_err(|e| {
+                ProviderError::MalformedResponse(format!("tool call arguments not valid JSON: {e}"))
+            })?;
         content.push(ContentBlock::ToolUse {
             id: tc.id.clone(),
             name: tc.function.name.clone(),
@@ -924,13 +951,19 @@ pub fn parse_wire_response(
     for choice in &wire.choices {
         let content = wire_message_to_content(&choice.message)?;
         let stop_reason = map_finish_reason(choice.finish_reason.as_deref().unwrap_or("stop"))?;
-        candidates.push(Candidate { content, stop_reason });
+        candidates.push(Candidate {
+            content,
+            stop_reason,
+        });
     }
 
     let usage = wire.usage.map(wire_usage_to_usage).unwrap_or_default();
 
     Ok(Completion {
-        model: ModelId::new(provider_id, wire.model.unwrap_or_else(|| requested_model.to_string())),
+        model: ModelId::new(
+            provider_id,
+            wire.model.unwrap_or_else(|| requested_model.to_string()),
+        ),
         candidates,
         usage,
         latency,
@@ -955,7 +988,10 @@ pub fn parse_wire_embed_response(
     let usage = wire.usage.map(wire_usage_to_usage).unwrap_or_default();
 
     Ok(Embeddings {
-        model: ModelId::new(provider_id, wire.model.unwrap_or_else(|| requested_model.to_string())),
+        model: ModelId::new(
+            provider_id,
+            wire.model.unwrap_or_else(|| requested_model.to_string()),
+        ),
         vectors,
         usage,
     })
@@ -974,8 +1010,9 @@ pub fn parse_wire_embed_response(
 /// this function does; nothing here assumes the whole body is available except this function's
 /// own signature.
 pub fn parse_sse_body(body: &[u8]) -> Result<Vec<WireStreamChunk>, ProviderError> {
-    let text = std::str::from_utf8(body)
-        .map_err(|e| ProviderError::MalformedResponse(format!("SSE body was not valid UTF-8: {e}")))?;
+    let text = std::str::from_utf8(body).map_err(|e| {
+        ProviderError::MalformedResponse(format!("SSE body was not valid UTF-8: {e}"))
+    })?;
 
     let mut chunks = Vec::new();
     for event in text.split("\n\n") {
@@ -1064,7 +1101,9 @@ pub fn assemble_streamed_completion(
     for (_, accum) in choices {
         let mut content = Vec::new();
         if !accum.content.is_empty() {
-            content.push(ContentBlock::Text { text: accum.content });
+            content.push(ContentBlock::Text {
+                text: accum.content,
+            });
         }
         for (_, tc) in accum.tool_calls {
             let input: serde_json::Value = if tc.arguments.is_empty() {
@@ -1083,13 +1122,19 @@ pub fn assemble_streamed_completion(
             });
         }
         let stop_reason = map_finish_reason(accum.finish_reason.as_deref().unwrap_or("stop"))?;
-        candidates.push(Candidate { content, stop_reason });
+        candidates.push(Candidate {
+            content,
+            stop_reason,
+        });
     }
 
     let usage = usage.map(wire_usage_to_usage).unwrap_or_default();
 
     Ok(Completion {
-        model: ModelId::new(provider_id, model.unwrap_or_else(|| requested_model.to_string())),
+        model: ModelId::new(
+            provider_id,
+            model.unwrap_or_else(|| requested_model.to_string()),
+        ),
         candidates,
         usage,
         latency,
@@ -1108,17 +1153,23 @@ pub fn build_headers(config: &CompatConfig) -> Result<reqwest::header::HeaderMap
             AuthStyle::Bearer => {
                 let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}"))
                     .map_err(|e| {
-                        ProviderError::InvalidRequest(format!("api key is not a valid header value: {e}"))
+                        ProviderError::InvalidRequest(format!(
+                            "api key is not a valid header value: {e}"
+                        ))
                     })?;
                 headers.insert(reqwest::header::AUTHORIZATION, value);
             }
             AuthStyle::Header(name) => {
                 let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
                     .map_err(|e| {
-                        ProviderError::InvalidRequest(format!("invalid auth header name {name:?}: {e}"))
+                        ProviderError::InvalidRequest(format!(
+                            "invalid auth header name {name:?}: {e}"
+                        ))
                     })?;
                 let value = reqwest::header::HeaderValue::from_str(api_key).map_err(|e| {
-                    ProviderError::InvalidRequest(format!("api key is not a valid header value: {e}"))
+                    ProviderError::InvalidRequest(format!(
+                        "api key is not a valid header value: {e}"
+                    ))
                 })?;
                 headers.insert(header_name, value);
             }
@@ -1127,9 +1178,10 @@ pub fn build_headers(config: &CompatConfig) -> Result<reqwest::header::HeaderMap
     }
 
     for (name, value) in &config.extra_headers {
-        let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
-            ProviderError::InvalidRequest(format!("invalid extra header name {name:?}: {e}"))
-        })?;
+        let header_name =
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| {
+                ProviderError::InvalidRequest(format!("invalid extra header name {name:?}: {e}"))
+            })?;
         let header_value = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
             ProviderError::InvalidRequest(format!("invalid extra header value for {name:?}: {e}"))
         })?;
@@ -1168,7 +1220,10 @@ pub fn classify_status(
 
     if status.as_u16() == 429 {
         let message = parse_error_message(body, "rate limited");
-        return Err(ProviderError::RateLimited { message, retry_after });
+        return Err(ProviderError::RateLimited {
+            message,
+            retry_after,
+        });
     }
 
     if status.is_server_error() {
@@ -1423,17 +1478,28 @@ mod tests {
                 {"index": 1, "message": {"content": "second"}, "finish_reason": "length"}
             ]
         }"#;
-        let completion =
-            parse_wire_response(body.as_bytes(), "m", "p", Duration::ZERO, tm_types::Timestamp::EPOCH)
-                .expect("parses");
+        let completion = parse_wire_response(
+            body.as_bytes(),
+            "m",
+            "p",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+        )
+        .expect("parses");
         assert_eq!(completion.candidates.len(), 2);
         assert_eq!(completion.candidates[1].stop_reason, StopReason::MaxTokens);
     }
 
     #[test]
     fn parse_wire_response_rejects_invalid_json() {
-        let err = parse_wire_response(b"not json", "m", "p", Duration::ZERO, tm_types::Timestamp::EPOCH)
-            .unwrap_err();
+        let err = parse_wire_response(
+            b"not json",
+            "m",
+            "p",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+        )
+        .unwrap_err();
         assert!(matches!(err, ProviderError::MalformedResponse(_)));
     }
 
@@ -1452,19 +1518,30 @@ mod tests {
 
     #[test]
     fn parse_wire_response_rejects_unknown_finish_reason() {
-        let body = r#"{"choices": [{"message": {"content": "x"}, "finish_reason": "content_filter"}]}"#;
-        let err =
-            parse_wire_response(body.as_bytes(), "m", "p", Duration::ZERO, tm_types::Timestamp::EPOCH)
-                .unwrap_err();
+        let body =
+            r#"{"choices": [{"message": {"content": "x"}, "finish_reason": "content_filter"}]}"#;
+        let err = parse_wire_response(
+            body.as_bytes(),
+            "m",
+            "p",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+        )
+        .unwrap_err();
         assert!(matches!(err, ProviderError::MalformedResponse(_)));
     }
 
     #[test]
     fn parse_wire_response_rejects_malformed_tool_call_arguments() {
         let body = r#"{"choices": [{"message": {"tool_calls": [{"id": "1", "type": "function", "function": {"name": "f", "arguments": "not json"}}]}, "finish_reason": "tool_calls"}]}"#;
-        let err =
-            parse_wire_response(body.as_bytes(), "m", "p", Duration::ZERO, tm_types::Timestamp::EPOCH)
-                .unwrap_err();
+        let err = parse_wire_response(
+            body.as_bytes(),
+            "m",
+            "p",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+        )
+        .unwrap_err();
         assert!(matches!(err, ProviderError::MalformedResponse(_)));
     }
 
@@ -1517,9 +1594,14 @@ mod tests {
             "data: [DONE]\n\n",
         );
         let chunks = parse_sse_body(body.as_bytes()).expect("parses");
-        let completion =
-            assemble_streamed_completion(&chunks, "gpt-test", "openai", Duration::ZERO, tm_types::Timestamp::EPOCH)
-                .expect("assembles");
+        let completion = assemble_streamed_completion(
+            &chunks,
+            "gpt-test",
+            "openai",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+        )
+        .expect("assembles");
 
         assert_eq!(completion.model, ModelId::new("openai", "gpt-stream"));
         assert_eq!(
@@ -1542,9 +1624,14 @@ mod tests {
             "data: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}]}\n\n",
         );
         let chunks = parse_sse_body(body.as_bytes()).expect("parses");
-        let completion =
-            assemble_streamed_completion(&chunks, "gpt-test", "openai", Duration::ZERO, tm_types::Timestamp::EPOCH)
-                .expect("assembles");
+        let completion = assemble_streamed_completion(
+            &chunks,
+            "gpt-test",
+            "openai",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+        )
+        .expect("assembles");
 
         assert_eq!(completion.candidates[0].stop_reason, StopReason::ToolUse);
         match &completion.candidates[0].content[0] {
@@ -1559,8 +1646,9 @@ mod tests {
 
     #[test]
     fn assemble_streamed_completion_rejects_empty_stream() {
-        let err = assemble_streamed_completion(&[], "m", "p", Duration::ZERO, tm_types::Timestamp::EPOCH)
-            .unwrap_err();
+        let err =
+            assemble_streamed_completion(&[], "m", "p", Duration::ZERO, tm_types::Timestamp::EPOCH)
+                .unwrap_err();
         assert!(matches!(err, ProviderError::MalformedResponse(_)));
     }
 
@@ -1571,17 +1659,26 @@ mod tests {
             "data: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"first\"}, \"finish_reason\": \"stop\"}]}\n\n",
         );
         let chunks = parse_sse_body(body.as_bytes()).expect("parses");
-        let completion =
-            assemble_streamed_completion(&chunks, "m", "p", Duration::ZERO, tm_types::Timestamp::EPOCH)
-                .expect("assembles");
+        let completion = assemble_streamed_completion(
+            &chunks,
+            "m",
+            "p",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+        )
+        .expect("assembles");
         assert_eq!(completion.candidates.len(), 2);
         assert_eq!(
             completion.candidates[0].content,
-            vec![ContentBlock::Text { text: "first".to_string() }]
+            vec![ContentBlock::Text {
+                text: "first".to_string()
+            }]
         );
         assert_eq!(
             completion.candidates[1].content,
-            vec![ContentBlock::Text { text: "second".to_string() }]
+            vec![ContentBlock::Text {
+                text: "second".to_string()
+            }]
         );
     }
 
@@ -1592,7 +1689,10 @@ mod tests {
         let config = CompatConfig::new("openai", "https://api.openai.com/v1", "gpt-test")
             .with_api_key("sk-test");
         let headers = build_headers(&config).expect("builds headers");
-        assert_eq!(headers.get(reqwest::header::AUTHORIZATION).unwrap(), "Bearer sk-test");
+        assert_eq!(
+            headers.get(reqwest::header::AUTHORIZATION).unwrap(),
+            "Bearer sk-test"
+        );
     }
 
     #[test]
@@ -1637,7 +1737,10 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            ProviderError::RateLimited { message, retry_after } => {
+            ProviderError::RateLimited {
+                message,
+                retry_after,
+            } => {
                 assert_eq!(message, "slow down");
                 assert_eq!(retry_after, Some(Duration::from_secs(20)));
             }

@@ -1878,3 +1878,42 @@ budget decision as well as a capacity one:
   stranding it.
 - Escalate to a human when the remaining project budget cannot finish the remaining graph. That is a
   fact worth surfacing early, not at the end.
+
+## 32. Code navigation (the ladder)
+
+See `docs/thesis.md` for the reasoning. This section is the contract.
+
+Navigation tools are offered as a deliberate hierarchy. Each rung answers a different question, and
+the agent is never prevented from using any of them — friction is not a safety mechanism, and a tool
+that has to be mandated has already lost on merit.
+
+1. **Semantic retrieval**, when neither the location nor the symbol is known. AST-aware chunking so
+   chunks respect code structure, fused with the lexical, symbol-proximity, path-affinity,
+   edit-recency and co-change signals of §7. Seeded by the ticket's own claims.
+2. **Symbol map** over whatever was retrieved. Structure before content: the classes, methods, traits
+   and signatures present, not a file dump.
+3. **LSP traversal**: definition, implementations, type on hover, and — the load-bearing one —
+   **callers and callees**.
+4. **Literal and regex search**. Always available, expected to be rare.
+5. **Edit with live feedback**: a REPL and LSP diagnostics surfaced as the edit is made, not one
+   round trip later.
+
+### 32.1 Why callers and callees rank highest
+
+Every other tool requires the agent to already suspect what it is looking for. A model cannot search
+for a caller whose name it has never seen, and it cannot know that the function it is about to change
+has fourteen call sites in three crates.
+
+Callers and callees are the only primitive that converts an **unknown unknown** into a traversal. It
+is therefore the single highest-value navigation tool in the system, and it must be exhaustive,
+fast, and correct across the whole workspace — not best-effort, not limited to the open file.
+
+### 32.2 Tool quality is the safety model
+
+We do not restrict the agent to steer it. A restricted agent routes around the restriction and the
+result is worse work and hidden behaviour.
+
+Instead the higher rungs must be so obviously superior that reaching for the lower ones is a rare,
+deliberate act. When a worker falls back to `rg`, that is a signal worth recording: either the query
+was genuinely a string search, or a higher rung failed to serve it, and the latter is a bug in our
+retrieval that `tm doctor` should surface as a measurement rather than a complaint.

@@ -25,7 +25,9 @@ use tm_types::Clock;
 use crate::fabric::Provider;
 use crate::providers::compat::CompatProvider;
 use crate::providers::ProviderInfo;
-use crate::types::{Completion, CompletionRequest, EmbedRequest, Embeddings, ModelId, ProviderError};
+use crate::types::{
+    Completion, CompletionRequest, EmbedRequest, Embeddings, ModelId, ProviderError,
+};
 
 /// OpenRouter — a single API in front of dozens of upstream model vendors.
 pub struct OpenRouterProvider {

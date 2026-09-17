@@ -49,6 +49,12 @@ pub mod component;
 pub mod event;
 pub mod runtime;
 pub mod screens;
+// `insta` and the pty crate that back this module are `[dev-dependencies]` (Cargo.toml), which
+// Cargo does not link into the plain library build — only into `cargo test`'s unittests binary,
+// where `cfg(test)` is true for the whole crate. Gating the module on `cfg(test)` is what makes
+// `cargo check -p tm-tui` pass without promoting test-only crates into the shipped binary's
+// dependency tree; see `testing`'s module docs for what that costs.
+#[cfg(test)]
 pub mod testing;
 pub mod text;
 pub mod theme;

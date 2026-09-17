@@ -38,7 +38,9 @@ use tm_types::Clock;
 use crate::fabric::Provider;
 use crate::providers::compat::CompatProvider;
 use crate::providers::ProviderInfo;
-use crate::types::{Completion, CompletionRequest, EmbedRequest, Embeddings, ModelId, ProviderError};
+use crate::types::{
+    Completion, CompletionRequest, EmbedRequest, Embeddings, ModelId, ProviderError,
+};
 
 /// OpenAI's Chat Completions API. See the module docs for env vars and the `max_tokens` /
 /// `max_completion_tokens` caveat.

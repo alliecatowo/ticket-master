@@ -10,6 +10,25 @@
 //! VHS-tape visual-regression gates on the highest-value screens (D-002) are deliberately out of
 //! scope for this module: they run out-of-process against a built `tm` binary, not against this
 //! crate's Rust test suite.
+//!
+//! # Why this module is `#[cfg(test)]`-gated
+//!
+//! `insta` and the pty crate this module uses are `[dev-dependencies]` (per this crate's
+//! Cargo.toml, which only the scaffolding agent may edit), so Cargo does not link them into the
+//! plain library build — only into the `cargo test` unittests binary, where `cfg(test)` is true
+//! for the whole crate (see `lib.rs`). That makes [`Harness`] reachable from any sibling module's
+//! `#[cfg(test)] mod tests` (e.g. `widgets_data::table`'s own tests), which covers the
+//! per-screen `insta` snapshot layer D-002 asks for.
+//!
+//! It does **not** make [`PtyHarness`] reachable from a separate integration-test binary under
+//! `crates/tm-tui/tests/*.rs`: those link against the *non*-`cfg(test)` build of this crate, so a
+//! `cfg(test)`-gated module does not exist for them, even though integration tests do get their
+//! own access to `[dev-dependencies]`. If the event-loop/signal tests need to live there (spawning
+//! a real compiled binary is usually cleaner as an integration test than a unit test), write the
+//! pty-driving helper directly under `tests/support/` instead of trying to import it from here —
+//! or, if sharing this exact code is worth it, that requires promoting `portable-pty`/`insta` to
+//! an optional regular dependency behind a feature, which is a Cargo.toml change only the
+//! scaffolding agent may make; raise it rather than routing around it.
 
 use std::io;
 use std::time::Duration;
