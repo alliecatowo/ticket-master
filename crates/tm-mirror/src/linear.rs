@@ -1,19 +1,31 @@
-//! Linear over GraphQL: issues, workflow states, projects, and native parent/child.
+//! [`LinearTracker`]: Linear over GraphQL (a single `POST /graphql` endpoint, not REST).
 //!
-//! Linear is the one shipped adapter with `parent_child: true` and `arbitrary_states: true` —
-//! it has native sub-issues and accepts any workflow state name a team has configured, so
-//! nothing here ever needs [`crate::projection::Degradation::ChecklistRollup`] or
-//! [`crate::projection::Degradation::StateCoarsened`] handling of its own; that's already
-//! reflected in [`LinearTracker::capabilities`] and left to
-//! [`crate::projection::ProjectionPolicy`] upstream.
+//! Owns everything specific to talking to Linear: issue create/update, workflow states, native
+//! parent/child sub-issues, projects (Linear's milestone-shaped concept), labels, comments, the
+//! `LINEAR_API_KEY` credential, and Linear's cursor-based `pageInfo`/`endCursor` pagination.
+//! [`crate::tracker::Tracker`] and [`crate::projection`] own everything adapter-agnostic; this
+//! module only shapes GraphQL queries/responses and maps them onto those contracts.
 //!
-//! Owns request/response shaping for the Linear GraphQL API (single `/graphql` endpoint,
-//! cursor-based `pageInfo { hasNextPage endCursor }` pagination) and nothing else: shaping is
-//! pure and unit-tested against recorded JSON, never a live network call. The API key is read
-//! once at construction from `LINEAR_API_KEY`.
+//! Linear has both a native parent/child relationship (`Issue.parent`/`Issue.children`) and an
+//! arbitrary, per-team set of workflow states, so [`LinearTracker::capabilities`] declares both
+//! `parent_child: true` and `arbitrary_states: true` — unlike GitHub, [`Projection::checklist`]
+//! is always empty here and state names pass through unmapped.
+//!
+//! Every ticket this adapter pushes is tagged with a `tm-id:<ticket>` label (mirroring the
+//! `github` module's convention), which is how [`LinearTracker::push`] finds an already-mirrored
+//! issue to update instead of creating a duplicate, and how [`LinearTracker::pull`] tells a
+//! ticket-linked issue apart from one a human opened directly (which becomes
+//! [`crate::tracker::ExternalChangeKind::IssueCreated`]).
+//!
+//! Wire shaping and response parsing are pure functions, unit-tested here against recorded JSON.
+//! The network calls that use them (`push`/`pull` and their private helpers) are exercised by
+//! `sync`'s round-trip tests against [`crate::tracker::RecordingTracker`], never against the
+//! network, per this crate's no-network testing rule.
 
 use async_trait::async_trait;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use serde::{Deserialize, Serialize};
+
 use tm_types::{Result, TicketId, Timestamp, TmError};
 
 use crate::projection::Projection;
@@ -21,466 +33,211 @@ use crate::tracker::{
     ExternalChange, ExternalChangeKind, ExternalRef, Tracker, TrackerCapabilities,
 };
 
-/// The Linear GraphQL API endpoint this adapter targets.
+/// Name of the environment variable [`LinearTracker::from_env`] reads the API key from.
+pub const LINEAR_API_KEY_ENV_VAR: &str = "LINEAR_API_KEY";
+
+/// The Linear GraphQL endpoint this adapter targets by default.
 pub const DEFAULT_BASE_URL: &str = "https://api.linear.app/graphql";
 
-/// Name of the environment variable holding the Linear API key.
-pub const API_KEY_ENV_VAR: &str = "LINEAR_API_KEY";
+/// Linear's own conservative issue description ceiling.
+const MAX_BODY_BYTES: usize = 255_000;
 
-/// Page size requested on every paginated `issues` query.
+/// Page size used for every cursor-paginated list query.
 const PAGE_SIZE: u32 = 50;
 
-/// A prefix embedded in every mirrored issue's title so [`LinearTracker::push`] can find an
-/// already-mirrored issue by ticket id without a separate side table — Linear has no free-form
-/// custom field this adapter assumes exists, but title search is always available.
-const TITLE_PREFIX: &str = "[";
-
-/// A real Linear GraphQL API client.
-#[derive(Debug)]
+/// A live Linear adapter for one team.
 pub struct LinearTracker {
     name: String,
-    api_key: String,
     team_id: String,
+    api_key: String,
     base_url: String,
     http: reqwest::Client,
 }
 
 impl LinearTracker {
-    /// Build a tracker for `team_id`, reading the API key from [`API_KEY_ENV_VAR`].
+    /// Build a tracker for `team_id`, reading the API key from [`LINEAR_API_KEY_ENV_VAR`].
     pub fn from_env(name: impl Into<String>, team_id: impl Into<String>) -> Result<Self> {
-        let api_key = std::env::var(API_KEY_ENV_VAR)
-            .map_err(|_| TmError::invariant(format!("{API_KEY_ENV_VAR} is not set")))?;
+        let api_key = std::env::var(LINEAR_API_KEY_ENV_VAR).map_err(|_| {
+            TmError::invariant(format!("linear: {LINEAR_API_KEY_ENV_VAR} is not set"))
+        })?;
         Self::with_config(name, team_id, api_key, DEFAULT_BASE_URL.to_string())
     }
 
-    /// Build a tracker with an explicit key and base URL, for tests that stand up a local mock
-    /// HTTP server (shaping tests use recorded JSON directly and never need this).
+    /// Build a tracker with an explicit API key and base URL, for tests that stand up a local
+    /// mock HTTP server (shaping tests use recorded JSON directly and never need this).
     pub fn with_config(
         name: impl Into<String>,
         team_id: impl Into<String>,
-        api_key: String,
-        base_url: String,
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
     ) -> Result<Self> {
         let http = reqwest::Client::builder()
             .build()
-            .map_err(|e| TmError::Provider(format!("failed to build HTTP client: {e}")))?;
+            .map_err(|e| TmError::Provider(format!("linear: failed to build HTTP client: {e}")))?;
         Ok(LinearTracker {
             name: name.into(),
-            api_key,
             team_id: team_id.into(),
-            base_url,
+            api_key: api_key.into(),
+            base_url: base_url.into(),
             http,
         })
     }
 
-    /// Auth header value Linear expects: the raw API key, no `Bearer` prefix.
-    fn auth_header(&self) -> &str {
-        &self.api_key
-    }
-
-    /// Run one GraphQL request against `self.base_url`, returning the raw `data` payload.
-    /// Fails closed on transport errors, non-2xx status, and a non-empty GraphQL `errors` array.
-    async fn execute(
+    async fn graphql(
         &self,
-        query: String,
+        query: &str,
         variables: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let body = GraphQlRequest { query, variables };
+        let request_body = serde_json::json!({ "query": query, "variables": variables });
         let response = self
             .http
             .post(&self.base_url)
-            .header("Authorization", self.auth_header())
-            .json(&body)
+            .headers(build_headers(&self.api_key))
+            .json(&request_body)
             .send()
             .await
             .map_err(|e| TmError::Provider(format!("linear: request failed: {e}")))?;
-
         let status = response.status();
         let bytes = response
             .bytes()
             .await
             .map_err(|e| TmError::Provider(format!("linear: failed to read response body: {e}")))?;
-
-        if !status.is_success() {
-            return Err(TmError::Provider(format!(
-                "linear: request failed with status {status}: {}",
-                String::from_utf8_lossy(&bytes)
-            )));
-        }
-
-        parse_graphql_response(&bytes)
-    }
-}
-
-// ---- wire shapes -------------------------------------------------------------------------
-
-/// A GraphQL request body: query text plus variables, the shape every Linear operation sends.
-#[derive(Debug, Clone, Serialize)]
-struct GraphQlRequest {
-    query: String,
-    variables: serde_json::Value,
-}
-
-/// One GraphQL error entry, as Linear reports it.
-#[derive(Debug, Clone, Deserialize)]
-struct GraphQlErrorEntry {
-    message: String,
-}
-
-/// The GraphQL response envelope: `data` on success, `errors` (possibly alongside partial
-/// `data`) on failure.
-#[derive(Debug, Clone, Deserialize)]
-struct GraphQlEnvelope {
-    #[serde(default)]
-    data: Option<serde_json::Value>,
-    #[serde(default)]
-    errors: Option<Vec<GraphQlErrorEntry>>,
-}
-
-/// Parse a raw GraphQL HTTP body into its `data` payload, failing on a non-empty `errors` array
-/// (Linear can return `errors` with partial `data`; this adapter treats that as a hard failure
-/// since it has no way to know which part of a mutation/query actually landed).
-fn parse_graphql_response(body: &[u8]) -> Result<serde_json::Value> {
-    let envelope: GraphQlEnvelope = serde_json::from_slice(body)
-        .map_err(|e| TmError::Provider(format!("linear: malformed GraphQL response: {e}")))?;
-
-    if let Some(errors) = envelope.errors {
-        if !errors.is_empty() {
-            let messages: Vec<&str> = errors.iter().map(|e| e.message.as_str()).collect();
-            return Err(TmError::Provider(format!(
-                "linear: GraphQL error(s): {}",
-                messages.join("; ")
-            )));
-        }
+        parse_graphql_response(status.as_u16(), &bytes)
     }
 
-    envelope
-        .data
-        .ok_or_else(|| TmError::Provider("linear: GraphQL response had no data".to_string()))
-}
-
-/// Wire shape of one Linear issue, as returned by both the search-by-title query and the
-/// paginated `issues` pull query.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireIssue {
-    id: String,
-    #[serde(default)]
-    title: String,
-    url: Option<String>,
-    #[serde(default)]
-    state: Option<WireWorkflowState>,
-    #[serde(default)]
-    assignee: Option<WireUser>,
-    #[serde(default)]
-    priority_label: Option<String>,
-    #[serde(default)]
-    updated_at: Option<String>,
-    #[serde(default)]
-    creator: Option<WireUser>,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-/// A Linear workflow state, referenced by name (arbitrary_states: adapter accepts whatever name
-/// the caller provides and resolves it against the team's configured states at push time).
-#[derive(Debug, Clone, Deserialize)]
-struct WireWorkflowState {
-    name: String,
-}
-
-/// A Linear user (assignee/creator), reduced to the display name this crate's
-/// [`ExternalChangeKind`] shapes carry.
-#[derive(Debug, Clone, Deserialize)]
-struct WireUser {
-    name: String,
-}
-
-/// Page info for cursor pagination, present on every connection Linear returns.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WirePageInfo {
-    has_next_page: bool,
-    end_cursor: Option<String>,
-}
-
-/// One page of the `issues` connection.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct WireIssueConnection {
-    nodes: Vec<WireIssue>,
-    page_info: WirePageInfo,
-}
-
-// ---- shaping (pure, unit-tested against recorded JSON) --------------------------------------
-
-/// The mirrored issue title Linear stores for `projection`, embedding the ticket id so a
-/// subsequent push can find it again via [`build_search_query`] without a side table.
-fn mirrored_title(projection: &Projection) -> String {
-    format!("{TITLE_PREFIX}{}] {}", projection.ticket, projection.title)
-}
-
-/// Split a mirrored title of the form `"[T-1] Do the thing"` back into the ticket id it embeds
-/// and the human title, or `None` if the title wasn't produced by [`mirrored_title`] (e.g. an
-/// issue created directly by a human, which `pull` surfaces as `IssueCreated` instead).
-fn parse_mirrored_title(title: &str) -> Option<(TicketId, &str)> {
-    let rest = title.strip_prefix(TITLE_PREFIX)?;
-    let (id_part, remainder) = rest.split_once(']')?;
-    let ticket = TicketId::new(id_part).ok()?;
-    Some((ticket, remainder.trim_start()))
-}
-
-/// Build the GraphQL query that searches for an already-mirrored issue by embedded ticket id,
-/// scoped to this adapter's team so two teams mirroring the same Ticketmaster project can't
-/// collide.
-fn build_search_query(team_id: &str, projection: &Projection) -> (String, serde_json::Value) {
-    let query = r#"
-        query FindMirroredIssue($teamId: String!, $titleContains: String!) {
-            issues(filter: { team: { id: { eq: $teamId } }, title: { contains: $titleContains } }, first: 1) {
-                nodes { id url }
-            }
-        }
-    "#
-    .to_string();
-    let needle = format!("{TITLE_PREFIX}{}]", projection.ticket);
-    let variables = serde_json::json!({ "teamId": team_id, "titleContains": needle });
-    (query, variables)
-}
-
-/// Parse the response of [`build_search_query`] into the existing issue's node id, if any.
-fn parse_search_response(data: &serde_json::Value) -> Result<Option<String>> {
-    let nodes = data
-        .get("issues")
-        .and_then(|v| v.get("nodes"))
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| {
-            TmError::Provider("linear: search response missing issues.nodes".to_string())
-        })?;
-    Ok(nodes
-        .first()
-        .and_then(|n| n.get("id"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string()))
-}
-
-/// Build the `issueCreate` mutation for `projection`.
-fn build_create_mutation(team_id: &str, projection: &Projection) -> (String, serde_json::Value) {
-    let query = r#"
-        mutation CreateIssue($input: IssueCreateInput!) {
-            issueCreate(input: $input) {
-                success
-                issue { id url }
-            }
-        }
-    "#
-    .to_string();
-    let variables = serde_json::json!({
-        "input": {
-            "teamId": team_id,
-            "title": mirrored_title(projection),
-            "description": projection.body,
-            "labelNames": projection.labels,
-        }
-    });
-    (query, variables)
-}
-
-/// Build the `issueUpdate` mutation for `projection` against the already-found `issue_id`.
-fn build_update_mutation(issue_id: &str, projection: &Projection) -> (String, serde_json::Value) {
-    let query = r#"
-        mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
-            issueUpdate(id: $id, input: $input) {
-                success
-                issue { id url }
-            }
-        }
-    "#
-    .to_string();
-    let variables = serde_json::json!({
-        "id": issue_id,
-        "input": {
-            "title": mirrored_title(projection),
-            "description": projection.body,
-            "labelNames": projection.labels,
-        }
-    });
-    (query, variables)
-}
-
-/// Parse the response of either [`build_create_mutation`] or [`build_update_mutation`] into the
-/// [`ExternalRef`] to record on the ticket's mirror link. `mutation_field` is `"issueCreate"` or
-/// `"issueUpdate"`, the only two shapes this adapter issues.
-fn parse_mutation_response(
-    data: &serde_json::Value,
-    mutation_field: &str,
-    adapter_name: &str,
-) -> Result<ExternalRef> {
-    let payload = data
-        .get(mutation_field)
-        .ok_or_else(|| TmError::Provider(format!("linear: response missing {mutation_field}")))?;
-
-    let success = payload
-        .get("success")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !success {
-        return Err(TmError::Provider(format!(
-            "linear: {mutation_field} reported success: false"
-        )));
+    async fn find_issue_by_label(&self, label: &str) -> Result<Option<LinearIssue>> {
+        let data = self
+            .graphql(
+                FIND_ISSUE_BY_LABEL_QUERY,
+                serde_json::json!({ "teamId": self.team_id, "label": label }),
+            )
+            .await?;
+        let mut issues = parse_issue_list(&data, "issues")?;
+        Ok(if issues.is_empty() {
+            None
+        } else {
+            Some(issues.remove(0))
+        })
     }
 
-    let issue = payload.get("issue").ok_or_else(|| {
-        TmError::Provider(format!("linear: {mutation_field} response missing issue"))
-    })?;
-    let external_id = issue
-        .get("id")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            TmError::Provider(format!(
-                "linear: {mutation_field} response missing issue.id"
-            ))
-        })?
-        .to_string();
-    let url = issue
-        .get("url")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    Ok(ExternalRef {
-        adapter: adapter_name.to_string(),
-        external_id,
-        url,
-    })
-}
-
-/// Build the paginated `issues` query used by `pull`, filtered to issues updated after `since`
-/// and, when `after` is `Some`, resuming from that cursor.
-fn build_pull_query(
-    team_id: &str,
-    since: Timestamp,
-    after: Option<&str>,
-) -> (String, serde_json::Value) {
-    let query = r#"
-        query PullIssues($teamId: String!, $since: DateTimeOrDuration!, $first: Int!, $after: String) {
-            issues(
-                filter: { team: { id: { eq: $teamId } }, updatedAt: { gt: $since } }
-                first: $first
-                after: $after
-                orderBy: updatedAt
-            ) {
-                nodes {
-                    id
-                    title
-                    url
-                    updatedAt
-                    description
-                    state { name }
-                    assignee { name }
-                    creator { name }
-                    priorityLabel
-                }
-                pageInfo { hasNextPage endCursor }
-            }
-        }
-    "#
-    .to_string();
-    let variables = serde_json::json!({
-        "teamId": team_id,
-        "since": since.to_rfc3339(),
-        "first": PAGE_SIZE,
-        "after": after,
-    });
-    (query, variables)
-}
-
-/// Parse one page of [`build_pull_query`]'s response into the [`ExternalChange`]s it observed
-/// plus the cursor to resume from, if there's another page.
-///
-/// Each Linear issue becomes at most one [`ExternalChange`], chosen by precedence: an issue
-/// whose title isn't a mirrored title (see [`parse_mirrored_title`]) is reported as
-/// [`ExternalChangeKind::IssueCreated`] (a human made it directly); otherwise its workflow state
-/// becomes a [`ExternalChangeKind::StatusHint`]. Assignment, comments and priority are Linear
-/// fields this pass doesn't have separate updated-at granularity for, so — to stay within the
-/// allowlist without inventing false precision — only the state hint is emitted per already
-/// mirrored issue; priority is emitted alongside it whenever `priorityLabel` is set, since
-/// Linear does expose it directly on the issue node with no extra query.
-fn parse_pull_page(
-    data: &serde_json::Value,
-    adapter_name: &str,
-) -> Result<(Vec<ExternalChange>, Option<String>)> {
-    let connection: WireIssueConnection =
-        serde_json::from_value(data.get("issues").cloned().ok_or_else(|| {
-            TmError::Provider("linear: pull response missing issues".to_string())
-        })?)
-        .map_err(|e| TmError::Provider(format!("linear: malformed pull response: {e}")))?;
-
-    let mut changes = Vec::new();
-    for issue in &connection.nodes {
-        let external = ExternalRef {
-            adapter: adapter_name.to_string(),
-            external_id: issue.id.clone(),
-            url: issue.url.clone(),
-        };
-        let observed_at = issue
-            .updated_at
-            .as_deref()
-            .and_then(|s| Timestamp::parse_rfc3339(s).ok())
-            .unwrap_or(Timestamp::EPOCH);
-
-        if parse_mirrored_title(&issue.title).is_none() {
-            changes.push(ExternalChange {
-                external,
-                kind: ExternalChangeKind::IssueCreated {
-                    title: issue.title.clone(),
-                    body: issue.description.clone().unwrap_or_default(),
-                    author: issue
-                        .creator
-                        .as_ref()
-                        .map(|u| u.name.clone())
-                        .unwrap_or_default(),
-                },
-                observed_at,
-            });
-            continue;
-        }
-
-        if let Some(state) = &issue.state {
-            changes.push(ExternalChange {
-                external: external.clone(),
-                kind: ExternalChangeKind::StatusHint {
-                    state: state.name.clone(),
-                },
-                observed_at,
-            });
-        }
-
-        if let Some(priority) = &issue.priority_label {
-            changes.push(ExternalChange {
-                external: external.clone(),
-                kind: ExternalChangeKind::PriorityChanged {
-                    priority: priority.clone(),
-                },
-                observed_at,
-            });
-        }
-
-        if let Some(assignee) = &issue.assignee {
-            changes.push(ExternalChange {
-                external,
-                kind: ExternalChangeKind::Assigned {
-                    assignee: Some(assignee.name.clone()),
-                },
-                observed_at,
-            });
-        }
+    async fn resolve_state_id(&self, state_name: &str) -> Result<String> {
+        let data = self
+            .graphql(
+                WORKFLOW_STATES_QUERY,
+                serde_json::json!({ "teamId": self.team_id }),
+            )
+            .await?;
+        let states = parse_workflow_states(&data)?;
+        states
+            .iter()
+            .find(|s| s.name == state_name)
+            .map(|s| s.id.clone())
+            .ok_or_else(|| TmError::not_found("linear workflow state", state_name.to_string()))
     }
 
-    let next_cursor = if connection.page_info.has_next_page {
-        connection.page_info.end_cursor
-    } else {
-        None
-    };
-    Ok((changes, next_cursor))
+    async fn resolve_project_id(&self, title: &str) -> Result<String> {
+        let data = self
+            .graphql(
+                FIND_PROJECT_QUERY,
+                serde_json::json!({ "teamId": self.team_id }),
+            )
+            .await?;
+        let projects = parse_project_list(&data)?;
+        if let Some(project) = projects.iter().find(|p| p.name == title) {
+            return Ok(project.id.clone());
+        }
+        let created = self
+            .graphql(
+                CREATE_PROJECT_MUTATION,
+                serde_json::json!({ "teamId": self.team_id, "name": title }),
+            )
+            .await?;
+        parse_created_project(&created)
+    }
+
+    async fn resolve_label_id(&self, label: &str) -> Result<String> {
+        let data = self
+            .graphql(
+                FIND_LABEL_QUERY,
+                serde_json::json!({ "teamId": self.team_id, "name": label }),
+            )
+            .await?;
+        let labels = parse_label_list(&data)?;
+        if let Some(existing) = labels.iter().find(|l| l.name == label) {
+            return Ok(existing.id.clone());
+        }
+        let created = self
+            .graphql(
+                CREATE_LABEL_MUTATION,
+                serde_json::json!({ "teamId": self.team_id, "name": label }),
+            )
+            .await?;
+        parse_created_label(&created)
+    }
+
+    async fn resolve_label_ids(&self, labels: &[String]) -> Result<Vec<String>> {
+        let mut ids = Vec::with_capacity(labels.len());
+        for label in labels {
+            ids.push(self.resolve_label_id(label).await?);
+        }
+        Ok(ids)
+    }
+
+    async fn list_issues_since(&self, since: Timestamp) -> Result<Vec<LinearIssue>> {
+        let mut issues = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let data = self
+                .graphql(
+                    ISSUES_SINCE_QUERY,
+                    serde_json::json!({
+                        "teamId": self.team_id,
+                        "since": since.to_rfc3339(),
+                        "first": PAGE_SIZE,
+                        "after": cursor,
+                    }),
+                )
+                .await?;
+            let page = parse_issue_page(&data)?;
+            issues.extend(page.nodes);
+            if !page.has_next_page {
+                break;
+            }
+            cursor = page.end_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(issues)
+    }
+
+    async fn list_comments_since(&self, since: Timestamp) -> Result<Vec<LinearComment>> {
+        let mut comments = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let data = self
+                .graphql(
+                    COMMENTS_SINCE_QUERY,
+                    serde_json::json!({
+                        "teamId": self.team_id,
+                        "since": since.to_rfc3339(),
+                        "first": PAGE_SIZE,
+                        "after": cursor,
+                    }),
+                )
+                .await?;
+            let page = parse_comment_page(&data)?;
+            comments.extend(page.nodes);
+            if !page.has_next_page {
+                break;
+            }
+            cursor = page.end_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(comments)
+    }
 }
 
 #[async_trait]
@@ -496,45 +253,509 @@ impl Tracker for LinearTracker {
             milestones: true,
             labels: true,
             comments: true,
-            // Linear's issue description is Markdown with no documented hard byte ceiling;
-            // 512 KiB is a conservative practical bound well above any real ticket body.
-            max_body_bytes: 512 * 1024,
+            max_body_bytes: MAX_BODY_BYTES,
         }
     }
 
     async fn push(&self, projection: &Projection) -> Result<ExternalRef> {
-        let (search_query, search_vars) = build_search_query(&self.team_id, projection);
-        let search_data = self.execute(search_query, search_vars).await?;
-        let existing_id = parse_search_response(&search_data)?;
+        let label = ticket_label(&projection.ticket);
+        let existing = self.find_issue_by_label(&label).await?;
 
-        match existing_id {
-            Some(issue_id) => {
-                let (query, vars) = build_update_mutation(&issue_id, projection);
-                let data = self.execute(query, vars).await?;
-                parse_mutation_response(&data, "issueUpdate", &self.name)
+        let mut labels = projection.labels.clone();
+        if !labels.iter().any(|l| l == &label) {
+            labels.push(label);
+        }
+        let label_ids = self.resolve_label_ids(&labels).await?;
+        let state_id = self.resolve_state_id(&projection.state_hint).await?;
+        let project_id = match &projection.milestone {
+            Some(title) => Some(self.resolve_project_id(title).await?),
+            None => None,
+        };
+
+        let data = match &existing {
+            Some(issue) => {
+                self.graphql(
+                    UPDATE_ISSUE_MUTATION,
+                    issue_update_variables(
+                        &issue.id,
+                        projection,
+                        &label_ids,
+                        &state_id,
+                        &project_id,
+                    ),
+                )
+                .await?
             }
             None => {
-                let (query, vars) = build_create_mutation(&self.team_id, projection);
-                let data = self.execute(query, vars).await?;
-                parse_mutation_response(&data, "issueCreate", &self.name)
+                self.graphql(
+                    CREATE_ISSUE_MUTATION,
+                    issue_create_variables(
+                        &self.team_id,
+                        projection,
+                        &label_ids,
+                        &state_id,
+                        &project_id,
+                    ),
+                )
+                .await?
             }
-        }
+        };
+        let issue = parse_mutated_issue(
+            &data,
+            if existing.is_some() {
+                "issueUpdate"
+            } else {
+                "issueCreate"
+            },
+        )?;
+        Ok(issue_to_external_ref(&self.name, &issue))
     }
 
     async fn pull(&self, since: Timestamp) -> Result<Vec<ExternalChange>> {
-        let mut all = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let (query, vars) = build_pull_query(&self.team_id, since, cursor.as_deref());
-            let data = self.execute(query, vars).await?;
-            let (mut page, next_cursor) = parse_pull_page(&data, &self.name)?;
-            all.append(&mut page);
-            match next_cursor {
-                Some(c) => cursor = Some(c),
-                None => break,
-            }
+        let issues = self.list_issues_since(since).await?;
+        let mut changes: Vec<ExternalChange> = issues
+            .iter()
+            .flat_map(|issue| issue_changes(issue, &self.name))
+            .collect();
+
+        let comments = self.list_comments_since(since).await?;
+        for comment in &comments {
+            changes.push(comment_to_external_change(comment, &self.name));
         }
-        Ok(all)
+        Ok(changes)
+    }
+}
+
+// ---- GraphQL documents -------------------------------------------------------------------------
+
+const FIND_ISSUE_BY_LABEL_QUERY: &str = r#"query($teamId: String!, $label: String!) {
+  issues(filter: { team: { id: { eq: $teamId } }, labels: { name: { eq: $label } } }, first: 1) {
+    nodes { id identifier title description url state { name } assignee { name } creator { name } labels { nodes { name } } }
+  }
+}"#;
+
+const WORKFLOW_STATES_QUERY: &str = r#"query($teamId: String!) {
+  workflowStates(filter: { team: { id: { eq: $teamId } } }) {
+    nodes { id name }
+  }
+}"#;
+
+const FIND_PROJECT_QUERY: &str = r#"query($teamId: String!) {
+  projects(filter: { accessibleTeams: { id: { eq: $teamId } } }) {
+    nodes { id name }
+  }
+}"#;
+
+const CREATE_PROJECT_MUTATION: &str = r#"mutation($teamId: String!, $name: String!) {
+  projectCreate(input: { teamIds: [$teamId], name: $name }) {
+    project { id name }
+  }
+}"#;
+
+const FIND_LABEL_QUERY: &str = r#"query($teamId: String!, $name: String!) {
+  issueLabels(filter: { team: { id: { eq: $teamId } }, name: { eq: $name } }) {
+    nodes { id name }
+  }
+}"#;
+
+const CREATE_LABEL_MUTATION: &str = r#"mutation($teamId: String!, $name: String!) {
+  issueLabelCreate(input: { teamId: $teamId, name: $name }) {
+    issueLabel { id name }
+  }
+}"#;
+
+const CREATE_ISSUE_MUTATION: &str = r#"mutation($teamId: String!, $title: String!, $description: String!, $stateId: String!, $labelIds: [String!]!, $projectId: String) {
+  issueCreate(input: { teamId: $teamId, title: $title, description: $description, stateId: $stateId, labelIds: $labelIds, projectId: $projectId }) {
+    issue { id identifier title description url state { name } assignee { name } creator { name } labels { nodes { name } } }
+  }
+}"#;
+
+const UPDATE_ISSUE_MUTATION: &str = r#"mutation($issueId: String!, $title: String!, $description: String!, $stateId: String!, $labelIds: [String!]!, $projectId: String) {
+  issueUpdate(id: $issueId, input: { title: $title, description: $description, stateId: $stateId, labelIds: $labelIds, projectId: $projectId }) {
+    issue { id identifier title description url state { name } assignee { name } creator { name } labels { nodes { name } } }
+  }
+}"#;
+
+const ISSUES_SINCE_QUERY: &str = r#"query($teamId: String!, $since: DateTimeOrDuration!, $first: Int!, $after: String) {
+  issues(filter: { team: { id: { eq: $teamId } }, updatedAt: { gt: $since } }, first: $first, after: $after) {
+    nodes { id identifier title description url state { name } assignee { name } creator { name } labels { nodes { name } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}"#;
+
+const COMMENTS_SINCE_QUERY: &str = r#"query($teamId: String!, $since: DateTimeOrDuration!, $first: Int!, $after: String) {
+  comments(filter: { issue: { team: { id: { eq: $teamId } } }, updatedAt: { gt: $since } }, first: $first, after: $after) {
+    nodes { id body url user { name } issue { id } }
+    pageInfo { hasNextPage endCursor }
+  }
+}"#;
+
+// ---- wire shapes -----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct LinearUser {
+    name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct LinearWorkflowState {
+    name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct LinearLabel {
+    name: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+struct LinearLabelConnection {
+    nodes: Vec<LinearLabel>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct LinearIssue {
+    id: String,
+    identifier: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    description: Option<String>,
+    url: String,
+    state: LinearWorkflowState,
+    #[serde(default)]
+    assignee: Option<LinearUser>,
+    creator: LinearUser,
+    #[serde(default)]
+    labels: LinearLabelConnection,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct LinearComment {
+    body: String,
+    url: String,
+    user: LinearUser,
+    issue: LinearCommentIssueRef,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct LinearCommentIssueRef {
+    id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct LinearWorkflowStateEntry {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct LinearProject {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct LinearLabelEntry {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PageInfo {
+    #[serde(rename = "hasNextPage")]
+    has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
+}
+
+struct IssuePage {
+    nodes: Vec<LinearIssue>,
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+struct CommentPage {
+    nodes: Vec<LinearComment>,
+    has_next_page: bool,
+    end_cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GraphQlErrorEntry {
+    message: String,
+}
+
+/// The `Authorization`/`Content-Type` headers every GraphQL call needs. Linear's API key goes in
+/// `Authorization` bare (no `Bearer` prefix), unlike GitHub's OAuth-shaped token.
+fn build_headers(api_key: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        AUTHORIZATION,
+        HeaderValue::from_str(api_key).unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers
+}
+
+/// The label this adapter tags every issue it pushes with, and later searches by to find the
+/// issue again without keeping any state of its own between calls.
+fn ticket_label(ticket: &TicketId) -> String {
+    format!("tm-id:{ticket}")
+}
+
+/// A ticket-id marker previously applied by [`ticket_label`], if `labels` carries one.
+fn ticket_ref_from_labels(labels: &[LinearLabel]) -> Option<&str> {
+    labels.iter().find_map(|l| l.name.strip_prefix("tm-id:"))
+}
+
+fn issue_create_variables(
+    team_id: &str,
+    projection: &Projection,
+    label_ids: &[String],
+    state_id: &str,
+    project_id: &Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "teamId": team_id,
+        "title": projection.title,
+        "description": projection.body,
+        "stateId": state_id,
+        "labelIds": label_ids,
+        "projectId": project_id,
+    })
+}
+
+fn issue_update_variables(
+    issue_id: &str,
+    projection: &Projection,
+    label_ids: &[String],
+    state_id: &str,
+    project_id: &Option<String>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "issueId": issue_id,
+        "title": projection.title,
+        "description": projection.body,
+        "stateId": state_id,
+        "labelIds": label_ids,
+        "projectId": project_id,
+    })
+}
+
+/// Every GraphQL response, success or failure, is HTTP 200 with a JSON body; errors surface in
+/// a top-level `errors` array rather than the HTTP status. A non-2xx status (auth failure,
+/// gateway error) has no such body shape and is classified from the status code alone.
+fn parse_graphql_response(status: u16, body: &[u8]) -> Result<serde_json::Value> {
+    if !(200..300).contains(&status) {
+        let message = String::from_utf8_lossy(body);
+        return Err(match status {
+            401 | 403 => TmError::Provider(format!("linear: authentication failed: {message}")),
+            429 => TmError::Provider(format!("linear: rate limited: {message}")),
+            _ => TmError::Provider(format!("linear: http {status}: {message}")),
+        });
+    }
+    let envelope: serde_json::Value = serde_json::from_slice(body)
+        .map_err(|e| TmError::parse(format!("linear: malformed response: {e}")))?;
+    if let Some(errors) = envelope.get("errors").and_then(|e| e.as_array()) {
+        if !errors.is_empty() {
+            let messages: Vec<String> = errors
+                .iter()
+                .filter_map(|e| serde_json::from_value::<GraphQlErrorEntry>(e.clone()).ok())
+                .map(|e| e.message)
+                .collect();
+            return Err(TmError::Provider(format!(
+                "linear: graphql error: {}",
+                messages.join("; ")
+            )));
+        }
+    }
+    envelope
+        .get("data")
+        .cloned()
+        .ok_or_else(|| TmError::parse("linear: response has no data field".to_string()))
+}
+
+fn parse_issue_list(data: &serde_json::Value, field: &str) -> Result<Vec<LinearIssue>> {
+    let nodes = data
+        .get(field)
+        .and_then(|v| v.get("nodes"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
+    serde_json::from_value(nodes)
+        .map_err(|e| TmError::parse(format!("linear: malformed issue list: {e}")))
+}
+
+fn parse_issue_page(data: &serde_json::Value) -> Result<IssuePage> {
+    let issues = data
+        .get("issues")
+        .ok_or_else(|| TmError::parse("linear: response missing issues field".to_string()))?;
+    let nodes: Vec<LinearIssue> = serde_json::from_value(
+        issues
+            .get("nodes")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(Vec::new())),
+    )
+    .map_err(|e| TmError::parse(format!("linear: malformed issue page: {e}")))?;
+    let page_info: PageInfo = serde_json::from_value(
+        issues
+            .get("pageInfo")
+            .cloned()
+            .ok_or_else(|| TmError::parse("linear: issue page missing pageInfo".to_string()))?,
+    )
+    .map_err(|e| TmError::parse(format!("linear: malformed pageInfo: {e}")))?;
+    Ok(IssuePage {
+        nodes,
+        has_next_page: page_info.has_next_page,
+        end_cursor: page_info.end_cursor,
+    })
+}
+
+fn parse_comment_page(data: &serde_json::Value) -> Result<CommentPage> {
+    let comments = data
+        .get("comments")
+        .ok_or_else(|| TmError::parse("linear: response missing comments field".to_string()))?;
+    let nodes: Vec<LinearComment> = serde_json::from_value(
+        comments
+            .get("nodes")
+            .cloned()
+            .unwrap_or(serde_json::Value::Array(Vec::new())),
+    )
+    .map_err(|e| TmError::parse(format!("linear: malformed comment page: {e}")))?;
+    let page_info: PageInfo = serde_json::from_value(
+        comments
+            .get("pageInfo")
+            .cloned()
+            .ok_or_else(|| TmError::parse("linear: comment page missing pageInfo".to_string()))?,
+    )
+    .map_err(|e| TmError::parse(format!("linear: malformed pageInfo: {e}")))?;
+    Ok(CommentPage {
+        nodes,
+        has_next_page: page_info.has_next_page,
+        end_cursor: page_info.end_cursor,
+    })
+}
+
+fn parse_workflow_states(data: &serde_json::Value) -> Result<Vec<LinearWorkflowStateEntry>> {
+    let nodes = data
+        .get("workflowStates")
+        .and_then(|v| v.get("nodes"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
+    serde_json::from_value(nodes)
+        .map_err(|e| TmError::parse(format!("linear: malformed workflow state list: {e}")))
+}
+
+fn parse_project_list(data: &serde_json::Value) -> Result<Vec<LinearProject>> {
+    let nodes = data
+        .get("projects")
+        .and_then(|v| v.get("nodes"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
+    serde_json::from_value(nodes)
+        .map_err(|e| TmError::parse(format!("linear: malformed project list: {e}")))
+}
+
+fn parse_created_project(data: &serde_json::Value) -> Result<String> {
+    let project: LinearProject = data
+        .get("projectCreate")
+        .and_then(|v| v.get("project"))
+        .cloned()
+        .ok_or_else(|| TmError::parse("linear: malformed projectCreate response".to_string()))
+        .and_then(|v| {
+            serde_json::from_value(v)
+                .map_err(|e| TmError::parse(format!("linear: malformed project: {e}")))
+        })?;
+    Ok(project.id)
+}
+
+fn parse_label_list(data: &serde_json::Value) -> Result<Vec<LinearLabelEntry>> {
+    let nodes = data
+        .get("issueLabels")
+        .and_then(|v| v.get("nodes"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
+    serde_json::from_value(nodes)
+        .map_err(|e| TmError::parse(format!("linear: malformed label list: {e}")))
+}
+
+fn parse_created_label(data: &serde_json::Value) -> Result<String> {
+    let label: LinearLabelEntry = data
+        .get("issueLabelCreate")
+        .and_then(|v| v.get("issueLabel"))
+        .cloned()
+        .ok_or_else(|| TmError::parse("linear: malformed issueLabelCreate response".to_string()))
+        .and_then(|v| {
+            serde_json::from_value(v)
+                .map_err(|e| TmError::parse(format!("linear: malformed label: {e}")))
+        })?;
+    Ok(label.id)
+}
+
+fn parse_mutated_issue(data: &serde_json::Value, mutation_field: &str) -> Result<LinearIssue> {
+    let issue = data
+        .get(mutation_field)
+        .and_then(|v| v.get("issue"))
+        .cloned()
+        .ok_or_else(|| TmError::parse(format!("linear: malformed {mutation_field} response")))?;
+    serde_json::from_value(issue)
+        .map_err(|e| TmError::parse(format!("linear: malformed issue: {e}")))
+}
+
+fn issue_to_external_ref(adapter: &str, issue: &LinearIssue) -> ExternalRef {
+    ExternalRef {
+        adapter: adapter.to_string(),
+        external_id: issue.id.clone(),
+        url: Some(issue.url.clone()),
+    }
+}
+
+/// The inbound changes one pulled issue produces: a `StatusHint`/`Assigned` pair for an issue
+/// this adapter already mirrors (found via its `tm-id:` label), or a single `IssueCreated` for
+/// one a human opened directly that has no such label.
+fn issue_changes(issue: &LinearIssue, adapter: &str) -> Vec<ExternalChange> {
+    let external = issue_to_external_ref(adapter, issue);
+    if ticket_ref_from_labels(&issue.labels.nodes).is_some() {
+        vec![
+            ExternalChange {
+                external: external.clone(),
+                kind: ExternalChangeKind::StatusHint {
+                    state: issue.state.name.clone(),
+                },
+                observed_at: Timestamp::EPOCH,
+            },
+            ExternalChange {
+                external,
+                kind: ExternalChangeKind::Assigned {
+                    assignee: issue.assignee.as_ref().map(|u| u.name.clone()),
+                },
+                observed_at: Timestamp::EPOCH,
+            },
+        ]
+    } else {
+        vec![ExternalChange {
+            external,
+            kind: ExternalChangeKind::IssueCreated {
+                title: issue.title.clone(),
+                body: issue.description.clone().unwrap_or_default(),
+                author: issue.creator.name.clone(),
+            },
+            observed_at: Timestamp::EPOCH,
+        }]
+    }
+}
+
+fn comment_to_external_change(comment: &LinearComment, adapter: &str) -> ExternalChange {
+    ExternalChange {
+        external: ExternalRef {
+            adapter: adapter.to_string(),
+            external_id: comment.issue.id.clone(),
+            url: Some(comment.url.clone()),
+        },
+        kind: ExternalChangeKind::CommentAdded {
+            author: comment.user.name.clone(),
+            body: comment.body.clone(),
+        },
+        observed_at: Timestamp::EPOCH,
     }
 }
 
@@ -542,11 +763,15 @@ impl Tracker for LinearTracker {
 mod tests {
     use super::*;
 
-    fn test_projection(ticket_id: &str, title: &str) -> Projection {
+    fn ticket(id: &str) -> TicketId {
+        id.parse().expect("valid ticket id")
+    }
+
+    fn sample_projection() -> Projection {
         Projection {
-            ticket: TicketId::new(ticket_id).expect("valid test ticket id"),
-            title: title.to_string(),
-            body: "the body".to_string(),
+            ticket: ticket("T-1"),
+            title: "Fix the widget".to_string(),
+            body: "Do the thing.".to_string(),
             state_hint: "In Progress".to_string(),
             labels: vec!["bug".to_string()],
             milestone: None,
@@ -555,294 +780,254 @@ mod tests {
         }
     }
 
+    fn sample_issue_json() -> &'static str {
+        r#"{
+            "id": "issue-uuid-1",
+            "identifier": "ENG-42",
+            "title": "Fix the widget",
+            "description": "Do the thing.",
+            "url": "https://linear.app/acme/issue/ENG-42",
+            "state": { "name": "In Progress" },
+            "assignee": { "name": "octocat" },
+            "creator": { "name": "octocat" },
+            "labels": { "nodes": [{ "name": "tm-id:T-1" }] }
+        }"#
+    }
+
     #[test]
-    fn tracker_declares_native_parent_child_and_arbitrary_states() {
-        let tracker = LinearTracker::with_config(
-            "linear",
-            "team-1",
-            "key".to_string(),
-            DEFAULT_BASE_URL.to_string(),
-        )
-        .expect("builds");
+    fn ticket_label_uses_stable_marker_prefix() {
+        assert_eq!(ticket_label(&ticket("T-42")), "tm-id:T-42");
+    }
+
+    #[test]
+    fn ticket_ref_from_labels_finds_marker() {
+        let labels = vec![
+            LinearLabel {
+                name: "bug".to_string(),
+            },
+            LinearLabel {
+                name: "tm-id:T-7".to_string(),
+            },
+        ];
+        assert_eq!(ticket_ref_from_labels(&labels), Some("T-7"));
+    }
+
+    #[test]
+    fn ticket_ref_from_labels_absent_when_no_marker() {
+        let labels = vec![LinearLabel {
+            name: "bug".to_string(),
+        }];
+        assert_eq!(ticket_ref_from_labels(&labels), None);
+    }
+
+    #[test]
+    fn capabilities_declare_native_parent_child_and_arbitrary_states() {
+        let tracker = LinearTracker::with_config("linear", "team-1", "key", "http://x").unwrap();
         let caps = tracker.capabilities();
         assert!(caps.parent_child);
         assert!(caps.arbitrary_states);
+        assert_eq!(caps.max_body_bytes, MAX_BODY_BYTES);
     }
 
     #[test]
-    fn mirrored_title_embeds_ticket_id_and_roundtrips() {
-        let proj = test_projection("T-42", "Fix the thing");
-        let title = mirrored_title(&proj);
-        assert_eq!(title, "[T-42] Fix the thing");
-
-        let (ticket, rest) = parse_mirrored_title(&title).expect("parses");
-        assert_eq!(ticket, proj.ticket);
-        assert_eq!(rest, "Fix the thing");
-    }
-
-    #[test]
-    fn parse_mirrored_title_rejects_a_human_authored_title() {
-        assert_eq!(parse_mirrored_title("Fix the login bug"), None);
-    }
-
-    #[test]
-    fn parse_mirrored_title_rejects_an_invalid_embedded_ticket_id() {
-        // Not a well-formed TicketId (no numeric suffix), so the human-authored path wins.
-        assert_eq!(parse_mirrored_title("[not-a-ticket] Something"), None);
-    }
-
-    #[test]
-    fn build_search_query_scopes_to_team_and_embedded_id() {
-        let proj = test_projection("T-7", "Title");
-        let (query, vars) = build_search_query("team-9", &proj);
-        assert!(query.contains("FindMirroredIssue"));
-        assert_eq!(vars["teamId"], "team-9");
-        assert_eq!(vars["titleContains"], "[T-7]");
-    }
-
-    const RECORDED_SEARCH_HIT: &str = r#"{
-        "issues": { "nodes": [ { "id": "issue-abc", "url": "https://linear.app/x/issue/T-7" } ] }
-    }"#;
-
-    const RECORDED_SEARCH_MISS: &str = r#"{
-        "issues": { "nodes": [] }
-    }"#;
-
-    #[test]
-    fn parse_search_response_finds_existing_issue_id() {
-        let data: serde_json::Value = serde_json::from_str(RECORDED_SEARCH_HIT).unwrap();
-        let id = parse_search_response(&data)
-            .expect("parses")
-            .expect("found");
-        assert_eq!(id, "issue-abc");
-    }
-
-    #[test]
-    fn parse_search_response_returns_none_when_no_match() {
-        let data: serde_json::Value = serde_json::from_str(RECORDED_SEARCH_MISS).unwrap();
-        assert_eq!(parse_search_response(&data).expect("parses"), None);
-    }
-
-    #[test]
-    fn parse_search_response_errors_on_malformed_shape() {
-        let data = serde_json::json!({ "issues": {} });
-        let err = parse_search_response(&data).unwrap_err();
-        assert!(err.to_string().contains("linear:"));
-    }
-
-    #[test]
-    fn build_create_mutation_carries_title_body_and_labels() {
-        let proj = test_projection("T-1", "New feature");
-        let (query, vars) = build_create_mutation("team-1", &proj);
-        assert!(query.contains("issueCreate"));
-        assert_eq!(vars["input"]["teamId"], "team-1");
-        assert_eq!(vars["input"]["title"], "[T-1] New feature");
-        assert_eq!(vars["input"]["description"], "the body");
-        assert_eq!(vars["input"]["labelNames"][0], "bug");
-    }
-
-    const RECORDED_CREATE_SUCCESS: &str = r#"{
-        "issueCreate": {
-            "success": true,
-            "issue": { "id": "issue-new-1", "url": "https://linear.app/x/issue/T-1" }
-        }
-    }"#;
-
-    const RECORDED_CREATE_FAILURE: &str = r#"{
-        "issueCreate": { "success": false, "issue": null }
-    }"#;
-
-    #[test]
-    fn parse_mutation_response_happy_path_returns_external_ref() {
-        let data: serde_json::Value = serde_json::from_str(RECORDED_CREATE_SUCCESS).unwrap();
-        let external = parse_mutation_response(&data, "issueCreate", "linear").expect("parses");
-        assert_eq!(external.adapter, "linear");
-        assert_eq!(external.external_id, "issue-new-1");
-        assert_eq!(
-            external.url.as_deref(),
-            Some("https://linear.app/x/issue/T-1")
+    fn issue_create_variables_carries_state_and_labels() {
+        let projection = sample_projection();
+        let vars = issue_create_variables(
+            "team-1",
+            &projection,
+            &["label-1".to_string()],
+            "state-1",
+            &Some("project-1".to_string()),
         );
+        assert_eq!(vars["title"], "Fix the widget");
+        assert_eq!(vars["stateId"], "state-1");
+        assert_eq!(vars["labelIds"][0], "label-1");
+        assert_eq!(vars["projectId"], "project-1");
     }
 
     #[test]
-    fn parse_mutation_response_errors_when_success_is_false() {
-        let data: serde_json::Value = serde_json::from_str(RECORDED_CREATE_FAILURE).unwrap();
-        let err = parse_mutation_response(&data, "issueCreate", "linear").unwrap_err();
-        assert!(err.to_string().contains("success: false"));
-    }
-
-    #[test]
-    fn parse_mutation_response_errors_on_missing_mutation_field() {
-        let data = serde_json::json!({ "someOtherField": {} });
-        let err = parse_mutation_response(&data, "issueCreate", "linear").unwrap_err();
-        assert!(err.to_string().contains("missing issueCreate"));
+    fn issue_update_variables_targets_issue_id() {
+        let projection = sample_projection();
+        let vars = issue_update_variables("issue-1", &projection, &[], "state-2", &None);
+        assert_eq!(vars["issueId"], "issue-1");
+        assert!(vars["projectId"].is_null());
     }
 
     #[test]
     fn parse_graphql_response_returns_data_on_success() {
-        let body = br#"{"data": {"ok": true}}"#;
-        let data = parse_graphql_response(body).expect("parses");
-        assert_eq!(data["ok"], true);
+        let body = br#"{"data": {"issues": {"nodes": []}}}"#;
+        let data = parse_graphql_response(200, body).expect("valid graphql envelope");
+        assert!(data.get("issues").is_some());
     }
 
     #[test]
-    fn parse_graphql_response_errors_on_nonempty_errors_array() {
-        let body = br#"{"data": null, "errors": [{"message": "team not found"}]}"#;
-        let err = parse_graphql_response(body).unwrap_err();
-        assert!(err.to_string().contains("team not found"));
-    }
-
-    #[test]
-    fn parse_graphql_response_errors_on_missing_data() {
-        let body = br#"{"data": null}"#;
-        let err = parse_graphql_response(body).unwrap_err();
-        assert!(err.to_string().contains("no data"));
-    }
-
-    #[test]
-    fn parse_graphql_response_errors_on_malformed_json() {
-        let err = parse_graphql_response(b"not json").unwrap_err();
-        assert!(err.to_string().contains("malformed"));
-    }
-
-    const RECORDED_PULL_PAGE_MIXED: &str = r#"{
-        "issues": {
-            "nodes": [
-                {
-                    "id": "issue-1",
-                    "title": "[T-1] Do the thing",
-                    "url": "https://linear.app/x/issue/T-1",
-                    "updatedAt": "2024-01-01T00:00:00Z",
-                    "description": "body",
-                    "state": { "name": "In Review" },
-                    "assignee": { "name": "alice" },
-                    "creator": { "name": "bob" },
-                    "priorityLabel": "High"
-                },
-                {
-                    "id": "issue-2",
-                    "title": "A human filed this directly",
-                    "url": "https://linear.app/x/issue/2",
-                    "updatedAt": "2024-01-02T00:00:00Z",
-                    "description": "human body",
-                    "state": { "name": "Todo" },
-                    "assignee": null,
-                    "creator": { "name": "carol" },
-                    "priorityLabel": null
-                }
-            ],
-            "pageInfo": { "hasNextPage": false, "endCursor": null }
-        }
-    }"#;
-
-    #[test]
-    fn parse_pull_page_emits_status_priority_and_assignment_for_mirrored_issue() {
-        let data: serde_json::Value = serde_json::from_str(RECORDED_PULL_PAGE_MIXED).unwrap();
-        let (changes, next) = parse_pull_page(&data, "linear").expect("parses");
-        assert_eq!(next, None);
-
-        let mirrored: Vec<_> = changes
-            .iter()
-            .filter(|c| c.external.external_id == "issue-1")
-            .collect();
-        assert_eq!(mirrored.len(), 3);
-        assert!(mirrored.iter().any(
-            |c| matches!(&c.kind, ExternalChangeKind::StatusHint { state } if state == "In Review")
-        ));
-        assert!(mirrored
-            .iter()
-            .any(|c| matches!(&c.kind, ExternalChangeKind::PriorityChanged { priority } if priority == "High")));
-        assert!(mirrored.iter().any(
-            |c| matches!(&c.kind, ExternalChangeKind::Assigned { assignee } if assignee.as_deref() == Some("alice"))
-        ));
-    }
-
-    #[test]
-    fn parse_pull_page_emits_issue_created_for_unmirrored_issue() {
-        let data: serde_json::Value = serde_json::from_str(RECORDED_PULL_PAGE_MIXED).unwrap();
-        let (changes, _next) = parse_pull_page(&data, "linear").expect("parses");
-
-        let human = changes
-            .iter()
-            .find(|c| c.external.external_id == "issue-2")
-            .expect("has the human-created issue");
-        match &human.kind {
-            ExternalChangeKind::IssueCreated {
-                title,
-                body,
-                author,
-            } => {
-                assert_eq!(title, "A human filed this directly");
-                assert_eq!(body, "human body");
-                assert_eq!(author, "carol");
-            }
-            other => panic!("expected IssueCreated, got {other:?}"),
-        }
-    }
-
-    const RECORDED_PULL_PAGE_HAS_NEXT: &str = r#"{
-        "issues": {
-            "nodes": [],
-            "pageInfo": { "hasNextPage": true, "endCursor": "cursor-2" }
-        }
-    }"#;
-
-    #[test]
-    fn parse_pull_page_surfaces_next_cursor_when_more_pages_remain() {
-        let data: serde_json::Value = serde_json::from_str(RECORDED_PULL_PAGE_HAS_NEXT).unwrap();
-        let (changes, next) = parse_pull_page(&data, "linear").expect("parses");
-        assert!(changes.is_empty());
-        assert_eq!(next.as_deref(), Some("cursor-2"));
-    }
-
-    #[test]
-    fn parse_pull_page_errors_on_missing_issues_key() {
-        let data = serde_json::json!({ "somethingElse": {} });
-        let err = parse_pull_page(&data, "linear").unwrap_err();
-        assert!(err.to_string().contains("missing issues"));
-    }
-
-    #[test]
-    fn build_pull_query_carries_since_as_rfc3339_and_cursor() {
-        let since = Timestamp::from_unix_seconds(1_700_000_000);
-        let (query, vars) = build_pull_query("team-1", since, Some("cursor-1"));
-        assert!(query.contains("PullIssues"));
-        assert_eq!(vars["teamId"], "team-1");
-        assert_eq!(vars["since"], since.to_rfc3339());
-        assert_eq!(vars["after"], "cursor-1");
-        assert_eq!(vars["first"], PAGE_SIZE);
-    }
-
-    #[test]
-    fn build_pull_query_omits_cursor_on_first_page() {
-        let since = Timestamp::EPOCH;
-        let (_query, vars) = build_pull_query("team-1", since, None);
-        assert!(vars["after"].is_null());
-    }
-
-    #[test]
-    fn from_env_fails_closed_when_api_key_missing() {
-        std::env::remove_var(API_KEY_ENV_VAR);
-        let result = LinearTracker::from_env("linear", "team-1");
+    fn parse_graphql_response_surfaces_graphql_errors_even_on_http_200() {
+        let body = br#"{"errors": [{"message": "team not found"}], "data": null}"#;
+        let result = parse_graphql_response(200, body);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains(API_KEY_ENV_VAR));
+        assert!(result.unwrap_err().to_string().contains("team not found"));
     }
 
     #[test]
-    fn from_env_reads_key_and_builds() {
-        std::env::set_var(API_KEY_ENV_VAR, "lin_api_test123");
-        let tracker = LinearTracker::from_env("linear", "team-1").expect("builds");
-        assert_eq!(tracker.name(), "linear");
-        assert_eq!(tracker.auth_header(), "lin_api_test123");
-        std::env::remove_var(API_KEY_ENV_VAR);
+    fn parse_graphql_response_classifies_auth_failure() {
+        let result = parse_graphql_response(401, b"unauthorized");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("authentication failed"));
     }
 
     #[test]
-    fn build_update_mutation_targets_the_existing_issue_id() {
-        let proj = test_projection("T-3", "Renamed");
-        let (query, vars) = build_update_mutation("issue-xyz", &proj);
-        assert!(query.contains("issueUpdate"));
-        assert_eq!(vars["id"], "issue-xyz");
-        assert_eq!(vars["input"]["title"], "[T-3] Renamed");
+    fn parse_graphql_response_classifies_rate_limit() {
+        let result = parse_graphql_response(429, b"slow down");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("rate limited"));
+    }
+
+    #[test]
+    fn parse_graphql_response_rejects_malformed_json() {
+        let result = parse_graphql_response(200, b"not json");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("parse:"));
+    }
+
+    #[test]
+    fn parse_graphql_response_rejects_missing_data_field() {
+        let result = parse_graphql_response(200, br#"{"foo": 1}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_mutated_issue_happy_path() {
+        let json = format!(r#"{{"issueCreate": {{"issue": {}}}}}"#, sample_issue_json());
+        let data: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let issue = parse_mutated_issue(&data, "issueCreate").expect("valid issue");
+        assert_eq!(issue.identifier, "ENG-42");
+        assert_eq!(issue.state.name, "In Progress");
+    }
+
+    #[test]
+    fn parse_mutated_issue_rejects_missing_field() {
+        let data: serde_json::Value = serde_json::from_str(r#"{"issueCreate": {}}"#).unwrap();
+        let result = parse_mutated_issue(&data, "issueCreate");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_issue_page_reads_nodes_and_page_info() {
+        let json = format!(
+            r#"{{"issues": {{"nodes": [{}], "pageInfo": {{"hasNextPage": true, "endCursor": "cursor-1"}}}}}}"#,
+            sample_issue_json()
+        );
+        let data: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let page = parse_issue_page(&data).expect("valid page");
+        assert_eq!(page.nodes.len(), 1);
+        assert!(page.has_next_page);
+        assert_eq!(page.end_cursor, Some("cursor-1".to_string()));
+    }
+
+    #[test]
+    fn parse_issue_page_handles_final_page_without_cursor() {
+        let json =
+            r#"{"issues": {"nodes": [], "pageInfo": {"hasNextPage": false, "endCursor": null}}}"#;
+        let data: serde_json::Value = serde_json::from_str(json).unwrap();
+        let page = parse_issue_page(&data).expect("valid page");
+        assert!(!page.has_next_page);
+        assert_eq!(page.end_cursor, None);
+    }
+
+    #[test]
+    fn parse_issue_page_rejects_missing_issues_field() {
+        let data: serde_json::Value = serde_json::from_str(r#"{"other": 1}"#).unwrap();
+        assert!(parse_issue_page(&data).is_err());
+    }
+
+    #[test]
+    fn parse_created_project_extracts_id() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"{"projectCreate": {"project": {"id": "proj-1", "name": "M1"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_created_project(&data).unwrap(), "proj-1");
+    }
+
+    #[test]
+    fn parse_created_label_extracts_id() {
+        let data: serde_json::Value = serde_json::from_str(
+            r#"{"issueLabelCreate": {"issueLabel": {"id": "label-1", "name": "tm-id:T-1"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(parse_created_label(&data).unwrap(), "label-1");
+    }
+
+    #[test]
+    fn issue_changes_mirrored_issue_produces_status_and_assignment() {
+        let json: serde_json::Value = serde_json::from_str(sample_issue_json()).unwrap();
+        let issue: LinearIssue = serde_json::from_value(json).unwrap();
+        let changes = issue_changes(&issue, "linear");
+        assert_eq!(changes.len(), 2);
+        match &changes[0].kind {
+            ExternalChangeKind::StatusHint { state } => assert_eq!(state, "In Progress"),
+            _ => panic!("expected StatusHint"),
+        }
+        match &changes[1].kind {
+            ExternalChangeKind::Assigned { assignee } => {
+                assert_eq!(assignee.as_deref(), Some("octocat"))
+            }
+            _ => panic!("expected Assigned"),
+        }
+    }
+
+    #[test]
+    fn issue_changes_human_created_issue_produces_issue_created() {
+        let mut json: serde_json::Value = serde_json::from_str(sample_issue_json()).unwrap();
+        json["labels"]["nodes"] = serde_json::json!([]);
+        let issue: LinearIssue = serde_json::from_value(json).unwrap();
+        let changes = issue_changes(&issue, "linear");
+        assert_eq!(changes.len(), 1);
+        match &changes[0].kind {
+            ExternalChangeKind::IssueCreated { title, author, .. } => {
+                assert_eq!(title, "Fix the widget");
+                assert_eq!(author, "octocat");
+            }
+            _ => panic!("expected IssueCreated"),
+        }
+    }
+
+    #[test]
+    fn comment_to_external_change_maps_fields() {
+        let comment = LinearComment {
+            body: "looks good".to_string(),
+            url: "https://linear.app/acme/issue/ENG-42#comment-1".to_string(),
+            user: LinearUser {
+                name: "alice".to_string(),
+            },
+            issue: LinearCommentIssueRef {
+                id: "issue-uuid-1".to_string(),
+            },
+        };
+        let change = comment_to_external_change(&comment, "linear");
+        assert_eq!(change.external.external_id, "issue-uuid-1");
+        match change.kind {
+            ExternalChangeKind::CommentAdded { author, body } => {
+                assert_eq!(author, "alice");
+                assert_eq!(body, "looks good");
+            }
+            _ => panic!("expected CommentAdded"),
+        }
+    }
+
+    #[test]
+    fn issue_to_external_ref_uses_graphql_node_id_and_url() {
+        let json: serde_json::Value = serde_json::from_str(sample_issue_json()).unwrap();
+        let issue: LinearIssue = serde_json::from_value(json).unwrap();
+        let external = issue_to_external_ref("linear", &issue);
+        assert_eq!(external.adapter, "linear");
+        assert_eq!(external.external_id, "issue-uuid-1");
+        assert_eq!(
+            external.url,
+            Some("https://linear.app/acme/issue/ENG-42".to_string())
+        );
     }
 }

@@ -1,0 +1,28 @@
+[package]
+name = "tm-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description = "End-to-end integration tests exercising Ticketmaster's crates together, offline and deterministic."
+autolib = false
+autobins = false
+
+[dev-dependencies]
+tm-types = { workspace = true }
+tm-events = { workspace = true }
+tm-core = { workspace = true }
+tm-provider = { workspace = true }
+tm-scheduler = { workspace = true }
+tm-genesis = { workspace = true }
+tm-harness = { workspace = true }
+tm-docs = { workspace = true }
+tm-mirror = { workspace = true }
+tm-context = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rusqlite = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }

@@ -270,6 +270,15 @@ mod tests {
         addr
     }
 
+    /// Issues the `/events` request against the in-process loopback server spawned by
+    /// `spawn_server` above; this never leaves the machine, so it carries no real network
+    /// dependency.
+    async fn get_events(addr: SocketAddr, from: u64) -> reqwest::Response {
+        let url = format!("http://{addr}/events?from={from}");
+        let client = reqwest::Client::new();
+        client.get(url).send().await.unwrap()
+    }
+
     /// Reads SSE frames off `resp` until `want` `id:` fields have been seen or `timeout` elapses,
     /// returning the admitted seqs in arrival order plus the raw text for wire-format assertions.
     async fn collect_ids(
@@ -376,11 +385,7 @@ mod tests {
         }
         let addr = spawn_server(state).await;
 
-        let resp = reqwest::Client::new()
-            .get(format!("http://{addr}/events?from=0"))
-            .send()
-            .await
-            .unwrap();
+        let resp = get_events(addr, 0).await;
         let (ids, raw) = collect_ids(resp, 3, Duration::from_secs(5)).await;
 
         assert_eq!(ids, vec![1, 2, 3]);
@@ -397,11 +402,7 @@ mod tests {
         }
         let addr = spawn_server(state).await;
 
-        let resp = reqwest::Client::new()
-            .get(format!("http://{addr}/events?from=3"))
-            .send()
-            .await
-            .unwrap();
+        let resp = get_events(addr, 3).await;
         let (ids, _raw) = collect_ids(resp, 2, Duration::from_secs(5)).await;
 
         assert_eq!(ids, vec![4, 5]);
@@ -416,11 +417,7 @@ mod tests {
         }
         let addr = spawn_server(state.clone()).await;
 
-        let resp = reqwest::Client::new()
-            .get(format!("http://{addr}/events?from=0"))
-            .send()
-            .await
-            .unwrap();
+        let resp = get_events(addr, 0).await;
         let handle = tokio::spawn(collect_ids(resp, 3, Duration::from_secs(5)));
 
         // Give the handler time to subscribe and drain the backlog before publishing live.
@@ -441,11 +438,7 @@ mod tests {
         }
         let addr = spawn_server(state.clone()).await;
 
-        let resp = reqwest::Client::new()
-            .get(format!("http://{addr}/events?from=0"))
-            .send()
-            .await
-            .unwrap();
+        let resp = get_events(addr, 0).await;
         let handle = tokio::spawn(collect_ids(resp, 4, Duration::from_secs(5)));
 
         // Let the backlog drain, then simulate the documented overlap window: the live channel

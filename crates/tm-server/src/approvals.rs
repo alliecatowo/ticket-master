@@ -14,7 +14,8 @@
 //! must re-request.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+
+use parking_lot::Mutex;
 
 use tm_types::{ParticipantId, TicketId, Timestamp};
 
@@ -123,13 +124,13 @@ impl ApprovalRegistry {
             waiter: Some(tx),
             result: None,
         };
-        self.entries.lock().unwrap().insert(id.clone(), entry);
+        self.entries.lock().insert(id.clone(), entry);
         ApprovalWaiter { id, receiver: rx }
     }
 
     /// Every currently-pending request, for `GET /approvals`.
     pub fn pending(&self) -> Vec<PendingApproval> {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock();
         entries
             .values()
             .filter(|entry| entry.result.is_none())
@@ -141,7 +142,7 @@ impl ApprovalRegistry {
 
     /// Look up one request's current status.
     pub fn get(&self, id: &ApprovalId) -> Option<ApprovalStatus> {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock();
         entries.get(id).map(|entry| {
             if let Some((decision, decided_by, decided_at)) = &entry.result {
                 ApprovalStatus::Decided {
@@ -169,7 +170,7 @@ impl ApprovalRegistry {
         decided_by: ParticipantId,
         decided_at: Timestamp,
     ) -> Result<(), ApprovalError> {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock();
         let entry = entries
             .get_mut(id)
             .ok_or_else(|| ApprovalError::NotFound(id.clone()))?;
@@ -233,7 +234,8 @@ mod tests {
         ApprovalRequest {
             id: id.to_string(),
             ticket: None,
-            requested_by: ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"),
+            requested_by: ParticipantId::new(ids.next(IdKind::Participant).as_str())
+                .expect("valid participant id"),
             subject: "test subject".to_string(),
             detail: "test detail".to_string(),
             requested_at: clock.now(),
@@ -253,7 +255,13 @@ mod tests {
         };
 
         registry
-            .decide(&"req-1".to_string(), decision.clone(), ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"), clock.now())
+            .decide(
+                &"req-1".to_string(),
+                decision.clone(),
+                ParticipantId::new(ids.next(IdKind::Participant).as_str())
+                    .expect("valid participant id"),
+                clock.now(),
+            )
             .unwrap();
 
         let result = waiter.wait().await.unwrap();
@@ -273,7 +281,13 @@ mod tests {
         };
 
         registry
-            .decide(&"req-2".to_string(), decision.clone(), ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"), clock.now())
+            .decide(
+                &"req-2".to_string(),
+                decision.clone(),
+                ParticipantId::new(ids.next(IdKind::Participant).as_str())
+                    .expect("valid participant id"),
+                clock.now(),
+            )
             .unwrap();
 
         let result = waiter.wait().await.unwrap();
@@ -292,7 +306,10 @@ mod tests {
         let req = make_request("req-3");
         let _waiter = registry.open(req);
 
-        assert_eq!(registry.get(&"req-3".to_string()), Some(ApprovalStatus::Pending));
+        assert_eq!(
+            registry.get(&"req-3".to_string()),
+            Some(ApprovalStatus::Pending)
+        );
     }
 
     #[test]
@@ -303,12 +320,18 @@ mod tests {
 
         let ids = TestIds::new();
         let clock = FixedClock::epoch();
-        let decided_by = ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id");
+        let decided_by = ParticipantId::new(ids.next(IdKind::Participant).as_str())
+            .expect("valid participant id");
         let decided_at = clock.now();
         let decision = ApprovalDecision::Approve { note: None };
 
         registry
-            .decide(&"req-4".to_string(), decision.clone(), decided_by.clone(), decided_at)
+            .decide(
+                &"req-4".to_string(),
+                decision.clone(),
+                decided_by.clone(),
+                decided_at,
+            )
             .ok();
 
         if let Some(ApprovalStatus::Decided {
@@ -334,7 +357,8 @@ mod tests {
         let err = registry.decide(
             &"unknown".to_string(),
             ApprovalDecision::Approve { note: None },
-            ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"),
+            ParticipantId::new(ids.next(IdKind::Participant).as_str())
+                .expect("valid participant id"),
             clock.now(),
         );
 
@@ -352,10 +376,22 @@ mod tests {
         let decision = ApprovalDecision::Approve { note: None };
 
         registry
-            .decide(&"req-5".to_string(), decision.clone(), ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"), clock.now())
+            .decide(
+                &"req-5".to_string(),
+                decision.clone(),
+                ParticipantId::new(ids.next(IdKind::Participant).as_str())
+                    .expect("valid participant id"),
+                clock.now(),
+            )
             .ok();
 
-        let err = registry.decide(&"req-5".to_string(), decision, ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"), clock.now());
+        let err = registry.decide(
+            &"req-5".to_string(),
+            decision,
+            ParticipantId::new(ids.next(IdKind::Participant).as_str())
+                .expect("valid participant id"),
+            clock.now(),
+        );
 
         assert_eq!(err, Err(ApprovalError::AlreadyDecided("req-5".to_string())));
     }
@@ -372,7 +408,13 @@ mod tests {
         let clock = FixedClock::epoch();
         let decision = ApprovalDecision::Approve { note: None };
 
-        let err = registry.decide(&"req-6".to_string(), decision, ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"), clock.now());
+        let err = registry.decide(
+            &"req-6".to_string(),
+            decision,
+            ParticipantId::new(ids.next(IdKind::Participant).as_str())
+                .expect("valid participant id"),
+            clock.now(),
+        );
 
         assert_eq!(err, Err(ApprovalError::WaiterGone("req-6".to_string())));
 
@@ -435,7 +477,8 @@ mod tests {
             .decide(
                 &"req-11".to_string(),
                 ApprovalDecision::Approve { note: None },
-                ParticipantId::new(ids.next(IdKind::Participant).as_str()).expect("valid participant id"),
+                ParticipantId::new(ids.next(IdKind::Participant).as_str())
+                    .expect("valid participant id"),
                 clock.now(),
             )
             .ok();

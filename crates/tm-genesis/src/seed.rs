@@ -379,7 +379,7 @@ mod tests {
             "parallelism preference unclear",
         );
         assert_eq!(q.text, "Should we use async?");
-        assert_eq!(q.blocking, true);
+        assert!(q.blocking);
         assert_eq!(q.rationale, "parallelism preference unclear");
         assert_eq!(q.resolution, None);
     }

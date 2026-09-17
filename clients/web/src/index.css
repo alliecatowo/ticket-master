@@ -1,0 +1,168 @@
+:root {
+  color-scheme: light dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --border: color-mix(in srgb, currentColor 15%, transparent);
+}
+
+body {
+  margin: 0;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-nav {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0.75rem 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-nav__brand {
+  font-weight: 700;
+}
+
+.app-nav__links {
+  display: flex;
+  gap: 1rem;
+  flex: 1;
+}
+
+.app-nav__link {
+  text-decoration: none;
+  color: inherit;
+  opacity: 0.7;
+}
+
+.app-nav__link--active {
+  opacity: 1;
+  font-weight: 600;
+}
+
+.app-nav__link--stub {
+  opacity: 0.4;
+}
+
+.app-nav__badge {
+  font-size: 0.6rem;
+  margin-left: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 0.25rem;
+}
+
+.app-nav__meta {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+}
+
+.app-nav__actor input {
+  margin-left: 0.4rem;
+}
+
+.connection-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  display: inline-block;
+  background: #999;
+}
+
+.connection-dot--live {
+  background: #2ea043;
+}
+
+.connection-dot--error {
+  background: #d1242f;
+}
+
+.connection-dot--connecting,
+.connection-dot--reconnecting {
+  background: #d4a72c;
+}
+
+.app-main {
+  padding: 1.25rem;
+  flex: 1;
+}
+
+.hint {
+  opacity: 0.7;
+}
+
+.error {
+  color: #d1242f;
+}
+
+.presence-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0.5rem 0 1rem;
+}
+
+.presence-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.15rem 0.6rem;
+  font-size: 0.8rem;
+}
+
+.presence-bar--empty {
+  font-size: 0.85rem;
+  opacity: 0.6;
+}
+
+.status-count {
+  opacity: 0.6;
+  font-weight: normal;
+}
+
+.backlog-filters {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.ticket-list {
+  list-style: none;
+  padding: 0;
+}
+
+.ticket-list li {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.ticket-meta {
+  opacity: 0.6;
+  font-size: 0.8rem;
+}
+
+.ticket-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+
+.ticket-fields {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.25rem 1rem;
+}
+
+.not-built {
+  max-width: 40rem;
+}
+
+.not-built__notice {
+  font-weight: 600;
+}

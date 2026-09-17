@@ -1,0 +1,32 @@
+{
+  "name": "@ticketmaster/client",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared TypeScript client for the Ticketmaster server API: typed REST bindings, a reconnecting SSE event subscription, and a pure in-memory ProjectStore materialized view.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "gen": "node scripts/gen.mjs",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

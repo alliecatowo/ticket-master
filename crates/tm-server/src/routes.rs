@@ -1236,7 +1236,7 @@ mod tests {
     async fn transition_activate_moves_ticket_out_of_draft() {
         let (_dir, state) = test_state();
         let id = make_ticket(&state).await;
-        transition_ticket(
+        let _ = transition_ticket(
             State(state.clone()),
             Path(id.clone()),
             Json(TransitionRequest::Activate { actor: actor() }),
@@ -1283,7 +1283,7 @@ mod tests {
 
     async fn make_ready_ticket(state: &AppState) -> TicketId {
         let id = make_ticket(state).await;
-        transition_ticket(
+        let _ = transition_ticket(
             State(state.clone()),
             Path(id.clone()),
             Json(TransitionRequest::Activate { actor: actor() }),
@@ -1630,7 +1630,7 @@ mod tests {
         let (_dir, state) = test_state();
         let session = SessionId::new("S-1").expect("valid shape");
         let participant = ParticipantId::new("human:alice").expect("valid participant");
-        update_presence(
+        let _ = update_presence(
             State(state.clone()),
             Path(session),
             Json(PresenceUpdateRequest {

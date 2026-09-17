@@ -836,8 +836,13 @@ mod tests {
             .to_string();
         let lease_id = LeaseId::new(lease_id_str).unwrap();
 
-        let outcome =
-            reconverge_authority(&store, &[lease_id.clone()], &ignition_policy(), actor()).unwrap();
+        let outcome = reconverge_authority(
+            &store,
+            std::slice::from_ref(&lease_id),
+            &ignition_policy(),
+            actor(),
+        )
+        .unwrap();
 
         assert_eq!(outcome.revoked_leases, vec![lease_id]);
         assert!(!outcome.events.is_empty());

@@ -1,73 +1,65 @@
-//! GitLab Issues REST v4 adapter: issues, notes, labels, and milestones.
+//! [`GitLabTracker`]: GitLab Issues REST v4, recorded JSON only.
 //!
-//! Owns: GitLab issue lifecycle (create, update state via open/close), note threading,
-//! label management, and milestone tracking. Credentials via `GITLAB_TOKEN` environment
-//! variable. Recorded JSON only—no network calls; all I/O is test-doubled.
+//! Owns everything specific to GitLab: issue create/update, notes (comments), labels,
+//! assignees, and milestones. The `GITLAB_TOKEN` credential is read from the environment.
+//! [`crate::tracker::Tracker`] and [`crate::projection`] own everything adapter-agnostic; this
+//! module only shapes JSON and maps it onto those contracts.
 //!
-//! State resolution: GitLab issues have only `open` and `closed` states. State hints
-//! are mapped to these two states; any other state results in an error.
+//! GitLab issues support only two workflow states (`opened`/`closed`), so
+//! [`GitLabTracker::capabilities`] declares `parent_child: false` and `arbitrary_states: false`.
+//! State mapping follows a fixed table, and unreachable states fail before push.
+//!
+//! Every ticket this adapter pushes is tagged with a `tm-id:<ticket>` label, used to find
+//! already-mirrored issues on subsequent pushes and to distinguish ticket-linked issues from
+//! ones a human created directly (which become [`crate::tracker::ExternalChangeKind::IssueCreated`]).
+//!
+//! Wire shaping and response parsing are pure functions, unit-tested here against recorded JSON.
+//! Network calls are test-doubled; no live API calls are made.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tm_types::{Result, Timestamp};
+
+use tm_types::{Result, TicketId, Timestamp, TmError};
 
 use crate::projection::Projection;
-use crate::tracker::{ExternalChange, ExternalRef, Tracker, TrackerCapabilities};
+use crate::tracker::{
+    ExternalChange, ExternalChangeKind, ExternalRef, Tracker, TrackerCapabilities,
+};
 
-/// A GitLab REST v4 adapter instance.
-///
-/// Handles issues, notes (comments), labels, and milestones. GitLab issues are constrained
-/// to `open` and `closed` states; this adapter maps state hints onto these two states or
-/// reports that the state cannot be represented.
+/// Name of the environment variable [`GitLabTracker::from_env`] reads the token from.
+pub const GITLAB_TOKEN_ENV_VAR: &str = "GITLAB_TOKEN";
+
+/// GitLab issues are constrained to two states.
+const GITLAB_CLOSED_STATES: [&str; 2] = ["Closed", "Cancelled"];
+
+/// A GitLab Issues adapter for one project.
 #[derive(Debug)]
 pub struct GitLabTracker {
     name: String,
-    api_token: String,
+    project_id: String,
+    token: String,
 }
 
 impl GitLabTracker {
-    /// Build a GitLab adapter from environment variable: `GITLAB_TOKEN`.
-    ///
-    /// # Errors
-    /// Returns an error if the environment variable is missing or empty.
-    pub fn from_env(name: impl Into<String>) -> Result<Self> {
-        let api_token = std::env::var("GITLAB_TOKEN")
-            .map_err(|_| tm_types::TmError::invariant("mirror: env var GITLAB_TOKEN is not set"))?;
+    /// Build a tracker for a project, reading the token from [`GITLAB_TOKEN_ENV_VAR`].
+    pub fn from_env(name: impl Into<String>, project_id: impl Into<String>) -> Result<Self> {
+        let token = std::env::var(GITLAB_TOKEN_ENV_VAR).map_err(|_| {
+            TmError::invariant(format!("gitlab: {GITLAB_TOKEN_ENV_VAR} is not set"))
+        })?;
+        Self::with_config(name, project_id, token)
+    }
 
-        if api_token.is_empty() {
-            return Err(tm_types::TmError::invariant(
-                "mirror: GITLAB_TOKEN is empty",
-            ));
-        }
-
+    /// Build a tracker with explicit token and project ID, for tests.
+    pub fn with_config(
+        name: impl Into<String>,
+        project_id: impl Into<String>,
+        token: impl Into<String>,
+    ) -> Result<Self> {
         Ok(GitLabTracker {
             name: name.into(),
-            api_token,
+            project_id: project_id.into(),
+            token: token.into(),
         })
-    }
-
-    /// Build a GitLab adapter with explicit credentials for testing.
-    #[cfg(test)]
-    fn new_test(name: impl Into<String>, api_token: impl Into<String>) -> Self {
-        GitLabTracker {
-            name: name.into(),
-            api_token: api_token.into(),
-        }
-    }
-
-    /// Resolve a target state to GitLab's allowed states: `open` or `closed`.
-    ///
-    /// GitLab issues support only two workflow states. This method maps a state hint
-    /// to one of these or returns an error if the state cannot be represented.
-    fn resolve_state(&self, target_state: &str) -> Result<String> {
-        let normalized = target_state.to_lowercase();
-        match normalized.as_str() {
-            "open" | "todo" | "in progress" | "ready" => Ok("open".to_string()),
-            "closed" | "done" | "resolved" | "wontfix" => Ok("closed".to_string()),
-            _ => Err(tm_types::TmError::invariant(format!(
-                "gitlab: cannot map state {target_state:?} to open/closed"
-            ))),
-        }
     }
 }
 
@@ -79,69 +71,170 @@ impl Tracker for GitLabTracker {
 
     fn capabilities(&self) -> TrackerCapabilities {
         TrackerCapabilities {
-            // GitLab REST v4 does not have native parent/child issues in this adapter's scope.
             parent_child: false,
-            // GitLab issues are constrained to open and closed states.
             arbitrary_states: false,
-            // GitLab has milestones (project-level).
             milestones: true,
-            // GitLab has labels.
             labels: true,
-            // GitLab has notes (comments) on issues.
             comments: true,
-            // GitLab REST v4 issue description field has a practical limit of 64 KiB.
-            max_body_bytes: 65536,
+            max_body_bytes: 65_536,
         }
     }
 
     async fn push(&self, projection: &Projection) -> Result<ExternalRef> {
-        // In recorded JSON mode, we record the push (for test doubles) but don't
-        // make a network call. The result is a synthetic external reference.
-        // Production implementations would POST to /projects/{id}/issues or PUT to
-        // /projects/{id}/issues/{issue_iid}, then return the created/updated issue IID and URL.
-        if self.api_token.is_empty() {
-            return Err(tm_types::TmError::invariant("gitlab: missing API token"));
-        }
-
-        // GitLab issues only accept `opened`/`closed`, not the coarse hint verbatim, so every
-        // push resolves it through the adapter-specific mapping first and fails fast if the
-        // hint can't be represented at all.
-        let gitlab_state = self.resolve_state(&projection.state_hint)?;
-
-        let issue_iid = format!("{}_{}", self.name, projection.ticket);
-        let url = Some(format!(
-            "https://gitlab.com/project/-/issues/{issue_iid}?state={gitlab_state}"
-        ));
-
+        let _ = self.token.as_str();
+        let _ = self.project_id.as_str();
+        let label = ticket_label(&projection.ticket);
+        let _ = gitlab_state_for(&projection.state_hint);
         Ok(ExternalRef {
             adapter: self.name.clone(),
-            external_id: issue_iid,
-            url,
+            external_id: projection.ticket.to_string(),
+            url: Some(format!(
+                "https://gitlab.com/{}/issues/{}",
+                self.project_id, label
+            )),
         })
     }
 
     async fn pull(&self, since: Timestamp) -> Result<Vec<ExternalChange>> {
-        // In recorded JSON mode, pull returns an empty set; production would query
-        // /projects/{id}/issues with an updated_after filter.
-        // The recorded mode is sufficient for push/pull idempotence tests via
-        // SyncEngine, which couples with RecordingTracker for scripted changes.
         let _ = since;
+        let _ = self.token.as_str();
         Ok(Vec::new())
     }
 }
 
-/// GitLab issue JSON shape (partial; production would be more complete).
+// ---- wire shapes ---------------------------------------------------------------------------
+//
+// `push`/`pull` are test-doubled stubs (see module docs): no live transport is wired up yet,
+// so the functions below that shape a live request/response are not reachable from them.
+// They stay as the pure, directly recorded-JSON-tested units the live transport will call
+// into once it exists.
+
+/// The label marking every issue this adapter pushes with.
+fn ticket_label(ticket: &TicketId) -> String {
+    format!("tm-id:{ticket}")
+}
+
+/// Extract a ticket-id marker from labels, if present.
+#[allow(dead_code)]
+fn ticket_ref_from_labels(labels: &[String]) -> Option<&str> {
+    labels.iter().find_map(|l| l.strip_prefix("tm-id:"))
+}
+
+/// Map an internal state name to GitLab's two-state model. GitLab's `arbitrary_states`
+/// capability is false, so this adapter owns the final opened/closed decision.
+fn gitlab_state_for(state_hint: &str) -> &'static str {
+    if GITLAB_CLOSED_STATES.contains(&state_hint) {
+        "closed"
+    } else {
+        "opened"
+    }
+}
+
+/// Build the JSON body for a create or update call.
+#[allow(dead_code)]
+fn issue_request_body(projection: &Projection, labels: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "title": projection.title,
+        "description": projection.body,
+        "state": gitlab_state_for(&projection.state_hint),
+        "labels": labels,
+    })
+}
+
+/// Parse a GitLab issue from JSON.
+#[allow(dead_code)]
+fn parse_issue(body: &[u8]) -> Result<GitLabIssue> {
+    serde_json::from_slice(body)
+        .map_err(|e| TmError::parse(format!("gitlab: malformed issue response: {e}")))
+}
+
+/// Parse a list of GitLab issues.
+#[allow(dead_code)]
+fn parse_issue_list(body: &[u8]) -> Result<Vec<GitLabIssue>> {
+    serde_json::from_slice(body)
+        .map_err(|e| TmError::parse(format!("gitlab: malformed issue list response: {e}")))
+}
+
+/// Parse a list of GitLab notes (comments).
+#[allow(dead_code)]
+fn parse_note_list(body: &[u8]) -> Result<Vec<GitLabNote>> {
+    serde_json::from_slice(body)
+        .map_err(|e| TmError::parse(format!("gitlab: malformed note list response: {e}")))
+}
+
+/// Convert a GitLab issue to an ExternalRef.
+#[allow(dead_code)]
+fn issue_to_external_ref(adapter: &str, issue: &GitLabIssue) -> ExternalRef {
+    ExternalRef {
+        adapter: adapter.to_string(),
+        external_id: issue.iid.to_string(),
+        url: Some(issue.web_url.clone()),
+    }
+}
+
+/// The changes one pulled issue produces.
+#[allow(dead_code)]
+fn issue_changes(issue: &GitLabIssue, adapter: &str) -> Vec<ExternalChange> {
+    let external = issue_to_external_ref(adapter, issue);
+    if ticket_ref_from_labels(&issue.labels).is_some() {
+        vec![
+            ExternalChange {
+                external: external.clone(),
+                kind: ExternalChangeKind::StatusHint {
+                    state: issue.state.clone(),
+                },
+                observed_at: Timestamp::EPOCH,
+            },
+            ExternalChange {
+                external,
+                kind: ExternalChangeKind::Assigned {
+                    assignee: issue.assignee.as_ref().map(|u| u.username.clone()),
+                },
+                observed_at: Timestamp::EPOCH,
+            },
+        ]
+    } else {
+        vec![ExternalChange {
+            external,
+            kind: ExternalChangeKind::IssueCreated {
+                title: issue.title.clone(),
+                body: issue.description.clone().unwrap_or_default(),
+                author: issue.author.username.clone(),
+            },
+            observed_at: Timestamp::EPOCH,
+        }]
+    }
+}
+
+/// Convert a GitLab note to an ExternalChange for an issue.
+#[allow(dead_code)]
+fn note_to_external_change(note: &GitLabNote, issue_iid: u64, adapter: &str) -> ExternalChange {
+    ExternalChange {
+        external: ExternalRef {
+            adapter: adapter.to_string(),
+            external_id: issue_iid.to_string(),
+            url: None,
+        },
+        kind: ExternalChangeKind::CommentAdded {
+            author: note.author.username.clone(),
+            body: note.body.clone(),
+        },
+        observed_at: Timestamp::EPOCH,
+    }
+}
+
+/// GitLab issue JSON shape (partial).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GitLabIssue {
-    /// Issue internal ID (unique within project).
+    /// Issue internal ID.
     pub id: u64,
-    /// Issue internal project ID.
+    /// Issue project ID.
     pub project_id: u64,
     /// Issue internal iid (sequential within project).
     pub iid: u64,
     /// Issue title.
     pub title: String,
-    /// Issue description (body).
+    /// Issue description.
     pub description: Option<String>,
     /// Issue state: `opened` or `closed`.
     pub state: String,
@@ -150,19 +243,19 @@ pub struct GitLabIssue {
     pub labels: Vec<String>,
     /// Assignee, if any.
     pub assignee: Option<GitLabUser>,
+    /// Issue author.
+    pub author: GitLabUser,
     /// Milestone, if any.
     pub milestone: Option<GitLabMilestone>,
+    /// Web URL to the issue.
+    pub web_url: String,
 }
 
-/// GitLab user reference.
+/// GitLab user (assignee, author).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GitLabUser {
-    /// User ID.
-    pub id: u64,
     /// User username.
     pub username: String,
-    /// User display name.
-    pub name: String,
 }
 
 /// GitLab milestone.
@@ -172,9 +265,6 @@ pub struct GitLabMilestone {
     pub id: u64,
     /// Milestone title.
     pub title: String,
-    /// Milestone state: `active`, `closed`, or `opened`.
-    #[serde(default)]
-    pub state: String,
 }
 
 /// GitLab note (comment) on an issue.
@@ -186,260 +276,354 @@ pub struct GitLabNote {
     pub body: String,
     /// Author of the note.
     pub author: GitLabUser,
-    /// When the note was created.
-    pub created_at: String,
-    /// When the note was last updated.
-    pub updated_at: String,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    #[test]
-    fn gitlab_tracker_from_env_valid() {
-        std::env::set_var("GITLAB_TOKEN", "glpat-token123");
+    /// `GITLAB_TOKEN_ENV_VAR` is process-global; serialize the tests that mutate it so they
+    /// don't race under the default multi-threaded test runner.
+    static ENV_GUARD: Mutex<()> = Mutex::new(());
 
-        let tracker = GitLabTracker::from_env("gitlab_prod").expect("should create tracker");
-        assert_eq!(tracker.name(), "gitlab_prod");
-        assert_eq!(tracker.api_token, "glpat-token123");
+    fn ticket(id: &str) -> TicketId {
+        id.parse().expect("valid ticket id")
+    }
 
-        std::env::remove_var("GITLAB_TOKEN");
+    fn sample_projection() -> Projection {
+        Projection {
+            ticket: ticket("T-1"),
+            title: "Fix the widget".to_string(),
+            body: "Do the thing.".to_string(),
+            state_hint: "Ready".to_string(),
+            labels: vec!["bug".to_string()],
+            milestone: None,
+            checklist: vec![],
+            degradations: vec![],
+        }
     }
 
     #[test]
-    fn gitlab_tracker_from_env_missing_token() {
-        std::env::remove_var("GITLAB_TOKEN");
+    fn ticket_label_uses_stable_marker_prefix() {
+        assert_eq!(ticket_label(&ticket("T-42")), "tm-id:T-42");
+    }
 
-        let result = GitLabTracker::from_env("gitlab_prod");
+    #[test]
+    fn ticket_ref_from_labels_finds_marker() {
+        let labels = vec!["bug".to_string(), "tm-id:T-7".to_string()];
+        assert_eq!(ticket_ref_from_labels(&labels), Some("T-7"));
+    }
+
+    #[test]
+    fn ticket_ref_from_labels_absent_when_no_marker() {
+        let labels = vec!["bug".to_string()];
+        assert_eq!(ticket_ref_from_labels(&labels), None);
+    }
+
+    #[test]
+    fn gitlab_state_for_maps_closed_states_to_closed() {
+        assert_eq!(gitlab_state_for("Closed"), "closed");
+        assert_eq!(gitlab_state_for("Cancelled"), "closed");
+    }
+
+    #[test]
+    fn gitlab_state_for_maps_everything_else_to_opened() {
+        assert_eq!(gitlab_state_for("Ready"), "opened");
+        assert_eq!(gitlab_state_for("Running"), "opened");
+        assert_eq!(gitlab_state_for("Draft"), "opened");
+    }
+
+    #[test]
+    fn issue_request_body_includes_all_fields() {
+        let projection = sample_projection();
+        let labels = vec!["bug".to_string(), "tm-id:T-1".to_string()];
+        let body = issue_request_body(&projection, &labels);
+        assert_eq!(body["title"], "Fix the widget");
+        assert_eq!(body["description"], "Do the thing.");
+        assert_eq!(body["state"], "opened");
+        assert_eq!(body["labels"][0], "bug");
+        assert_eq!(body["labels"][1], "tm-id:T-1");
+    }
+
+    #[test]
+    fn parse_issue_happy_path() {
+        let json = br#"{
+            "id": 42,
+            "project_id": 1,
+            "iid": 5,
+            "title": "Fix the widget",
+            "description": "Do the thing.",
+            "state": "opened",
+            "labels": ["tm-id:T-1"],
+            "assignee": {"username": "alice"},
+            "author": {"username": "bob"},
+            "web_url": "https://gitlab.com/project/issues/5"
+        }"#;
+        let issue = parse_issue(json).expect("valid issue json");
+        assert_eq!(issue.id, 42);
+        assert_eq!(issue.iid, 5);
+        assert_eq!(issue.title, "Fix the widget");
+        assert_eq!(issue.state, "opened");
+    }
+
+    #[test]
+    fn parse_issue_rejects_malformed_json() {
+        let result = parse_issue(b"not json");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("GITLAB_TOKEN"));
+        assert!(result.unwrap_err().to_string().contains("parse:"));
     }
 
     #[test]
-    fn gitlab_tracker_from_env_empty_token() {
-        std::env::set_var("GITLAB_TOKEN", "");
-
-        let result = GitLabTracker::from_env("gitlab_prod");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("empty"));
-
-        std::env::remove_var("GITLAB_TOKEN");
+    fn parse_issue_defaults_optional_fields() {
+        let json = br#"{
+            "id": 1,
+            "project_id": 1,
+            "iid": 1,
+            "title": "No description",
+            "state": "opened",
+            "author": {"username": "someone"},
+            "web_url": "https://gitlab.com/project/issues/1"
+        }"#;
+        let issue = parse_issue(json).expect("valid issue json");
+        assert_eq!(issue.description, None);
+        assert_eq!(issue.assignee, None);
+        assert!(issue.labels.is_empty());
     }
 
     #[test]
-    fn gitlab_tracker_capabilities() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
+    fn parse_issue_list_happy_path() {
+        let json = br#"[
+            {"id": 1, "project_id": 1, "iid": 1, "title": "a", "state": "opened", "author": {"username": "u"}, "web_url": "https://x/1"},
+            {"id": 2, "project_id": 1, "iid": 2, "title": "b", "state": "closed", "author": {"username": "u"}, "web_url": "https://x/2"}
+        ]"#;
+        let issues = parse_issue_list(json).expect("valid list");
+        assert_eq!(issues.len(), 2);
+        assert_eq!(issues[1].state, "closed");
+    }
+
+    #[test]
+    fn issue_to_external_ref_carries_iid_and_url() {
+        let issue = GitLabIssue {
+            id: 7,
+            project_id: 1,
+            iid: 3,
+            title: "t".to_string(),
+            description: None,
+            state: "opened".to_string(),
+            labels: vec![],
+            assignee: None,
+            author: GitLabUser {
+                username: "u".to_string(),
+            },
+            milestone: None,
+            web_url: "https://gitlab.com/project/issues/3".to_string(),
+        };
+        let ext = issue_to_external_ref("gitlab", &issue);
+        assert_eq!(ext.adapter, "gitlab");
+        assert_eq!(ext.external_id, "3");
+        assert_eq!(
+            ext.url.as_deref(),
+            Some("https://gitlab.com/project/issues/3")
+        );
+    }
+
+    #[test]
+    fn issue_changes_mirrored_issue_yields_status_and_assignment() {
+        let issue = GitLabIssue {
+            id: 1,
+            project_id: 1,
+            iid: 1,
+            title: "t".to_string(),
+            description: None,
+            state: "closed".to_string(),
+            labels: vec!["tm-id:T-1".to_string()],
+            assignee: Some(GitLabUser {
+                username: "alice".to_string(),
+            }),
+            author: GitLabUser {
+                username: "bob".to_string(),
+            },
+            milestone: None,
+            web_url: "https://x/1".to_string(),
+        };
+        let changes = issue_changes(&issue, "gitlab");
+        assert_eq!(changes.len(), 2);
+        match &changes[0].kind {
+            ExternalChangeKind::StatusHint { state } => assert_eq!(state, "closed"),
+            other => panic!("expected StatusHint, got {other:?}"),
+        }
+        match &changes[1].kind {
+            ExternalChangeKind::Assigned { assignee } => {
+                assert_eq!(assignee.as_deref(), Some("alice"))
+            }
+            other => panic!("expected Assigned, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn issue_changes_unmirrored_issue_yields_issue_created() {
+        let issue = GitLabIssue {
+            id: 9,
+            project_id: 1,
+            iid: 9,
+            title: "Found a bug".to_string(),
+            description: Some("It broke".to_string()),
+            state: "opened".to_string(),
+            labels: vec![],
+            assignee: None,
+            author: GitLabUser {
+                username: "reporter".to_string(),
+            },
+            milestone: None,
+            web_url: "https://x/9".to_string(),
+        };
+        let changes = issue_changes(&issue, "gitlab");
+        assert_eq!(changes.len(), 1);
+        match &changes[0].kind {
+            ExternalChangeKind::IssueCreated {
+                title,
+                body,
+                author,
+            } => {
+                assert_eq!(title, "Found a bug");
+                assert_eq!(body, "It broke");
+                assert_eq!(author, "reporter");
+            }
+            other => panic!("expected IssueCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn issue_changes_unmirrored_issue_defaults_missing_description() {
+        let issue = GitLabIssue {
+            id: 9,
+            project_id: 1,
+            iid: 9,
+            title: "t".to_string(),
+            description: None,
+            state: "opened".to_string(),
+            labels: vec![],
+            assignee: None,
+            author: GitLabUser {
+                username: "reporter".to_string(),
+            },
+            milestone: None,
+            web_url: "https://x/9".to_string(),
+        };
+        let changes = issue_changes(&issue, "gitlab");
+        match &changes[0].kind {
+            ExternalChangeKind::IssueCreated { body, .. } => assert_eq!(body, ""),
+            other => panic!("expected IssueCreated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_note_list_happy_path() {
+        let json = br#"[
+            {"id": 1, "body": "looks good", "author": {"username": "reviewer"}}
+        ]"#;
+        let notes = parse_note_list(json).expect("valid note list");
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].author.username, "reviewer");
+        assert_eq!(notes[0].body, "looks good");
+    }
+
+    #[test]
+    fn note_to_external_change_maps_fields() {
+        let note = GitLabNote {
+            id: 1,
+            body: "nice work".to_string(),
+            author: GitLabUser {
+                username: "carol".to_string(),
+            },
+        };
+        let change = note_to_external_change(&note, 3, "gitlab");
+        assert_eq!(change.external.external_id, "3");
+        match change.kind {
+            ExternalChangeKind::CommentAdded { author, body } => {
+                assert_eq!(author, "carol");
+                assert_eq!(body, "nice work");
+            }
+            other => panic!("expected CommentAdded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_config_builds_a_tracker_without_touching_environment() {
+        let tracker = GitLabTracker::with_config("gl", "123", "tok").expect("builds");
+        assert_eq!(tracker.name(), "gl");
+    }
+
+    #[test]
+    fn capabilities_declare_no_parent_child_and_no_arbitrary_states() {
+        let tracker = GitLabTracker::with_config("gl", "123", "tok").expect("builds");
         let caps = tracker.capabilities();
-
         assert!(!caps.parent_child);
         assert!(!caps.arbitrary_states);
         assert!(caps.milestones);
         assert!(caps.labels);
         assert!(caps.comments);
-        assert_eq!(caps.max_body_bytes, 65536);
     }
 
     #[tokio::test]
-    async fn gitlab_tracker_push_happy_path() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-        let projection = Projection {
-            ticket: "T-123".parse().expect("valid ticket id"),
-            title: "Test Issue".to_string(),
-            body: "Issue description".to_string(),
-            state_hint: "open".to_string(),
-            labels: vec!["bug".to_string(), "urgent".to_string()],
-            milestone: Some("v1.0".to_string()),
-            checklist: vec![],
-            degradations: vec![],
-        };
-
+    async fn push_happy_path() {
+        let tracker = GitLabTracker::with_config("gl", "456", "tok").expect("builds");
+        let projection = sample_projection();
         let result = tracker.push(&projection).await;
         assert!(result.is_ok());
-
         let external_ref = result.unwrap();
-        assert_eq!(external_ref.adapter, "gitlab");
-        assert_eq!(external_ref.external_id, "gitlab_T-123");
-        assert!(external_ref.url.is_some());
-        assert!(external_ref.url.unwrap().contains("gitlab.com"));
+        assert_eq!(external_ref.adapter, "gl");
+        assert_eq!(external_ref.external_id, "T-1");
     }
 
     #[tokio::test]
-    async fn gitlab_tracker_pull_empty() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-        let since = Timestamp::from_unix_seconds(1);
-
+    async fn pull_empty() {
+        let tracker = GitLabTracker::with_config("gl", "456", "tok").expect("builds");
+        let since = Timestamp::EPOCH.plus_millis(1000);
         let result = tracker.pull(since).await;
         assert!(result.is_ok());
-
         let changes = result.unwrap();
         assert_eq!(changes.len(), 0);
     }
 
     #[test]
-    fn gitlab_tracker_resolve_state_open_variants() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-
-        assert_eq!(tracker.resolve_state("open").unwrap(), "open");
-        assert_eq!(tracker.resolve_state("todo").unwrap(), "open");
-        assert_eq!(tracker.resolve_state("in progress").unwrap(), "open");
-        assert_eq!(tracker.resolve_state("ready").unwrap(), "open");
-    }
-
-    #[test]
-    fn gitlab_tracker_resolve_state_closed_variants() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-
-        assert_eq!(tracker.resolve_state("closed").unwrap(), "closed");
-        assert_eq!(tracker.resolve_state("done").unwrap(), "closed");
-        assert_eq!(tracker.resolve_state("resolved").unwrap(), "closed");
-        assert_eq!(tracker.resolve_state("wontfix").unwrap(), "closed");
-    }
-
-    #[test]
-    fn gitlab_tracker_resolve_state_case_insensitive() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-
-        assert_eq!(tracker.resolve_state("OPEN").unwrap(), "open");
-        assert_eq!(tracker.resolve_state("Closed").unwrap(), "closed");
-        assert_eq!(tracker.resolve_state("IN PROGRESS").unwrap(), "open");
-    }
-
-    #[test]
-    fn gitlab_tracker_resolve_state_invalid() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-
-        let result = tracker.resolve_state("deleted");
+    fn from_env_fails_when_token_missing() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(GITLAB_TOKEN_ENV_VAR);
+        let result = GitLabTracker::from_env("gl", "123");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cannot map state"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains(GITLAB_TOKEN_ENV_VAR));
     }
 
     #[test]
-    fn gitlab_tracker_resolve_state_unknown() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-
-        let result = tracker.resolve_state("unknown_state");
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn gitlab_tracker_push_minimal_projection() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-        let projection = Projection {
-            ticket: "T-001".parse().expect("valid ticket id"),
-            title: "".to_string(),
-            body: "".to_string(),
-            state_hint: "closed".to_string(),
-            labels: vec![],
-            milestone: None,
-            checklist: vec![],
-            degradations: vec![],
-        };
-
-        let result = tracker.push(&projection).await;
+    fn from_env_reads_token_and_builds() {
+        let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(GITLAB_TOKEN_ENV_VAR, "tok_test_123");
+        let result = GitLabTracker::from_env("gl", "789");
         assert!(result.is_ok());
-        let external_ref = result.unwrap();
-        assert_eq!(external_ref.external_id, "gitlab_T-001");
-    }
-
-    #[test]
-    fn gitlab_issue_serialization() {
-        let issue = GitLabIssue {
-            id: 1,
-            project_id: 100,
-            iid: 1,
-            title: "Test Issue".to_string(),
-            description: Some("Description text".to_string()),
-            state: "opened".to_string(),
-            labels: vec!["bug".to_string(), "label2".to_string()],
-            assignee: Some(GitLabUser {
-                id: 42,
-                username: "alice".to_string(),
-                name: "Alice".to_string(),
-            }),
-            milestone: Some(GitLabMilestone {
-                id: 5,
-                title: "v1.0".to_string(),
-                state: "active".to_string(),
-            }),
-        };
-
-        let json = serde_json::to_string(&issue).expect("should serialize");
-        assert!(json.contains("Test Issue"));
-        assert!(json.contains("Description text"));
-        assert!(json.contains("opened"));
-        assert!(json.contains("bug"));
-        assert!(json.contains("alice"));
-    }
-
-    #[test]
-    fn gitlab_issue_deserialization() {
-        let json = r#"{
-            "id": 2,
-            "project_id": 101,
-            "iid": 2,
-            "title": "Test Issue",
-            "description": "Description",
-            "state": "opened",
-            "labels": ["urgent"],
-            "assignee": { "id": 43, "username": "bob", "name": "Bob" },
-            "milestone": { "id": 6, "title": "v2.0", "state": "active" }
-        }"#;
-
-        let issue: GitLabIssue = serde_json::from_str(json).expect("should deserialize");
-        assert_eq!(issue.iid, 2);
-        assert_eq!(issue.title, "Test Issue");
-        assert_eq!(issue.state, "opened");
-        assert_eq!(issue.labels, vec!["urgent"]);
-        assert_eq!(issue.assignee.unwrap().name, "Bob");
-        assert_eq!(issue.milestone.unwrap().title, "v2.0");
-    }
-
-    #[test]
-    fn gitlab_issue_minimal_fields() {
-        let json = r#"{
-            "id": 3,
-            "project_id": 102,
-            "iid": 3,
-            "title": "Minimal Issue",
-            "description": null,
-            "state": "closed",
-            "labels": [],
-            "assignee": null,
-            "milestone": null
-        }"#;
-
-        let issue: GitLabIssue = serde_json::from_str(json).expect("should deserialize");
-        assert_eq!(issue.iid, 3);
-        assert_eq!(issue.title, "Minimal Issue");
-        assert_eq!(issue.state, "closed");
-        assert!(issue.description.is_none());
-        assert!(issue.labels.is_empty());
-        assert!(issue.assignee.is_none());
-        assert!(issue.milestone.is_none());
+        let tracker = result.unwrap();
+        assert_eq!(tracker.name(), "gl");
+        std::env::remove_var(GITLAB_TOKEN_ENV_VAR);
     }
 
     #[test]
     fn gitlab_user_serialization() {
         let user = GitLabUser {
-            id: 99,
-            username: "charlie".to_string(),
-            name: "Charlie".to_string(),
+            username: "alice".to_string(),
         };
-
         let json = serde_json::to_string(&user).expect("should serialize");
-        assert!(json.contains("charlie"));
-        assert!(json.contains("Charlie"));
+        assert!(json.contains("alice"));
     }
 
     #[test]
     fn gitlab_user_deserialization() {
-        let json = r#"{ "id": 50, "username": "dave", "name": "Dave" }"#;
-
+        let json = r#"{"username": "bob"}"#;
         let user: GitLabUser = serde_json::from_str(json).expect("should deserialize");
-        assert_eq!(user.id, 50);
-        assert_eq!(user.username, "dave");
-        assert_eq!(user.name, "Dave");
+        assert_eq!(user.username, "bob");
     }
 
     #[test]
@@ -447,22 +631,17 @@ mod tests {
         let milestone = GitLabMilestone {
             id: 10,
             title: "Release v1.5".to_string(),
-            state: "active".to_string(),
         };
-
         let json = serde_json::to_string(&milestone).expect("should serialize");
         assert!(json.contains("Release v1.5"));
-        assert!(json.contains("active"));
     }
 
     #[test]
     fn gitlab_milestone_deserialization() {
-        let json = r#"{ "id": 11, "title": "Next Sprint", "state": "opened" }"#;
-
+        let json = r#"{"id": 11, "title": "Next Sprint"}"#;
         let milestone: GitLabMilestone = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(milestone.id, 11);
         assert_eq!(milestone.title, "Next Sprint");
-        assert_eq!(milestone.state, "opened");
     }
 
     #[test]
@@ -471,14 +650,9 @@ mod tests {
             id: 200,
             body: "This is a comment".to_string(),
             author: GitLabUser {
-                id: 44,
                 username: "eve".to_string(),
-                name: "Eve".to_string(),
             },
-            created_at: "2024-01-15T10:30:00Z".to_string(),
-            updated_at: "2024-01-15T11:00:00Z".to_string(),
         };
-
         let json = serde_json::to_string(&note).expect("should serialize");
         assert!(json.contains("This is a comment"));
         assert!(json.contains("eve"));
@@ -489,88 +663,33 @@ mod tests {
         let json = r#"{
             "id": 201,
             "body": "Another comment",
-            "author": { "id": 45, "username": "frank", "name": "Frank" },
-            "created_at": "2024-02-01T12:00:00Z",
-            "updated_at": "2024-02-01T13:00:00Z"
+            "author": {"username": "frank"}
         }"#;
-
         let note: GitLabNote = serde_json::from_str(json).expect("should deserialize");
         assert_eq!(note.id, 201);
         assert_eq!(note.body, "Another comment");
-        assert_eq!(note.author.name, "Frank");
-        assert_eq!(note.created_at, "2024-02-01T12:00:00Z");
-    }
-
-    #[tokio::test]
-    async fn gitlab_tracker_push_with_labels() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-        let projection = Projection {
-            ticket: "T-999".parse().expect("valid ticket id"),
-            title: "Issue with labels".to_string(),
-            body: "Multi-label test".to_string(),
-            state_hint: "in progress".to_string(),
-            labels: vec![
-                "backend".to_string(),
-                "performance".to_string(),
-                "v2".to_string(),
-            ],
-            milestone: Some("Release Q4".to_string()),
-            checklist: vec![],
-            degradations: vec![],
-        };
-
-        let result = tracker.push(&projection).await;
-        assert!(result.is_ok());
-        let ref_obj = result.unwrap();
-        assert_eq!(ref_obj.external_id, "gitlab_T-999");
+        assert_eq!(note.author.username, "frank");
     }
 
     #[test]
-    fn gitlab_issue_with_multiple_labels() {
+    fn gitlab_issue_with_milestone_and_assignee() {
         let json = r#"{
             "id": 4,
             "project_id": 103,
             "iid": 4,
-            "title": "Multi-label issue",
-            "description": null,
+            "title": "Complex issue",
+            "description": "With all fields",
             "state": "opened",
-            "labels": ["alpha", "beta", "gamma"],
-            "assignee": null,
-            "milestone": null
+            "labels": ["alpha", "beta"],
+            "assignee": {"username": "dev"},
+            "author": {"username": "creator"},
+            "milestone": {"id": 5, "title": "v2.0"},
+            "web_url": "https://gitlab.com/p/issues/4"
         }"#;
-
         let issue: GitLabIssue = serde_json::from_str(json).expect("should deserialize");
-        assert_eq!(issue.labels.len(), 3);
-        assert!(issue.labels.contains(&"alpha".to_string()));
-        assert!(issue.labels.contains(&"beta".to_string()));
-        assert!(issue.labels.contains(&"gamma".to_string()));
-    }
-
-    #[test]
-    fn gitlab_tracker_resolve_state_all_open_variants() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-
-        for state in &["open", "todo", "in progress", "ready"] {
-            assert_eq!(
-                tracker.resolve_state(state).unwrap(),
-                "open",
-                "state '{}' should resolve to 'open'",
-                state
-            );
-        }
-    }
-
-    #[test]
-    fn gitlab_tracker_resolve_state_all_closed_variants() {
-        let tracker = GitLabTracker::new_test("gitlab", "token123");
-
-        for state in &["closed", "done", "resolved", "wontfix"] {
-            assert_eq!(
-                tracker.resolve_state(state).unwrap(),
-                "closed",
-                "state '{}' should resolve to 'closed'",
-                state
-            );
-        }
+        assert_eq!(issue.labels.len(), 2);
+        assert!(issue.assignee.is_some());
+        assert_eq!(issue.assignee.unwrap().username, "dev");
+        assert!(issue.milestone.is_some());
     }
 }

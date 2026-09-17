@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use tm_core::{ArtifactKind, ArtifactStorage, Store};
+use tm_core::{ArtifactKind, ArtifactStorage};
 use tm_types::{
     ArtifactId, Clock, IdSource, LeaseId, MilestoneId, ParticipantId, Result as TmResult, Role,
     TicketId, Timestamp, TmError,
@@ -588,11 +588,11 @@ mod tests {
         }
     }
 
-    fn open_store() -> (TempDir, Store) {
+    fn open_store() -> (TempDir, tm_core::Store) {
         let dir = TempDir::new().expect("tempdir");
         let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
         let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
-        let store = Store::open_with(dir.path(), clock, ids).expect("open store");
+        let store = tm_core::Store::open_with(dir.path(), clock, ids).expect("open store");
         (dir, store)
     }
 

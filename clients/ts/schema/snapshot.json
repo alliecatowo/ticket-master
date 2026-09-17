@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Ticketmaster server API",
+  "definitions": {
+    "TicketId": { "type": "string", "pattern": "^(T|V|A)-[0-9]+$" },
+    "ParticipantId": { "type": "string" },
+    "TicketKind": {
+      "type": "string",
+      "enum": ["work", "verification", "audit", "investigation", "recovery", "harness"]
+    },
+    "TicketState": {
+      "type": "string",
+      "enum": [
+        "draft", "blocked", "ready", "leased", "running", "submitted", "verifying",
+        "auditing", "rework", "replan", "recovery", "escalated", "closed", "cancelled"
+      ]
+    },
+    "CreateTicketRequest": {
+      "type": "object",
+      "required": ["kind", "objective", "executor", "verification", "retry", "actor"],
+      "properties": {
+        "kind": { "$ref": "#/definitions/TicketKind" },
+        "objective": { "type": "string" },
+        "parent": { "$ref": "#/definitions/TicketId" },
+        "priority": { "type": "integer" },
+        "actor": { "$ref": "#/definitions/ParticipantId" }
+      }
+    },
+    "TransitionRequest": {
+      "type": "object",
+      "description": "externally tagged: one of activate|trigger|submit|verify|audit|close|cancel|reopen|fail"
+    }
+  }
+}

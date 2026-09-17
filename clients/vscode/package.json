@@ -1,0 +1,113 @@
+{
+  "name": "ticketmaster-vscode",
+  "displayName": "Ticketmaster",
+  "description": "Editor surface for Ticketmaster: milestone/ticket tree, path-lease decorations, decision CodeLens.",
+  "version": "0.0.1",
+  "private": true,
+  "publisher": "ticketmaster",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ticketmaster",
+          "title": "Ticketmaster",
+          "icon": "$(checklist)"
+        }
+      ]
+    },
+    "views": {
+      "ticketmaster": [
+        {
+          "id": "ticketmaster.milestonesView",
+          "name": "Milestones",
+          "contextualTitle": "Ticketmaster"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ticketmaster.refresh",
+        "title": "Ticketmaster: Refresh",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ticketmaster.openTicket",
+        "title": "Ticketmaster: Open Ticket"
+      },
+      {
+        "command": "ticketmaster.claimTicket",
+        "title": "Ticketmaster: Claim Ticket"
+      },
+      {
+        "command": "ticketmaster.submitWithEvidence",
+        "title": "Ticketmaster: Submit With Evidence"
+      },
+      {
+        "command": "ticketmaster.recordDecision",
+        "title": "Ticketmaster: Record Decision"
+      },
+      {
+        "command": "ticketmaster.runOnSelection",
+        "title": "Ticketmaster: Run tm on Selection"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "ticketmaster.refresh",
+          "when": "view == ticketmaster.milestonesView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "ticketmaster.openTicket",
+          "when": "view == ticketmaster.milestonesView && viewItem == ticket"
+        },
+        {
+          "command": "ticketmaster.claimTicket",
+          "when": "view == ticketmaster.milestonesView && viewItem == ticket"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "ticketmaster.runOnSelection",
+          "when": "editorHasSelection",
+          "group": "ticketmaster"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Ticketmaster",
+      "properties": {
+        "ticketmaster.serverUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:4180",
+          "description": "Base URL of the tm-server instance for this project (see SPEC.md section 14)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.9"
+  }
+}

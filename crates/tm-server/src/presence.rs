@@ -98,7 +98,7 @@ impl PresenceTable {
     /// participants that were dropped.
     pub fn sweep_expired(&self, now: Timestamp) -> Vec<ParticipantId> {
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
-        sweep_expired_at(&mut *entries, now)
+        sweep_expired_at(&mut entries, now)
     }
 }
 
@@ -593,7 +593,8 @@ mod tests {
         let ticket_id = make_ticket("T-3");
         let holder = make_participant("charlie");
 
-        let patterns = PatternSet::parse(["src/*.rs", "lib/*.rs", "tests/*.rs"]).expect("valid set");
+        let patterns =
+            PatternSet::parse(["src/*.rs", "lib/*.rs", "tests/*.rs"]).expect("valid set");
 
         let claim = ResourceClaim {
             paths: patterns,

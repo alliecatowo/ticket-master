@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn ephemeral_profile_dir_creates_directory() {
-        let ids = TestIds::new();
+        let ids = TestIds::seeded(1001);
         let result = ephemeral_profile_dir(&ids);
         assert!(result.is_ok());
 
@@ -408,8 +408,8 @@ mod tests {
 
     #[test]
     fn ephemeral_profile_dir_unique_paths() {
-        let ids1 = TestIds::new();
-        let ids2 = TestIds::seeded(1);
+        let ids1 = TestIds::seeded(1002);
+        let ids2 = TestIds::seeded(1003);
 
         let dir1 = ephemeral_profile_dir(&ids1).unwrap();
         let dir2 = ephemeral_profile_dir(&ids2).unwrap();
@@ -440,7 +440,7 @@ mod tests {
 
     #[test]
     fn build_argv_contains_required_flags() {
-        let ids = TestIds::new();
+        let ids = TestIds::seeded(1004);
         let profile_dir = ephemeral_profile_dir(&ids).unwrap();
         let browser = DiscoveredBrowser {
             kind: BrowserKind::Chrome,
@@ -467,7 +467,7 @@ mod tests {
 
     #[test]
     fn build_argv_includes_extra_args() {
-        let ids = TestIds::new();
+        let ids = TestIds::seeded(1005);
         let profile_dir = ephemeral_profile_dir(&ids).unwrap();
         let browser = DiscoveredBrowser {
             kind: BrowserKind::Chrome,
@@ -491,7 +491,7 @@ mod tests {
 
     #[test]
     fn build_argv_flags_order() {
-        let ids = TestIds::new();
+        let ids = TestIds::seeded(1006);
         let profile_dir = ephemeral_profile_dir(&ids).unwrap();
         let browser = DiscoveredBrowser {
             kind: BrowserKind::Chrome,

@@ -8,19 +8,19 @@
 //! the chain of reasoning from the original prompt through compilation, ignition, and maturity
 //! checks.
 
-pub mod seed;
-pub mod vision;
-pub mod spec;
+pub mod attach;
 pub mod compile;
 pub mod ignition;
 pub mod maturity;
+pub mod seed;
+pub mod spec;
 pub mod stages;
-pub mod attach;
+pub mod vision;
 
-pub use seed::{Assumption, Question, Seed};
-pub use vision::Vision;
-pub use spec::Specification;
 pub use compile::GraphCompilation;
 pub use ignition::IgnitionPolicy;
 pub use maturity::MaturityGateResult;
-pub use stages::{Stage, StageEvent, GenesisState, GenesisDriver};
+pub use seed::{Assumption, Question, Seed};
+pub use spec::Specification;
+pub use stages::{GenesisDriver, GenesisState, Stage, StageEvent};
+pub use vision::Vision;

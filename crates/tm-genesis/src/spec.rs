@@ -7,6 +7,7 @@
 //! stage down, which turns a `Specification` into an actual ticket graph.
 
 use serde::{Deserialize, Serialize};
+use tm_provider::types::ContentBlock;
 use tm_types::{ArtifactId, Clock, Predicate, Result as TmResult, Timestamp, TmError};
 
 use crate::vision::Vision;
@@ -354,8 +355,14 @@ mod tests {
     #[tokio::test]
     async fn compile_spec_happy_path() {
         let vision = sample_vision();
-        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(5000)));
-        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock.clone());
+        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(
+            5000,
+        )));
+        let mock = MockProvider::new(
+            "anthropic",
+            ModelId::new("anthropic", "claude"),
+            clock.clone(),
+        );
 
         let scripted_completion = Completion {
             model: ModelId::new("anthropic", "claude"),
@@ -375,20 +382,7 @@ mod tests {
             received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
-        let req = tm_provider::types::CompletionRequest {
-            system: Some(
-                "You are an expert software architect specializing in specification compilation."
-                    .to_string(),
-            ),
-            messages: vec![],
-            tools: vec![],
-            max_tokens: 4096,
-            temperature: Some(0.0),
-            stop_sequences: vec![],
-            stream: false,
-            n: 1,
-        };
-
+        let req = build_spec_request(&vision);
         mock.script_response(&req, scripted_completion);
 
         let spec = compile_spec(&vision, &mock, clock.as_ref())
@@ -422,17 +416,20 @@ mod tests {
         assert_eq!(spec.v1.objective, "Feature complete system");
         assert_eq!(spec.v1.exit_criteria.len(), 2);
         assert_eq!(spec.source_vision, None);
-        assert_eq!(
-            spec.created,
-            tm_types::Timestamp::from_unix_seconds(5000)
-        );
+        assert_eq!(spec.created, tm_types::Timestamp::from_unix_seconds(5000));
     }
 
     #[tokio::test]
     async fn compile_spec_rejects_empty_v0_criteria() {
         let vision = sample_vision();
-        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(5000)));
-        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock.clone());
+        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(
+            5000,
+        )));
+        let mock = MockProvider::new(
+            "anthropic",
+            ModelId::new("anthropic", "claude"),
+            clock.clone(),
+        );
 
         let invalid_json = r#"{
   "requirements": [{"id": "R1", "text": "Requirement", "priority": 1}],
@@ -461,20 +458,7 @@ mod tests {
             received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
-        let req = tm_provider::types::CompletionRequest {
-            system: Some(
-                "You are an expert software architect specializing in specification compilation."
-                    .to_string(),
-            ),
-            messages: vec![],
-            tools: vec![],
-            max_tokens: 4096,
-            temperature: Some(0.0),
-            stop_sequences: vec![],
-            stream: false,
-            n: 1,
-        };
-
+        let req = build_spec_request(&vision);
         mock.script_response(&req, scripted_completion);
 
         let result = compile_spec(&vision, &mock, clock.as_ref()).await;
@@ -488,8 +472,14 @@ mod tests {
     #[tokio::test]
     async fn compile_spec_rejects_empty_v1_criteria() {
         let vision = sample_vision();
-        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(5000)));
-        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock.clone());
+        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(
+            5000,
+        )));
+        let mock = MockProvider::new(
+            "anthropic",
+            ModelId::new("anthropic", "claude"),
+            clock.clone(),
+        );
 
         let invalid_json = r#"{
   "requirements": [{"id": "R1", "text": "Requirement", "priority": 1}],
@@ -518,20 +508,7 @@ mod tests {
             received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
-        let req = tm_provider::types::CompletionRequest {
-            system: Some(
-                "You are an expert software architect specializing in specification compilation."
-                    .to_string(),
-            ),
-            messages: vec![],
-            tools: vec![],
-            max_tokens: 4096,
-            temperature: Some(0.0),
-            stop_sequences: vec![],
-            stream: false,
-            n: 1,
-        };
-
+        let req = build_spec_request(&vision);
         mock.script_response(&req, scripted_completion);
 
         let result = compile_spec(&vision, &mock, clock.as_ref()).await;
@@ -545,8 +522,14 @@ mod tests {
     #[tokio::test]
     async fn compile_spec_rejects_empty_requirements() {
         let vision = sample_vision();
-        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(5000)));
-        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock.clone());
+        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(
+            5000,
+        )));
+        let mock = MockProvider::new(
+            "anthropic",
+            ModelId::new("anthropic", "claude"),
+            clock.clone(),
+        );
 
         let invalid_json = r#"{
   "requirements": [],
@@ -575,20 +558,7 @@ mod tests {
             received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
-        let req = tm_provider::types::CompletionRequest {
-            system: Some(
-                "You are an expert software architect specializing in specification compilation."
-                    .to_string(),
-            ),
-            messages: vec![],
-            tools: vec![],
-            max_tokens: 4096,
-            temperature: Some(0.0),
-            stop_sequences: vec![],
-            stream: false,
-            n: 1,
-        };
-
+        let req = build_spec_request(&vision);
         mock.script_response(&req, scripted_completion);
 
         let result = compile_spec(&vision, &mock, clock.as_ref()).await;
@@ -602,8 +572,14 @@ mod tests {
     #[tokio::test]
     async fn compile_spec_rejects_malformed_json() {
         let vision = sample_vision();
-        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(5000)));
-        let mock = MockProvider::new("anthropic", ModelId::new("anthropic", "claude"), clock.clone());
+        let clock = Arc::new(FixedClock::new(tm_types::Timestamp::from_unix_seconds(
+            5000,
+        )));
+        let mock = MockProvider::new(
+            "anthropic",
+            ModelId::new("anthropic", "claude"),
+            clock.clone(),
+        );
 
         let scripted_completion = Completion {
             model: ModelId::new("anthropic", "claude"),
@@ -618,20 +594,7 @@ mod tests {
             received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
-        let req = tm_provider::types::CompletionRequest {
-            system: Some(
-                "You are an expert software architect specializing in specification compilation."
-                    .to_string(),
-            ),
-            messages: vec![],
-            tools: vec![],
-            max_tokens: 4096,
-            temperature: Some(0.0),
-            stop_sequences: vec![],
-            stream: false,
-            n: 1,
-        };
-
+        let req = build_spec_request(&vision);
         mock.script_response(&req, scripted_completion);
 
         let result = compile_spec(&vision, &mock, clock.as_ref()).await;

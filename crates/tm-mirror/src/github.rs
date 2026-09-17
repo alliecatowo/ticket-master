@@ -1,50 +1,51 @@
-//! [`GitHubTracker`]: GitHub Issues over REST v3, via `reqwest`.
+//! GitHub Issues, REST v3, over `reqwest`.
 //!
-//! Owns everything specific to talking to GitHub: issue create/update, comments, labels,
-//! assignees, milestones, the `GITHUB_TOKEN` credential, and GitHub's rate-limit headers.
-//! [`crate::tracker::Tracker`] and [`crate::projection`] own everything adapter-agnostic; this
-//! module only shapes JSON at the HTTP boundary and maps it onto those contracts.
+//! Owns issue create/update, comments, labels, milestones and inbound state/assignee/label
+//! reads. Credentials are read once, by name, from [`GITHUB_TOKEN_ENV_VAR`]; nothing in this
+//! module reads `GITHUB_TOKEN` anywhere except [`GitHubTracker::from_env`], and shaping is
+//! unit-testable against recorded JSON with no network call.
 //!
-//! GitHub Issues has no native parent/child relationship and only two workflow states
+//! GitHub's issue model has no native parent/child relationship and only two states
 //! (`open`/`closed`), so [`GitHubTracker::capabilities`] declares `parent_child: false` and
-//! `arbitrary_states: false` — [`crate::projection::ProjectionPolicy`] is responsible for
-//! folding descendants into a checklist and coarsening internal states before a [`Projection`]
-//! ever reaches this module.
+//! `arbitrary_states: false`: [`crate::projection::ProjectionPolicy`] rolls descendants into a
+//! checklist and coarsens state before this adapter ever sees a [`Projection`].
 //!
-//! Every ticket this adapter pushes is tagged with a `tm-id:<ticket>` label, which is how
-//! [`GitHubTracker::push`] finds an already-mirrored issue to update instead of creating a
-//! duplicate, and how [`GitHubTracker::pull`] tells a ticket-linked issue apart from one a human
-//! opened directly (which becomes [`crate::tracker::ExternalChangeKind::IssueCreated`]).
-//!
-//! Wire shaping and response parsing are pure functions, unit-tested here against recorded JSON.
-//! The network calls that use them (`push`/`pull` and their private helpers) are exercised by
-//! `sync`'s round-trip tests against [`crate::tracker::RecordingTracker`], never against the
-//! network, per this crate's no-network testing rule.
+//! `push` is idempotent across repeated calls for the same ticket: this adapter remembers the
+//! issue number it created for each [`tm_types::TicketId`] and issues a `PATCH` on subsequent
+//! pushes instead of creating a duplicate issue.
+
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, USER_AGENT};
-use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
-
-use tm_types::{Result, TicketId, Timestamp, TmError};
+use tm_types::{Clock, Result, TicketId, Timestamp, TmError};
 
 use crate::projection::Projection;
 use crate::tracker::{
     ExternalChange, ExternalChangeKind, ExternalRef, Tracker, TrackerCapabilities,
 };
 
-/// Name of the environment variable [`GitHubTracker::from_env`] reads the token from.
+/// Name of the environment variable this adapter reads its personal-access/App token from.
 pub const GITHUB_TOKEN_ENV_VAR: &str = "GITHUB_TOKEN";
 
-/// The GitHub REST v3 endpoint this adapter targets by default.
+/// Default GitHub REST v3 base URL.
 pub const DEFAULT_BASE_URL: &str = "https://api.github.com";
 
-/// The REST media type this adapter requests.
-const ACCEPT_HEADER: &str = "application/vnd.github+json";
+/// GitHub's own ceiling on issue body length, in bytes.
+const MAX_BODY_BYTES: usize = 65536;
 
-/// GitHub Issues has exactly two workflow states; every internal state not `Closed`/`Cancelled`
-/// maps to `open`.
-const GITHUB_CLOSED_STATES: [&str; 2] = ["Closed", "Cancelled"];
+/// Maximum attempts on a rate-limited or 5xx response before giving up.
+const DEFAULT_MAX_RETRIES: u32 = 3;
+
+/// Floor for exponential backoff when GitHub gives no usable rate-limit or `Retry-After` header.
+const BACKOFF_FLOOR: Duration = Duration::from_millis(500);
+
+/// A prefix on a label name treated as carrying priority (e.g. `priority:high`), the only signal
+/// this adapter has for [`ExternalChangeKind::PriorityChanged`] since GitHub Issues has no native
+/// priority field.
+const PRIORITY_LABEL_PREFIX: &str = "priority:";
 
 /// A live GitHub Issues adapter for one `owner/repo`.
 pub struct GitHubTracker {
@@ -54,6 +55,13 @@ pub struct GitHubTracker {
     token: String,
     base_url: String,
     http: reqwest::Client,
+    clock: std::sync::Arc<dyn Clock>,
+    max_retries: u32,
+    /// Ticket -> issue number, so a second `push` for the same ticket updates rather than
+    /// recreates. Interior mutability so `push` can take `&self` per the [`Tracker`] contract.
+    issue_numbers: Mutex<BTreeMap<TicketId, u64>>,
+    /// Milestone title -> milestone number, resolved lazily and cached for the process lifetime.
+    milestone_numbers: Mutex<BTreeMap<String, i64>>,
 }
 
 impl GitHubTracker {
@@ -62,33 +70,54 @@ impl GitHubTracker {
         name: impl Into<String>,
         owner: impl Into<String>,
         repo: impl Into<String>,
+        clock: std::sync::Arc<dyn Clock>,
     ) -> Result<Self> {
         let token = std::env::var(GITHUB_TOKEN_ENV_VAR).map_err(|_| {
-            TmError::invariant(format!("github: {GITHUB_TOKEN_ENV_VAR} is not set"))
+            TmError::invariant(format!("mirror: {GITHUB_TOKEN_ENV_VAR} is not set"))
         })?;
-        Self::with_config(name, owner, repo, token, DEFAULT_BASE_URL.to_string())
+        Self::with_config(
+            name,
+            owner,
+            repo,
+            token,
+            DEFAULT_BASE_URL.to_string(),
+            clock,
+        )
     }
 
-    /// Build a tracker with an explicit token and base URL, for tests that stand up a local mock
-    /// HTTP server (shaping tests use recorded JSON directly and never need this).
+    /// Build a tracker with an explicit token and base URL (tests that stand up a local mock
+    /// server, or a GitHub Enterprise Server host).
     pub fn with_config(
         name: impl Into<String>,
         owner: impl Into<String>,
         repo: impl Into<String>,
-        token: impl Into<String>,
-        base_url: impl Into<String>,
+        token: String,
+        base_url: String,
+        clock: std::sync::Arc<dyn Clock>,
     ) -> Result<Self> {
         let http = reqwest::Client::builder()
+            .user_agent("ticketmaster-mirror")
+            .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|e| TmError::Provider(format!("github: failed to build HTTP client: {e}")))?;
+            .map_err(|e| TmError::Provider(format!("failed to build HTTP client: {e}")))?;
         Ok(GitHubTracker {
             name: name.into(),
             owner: owner.into(),
             repo: repo.into(),
-            token: token.into(),
-            base_url: base_url.into(),
+            token,
+            base_url,
             http,
+            clock,
+            max_retries: DEFAULT_MAX_RETRIES,
+            issue_numbers: Mutex::new(BTreeMap::new()),
+            milestone_numbers: Mutex::new(BTreeMap::new()),
         })
+    }
+
+    /// Maximum retry attempts on rate limit/5xx before giving up. Default is set in the
+    /// constructors; exposed for tests that want to force exhaustion quickly.
+    pub fn set_max_retries(&mut self, max_retries: u32) {
+        self.max_retries = max_retries;
     }
 
     fn issues_url(&self) -> String {
@@ -99,7 +128,11 @@ impl GitHubTracker {
     }
 
     fn issue_url(&self, number: u64) -> String {
-        format!("{}/{}", self.issues_url(), number)
+        format!("{}/{number}", self.issues_url())
+    }
+
+    fn comments_url(&self, number: u64) -> String {
+        format!("{}/comments", self.issue_url(number))
     }
 
     fn milestones_url(&self) -> String {
@@ -109,97 +142,117 @@ impl GitHubTracker {
         )
     }
 
-    fn comments_url(&self) -> String {
-        format!(
-            "{}/repos/{}/{}/issues/comments",
-            self.base_url, self.owner, self.repo
-        )
-    }
-
-    async fn send(
-        &self,
-        method: Method,
-        url: String,
-        body: Option<&serde_json::Value>,
-    ) -> Result<Vec<u8>> {
-        let mut req = self
-            .http
-            .request(method, url)
-            .headers(build_headers(&self.token));
-        if let Some(b) = body {
-            req = req.json(b);
-        }
-        let response = req
-            .send()
-            .await
-            .map_err(|e| TmError::Provider(format!("github: request failed: {e}")))?;
-        let status = response.status();
-        let headers = response.headers().clone();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| TmError::Provider(format!("github: failed to read response body: {e}")))?;
-        classify_status(status, &headers, &bytes)?;
-        Ok(bytes.to_vec())
-    }
-
-    async fn find_issue_by_label(&self, label: &str) -> Result<Option<GitHubIssue>> {
-        let url = format!(
-            "{}?labels={}&state=all&per_page=1",
-            self.issues_url(),
-            label
+    fn headers(&self) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::AUTHORIZATION,
+            reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.token))
+                .unwrap_or_else(|_| reqwest::header::HeaderValue::from_static("")),
         );
-        let body = self.send(Method::GET, url, None).await?;
-        let mut issues = parse_issue_list(&body)?;
-        Ok(if issues.is_empty() {
-            None
-        } else {
-            Some(issues.remove(0))
-        })
+        headers.insert(
+            reqwest::header::ACCEPT,
+            reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
+        );
+        headers
     }
 
-    async fn resolve_milestone(&self, title: &str) -> Result<u64> {
+    /// Resolve a milestone title to GitHub's numeric id, creating it if it doesn't exist yet.
+    async fn resolve_milestone(&self, title: &str) -> Result<i64> {
+        if let Some(number) = self
+            .milestone_numbers
+            .lock()
+            .map_err(|_| TmError::invariant("github: milestone cache mutex poisoned"))?
+            .get(title)
+        {
+            return Ok(*number);
+        }
+
         let body = self
-            .send(
-                Method::GET,
-                format!("{}?state=all", self.milestones_url()),
-                None,
-            )
+            .send_with_retry(reqwest::Method::GET, self.milestones_url(), None)
             .await?;
         let milestones = parse_milestone_list(&body)?;
         if let Some(number) = find_milestone_number(&milestones, title) {
+            self.milestone_numbers
+                .lock()
+                .map_err(|_| TmError::invariant("github: milestone cache mutex poisoned"))?
+                .insert(title.to_string(), number);
             return Ok(number);
         }
-        let created = self
-            .send(
-                Method::POST,
+
+        let created_body = self
+            .send_with_retry(
+                reqwest::Method::POST,
                 self.milestones_url(),
-                Some(&serde_json::json!({ "title": title })),
+                Some(serde_json::json!({ "title": title })),
             )
             .await?;
-        let milestone: GitHubMilestone = serde_json::from_slice(&created)
-            .map_err(|e| TmError::parse(format!("github: malformed milestone response: {e}")))?;
-        Ok(milestone.number)
+        let created = parse_milestone(&created_body)?;
+        self.milestone_numbers
+            .lock()
+            .map_err(|_| TmError::invariant("github: milestone cache mutex poisoned"))?
+            .insert(title.to_string(), created.number);
+        Ok(created.number)
     }
 
-    async fn list_issues_since(&self, since: Timestamp) -> Result<Vec<GitHubIssue>> {
-        let url = format!(
-            "{}?since={}&state=all&sort=updated&direction=asc",
-            self.issues_url(),
-            since.to_rfc3339()
-        );
-        let body = self.send(Method::GET, url, None).await?;
-        parse_issue_list(&body)
-    }
+    /// Send one HTTP request, retrying on rate limit / 5xx up to `max_retries` times.
+    async fn send_with_retry(
+        &self,
+        method: reqwest::Method,
+        url: String,
+        json_body: Option<serde_json::Value>,
+    ) -> Result<Vec<u8>> {
+        let mut attempt: u32 = 0;
+        loop {
+            let mut builder = self
+                .http
+                .request(method.clone(), &url)
+                .headers(self.headers());
+            if let Some(body) = &json_body {
+                builder = builder.json(body);
+            }
+            let response = builder
+                .send()
+                .await
+                .map_err(|e| TmError::Provider(format!("github: request failed: {e}")))?;
 
-    async fn list_comments_since(&self, since: Timestamp) -> Result<Vec<GitHubComment>> {
-        let url = format!(
-            "{}?since={}&sort=created&direction=asc",
-            self.comments_url(),
-            since.to_rfc3339()
-        );
-        let body = self.send(Method::GET, url, None).await?;
-        parse_comment_list(&body)
+            let status = response.status();
+            let retry_after = response
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(Duration::from_secs);
+            let rate_remaining = response
+                .headers()
+                .get("x-ratelimit-remaining")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u32>().ok());
+            let rate_reset = response
+                .headers()
+                .get("x-ratelimit-reset")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<i64>().ok());
+
+            let body = response.bytes().await.map_err(|e| {
+                TmError::Provider(format!("github: failed to read response body: {e}"))
+            })?;
+
+            let now = self.clock.now();
+            match classify_status(status, retry_after, rate_remaining, rate_reset, now, &body) {
+                StatusOutcome::Ok => return Ok(body.to_vec()),
+                StatusOutcome::Retry(wait) => {
+                    if attempt >= self.max_retries {
+                        return Err(TmError::Provider(format!(
+                            "github: exhausted {} retries against {url}",
+                            self.max_retries
+                        )));
+                    }
+                    attempt += 1;
+                    tokio::time::sleep(wait.max(BACKOFF_FLOOR)).await;
+                }
+                StatusOutcome::Err(err) => return Err(err),
+            }
+        }
     }
 }
 
@@ -216,50 +269,69 @@ impl Tracker for GitHubTracker {
             milestones: true,
             labels: true,
             comments: true,
-            max_body_bytes: 65_536,
+            max_body_bytes: MAX_BODY_BYTES,
         }
     }
 
     async fn push(&self, projection: &Projection) -> Result<ExternalRef> {
-        let label = ticket_label(&projection.ticket);
-        let existing = self.find_issue_by_label(&label).await?;
-
-        let mut labels = projection.labels.clone();
-        if !labels.iter().any(|l| l == &label) {
-            labels.push(label);
-        }
-
-        let milestone = match &projection.milestone {
+        let milestone_number = match &projection.milestone {
             Some(title) => Some(self.resolve_milestone(title).await?),
             None => None,
         };
+        let payload = issue_payload(projection, milestone_number);
+        let existing = *self
+            .issue_numbers
+            .lock()
+            .map_err(|_| TmError::invariant("github: issue number cache mutex poisoned"))?
+            .get(&projection.ticket)
+            .unwrap_or(&0);
 
-        let request = issue_request_body(projection, &labels, milestone);
-        let body = match &existing {
-            Some(issue) => {
-                self.send(Method::PATCH, self.issue_url(issue.number), Some(&request))
-                    .await?
-            }
-            None => {
-                self.send(Method::POST, self.issues_url(), Some(&request))
-                    .await?
-            }
+        let body = if existing == 0 {
+            self.send_with_retry(reqwest::Method::POST, self.issues_url(), Some(payload))
+                .await?
+        } else {
+            self.send_with_retry(
+                reqwest::Method::PATCH,
+                self.issue_url(existing),
+                Some(payload),
+            )
+            .await?
         };
         let issue = parse_issue(&body)?;
-        Ok(issue_to_external_ref(&self.name, &issue))
+        self.issue_numbers
+            .lock()
+            .map_err(|_| TmError::invariant("github: issue number cache mutex poisoned"))?
+            .insert(projection.ticket.clone(), issue.number);
+        Ok(issue_external_ref(&self.name, &issue))
     }
 
     async fn pull(&self, since: Timestamp) -> Result<Vec<ExternalChange>> {
-        let issues = self.list_issues_since(since).await?;
-        let mut changes: Vec<ExternalChange> = issues
-            .iter()
-            .flat_map(|issue| issue_changes(issue, &self.name))
-            .collect();
+        let url = format!(
+            "{}?state=all&sort=updated&direction=asc&since={}",
+            self.issues_url(),
+            since.to_rfc3339()
+        );
+        let body = self
+            .send_with_retry(reqwest::Method::GET, url, None)
+            .await?;
+        let issues = parse_issue_list(&body)?;
 
-        let comments = self.list_comments_since(since).await?;
-        for comment in &comments {
-            if let Some(change) = comment_to_external_change(comment, &self.name) {
-                changes.push(change);
+        let mut changes = Vec::new();
+        for issue in issues.iter().filter(|i| !i.is_pull_request()) {
+            changes.extend(changes_for_issue(&self.name, issue, since));
+
+            if issue.comments == 0 {
+                continue;
+            }
+            let comments_body = self
+                .send_with_retry(reqwest::Method::GET, self.comments_url(issue.number), None)
+                .await?;
+            let comments = parse_comment_list(&comments_body)?;
+            let external = issue_external_ref(&self.name, issue);
+            for comment in &comments {
+                if let Some(change) = comment_change(external.clone(), comment, since) {
+                    changes.push(change);
+                }
             }
         }
         Ok(changes)
@@ -267,129 +339,128 @@ impl Tracker for GitHubTracker {
 }
 
 // ---- wire shapes -----------------------------------------------------------------------------
+//
+// Mirror the GitHub REST v3 JSON shape exactly and exist only to (de)serialize at the HTTP
+// boundary.
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct GitHubLabel {
+#[derive(Debug, Clone, Serialize)]
+struct IssuePayload {
+    title: String,
+    body: String,
+    state: &'static str,
+    labels: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    milestone: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Label {
     name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-struct GitHubUser {
+#[derive(Debug, Clone, Deserialize)]
+struct User {
     login: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-struct GitHubIssue {
+#[derive(Debug, Clone, Deserialize)]
+struct Milestone {
+    number: i64,
+    title: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Issue {
     number: u64,
     html_url: String,
-    title: String,
     #[serde(default)]
-    body: Option<String>,
     state: String,
     #[serde(default)]
-    labels: Vec<GitHubLabel>,
+    labels: Vec<Label>,
+    assignee: Option<User>,
     #[serde(default)]
-    assignee: Option<GitHubUser>,
-    user: GitHubUser,
+    created_at: String,
+    #[serde(default)]
+    updated_at: String,
+    #[serde(default)]
+    comments: u64,
+    /// Present (any shape) only on pull requests, since GitHub's issues list endpoint returns
+    /// both issues and PRs.
+    pull_request: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-struct GitHubComment {
+impl Issue {
+    fn is_pull_request(&self) -> bool {
+        self.pull_request.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct Comment {
     body: String,
-    user: GitHubUser,
-    issue_url: String,
-    html_url: String,
+    user: User,
+    #[serde(default)]
+    created_at: String,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq)]
-struct GitHubMilestone {
-    number: u64,
-    title: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitHubErrorEnvelope {
+#[derive(Debug, Clone, Deserialize)]
+struct ErrorEnvelope {
     message: String,
 }
 
-/// Every non-error header this adapter cares about, plus a bearer token, `Accept`, and a
-/// `User-Agent` GitHub requires of every client.
-fn build_headers(token: &str) -> HeaderMap {
-    let mut headers = HeaderMap::new();
-    let auth = format!("Bearer {token}");
-    headers.insert(
-        AUTHORIZATION,
-        HeaderValue::from_str(&auth).unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
-    headers.insert(ACCEPT, HeaderValue::from_static(ACCEPT_HEADER));
-    headers.insert(USER_AGENT, HeaderValue::from_static("ticketmaster-mirror"));
-    headers
+fn issue_payload(projection: &Projection, milestone_number: Option<i64>) -> serde_json::Value {
+    let payload = IssuePayload {
+        title: projection.title.clone(),
+        body: projection.body.clone(),
+        state: normalize_state(&projection.state_hint),
+        labels: projection.labels.clone(),
+        milestone: milestone_number,
+    };
+    // Infallible: `IssuePayload` has no non-JSON-representable field (no maps with non-string
+    // keys, no floats that could be NaN).
+    serde_json::to_value(payload).unwrap_or(serde_json::Value::Null)
 }
 
-/// The label this adapter tags every issue it pushes with, and later searches by to find the
-/// issue again without keeping any state of its own between calls.
-fn ticket_label(ticket: &TicketId) -> String {
-    format!("tm-id:{ticket}")
-}
-
-/// A ticket-id marker previously applied by [`ticket_label`], if `labels` carries one.
-fn ticket_ref_from_labels(labels: &[GitHubLabel]) -> Option<&str> {
-    labels.iter().find_map(|l| l.name.strip_prefix("tm-id:"))
-}
-
-/// Coarsen an internal state name onto GitHub's two-state model. GitHub's `arbitrary_states`
-/// capability is false, so this adapter (not the caller) owns the final open/closed decision.
-fn github_state_for(state_hint: &str) -> &'static str {
-    if GITHUB_CLOSED_STATES.contains(&state_hint) {
+/// GitHub's issue `state` field accepts exactly `"open"` or `"closed"`; anything else the
+/// projection produced (its state was already coarsened by `ProjectionPolicy` against this
+/// adapter's `arbitrary_states: false`, but a caller could still hand a raw ticket state
+/// straight through) falls back to `"open"` rather than sending a value GitHub would reject.
+fn normalize_state(state_hint: &str) -> &'static str {
+    if state_hint.eq_ignore_ascii_case("closed") {
         "closed"
     } else {
         "open"
     }
 }
 
-/// The JSON body for a create (`POST .../issues`) or update (`PATCH .../issues/{n}`) call.
-fn issue_request_body(
-    projection: &Projection,
-    labels: &[String],
-    milestone: Option<u64>,
-) -> serde_json::Value {
-    serde_json::json!({
-        "title": projection.title,
-        "body": projection.body,
-        "state": github_state_for(&projection.state_hint),
-        "labels": labels,
-        "milestone": milestone,
-    })
+fn parse_issue(body: &[u8]) -> Result<Issue> {
+    serde_json::from_slice(body).map_err(|e| TmError::Parse(format!("github: issue: {e}")))
 }
 
-fn parse_issue(body: &[u8]) -> Result<GitHubIssue> {
-    serde_json::from_slice(body)
-        .map_err(|e| TmError::parse(format!("github: malformed issue response: {e}")))
+fn parse_issue_list(body: &[u8]) -> Result<Vec<Issue>> {
+    serde_json::from_slice(body).map_err(|e| TmError::Parse(format!("github: issue list: {e}")))
 }
 
-fn parse_issue_list(body: &[u8]) -> Result<Vec<GitHubIssue>> {
-    serde_json::from_slice(body)
-        .map_err(|e| TmError::parse(format!("github: malformed issue list response: {e}")))
+fn parse_comment_list(body: &[u8]) -> Result<Vec<Comment>> {
+    serde_json::from_slice(body).map_err(|e| TmError::Parse(format!("github: comment list: {e}")))
 }
 
-fn parse_comment_list(body: &[u8]) -> Result<Vec<GitHubComment>> {
-    serde_json::from_slice(body)
-        .map_err(|e| TmError::parse(format!("github: malformed comment list response: {e}")))
+fn parse_milestone(body: &[u8]) -> Result<Milestone> {
+    serde_json::from_slice(body).map_err(|e| TmError::Parse(format!("github: milestone: {e}")))
 }
 
-fn parse_milestone_list(body: &[u8]) -> Result<Vec<GitHubMilestone>> {
-    serde_json::from_slice(body)
-        .map_err(|e| TmError::parse(format!("github: malformed milestone list response: {e}")))
+fn parse_milestone_list(body: &[u8]) -> Result<Vec<Milestone>> {
+    serde_json::from_slice(body).map_err(|e| TmError::Parse(format!("github: milestone list: {e}")))
 }
 
-fn find_milestone_number(milestones: &[GitHubMilestone], title: &str) -> Option<u64> {
+fn find_milestone_number(milestones: &[Milestone], title: &str) -> Option<i64> {
     milestones
         .iter()
         .find(|m| m.title == title)
         .map(|m| m.number)
 }
 
-fn issue_to_external_ref(adapter: &str, issue: &GitHubIssue) -> ExternalRef {
+fn issue_external_ref(adapter: &str, issue: &Issue) -> ExternalRef {
     ExternalRef {
         adapter: adapter.to_string(),
         external_id: issue.number.to_string(),
@@ -397,192 +468,214 @@ fn issue_to_external_ref(adapter: &str, issue: &GitHubIssue) -> ExternalRef {
     }
 }
 
-/// The inbound changes one pulled issue produces: a `StatusHint`/`Assigned` pair for an issue
-/// this adapter already mirrors (found via its `tm-id:` label), or a single `IssueCreated` for
-/// one a human opened directly that has no such label.
-fn issue_changes(issue: &GitHubIssue, adapter: &str) -> Vec<ExternalChange> {
-    let external = issue_to_external_ref(adapter, issue);
-    if ticket_ref_from_labels(&issue.labels).is_some() {
-        vec![
-            ExternalChange {
-                external: external.clone(),
-                kind: ExternalChangeKind::StatusHint {
-                    state: issue.state.clone(),
-                },
-                observed_at: Timestamp::EPOCH,
-            },
-            ExternalChange {
-                external,
-                kind: ExternalChangeKind::Assigned {
-                    assignee: issue.assignee.as_ref().map(|u| u.login.clone()),
-                },
-                observed_at: Timestamp::EPOCH,
-            },
-        ]
-    } else {
-        vec![ExternalChange {
+fn priority_label(labels: &[Label]) -> Option<String> {
+    labels.iter().find_map(|l| {
+        l.name
+            .strip_prefix(PRIORITY_LABEL_PREFIX)
+            .map(|p| p.to_string())
+    })
+}
+
+/// Derive the allowlisted changes an issue represents relative to `since`. An issue whose
+/// `created_at` is at or after `since` is treated as newly created on GitHub (`IssueCreated`);
+/// otherwise it's an update, and each of state/assignee/priority is emitted only when GitHub
+/// reports it (an unassigned, unlabeled issue produces no `Assigned`/`PriorityChanged` noise).
+fn changes_for_issue(adapter: &str, issue: &Issue, since: Timestamp) -> Vec<ExternalChange> {
+    let external = issue_external_ref(adapter, issue);
+    let observed_at = Timestamp::parse_rfc3339(&issue.updated_at).unwrap_or(since);
+
+    if Timestamp::parse_rfc3339(&issue.created_at)
+        .map(|t| t >= since)
+        .unwrap_or(false)
+    {
+        return vec![ExternalChange {
             external,
             kind: ExternalChangeKind::IssueCreated {
-                title: issue.title.clone(),
-                body: issue.body.clone().unwrap_or_default(),
-                author: issue.user.login.clone(),
+                title: String::new(),
+                body: String::new(),
+                author: String::new(),
             },
-            observed_at: Timestamp::EPOCH,
-        }]
+            observed_at,
+        }];
     }
-}
 
-/// The issue number embedded in a comment's `issue_url`
-/// (`https://api.github.com/repos/{owner}/{repo}/issues/{number}`), or `None` if the URL doesn't
-/// end in one, so a malformed comment is skipped by [`comment_to_external_change`] rather than
-/// failing the whole pull.
-fn issue_number_from_issue_url(issue_url: &str) -> Option<u64> {
-    issue_url.rsplit('/').next()?.parse().ok()
-}
-
-fn comment_to_external_change(comment: &GitHubComment, adapter: &str) -> Option<ExternalChange> {
-    let number = issue_number_from_issue_url(&comment.issue_url)?;
-    Some(ExternalChange {
-        external: ExternalRef {
-            adapter: adapter.to_string(),
-            external_id: number.to_string(),
-            url: Some(comment.html_url.clone()),
+    let mut changes = vec![ExternalChange {
+        external: external.clone(),
+        kind: ExternalChangeKind::StatusHint {
+            state: issue.state.clone(),
         },
+        observed_at,
+    }];
+
+    changes.push(ExternalChange {
+        external: external.clone(),
+        kind: ExternalChangeKind::Assigned {
+            assignee: issue.assignee.as_ref().map(|u| u.login.clone()),
+        },
+        observed_at,
+    });
+
+    if let Some(priority) = priority_label(&issue.labels) {
+        changes.push(ExternalChange {
+            external,
+            kind: ExternalChangeKind::PriorityChanged { priority },
+            observed_at,
+        });
+    }
+
+    changes
+}
+
+fn comment_change(
+    external: ExternalRef,
+    comment: &Comment,
+    since: Timestamp,
+) -> Option<ExternalChange> {
+    let observed_at = Timestamp::parse_rfc3339(&comment.created_at).ok()?;
+    if observed_at < since {
+        return None;
+    }
+    Some(ExternalChange {
+        external,
         kind: ExternalChangeKind::CommentAdded {
             author: comment.user.login.clone(),
             body: comment.body.clone(),
         },
-        observed_at: Timestamp::EPOCH,
+        observed_at,
     })
 }
 
-/// 2xx -> `Ok(())`. 404 -> [`TmError::NotFound`]. 409 -> [`TmError::Conflict`]. 403 with
-/// `X-RateLimit-Remaining: 0` -> [`TmError::Provider`] naming the reset time from
-/// `X-RateLimit-Reset` (a Unix-seconds epoch, GitHub's documented format). Any other non-2xx ->
-/// [`TmError::Provider`] with the response's `message` field, falling back to the status text.
-fn classify_status(status: StatusCode, headers: &HeaderMap, body: &[u8]) -> Result<()> {
+enum StatusOutcome {
+    Ok,
+    Retry(Duration),
+    Err(TmError),
+}
+
+/// Classify a GitHub REST response. 2xx -> `Ok`. 403/429 with `x-ratelimit-remaining: 0` (or a
+/// bare 429) -> `Retry`, waiting until `x-ratelimit-reset` (an absolute Unix timestamp, converted
+/// to a duration against `now`) or `Retry-After`, whichever is present, falling back to the
+/// backoff floor. 5xx -> `Retry` with the backoff floor. 404 -> terminal not-found. Any other
+/// non-2xx -> terminal, message taken from the body's `message` field when present.
+fn classify_status(
+    status: reqwest::StatusCode,
+    retry_after: Option<Duration>,
+    rate_remaining: Option<u32>,
+    rate_reset_unix_secs: Option<i64>,
+    now: Timestamp,
+    body: &[u8],
+) -> StatusOutcome {
     if status.is_success() {
-        return Ok(());
+        return StatusOutcome::Ok;
     }
-    if status == StatusCode::FORBIDDEN && header_str(headers, "x-ratelimit-remaining") == Some("0")
-    {
-        let reset = header_str(headers, "x-ratelimit-reset").unwrap_or("unknown");
-        return Err(TmError::Provider(format!(
-            "github: rate limited, resets at unix time {reset}"
-        )));
+
+    let rate_limited =
+        status.as_u16() == 429 || (status.as_u16() == 403 && rate_remaining == Some(0));
+    if rate_limited {
+        let wait = retry_after.or_else(|| {
+            rate_reset_unix_secs.map(|reset| {
+                let remaining = reset - now.unix_seconds();
+                Duration::from_secs(remaining.max(0) as u64)
+            })
+        });
+        return StatusOutcome::Retry(wait.unwrap_or(BACKOFF_FLOOR));
     }
-    let message = error_message(body, status.as_str());
-    match status {
-        StatusCode::NOT_FOUND => Err(TmError::not_found("github issue", message)),
-        StatusCode::CONFLICT => Err(TmError::conflict(format!("github: {message}"))),
-        _ => Err(TmError::Provider(format!("github: {status} {message}"))),
+
+    if status.is_server_error() {
+        return StatusOutcome::Retry(BACKOFF_FLOOR);
     }
+
+    if status.as_u16() == 404 {
+        return StatusOutcome::Err(TmError::not_found("github issue", error_message(body)));
+    }
+
+    StatusOutcome::Err(TmError::Provider(format!(
+        "github: request failed with status {status}: {}",
+        error_message(body)
+    )))
 }
 
-fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers.get(name).and_then(|v| v.to_str().ok())
-}
-
-fn error_message(body: &[u8], fallback: &str) -> String {
-    serde_json::from_slice::<GitHubErrorEnvelope>(body)
+fn error_message(body: &[u8]) -> String {
+    serde_json::from_slice::<ErrorEnvelope>(body)
         .map(|e| e.message)
-        .unwrap_or_else(|_| fallback.to_string())
+        .unwrap_or_else(|_| "no error message".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::projection::{ChecklistItem, Degradation};
 
-    fn ticket(id: &str) -> TicketId {
-        id.parse().expect("valid ticket id")
-    }
-
-    fn sample_projection() -> Projection {
+    fn projection() -> Projection {
         Projection {
-            ticket: ticket("T-1"),
-            title: "Fix the widget".to_string(),
-            body: "Do the thing.".to_string(),
-            state_hint: "Ready".to_string(),
+            ticket: TicketId::new("T-1").expect("valid ticket id"),
+            title: "Fix the thing".to_string(),
+            body: "Do the work.".to_string(),
+            state_hint: "open".to_string(),
             labels: vec!["bug".to_string()],
             milestone: None,
-            checklist: vec![],
-            degradations: vec![],
+            checklist: Vec::<ChecklistItem>::new(),
+            degradations: Vec::<Degradation>::new(),
         }
     }
 
     #[test]
-    fn ticket_label_uses_stable_marker_prefix() {
-        assert_eq!(ticket_label(&ticket("T-42")), "tm-id:T-42");
+    fn capabilities_declare_no_parent_child_and_no_arbitrary_states() {
+        let caps = GitHubTracker {
+            name: "gh".to_string(),
+            owner: "o".to_string(),
+            repo: "r".to_string(),
+            token: "t".to_string(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            http: reqwest::Client::new(),
+            clock: std::sync::Arc::new(tm_types::FixedClock::epoch()),
+            max_retries: DEFAULT_MAX_RETRIES,
+            issue_numbers: Mutex::new(BTreeMap::new()),
+            milestone_numbers: Mutex::new(BTreeMap::new()),
+        }
+        .capabilities();
+        assert!(!caps.parent_child);
+        assert!(!caps.arbitrary_states);
+        assert!(caps.milestones);
+        assert!(caps.labels);
+        assert!(caps.comments);
+        assert_eq!(caps.max_body_bytes, MAX_BODY_BYTES);
     }
 
     #[test]
-    fn ticket_ref_from_labels_finds_marker() {
-        let labels = vec![
-            GitHubLabel {
-                name: "bug".to_string(),
-            },
-            GitHubLabel {
-                name: "tm-id:T-7".to_string(),
-            },
-        ];
-        assert_eq!(ticket_ref_from_labels(&labels), Some("T-7"));
+    fn normalize_state_passes_closed_through() {
+        assert_eq!(normalize_state("closed"), "closed");
+        assert_eq!(normalize_state("Closed"), "closed");
     }
 
     #[test]
-    fn ticket_ref_from_labels_absent_when_no_marker() {
-        let labels = vec![GitHubLabel {
-            name: "bug".to_string(),
-        }];
-        assert_eq!(ticket_ref_from_labels(&labels), None);
+    fn normalize_state_defaults_unknown_values_to_open() {
+        assert_eq!(normalize_state("Draft"), "open");
+        assert_eq!(normalize_state("anything else"), "open");
     }
 
     #[test]
-    fn github_state_for_maps_closed_states_to_closed() {
-        assert_eq!(github_state_for("Closed"), "closed");
-        assert_eq!(github_state_for("Cancelled"), "closed");
+    fn issue_payload_carries_title_body_state_labels() {
+        let value = issue_payload(&projection(), None);
+        assert_eq!(value["title"], "Fix the thing");
+        assert_eq!(value["body"], "Do the work.");
+        assert_eq!(value["state"], "open");
+        assert_eq!(value["labels"][0], "bug");
+        assert!(value.get("milestone").is_none());
     }
 
     #[test]
-    fn github_state_for_maps_everything_else_to_open() {
-        assert_eq!(github_state_for("Ready"), "open");
-        assert_eq!(github_state_for("Blocked"), "open");
-        assert_eq!(github_state_for("Draft"), "open");
+    fn issue_payload_includes_resolved_milestone_number() {
+        let value = issue_payload(&projection(), Some(7));
+        assert_eq!(value["milestone"], 7);
     }
 
     #[test]
-    fn issue_request_body_includes_ticket_label_and_mapped_state() {
-        let projection = sample_projection();
-        let labels = vec!["bug".to_string(), "tm-id:T-1".to_string()];
-        let body = issue_request_body(&projection, &labels, Some(3));
-        assert_eq!(body["title"], "Fix the widget");
-        assert_eq!(body["state"], "open");
-        assert_eq!(body["labels"][1], "tm-id:T-1");
-        assert_eq!(body["milestone"], 3);
-    }
-
-    #[test]
-    fn issue_request_body_milestone_absent_is_null() {
-        let projection = sample_projection();
-        let body = issue_request_body(&projection, &[], None);
-        assert!(body["milestone"].is_null());
-    }
-
-    #[test]
-    fn parse_issue_happy_path() {
-        let json = br#"{
-            "number": 42,
-            "html_url": "https://github.com/acme/widgets/issues/42",
-            "title": "Fix the widget",
-            "body": "Do the thing.",
-            "state": "open",
-            "labels": [{"name": "tm-id:T-1"}],
-            "assignee": {"login": "octocat"},
-            "user": {"login": "octocat"}
-        }"#;
+    fn parse_issue_reads_number_and_url() {
+        let json =
+            br#"{"number": 42, "html_url": "https://github.com/o/r/issues/42", "state": "open"}"#;
         let issue = parse_issue(json).expect("valid issue json");
         assert_eq!(issue.number, 42);
-        assert_eq!(issue.state, "open");
-        assert_eq!(issue.assignee.unwrap().login, "octocat");
+        assert_eq!(issue.html_url, "https://github.com/o/r/issues/42");
     }
 
     #[test]
@@ -593,309 +686,298 @@ mod tests {
     }
 
     #[test]
-    fn parse_issue_defaults_missing_body_and_assignee() {
-        let json = br#"{
-            "number": 1,
-            "html_url": "https://github.com/acme/widgets/issues/1",
-            "title": "No body",
-            "state": "open",
-            "user": {"login": "someone"}
-        }"#;
-        let issue = parse_issue(json).expect("valid issue json");
-        assert_eq!(issue.body, None);
-        assert_eq!(issue.assignee, None);
-        assert!(issue.labels.is_empty());
+    fn issue_external_ref_uses_stringified_issue_number() {
+        let issue = Issue {
+            number: 99,
+            html_url: "https://github.com/o/r/issues/99".to_string(),
+            state: "open".to_string(),
+            labels: Vec::new(),
+            assignee: None,
+            created_at: String::new(),
+            updated_at: String::new(),
+            comments: 0,
+            pull_request: None,
+        };
+        let external = issue_external_ref("gh", &issue);
+        assert_eq!(external.adapter, "gh");
+        assert_eq!(external.external_id, "99");
+        assert_eq!(
+            external.url,
+            Some("https://github.com/o/r/issues/99".to_string())
+        );
     }
 
     #[test]
-    fn parse_issue_list_happy_path() {
+    fn parse_issue_list_reads_multiple_issues_and_skips_nothing_itself() {
         let json = br#"[
-            {"number": 1, "html_url": "https://x/1", "title": "a", "state": "open", "user": {"login": "u"}},
-            {"number": 2, "html_url": "https://x/2", "title": "b", "state": "closed", "user": {"login": "u"}}
+            {"number": 1, "html_url": "https://x/1", "state": "open"},
+            {"number": 2, "html_url": "https://x/2", "state": "closed", "pull_request": {}}
         ]"#;
         let issues = parse_issue_list(json).expect("valid list");
         assert_eq!(issues.len(), 2);
-        assert_eq!(issues[1].state, "closed");
+        assert!(!issues[0].is_pull_request());
+        assert!(issues[1].is_pull_request());
     }
 
     #[test]
-    fn issue_to_external_ref_carries_number_and_url() {
-        let issue = GitHubIssue {
-            number: 7,
-            html_url: "https://github.com/acme/widgets/issues/7".to_string(),
-            title: "t".to_string(),
-            body: None,
-            state: "open".to_string(),
-            labels: vec![],
-            assignee: None,
-            user: GitHubUser {
-                login: "u".to_string(),
-            },
-        };
-        let ext = issue_to_external_ref("github", &issue);
-        assert_eq!(ext.adapter, "github");
-        assert_eq!(ext.external_id, "7");
-        assert_eq!(
-            ext.url.as_deref(),
-            Some("https://github.com/acme/widgets/issues/7")
-        );
-    }
-
-    #[test]
-    fn issue_changes_mirrored_issue_yields_status_and_assignment() {
-        let issue = GitHubIssue {
-            number: 1,
-            html_url: "https://x/1".to_string(),
-            title: "t".to_string(),
-            body: None,
-            state: "closed".to_string(),
-            labels: vec![GitHubLabel {
-                name: "tm-id:T-1".to_string(),
-            }],
-            assignee: Some(GitHubUser {
-                login: "alice".to_string(),
-            }),
-            user: GitHubUser {
-                login: "bob".to_string(),
-            },
-        };
-        let changes = issue_changes(&issue, "github");
-        assert_eq!(changes.len(), 2);
-        match &changes[0].kind {
-            ExternalChangeKind::StatusHint { state } => assert_eq!(state, "closed"),
-            other => panic!("expected StatusHint, got {other:?}"),
-        }
-        match &changes[1].kind {
-            ExternalChangeKind::Assigned { assignee } => {
-                assert_eq!(assignee.as_deref(), Some("alice"))
-            }
-            other => panic!("expected Assigned, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn issue_changes_unmirrored_issue_yields_issue_created() {
-        let issue = GitHubIssue {
-            number: 9,
-            html_url: "https://x/9".to_string(),
-            title: "Found a bug".to_string(),
-            body: Some("It broke".to_string()),
-            state: "open".to_string(),
-            labels: vec![],
-            assignee: None,
-            user: GitHubUser {
-                login: "reporter".to_string(),
-            },
-        };
-        let changes = issue_changes(&issue, "github");
-        assert_eq!(changes.len(), 1);
-        match &changes[0].kind {
-            ExternalChangeKind::IssueCreated {
-                title,
-                body,
-                author,
-            } => {
-                assert_eq!(title, "Found a bug");
-                assert_eq!(body, "It broke");
-                assert_eq!(author, "reporter");
-            }
-            other => panic!("expected IssueCreated, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn issue_changes_unmirrored_issue_defaults_missing_body() {
-        let issue = GitHubIssue {
-            number: 9,
-            html_url: "https://x/9".to_string(),
-            title: "t".to_string(),
-            body: None,
-            state: "open".to_string(),
-            labels: vec![],
-            assignee: None,
-            user: GitHubUser {
-                login: "reporter".to_string(),
-            },
-        };
-        let changes = issue_changes(&issue, "github");
-        match &changes[0].kind {
-            ExternalChangeKind::IssueCreated { body, .. } => assert_eq!(body, ""),
-            other => panic!("expected IssueCreated, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn parse_comment_list_happy_path() {
-        let json = br#"[
-            {"body": "looks good", "user": {"login": "reviewer"},
-             "issue_url": "https://api.github.com/repos/acme/widgets/issues/5",
-             "html_url": "https://github.com/acme/widgets/issues/5#comment-1"}
-        ]"#;
-        let comments = parse_comment_list(json).expect("valid comment list");
+    fn parse_comment_list_reads_author_and_body() {
+        let json = br#"[{"body": "hi", "user": {"login": "alice"}, "created_at": "2024-01-01T00:00:00Z"}]"#;
+        let comments = parse_comment_list(json).expect("valid comments");
         assert_eq!(comments.len(), 1);
-        assert_eq!(comments[0].user.login, "reviewer");
-    }
-
-    #[test]
-    fn issue_number_from_issue_url_parses_trailing_number() {
-        assert_eq!(
-            issue_number_from_issue_url("https://api.github.com/repos/acme/widgets/issues/5"),
-            Some(5)
-        );
-    }
-
-    #[test]
-    fn issue_number_from_issue_url_none_when_not_numeric() {
-        assert_eq!(
-            issue_number_from_issue_url("https://api.github.com/repos/acme/widgets"),
-            None
-        );
-    }
-
-    #[test]
-    fn comment_to_external_change_maps_fields() {
-        let comment = GitHubComment {
-            body: "nice work".to_string(),
-            user: GitHubUser {
-                login: "carol".to_string(),
-            },
-            issue_url: "https://api.github.com/repos/acme/widgets/issues/3".to_string(),
-            html_url: "https://github.com/acme/widgets/issues/3#comment-9".to_string(),
-        };
-        let change = comment_to_external_change(&comment, "github").expect("mapped change");
-        assert_eq!(change.external.external_id, "3");
-        match change.kind {
-            ExternalChangeKind::CommentAdded { author, body } => {
-                assert_eq!(author, "carol");
-                assert_eq!(body, "nice work");
-            }
-            other => panic!("expected CommentAdded, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn comment_to_external_change_none_when_issue_url_unparseable() {
-        let comment = GitHubComment {
-            body: "x".to_string(),
-            user: GitHubUser {
-                login: "carol".to_string(),
-            },
-            issue_url: "not-a-url".to_string(),
-            html_url: "https://x".to_string(),
-        };
-        assert!(comment_to_external_change(&comment, "github").is_none());
+        assert_eq!(comments[0].body, "hi");
+        assert_eq!(comments[0].user.login, "alice");
     }
 
     #[test]
     fn find_milestone_number_matches_by_title() {
         let milestones = vec![
-            GitHubMilestone {
+            Milestone {
                 number: 1,
-                title: "v1.0".to_string(),
+                title: "v1".to_string(),
             },
-            GitHubMilestone {
+            Milestone {
                 number: 2,
-                title: "v2.0".to_string(),
+                title: "v2".to_string(),
             },
         ];
-        assert_eq!(find_milestone_number(&milestones, "v2.0"), Some(2));
+        assert_eq!(find_milestone_number(&milestones, "v2"), Some(2));
+        assert_eq!(find_milestone_number(&milestones, "v3"), None);
     }
 
     #[test]
-    fn find_milestone_number_none_when_absent() {
-        let milestones = vec![GitHubMilestone {
-            number: 1,
-            title: "v1.0".to_string(),
+    fn priority_label_extracts_suffix_after_prefix() {
+        let labels = vec![
+            Label {
+                name: "bug".to_string(),
+            },
+            Label {
+                name: "priority:high".to_string(),
+            },
+        ];
+        assert_eq!(priority_label(&labels), Some("high".to_string()));
+    }
+
+    #[test]
+    fn priority_label_absent_when_no_matching_label() {
+        let labels = vec![Label {
+            name: "bug".to_string(),
         }];
-        assert_eq!(find_milestone_number(&milestones, "v9.0"), None);
+        assert_eq!(priority_label(&labels), None);
+    }
+
+    fn issue_fixture(created_at: &str, updated_at: &str) -> Issue {
+        Issue {
+            number: 7,
+            html_url: "https://github.com/o/r/issues/7".to_string(),
+            state: "closed".to_string(),
+            labels: vec![Label {
+                name: "priority:urgent".to_string(),
+            }],
+            assignee: Some(User {
+                login: "bob".to_string(),
+            }),
+            created_at: created_at.to_string(),
+            updated_at: updated_at.to_string(),
+            comments: 0,
+            pull_request: None,
+        }
     }
 
     #[test]
-    fn parse_milestone_list_happy_path() {
-        let json = br#"[{"number": 4, "title": "v4.0"}]"#;
-        let milestones = parse_milestone_list(json).expect("valid milestone list");
-        assert_eq!(milestones[0].number, 4);
+    fn changes_for_issue_created_after_since_is_issue_created_only() {
+        let since = Timestamp::parse_rfc3339("2024-01-01T00:00:00Z").expect("valid timestamp");
+        let issue = issue_fixture("2024-06-01T00:00:00Z", "2024-06-01T00:00:00Z");
+        let changes = changes_for_issue("gh", &issue, since);
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(
+            changes[0].kind,
+            ExternalChangeKind::IssueCreated { .. }
+        ));
     }
 
     #[test]
-    fn build_headers_sets_bearer_auth_accept_and_user_agent() {
-        let headers = build_headers("secret-token");
-        assert_eq!(headers.get(AUTHORIZATION).unwrap(), "Bearer secret-token");
-        assert_eq!(headers.get(ACCEPT).unwrap(), ACCEPT_HEADER);
-        assert_eq!(headers.get(USER_AGENT).unwrap(), "ticketmaster-mirror");
-    }
-
-    #[test]
-    fn classify_status_ok_on_2xx() {
-        let headers = HeaderMap::new();
-        assert!(classify_status(StatusCode::OK, &headers, b"{}").is_ok());
-        assert!(classify_status(StatusCode::CREATED, &headers, b"{}").is_ok());
-    }
-
-    #[test]
-    fn classify_status_not_found_maps_to_not_found_error() {
-        let headers = HeaderMap::new();
-        let body = br#"{"message": "Not Found"}"#;
-        let err = classify_status(StatusCode::NOT_FOUND, &headers, body).unwrap_err();
-        assert!(err.to_string().contains("not found"));
-        assert!(err.to_string().contains("Not Found"));
-    }
-
-    #[test]
-    fn classify_status_conflict_maps_to_conflict_error() {
-        let headers = HeaderMap::new();
-        let body = br#"{"message": "already exists"}"#;
-        let err = classify_status(StatusCode::CONFLICT, &headers, body).unwrap_err();
-        assert!(err.to_string().contains("conflict:"));
-        assert!(err.to_string().contains("already exists"));
-    }
-
-    #[test]
-    fn classify_status_rate_limited_names_reset_time() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
-        headers.insert("x-ratelimit-reset", HeaderValue::from_static("1700000000"));
-        let err = classify_status(StatusCode::FORBIDDEN, &headers, b"{}").unwrap_err();
-        assert!(err.to_string().contains("rate limited"));
-        assert!(err.to_string().contains("1700000000"));
-    }
-
-    #[test]
-    fn classify_status_forbidden_without_rate_limit_headers_is_generic_provider_error() {
-        let headers = HeaderMap::new();
-        let body = br#"{"message": "Bad credentials"}"#;
-        let err = classify_status(StatusCode::FORBIDDEN, &headers, body).unwrap_err();
-        assert!(err.to_string().contains("Bad credentials"));
-    }
-
-    #[test]
-    fn classify_status_falls_back_to_status_text_on_unparseable_error_body() {
-        let headers = HeaderMap::new();
-        let err =
-            classify_status(StatusCode::INTERNAL_SERVER_ERROR, &headers, b"not json").unwrap_err();
-        assert!(err.to_string().contains("500"));
-    }
-
-    #[test]
-    fn with_config_builds_a_tracker_without_touching_the_environment() {
-        let tracker = GitHubTracker::with_config("gh", "acme", "widgets", "tok", DEFAULT_BASE_URL)
-            .expect("builds without a real HTTP call");
-        assert_eq!(tracker.name(), "gh");
-        assert_eq!(
-            tracker.issues_url(),
-            "https://api.github.com/repos/acme/widgets/issues"
+    fn changes_for_issue_updated_before_since_emits_status_assigned_and_priority() {
+        let since = Timestamp::parse_rfc3339("2024-06-01T00:00:00Z").expect("valid timestamp");
+        let issue = issue_fixture("2024-01-01T00:00:00Z", "2024-06-15T00:00:00Z");
+        let changes = changes_for_issue("gh", &issue, since);
+        assert_eq!(changes.len(), 3);
+        assert!(
+            matches!(&changes[0].kind, ExternalChangeKind::StatusHint { state } if state == "closed")
+        );
+        assert!(
+            matches!(&changes[1].kind, ExternalChangeKind::Assigned { assignee } if assignee.as_deref() == Some("bob"))
+        );
+        assert!(
+            matches!(&changes[2].kind, ExternalChangeKind::PriorityChanged { priority } if priority == "urgent")
         );
     }
 
     #[test]
-    fn capabilities_declare_no_parent_child_and_no_arbitrary_states() {
-        let tracker = GitHubTracker::with_config("gh", "acme", "widgets", "tok", DEFAULT_BASE_URL)
-            .expect("builds without a real HTTP call");
-        let caps = tracker.capabilities();
-        assert!(!caps.parent_child);
-        assert!(!caps.arbitrary_states);
-        assert!(caps.milestones);
-        assert!(caps.labels);
-        assert!(caps.comments);
+    fn changes_for_issue_unassigned_and_unlabeled_omits_priority_change() {
+        let since = Timestamp::parse_rfc3339("2024-06-01T00:00:00Z").expect("valid timestamp");
+        let issue = Issue {
+            number: 8,
+            html_url: "https://github.com/o/r/issues/8".to_string(),
+            state: "open".to_string(),
+            labels: Vec::new(),
+            assignee: None,
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-06-15T00:00:00Z".to_string(),
+            comments: 0,
+            pull_request: None,
+        };
+        let changes = changes_for_issue("gh", &issue, since);
+        assert_eq!(changes.len(), 2);
+        assert!(
+            matches!(&changes[1].kind, ExternalChangeKind::Assigned { assignee } if assignee.is_none())
+        );
+    }
+
+    #[test]
+    fn comment_change_skips_comments_before_since() {
+        let since = Timestamp::parse_rfc3339("2024-06-01T00:00:00Z").expect("valid timestamp");
+        let comment = Comment {
+            body: "old".to_string(),
+            user: User {
+                login: "carol".to_string(),
+            },
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+        };
+        let external = ExternalRef {
+            adapter: "gh".to_string(),
+            external_id: "7".to_string(),
+            url: None,
+        };
+        assert!(comment_change(external, &comment, since).is_none());
+    }
+
+    #[test]
+    fn comment_change_includes_comments_at_or_after_since() {
+        let since = Timestamp::parse_rfc3339("2024-06-01T00:00:00Z").expect("valid timestamp");
+        let comment = Comment {
+            body: "new".to_string(),
+            user: User {
+                login: "carol".to_string(),
+            },
+            created_at: "2024-06-01T00:00:00Z".to_string(),
+        };
+        let external = ExternalRef {
+            adapter: "gh".to_string(),
+            external_id: "7".to_string(),
+            url: None,
+        };
+        let change = comment_change(external, &comment, since).expect("comment should be included");
+        match change.kind {
+            ExternalChangeKind::CommentAdded { author, body } => {
+                assert_eq!(author, "carol");
+                assert_eq!(body, "new");
+            }
+            _ => panic!("expected CommentAdded"),
+        }
+    }
+
+    #[test]
+    fn classify_status_success_is_ok() {
+        assert!(matches!(
+            classify_status(
+                reqwest::StatusCode::OK,
+                None,
+                None,
+                None,
+                Timestamp::EPOCH,
+                b"{}"
+            ),
+            StatusOutcome::Ok
+        ));
+    }
+
+    #[test]
+    fn classify_status_429_retries() {
+        let outcome = classify_status(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            None,
+            None,
+            None,
+            Timestamp::EPOCH,
+            b"{}",
+        );
+        assert!(matches!(outcome, StatusOutcome::Retry(_)));
+    }
+
+    #[test]
+    fn classify_status_403_with_zero_remaining_retries_using_reset_header() {
+        let now = Timestamp::EPOCH;
+        let outcome = classify_status(
+            reqwest::StatusCode::FORBIDDEN,
+            None,
+            Some(0),
+            Some(now.unix_seconds() + 60),
+            now,
+            b"{}",
+        );
+        match outcome {
+            StatusOutcome::Retry(wait) => assert_eq!(wait, Duration::from_secs(60)),
+            _ => panic!("expected retry"),
+        }
+    }
+
+    #[test]
+    fn classify_status_403_without_rate_limit_signal_is_terminal() {
+        let body = br#"{"message": "not authorized"}"#;
+        let outcome = classify_status(
+            reqwest::StatusCode::FORBIDDEN,
+            None,
+            None,
+            None,
+            Timestamp::EPOCH,
+            body,
+        );
+        match outcome {
+            StatusOutcome::Err(err) => assert!(err.to_string().contains("not authorized")),
+            _ => panic!("expected terminal error"),
+        }
+    }
+
+    #[test]
+    fn classify_status_5xx_retries() {
+        let outcome = classify_status(
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            None,
+            None,
+            None,
+            Timestamp::EPOCH,
+            b"{}",
+        );
+        assert!(matches!(outcome, StatusOutcome::Retry(_)));
+    }
+
+    #[test]
+    fn classify_status_404_is_not_found() {
+        let body = br#"{"message": "Not Found"}"#;
+        let outcome = classify_status(
+            reqwest::StatusCode::NOT_FOUND,
+            None,
+            None,
+            None,
+            Timestamp::EPOCH,
+            body,
+        );
+        match outcome {
+            StatusOutcome::Err(err) => assert!(err.to_string().contains("not found")),
+            _ => panic!("expected not found"),
+        }
+    }
+
+    #[test]
+    fn error_message_falls_back_when_body_has_no_message_field() {
+        assert_eq!(error_message(b"not json"), "no error message");
+    }
+
+    #[test]
+    fn error_message_reads_message_field() {
+        assert_eq!(
+            error_message(br#"{"message": "bad request"}"#),
+            "bad request"
+        );
     }
 }

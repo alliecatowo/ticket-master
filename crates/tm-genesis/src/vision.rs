@@ -51,18 +51,21 @@ impl Vision {
 
 /// Compile a [`Vision`] from `seed` under `Role::VisionFrontier`.
 ///
-// IMPL: builds a single `CompletionRequest` (see `tm_provider::types`) whose prompt embeds
-// `seed.raw_prompt` plus its explicit/inferred constraints and assumptions, and asks the model to
-// produce prose for each `Vision` field plus JSON lists for `governing_constraints`, `non_goals`
-// and `spiritually_wrong`. Route it through `provider.complete` with `req.role ==
-// Role::VisionFrontier` (frontier judgment, per `SPEC.md` §12 — do not substitute a cheaper
-// role). Parse the structured portion of the response as JSON; treat any missing required field
-// as `TmError::parse`, not a silently empty string, since a Vision with a blank `identity` would
-// silently propagate into every later stage. `source_seed` is left `None` here; the caller sets
-// it once the returned `Seed` has actually been persisted as an artifact (this function has no
-// access to a `Store`, keeping it a pure provider round-trip). `clock` stamps `created`.
-// Errors: `TmError::Provider` on completion failure, `TmError::Parse` on malformed/incomplete
-// output.
+/// Builds a single `CompletionRequest` (see `tm_provider::types`) whose prompt embeds
+/// `seed.raw_prompt` plus its explicit/inferred constraints and assumptions, and asks the model to
+/// produce prose for each `Vision` field plus JSON lists for `governing_constraints`, `non_goals`
+/// and `spiritually_wrong`. Route it through `provider.complete` with `req.role ==
+/// Role::VisionFrontier` (frontier judgment, per `SPEC.md` §12 — do not substitute a cheaper
+/// role). Parse the structured portion of the response as JSON; treat any missing required field
+/// as `TmError::parse`, not a silently empty string, since a Vision with a blank `identity` would
+/// silently propagate into every later stage. `source_seed` is left `None` here; the caller sets
+/// it once the returned `Seed` has actually been persisted as an artifact (this function has no
+/// access to a `Store`, keeping it a pure provider round-trip). `clock` stamps `created`.
+///
+/// # Errors
+///
+/// Returns `TmError::Provider` on completion failure, `TmError::Parse` on malformed/incomplete
+/// output.
 pub async fn compile_vision(
     seed: &Seed,
     provider: &dyn tm_provider::Provider,
@@ -328,10 +331,7 @@ mod tests {
             "spiritually_wrong": ["storing PII", "using blockchain"]
         }"#;
 
-        let seed = Seed::new(
-            "build a project manager".to_string(),
-            &FixedClock::epoch(),
-        );
+        let seed = Seed::new("build a project manager".to_string(), &FixedClock::epoch());
         let provider = TestProvider::new(response.to_string());
         let clock = FixedClock::epoch();
 
@@ -617,7 +617,9 @@ mod tests {
     #[test]
     fn test_vision_is_anchored_true() {
         let vision = Vision {
-            source_seed: Some(tm_types::ArtifactId::new("ART-9f2a1c0b77de").expect("valid test id")),
+            source_seed: Some(
+                tm_types::ArtifactId::new("ART-9f2a1c0b77de").expect("valid test id"),
+            ),
             product_thesis: "test".to_string(),
             user_experience: "test".to_string(),
             taste: "test".to_string(),
