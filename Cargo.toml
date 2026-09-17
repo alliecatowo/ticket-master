@@ -23,6 +23,7 @@ tm-agent = { path = "crates/tm-agent" }
 tm-genesis = { path = "crates/tm-genesis" }
 tm-mirror = { path = "crates/tm-mirror" }
 tm-server = { path = "crates/tm-server" }
+tm-tui = { path = "crates/tm-tui" }
 
 anyhow = "1"
 thiserror = "2"
@@ -35,6 +36,7 @@ tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 regex = "1"
@@ -55,3 +57,13 @@ insta = { version = "1", features = ["json", "redactions"] }
 assert_cmd = "2"
 predicates = "3"
 serial_test = "3"
+# tm-tui: ratatui/ratatui-core own the cell buffer, diffing and the crossterm backend (D-002);
+# everything above the buffer (components, focus, widgets, theming) is ours. ratatui-core is
+# preferred directly wherever a file needs only Buffer/Rect/Style and not the widget set or a
+# terminal backend, per D-002.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "serde"] }
+ratatui-core = { version = "0.1", default-features = false, features = ["std", "serde"] }
+crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
+portable-pty = "0.9"

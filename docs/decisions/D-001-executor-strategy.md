@@ -70,3 +70,40 @@ thesis needs to be measurable. It is the instrument, not the product.
   comes from the work: if two tickets share an interface their participants have a reason to
   coordinate, and rooms plus presence already express that. A declared team invents structure the
   graph does not have and competes with it.
+
+## Amendment, 2026-09-16 — ACP replaces most of the per-harness adapter work
+
+The "Evidence" section above asserts: *"There is no common agent protocol across these harnesses
+today, so per-harness adapters are required regardless."* **That is no longer true, and it was the
+premise holding up the most expensive part of this decision.**
+
+Zed's **Agent Client Protocol** (ACP) is JSON-RPC 2.0 over stdio, deliberately modelled on LSP to
+turn N agents × M editors into N+M. It is now community-governed with its own registry, and the
+agent side already includes **Claude Code** (via `claude-agent-acp`), **Gemini CLI** (native `--acp`),
+**Codex** (via `codex-acp`) and **Goose**. On the client side Zed is the reference implementation and
+JetBrains is partnering to bring it to IntelliJ, PyCharm and WebStorm.
+
+So three of the five adapters this decision scoped as bespoke work are reachable through one
+protocol. The revised plan:
+
+1. **An ACP client adapter is the primary `Executor` implementation** for external harnesses, not one
+   adapter among five. It gets us Claude Code, Codex, Gemini CLI and Goose at once, and it keeps
+   working as other agents adopt ACP — which is the opposite of the per-harness maintenance treadmill
+   this decision accepted as a cost.
+2. **Bespoke adapters shrink to the exceptions.** `pi` (JSON-RPC over stdio, but its own shape) and
+   `human` stay hand-written. `opencode` is reachable through its own HTTP server. We write a bespoke
+   adapter only where ACP cannot express something we need, and we say which thing.
+3. **We also speak ACP as an agent**, so any ACP-capable editor can drive Ticketmaster with no
+   integration work on their side. This is the cheaper half and the more strategic one: it is the
+   difference between being a walled runtime and being something an editor can host.
+
+Nothing else in this decision changes. Authority is still enforced on our side of the boundary — ACP
+is a transport for driving an executor, not a permission model, and an ACP-connected harness gets the
+same derived sandbox and the same return-scope validation as any other. Verification stays separate:
+an ACP executor returns evidence, never a verdict.
+
+The judgement behind this: ACP is not yet universal, and betting on it early is a real bet. But it is
+structurally the LSP of this category, it has foundation-style governance rather than one vendor's
+control, and it picked up a major IDE vendor within a year. The downside if it stalls is that we
+wrote one adapter that speaks a protocol four harnesses happen to support — which is exactly the work
+we had already signed up for. The asymmetry favours moving now.

@@ -213,6 +213,97 @@ for any transcript-based agent:
 - The single-writer boundary from the research gaps above has to be resolved before this ships — two
   attached clients issuing commands is exactly the contention case that is currently unstated.
 
+## Ecosystem parity, and where the native/plugin line goes (2026-09-16)
+
+Three surveys: opencode's published ecosystem (38 plugins, 11 projects), the extension systems of
+Claude Code, Codex and gemini-cli, and the IDE-based agents (Cursor, Zed, Cline, Roo, Continue,
+Aider, Devin/Windsurf, Amp, OpenHands, Goose, Kilo).
+
+The method that made this useful: **a plugin ecosystem is a map of what the product failed to make
+native.** Where several people independently built the same plugin, that is an unmet core need, and
+the count is the signal. Four separate opencode notification plugins. Two independent Neovim
+frontends. Three plugins whose entire purpose is using a subscription you already pay for instead of
+API credits. Six reimplementing spec-to-plan-to-implement with session continuity.
+
+That last cluster deserves stating plainly: **six opencode plugins are building Ticketmaster.**
+`conductor` (Context → Spec → Plan → Implement), `micode` (Brainstorm → Plan → Implement),
+`subtask2`, `goal-plugin`, `background-agents`, `workspace`. They exist because opencode is a
+transcript runtime with no project state, so everything durable has to be bolted on from outside.
+That is the thesis of this repository, validated by people paying the cost of its absence.
+
+### Table stakes — ship natively, these are no longer differentiators
+
+- **MCP, as both client and server.** 11 of 12 IDE agents and all three CLI agents support it; only
+  Aider does not, and it is criticised for it. Codex runs both directions (`codex mcp-server` lets
+  other agents call Codex as a tool), which is the shape we want too.
+- **AGENTS.md.** Donated to the Linux Foundation's Agentic AI Foundation, reportedly 60k+ projects
+  and 20+ tools. Read it natively. Do not invent `TICKETMASTER.md`; a proprietary name is a tax on
+  every user and buys nothing.
+- **Skills as progressively-disclosed procedure bundles** (`SKILL.md`: metadata first, body on
+  demand). Claude Code and Codex both ship this by that exact name.
+- **Lifecycle hooks, using the event names Claude Code and Codex already share** — `PreToolUse`,
+  `PostToolUse`, `UserPromptSubmit`, `Stop`, `SessionStart`. Two independent vendors converging on
+  one vocabulary makes it a category standard; adopting it means a switcher's existing hooks work.
+  Claude Code documents 38 events, Codex 12. Handlers must be able to deny and to *rewrite* the call,
+  not merely observe.
+- **Sandboxing, with the approval policy as a separate axis.** Every serious tool separates "what is
+  technically blocked" from "what needs a human yes" — Codex most explicitly (`sandbox_mode` ×
+  `approval_policy`). We already have that split in authority versus escalation; say so in those terms.
+- **Checkpoints, distinct from git.** 5 of 12 ship it and it is consistently named the top trust
+  feature. gemini-cli uses a shadow git repo; Cursor and Cline use per-turn snapshots.
+- **Git worktree isolation** as a first-class flag, per session and per delegated worker.
+- **Browser control as first-party**, not a community bolt-on. All three CLI agents treat it as core.
+- **OpenTelemetry** as the observability substrate, opt-in and off by default.
+
+### Where we can actually win
+
+- **Notifications.** The single clearest signal in the whole survey: *none* of Claude Code, Codex or
+  gemini-cli ships rich desktop notification, and all three spawned near-identical community bridges
+  (`terminal-notifier`, `ntfy`, OSC-9 capture). opencode has four competing plugins. Everyone needs
+  "tell me when the agent needs me," nobody ships it.
+- **Cost and token accounting with zero setup.** Codex has no built-in dollar view at all — the
+  feature request was closed unshipped. Claude Code's cost data requires standing up your own OTel
+  backend. Third-party log-scrapers exist for both. We have an append-only event log with usage on
+  every provider call, so this is nearly free for us and structurally awkward for them.
+- **Checkpoints and forking from the event log.** Everyone else bolts a snapshot mechanism onto a
+  transcript. Ours falls out of replay, and forking a ticket's history at an arbitrary seq — already
+  in this backlog — is something none of them can offer at all.
+- **Hooks as enforcement rather than convention.** The competitive-research gap above says our effect
+  boundary is policy, not enforcement. A hook that can deny or rewrite a call at the boundary is how
+  that becomes structural, and it is rare: only Cursor has a general system among the IDE agents.
+- **Auth arbitrage as routable capacity.** Three opencode plugins exist to spend a ChatGPT/Gemini/
+  Antigravity subscription instead of API credits. The fabric already models free tiers as capacity
+  with a daily ceiling; subscription-backed auth is the same idea with better economics, and it is
+  demonstrably what people want badly enough to hack around billing for.
+- **Context enrichment on read.** `opencode-type-inject` injects resolved TypeScript/Svelte types
+  into file reads. We have `tm-codeintel`; enriching a read with its resolved types is a small
+  addition to context compilation and a real quality win.
+- **Secret redaction before the model call.** `opencode-vibeguard` redacts secrets and PII into
+  placeholders and restores locally. We have nothing here and it belongs at the effect boundary.
+
+### Registry and distribution
+
+Continue.dev's **Hub** is the model worth copying: everything is a typed "block" (models, context,
+rules, prompts, docs, MCP servers), composed into assistants, published git-ops style with
+public/private/organization visibility. That is real registry semantics — versioning, scoping,
+remixing — rather than a flat awesome-list. It maps directly onto our templates (§27) and wiki (§26).
+
+Two cautions from the data. First, every official catalogue skews to vendor SaaS connectors: the
+Anthropic marketplace is 308 plugins dominated by AWS/Azure/Atlassian-style integrations, and
+Google's first-party extension org is 66 repos of Google Cloud surfaces. The interesting long tail —
+test writers, memory, notifications, workflow — lives in unofficial community lists in all three
+ecosystems. Second, `ocx` exists: an extension manager with portable isolated profiles, i.e. a
+package manager for the plugin system. That is what happens when distribution is an afterthought.
+
+### Surfaces the ecosystems say people want
+
+Ranked by how many independent implementations exist: Neovim (two separate opencode frontends),
+mobile web over a VPN/Tailscale (`portal`), desktop/web/mobile clients (`OpenChamber`, `CodeNomad`),
+chat-ops (`kimaki`, a Discord bot; Codex is drivable from Slack and from `@codex` on a GitHub issue),
+Obsidian, and Zellij/tmux integration. Our remote-control backlog item covers the transport for most
+of these; what they add is that the demand is for *many thin clients*, which is an argument for
+keeping `tm serve` and its event stream the real product boundary.
+
 ## Stretch
 
 - iOS simulator executor (SPEC §23).

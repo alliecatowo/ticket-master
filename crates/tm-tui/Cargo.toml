@@ -1,0 +1,24 @@
+[package]
+name = "tm-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The terminal UI: an app-owned component tree, focus, hit testing and widget set built on ratatui/crossterm's cell buffer and backend (D-002)."
+
+[dependencies]
+tm-types = { workspace = true }
+ratatui = { workspace = true }
+ratatui-core = { workspace = true }
+crossterm = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+tokio = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+portable-pty = { workspace = true }
+tempfile = { workspace = true }
