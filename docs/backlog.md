@@ -304,6 +304,65 @@ Obsidian, and Zellij/tmux integration. Our remote-control backlog item covers th
 of these; what they add is that the demand is for *many thin clients*, which is an argument for
 keeping `tm serve` and its event stream the real product boundary.
 
+## Adapter layers (SPEC §28)
+
+- `tm-acp`: ACP client (drive Claude Code, Codex, Gemini CLI, Goose through one adapter) and ACP
+  agent (be drivable by Zed, JetBrains). Client first — it subsumes most of the D-001 adapter work.
+- MCP client and server. Client so a worker reaches any MCP server *under its granted authority*;
+  server so `tm` is a tool other agents can call.
+- `tm-auth`: the auth adapter trait and its five kinds — API key, subscription OAuth (device/PKCE),
+  cloud IAM (SigV4, ADC, Azure AD), platform ephemeral tokens minted per lease, delegated/none.
+  Each reports its entitlement (quota class, rate limits, metered vs subscription, daily ceiling) so
+  the fabric can route on it. `tm auth <provider>` for interactive login, OS keychain by default.
+- Runtime adapters behind `Executor`: `builtin`, `acp`, `opencode` (its HTTP server), `pi`, `human`.
+- A redaction test that fails the build if credential material can reach an event, a context pack, a
+  `--json` payload, an error message or a rendered frame.
+
+## The goal loop (SPEC §29)
+
+- Goal and steps as events, so they survive death, compaction and handoff and replay identically.
+- Explicit re-orientation each cycle: re-read the goal against observed state rather than trusting
+  the model's memory of it.
+- Bounded auto-continue, gated on measurable progress plus the cycle budget plus the global backstop.
+- Completion claimed by the loop, decided by the verification ladder. Never self-verified.
+- Live in the TUI, since a user watching a worker should see what it thinks it is doing.
+
+## Context economy (SPEC §30)
+
+- Tool-surface derivation from `Authority`: a disallowed capability contributes no schema at all.
+  This is the highest-leverage item on this list and it is nearly free given the authority algebra.
+- Per-section token accounting on every compiled pack; an unattributed section is a bug.
+- Deterministic pruning from the event log: a re-read supersedes its earlier read, superseded results
+  leave the working set but never the log. Must prune identically on replay.
+- Progressive skill loading (metadata first, body on invocation).
+- Context budget in `Authority`, checked at compile time. Over budget fails and names the sections;
+  it never silently truncates.
+- `tm doctor` flags sections that have not changed any ticket's outcome over a window.
+
+## Budget-aware execution (SPEC §31)
+
+- Remaining budget in the context pack, refreshed per goal-loop cycle, expressed as an affordability
+  menu across reachable model tiers rather than a bare number.
+- Worker behaviours: tier down before exhaustion, reprioritise toward durable progress under
+  scarcity, refuse to begin an effect it cannot afford to finish.
+- Budget handoff: finish or roll back the in-flight effect, persist goal state, release the lease,
+  report. Explicitly NOT a failed attempt — no retry consumed, no Recovery transition. Needs a state
+  machine change and a regression test, since the default reading gets this wrong.
+- Scheduler: reserve verification budget before dispatch; refuse to strand a ticket it cannot fund;
+  escalate when the remaining budget cannot finish the remaining graph.
+
+## Ecosystem parity, as work items
+
+- Native notifications (desktop, push, ntfy-style), since nobody ships this and everybody needs it.
+- Zero-setup cost and token accounting off the event log, including per-ticket and per-worker spend.
+- Hooks with the Claude Code / Codex shared event vocabulary — `PreToolUse`, `PostToolUse`,
+  `UserPromptSubmit`, `Stop`, `SessionStart` — where a handler may deny or rewrite, not just observe.
+  This is what turns the effect boundary from policy into enforcement.
+- `AGENTS.md` read natively. No proprietary filename.
+- `SKILL.md` skills. Checkpoints and forking off the event log. Worktree isolation per worker.
+- Secret and PII redaction before the model call, restored locally (the `vibeguard` shape).
+- Context enrichment on read: resolved types alongside a file read, from `tm-codeintel`.
+
 ## Stretch
 
 - iOS simulator executor (SPEC §23).
