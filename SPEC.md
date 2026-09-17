@@ -1744,3 +1744,137 @@ wandering, declaring victory early, or forgetting what it was doing after a comp
   ladder decides whether it was. The goal loop never marks its own work verified.
 - It is visible in the TUI (§15) as live state, because a user watching a worker should see what it
   thinks it is doing and how much of it is done.
+
+## 30. Context economy
+
+The ecosystem survey in the backlog found the opposite of what we want, everywhere. Every agent
+product accretes plugins, and every installed plugin injects tool schemas, instruction layers and
+hook prose into *every request for the rest of the session*. Claude Code documents 38 hook events and
+its official marketplace carries 308 plugins; a user with a dozen MCP servers connected is paying for
+all twelve servers' tool definitions on every single turn, including the eleven turns in a row that
+touch none of them. That cost is invisible, recurring, and compounds: a context is re-sent every turn,
+so bloat admitted once is paid for hundreds of times.
+
+We have a structural answer nobody else has, because we have authority and deterministic compilation.
+The principle is: **context is a compiled artifact with an enforced budget, not an accumulating pile.**
+
+### 30.1 Admit by authority, not by availability
+
+A worker's tool surface is derived from its granted `Authority`, not from what the installation
+happens to have connected. A ticket whose authority disallows shell does not receive shell tool
+definitions — not a disabled tool, not a tool that returns "permission denied," *no schema in the
+context at all*. Same for network, for MCP servers, for browser and computer use.
+
+This is free for us and impossible for them: they have a permission prompt, we have an algebra that
+already computes the exact capability set. The security property and the economy property are the
+same property.
+
+### 30.2 Every layer pays rent
+
+Each of the following is a context cost, and each needs an explicit justification per ticket rather
+than being on by default: tool schemas, skill and instruction files, MCP server definitions, hook
+descriptions, retrieved code, documentation, wiki pages, prior evidence, and the goal state.
+
+- The context compiler reports a **per-section byte and token breakdown** for every pack it emits, so
+  bloat is visible rather than inferred. An unattributed context is a bug.
+- A section that has not changed the outcome of any ticket over a window is a candidate for removal,
+  and `tm doctor` says so. Sections earn their place from measured effect, not from seeming useful.
+- Skills load progressively — metadata first, body only on actual invocation — which is the one
+  pattern the incumbents got right and we should copy exactly.
+
+### 30.3 Determinism replaces exploration
+
+The largest single context saving is not trimming; it is not needing the tokens in the first place.
+A conventional agent spends a large fraction of its window rediscovering the repository — listing
+directories, grepping, opening files to find out what is where. `tm-codeintel` and `tm-context`
+already know. A compiled pack arrives with the relevant definitions, callers, history and
+conventions resolved, so those turns never happen.
+
+This is also why the cheap-model thesis works: a small model with a precise context outperforms a
+large model that has to go looking, and it is dramatically cheaper per attempt.
+
+### 30.4 Pruning within a run
+
+Long runs accumulate obsolete tool output — the file you read three versions ago, the failed command
+you already fixed, the search whose results you have superseded.
+
+- Tool results are **addressable and replaceable**: re-reading a file supersedes the earlier read
+  rather than appending beside it, and a superseded result is dropped from the compiled context while
+  remaining in the event log. The log is the record; the context is a working set.
+- Pruning is a **deterministic function of the event log**, not a model judgement call. The same run
+  prunes identically on replay, which keeps the whole system reproducible. An LLM deciding what to
+  forget is a source of nondeterminism we refuse.
+- Compaction preserves the goal state (§29) verbatim, because that is the thing whose loss causes a
+  worker to wander.
+
+### 30.5 Enforcement
+
+A context budget is part of `Authority`, expressed in the same `Budget` type as everything else, and
+it is checked at compile time, not hoped for. A pack that exceeds its budget fails to compile and the
+compiler reports which sections pushed it over — it does not silently truncate, because silent
+truncation drops exactly the tail content the worker was about to need.
+
+## 31. Budget-aware execution
+
+A worker today is told what to do and not what it can afford. That is why agents stop dead mid-task
+with the work half-applied, or burn a frontier model's budget on a mechanical edit and have nothing
+left for the review. `Budget` already exists in the authority lattice, attenuates with delegation, and
+tracks tokens, money and wall time. The missing step is that **the worker can see it.**
+
+### 31.1 Legible remaining budget
+
+Remaining budget is part of the context pack and is refreshed each cycle of the goal loop. It is
+expressed in terms a model can act on, not just as a number:
+
+- Absolute remaining spend in each dimension (tokens, dollars, wall seconds).
+- Burn rate so far, and therefore a projection: roughly how many more cycles of the kind it has been
+  doing are affordable.
+- The **menu**: which model tiers are reachable with what remains, and what each costs. "You have
+  enough for one frontier call or roughly forty cheap ones" is an actionable sentence; "you have
+  180,000 tokens" is not.
+- Whether spend is metered or subscription capacity (§28.2), because the correct behaviour differs —
+  metered spend should be conserved, subscription capacity within its ceiling should be used.
+
+### 31.2 What the worker does with it
+
+- **Tier down before running out.** Drop to a cheaper model for mechanical steps and reserve the
+  remainder for the steps that need judgement, rather than discovering the ceiling at the worst
+  moment. This makes §13's "model tier as an explicit cost lever" a decision the worker participates
+  in, not just a policy imposed above it.
+- **Reprioritise under scarcity.** With budget short, do the step that produces the most durable
+  progress first — a committed, verified increment beats three half-finished ones, because the next
+  worker inherits the increment and cannot inherit the half-work.
+- **Refuse to start what it cannot finish.** Beginning an effect whose completion is unaffordable is
+  worse than not starting: it produces exactly the "effect ran, receipt lost" state the research gaps
+  above identify as our most dangerous unhandled case.
+
+### 31.3 Handoff, not death
+
+This is the part that matters most, and the part our substrate makes possible.
+
+**Budget exhaustion must be a planned handoff, never a crash.** A worker approaching its limit
+finishes or rolls back the effect in flight, writes its goal state and findings as events, releases
+its lease cleanly, and reports why it stopped. The scheduler then issues a fresh lease — to a new
+worker, at a tier the remaining project budget supports — and because the goal loop is events (§29),
+the successor resumes rather than restarts.
+
+Every competitor's version of this is a dead session and a human re-explaining the task. Ours is a
+lease expiry with a durable goal, which is machinery we already have.
+
+The distinction from failure is sharp and belongs in the state machine: a budget handoff is **not** a
+failed attempt. It does not consume a retry, it does not enter Recovery, and it is not evidence of
+anything going wrong. A ticket that takes three workers to finish because each ran out of budget has
+succeeded three times, not failed twice.
+
+### 31.4 Project-level scheduling on budget
+
+The scheduler sees every worker's remaining budget and the project's, which makes admission control a
+budget decision as well as a capacity one:
+
+- Reserve verification budget before dispatching work, exactly as §21 reserves verification capacity.
+  A project that spends its last dollars on execution and cannot afford to verify has produced
+  nothing trustworthy.
+- Refuse to dispatch a ticket whose estimated cost exceeds what remains, rather than starting it and
+  stranding it.
+- Escalate to a human when the remaining project budget cannot finish the remaining graph. That is a
+  fact worth surfacing early, not at the end.
