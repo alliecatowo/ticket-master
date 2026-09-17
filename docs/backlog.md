@@ -111,6 +111,108 @@ if left alone, not by how interesting it is.
   spec as authoritative and cascades edits into regenerated tasks, tests and docs. Continuous
   reconciliation of spec against ticket state is a sharper version of what we already claim.
 
+## Terminal surface quality bar (SPEC §15)
+
+The CLI is the proof surface, so it is also the one that has to be visibly better than the field —
+Claude Code, Codex, opencode and pi are the comparison set, and "as good as" is a failure. Two
+demands sit in tension and both are hard requirements: it must be beautiful, and it must be sturdy.
+
+- **Sturdy first, because pretty is worthless if it corrupts the screen.** A single render model:
+  the TUI is a pure function of project state to a frame, diffed and flushed, never interleaved
+  `println!` from background tasks. Correct wcwidth/grapheme handling so CJK, emoji and combining
+  marks do not tear the layout. Resize, suspend/resume (`SIGTSTP`), and `SIGWINCH` handled without
+  a redraw storm. Degrades by capability detection, not by guessing: truecolor to 256 to 16 to
+  monochrome, Unicode to ASCII box drawing, and a `--plain` mode that is the same information with
+  no cursor addressing at all. A panic restores the terminal — no orphaned alternate screen, no
+  disabled echo. Every frame is reproducible from a recorded event log, which is what makes the TUI
+  testable at all (see the PTY layer, SPEC §22).
+- **Then beautiful.** The thing worth showing is what nobody else shows: the ticket graph, the
+  authority a worker actually holds, live lease countdowns, budget burn, and the verification
+  ladder's state — a project you can watch, not a scrolling transcript. Streaming output that never
+  jumps, a status region that stays put, diffs rendered as diffs, and evidence rendered as evidence.
+- **What to take from the field.** Codex's and pi's input handling and approval affordances are
+  worth cargo-culting outright (D-001 already says so). What none of them have is persistent
+  project state to render, which is exactly our advantage — do not copy a transcript UI onto a
+  state machine.
+- **Accessibility is not a later pass.** Respect `NO_COLOR`, `TERM=dumb` and reduced motion; never
+  encode meaning in colour alone; keep a screen-reader-sane linear mode.
+
+## First-party integrations: GitHub and Linear apps
+
+Distinct from the §13 mirroring adapters, which sync tickets. These are installable applications
+that put Ticketmaster *inside* the tracker.
+
+- **GitHub app.** Checks and status on the verification ladder, PR review comments carrying evidence
+  and provenance, issue-to-ticket adoption, and installation tokens as the per-lease ephemeral
+  credential the research gaps above already argue for.
+- **Linear app, built as a Linear Agent — not a bot.** Linear's agent model maps onto ours closely
+  enough that fighting it would be the mistake. Install via OAuth2 with `actor=app` and the
+  `app:mentionable` / `app:assignable` scopes; the agent is *delegated* an issue rather than
+  assigned it, which is the same authority-grant shape we already model. An `AgentSession` is
+  created when the agent is mentioned or delegated an issue, arriving as an `AgentSessionEvent`
+  webhook with action `created`; follow-up user messages arrive as action `prompted`. Sessions carry
+  six states — `pending`, `active`, `error`, `awaitingInput`, `complete`, `stale` — which Linear
+  derives from the activities we emit, so we never set state directly. Progress is reported by
+  `agentActivityCreate` with a content type of `thought`, `action` (with `action`, `parameter` and
+  an optional `result`), `elicitation`, `response`, or `error`; only `thought` and `action` may be
+  ephemeral.
+  - The hard constraint: **an activity must be emitted within 10 seconds of the `created` event** or
+    the session is marked unresponsive, and webhooks themselves must be acknowledged in 5. So the
+    webhook handler appends an event and returns; a `thought` is emitted immediately; the real work
+    runs on the scheduler as an ordinary ticket. This is the first external system that imposes a
+    latency SLA on our loop, and it is worth taking as a design forcing function.
+  - The mapping worth getting right: `elicitation` is our escalation-to-human, `action` is our
+    effect boundary, `response` is the verified outcome, `error` is a failed verification — not
+    freeform chat. Activities are frozen snapshots, so conversation history is reconstructed from
+    them, which is the same discipline as our event log.
+
+## Documentation retrieval (Context7 or equivalent)
+
+Workers currently get repository context and nothing about the libraries they are using, which is
+the single largest source of confidently wrong code. Add an external-documentation source to context
+compilation (SPEC §8), ranked alongside code and wiki pages.
+
+- Provider-shaped, like everything else: Context7 (`resolve-library-id` then fetch, or its HTTP
+  `/libs/search` and `/context` endpoints), a self-hosted index such as `docs-mcp-server`, and a
+  plain `llms.txt` fetcher for projects that publish one.
+- Pinned to the dependency versions actually in the lockfile — docs for the wrong major version are
+  worse than no docs.
+- Cached in-repo with provenance and a fetched-at stamp so a context pack stays reproducible, and so
+  the compiler can be offline.
+- Feeds the wiki (§26) as a citable source rather than being a separate silo.
+
+## Remote control and teleport (SPEC §14, §18)
+
+A project outlives any one machine, which is precisely the claim Ticketmaster makes — so a session
+must be attachable from somewhere else. Survey of how the field does it, and what we should take:
+
+- **opencode** splits `serve` (headless HTTP backend, OpenAPI 3.1 at `/doc`) from the TUI, then
+  `opencode attach <url>` points a terminal at a running backend on another machine, and
+  `opencode web` serves a browser client from the same process. The separation is right and is
+  already our shape: `tm serve` is the backend, every surface is a client.
+- **Claude Code** runs two directions deliberately: `/remote-control` pushes a locally running
+  session out to phone/web, while `--teleport` pulls a cloud session down into the local terminal.
+  `claude ssh` drives a remote machine over an ordinary SSH connection. The push/pull distinction is
+  the useful idea — they are different trust and ownership stories, not one feature.
+- **Codex** takes the cloud-first route: work runs in a hosted sandbox and the local client is one
+  view onto it.
+
+What we build, given that our state is already an event log — which makes this cheaper for us than
+for any transcript-based agent:
+
+- Attach and detach as ordinary operations: `tm attach <url>` resumes from a known `seq` using the
+  subscribe-then-backfill protocol already specified in `tm-events`, so a reconnect never gaps and
+  never replays from zero.
+- Both directions, named as such. Push (expose this local project to another device) and pull
+  (adopt a remote project into this terminal) are separate verbs with separate authority grants — an
+  attached client gets its own attenuated `Authority`, and revoking it is a lease expiry, not a
+  special case.
+- Multiple concurrent viewers with presence, since the server already has it.
+- Transport as a provider: local socket, SSH, and a relay for the case where neither end can accept
+  a connection. End-to-end encryption on the relay path, because source is passing through it.
+- The single-writer boundary from the research gaps above has to be resolved before this ships — two
+  attached clients issuing commands is exactly the contention case that is currently unstated.
+
 ## Stretch
 
 - iOS simulator executor (SPEC §23).
