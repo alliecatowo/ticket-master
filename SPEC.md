@@ -1632,3 +1632,115 @@ Third-party templates are untrusted input: their `verify.toml` runs in the same 
 any other command, `skill.md` is treated as data rather than instructions, and a template can
 declare capability requirements but never grant itself authority. A template is a starting point
 someone else wrote, not a licence to run arbitrary code with the project's permissions.
+
+## 28. The three adapter layers
+
+§24 said "executors" and §6 said "providers" and between them they blurred three genuinely different
+things into two. Naming them separately matters, because they vary independently: the same model can
+be reached through four different auth modes, and the same auth can serve both a raw model endpoint
+and a whole agent runtime.
+
+| Layer | Answers | Examples |
+|---|---|---|
+| **Protocol adapter** | How do we *speak* to it? | ACP, MCP, LSP, the tracker REST APIs |
+| **Auth adapter** | How are we *allowed* to use it? | OAuth device flow, subscription tokens, API keys, cloud IAM |
+| **Runtime adapter** | What *kind of thing* is executing? | a model endpoint, a whole agent harness, a human |
+
+A provider is *where the compute is*. An auth adapter is *how you are entitled to it*. A runtime
+adapter is *what shape of executor sits behind it*. Collapsing these is why the earlier draft could
+not express "run Claude Code, billed against a Claude subscription, driven over ACP" — which is one
+sentence with three independent choices in it.
+
+### 28.1 Protocol adapters
+
+**ACP (Agent Client Protocol)** in both directions, per D-001's amendment.
+
+- **As a client**, ACP is the primary way we drive external agent runtimes: one adapter reaches
+  Claude Code, Codex, Gemini CLI and Goose today, and whatever adopts it next for free.
+- **As an agent**, we expose Ticketmaster over ACP so any ACP-capable editor — Zed today, JetBrains
+  in progress — can drive a project with no integration work on their side.
+
+**MCP** in both directions likewise: as a client so any MCP server becomes available to a worker
+under its granted authority, and as a server so `tm` itself is a tool another agent can call. A
+project exposed over MCP is the cheapest possible integration surface for tools we will never
+anticipate.
+
+Protocol adapters carry no authority of their own. They are transports; §4's authority algebra is
+enforced on our side of every one of them, and a protocol that *claims* a permission model does not
+get to substitute its model for ours.
+
+### 28.2 Auth adapters
+
+Authentication is a first-class, pluggable concern, not a string in a config file. The same provider
+is reachable several ways, and which way you use changes cost, rate limits and what you are permitted
+to do — so it is routing input, not a connection detail.
+
+Kinds we support:
+
+- **API key.** The base case. Read from a named environment variable or the OS keychain, never from
+  the repository, never logged, never returned by any introspection call.
+- **Subscription OAuth.** Device-code or PKCE flow against a consumer plan — a ChatGPT Plus/Pro
+  subscription, a Claude Pro/Max plan, a Gemini plan — yielding a refreshable token used instead of
+  metered API credits. Three separate opencode plugins exist purely to do this, which is as clear a
+  demand signal as this category produces.
+- **Cloud IAM.** AWS SigV4 with the ambient credential chain, Google application default credentials
+  and service-account impersonation, Azure AD. These carry their own expiry and refresh semantics.
+- **Platform-issued ephemeral tokens.** A GitHub App installation token is the model: scoped, short
+  lived, minted per unit of work. This is what the competitive-research gap above argues credentials
+  should generally be, and it composes with leases exactly — a credential that dies with the lease.
+- **Delegated/None.** The executor holds its own credentials and we never see them (the common case
+  for an external harness a human already logged into), or no auth is needed at all (a local model).
+
+Requirements on every auth adapter:
+
+- It reports **what it is entitled to**, not just whether it works: quota class, rate limits, whether
+  this is metered spend or subscription capacity, and any daily ceiling. The fabric routes on this.
+  Subscription and free-tier capacity are ordinary capacity with a ceiling, not special cases.
+- Tokens refresh without interrupting in-flight work, and a refresh failure degrades to a routing
+  decision (this candidate is unavailable) rather than an exception.
+- Credential material never enters the event log, a context pack, a `--json` payload, an error
+  message, or a rendered frame. What the log records is *which* auth adapter was used, never what it
+  held.
+- Interactive login is a `tm auth` verb per provider, storing to the OS keychain by default.
+
+### 28.3 Runtime adapters
+
+The `Executor` trait of §24, now correctly separated from the two layers above. A runtime adapter
+declares its capabilities and the scheduler routes around what it cannot do.
+
+- **`builtin`** — `tm-agent`, the reference executor. Minimal by design, and the only one whose token
+  usage and context composition we fully control, which is what makes the cheap-model thesis
+  measurable.
+- **`acp`** — any ACP-speaking harness, parameterised by which one.
+- **`opencode`** — over its own HTTP server, which is a first-class API rather than a shim.
+- **`pi`** — JSON-RPC over stdio in its own shape.
+- **`human`** — a person, with the same evidence contract as any other executor.
+
+A runtime adapter is given a sandbox derived from granted authority and its returned writes are
+validated against that scope. It returns evidence; it never returns a verdict. That holds regardless
+of protocol or auth.
+
+## 29. The goal loop
+
+Every agent worth using has one: a durable objective that survives individual turns, is decomposed
+into steps, tracks what is done, and keeps going until the goal is met or genuinely blocked. Claude
+Code's plan mode and todo list, Codex's plan tool, and opencode's `goal` plugin are all the same
+shape. We need it, and we have an unusual advantage in building it.
+
+The distinction that matters: **a ticket is the unit of durable project work; a goal is the unit of
+durable intent inside one execution.** A ticket says "the login form must validate emails." A goal is
+the worker's live decomposition of how it is getting there, and it is what stops a model from
+wandering, declaring victory early, or forgetting what it was doing after a compaction.
+
+- The goal and its steps are **events**, not scratch state. They survive process death, compaction
+  and handoff, and they replay. Every competitor's todo list lives in a transcript and dies with it.
+- **Re-orientation is explicit.** The loop re-reads the goal against observed state each cycle rather
+  than trusting the model's memory of it — which is the actual mechanism by which a long run stays on
+  target, per §21's loop contract.
+- **Auto-continue is bounded.** It continues while progress is measurable and the cycle budget and
+  §21.5's dumb global backstop both permit; it stops and escalates otherwise. "Keeps going until
+  complete" without a bound is how a runaway loop is described after the fact.
+- **Completion is claimed, not asserted.** The loop may say the goal is met; §16's verification
+  ladder decides whether it was. The goal loop never marks its own work verified.
+- It is visible in the TUI (§15) as live state, because a user watching a worker should see what it
+  thinks it is doing and how much of it is done.
