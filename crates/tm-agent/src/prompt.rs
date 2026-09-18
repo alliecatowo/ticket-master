@@ -158,6 +158,7 @@ mod tests {
         let pack = ContextPack {
             sections: vec![],
             tokens: 0,
+            bytes: 0,
             provenance: vec![],
             dropped: vec![],
         };
@@ -176,9 +177,11 @@ mod tests {
                 title: "Objective".to_string(),
                 body: "Fix the bug.".to_string(),
                 tokens: 10,
+                bytes: 10,
                 provenance: vec![],
             }],
             tokens: 10,
+            bytes: 10,
             provenance: vec![],
             dropped: vec![],
         };
@@ -198,6 +201,7 @@ mod tests {
                     title: "Objective".to_string(),
                     body: "Do task A.".to_string(),
                     tokens: 10,
+                    bytes: 10,
                     provenance: vec![],
                 },
                 Section {
@@ -205,10 +209,12 @@ mod tests {
                     title: "Decisions".to_string(),
                     body: "Decided on approach B.".to_string(),
                     tokens: 15,
+                    bytes: 15,
                     provenance: vec![],
                 },
             ],
             tokens: 25,
+            bytes: 25,
             provenance: vec![],
             dropped: vec![],
         };
@@ -230,20 +236,24 @@ mod tests {
                 title: "Objective".to_string(),
                 body: "Task.".to_string(),
                 tokens: 5,
+                bytes: 5,
                 provenance: vec![],
             }],
             tokens: 5,
+            bytes: 5,
             provenance: vec![],
             dropped: vec![
                 DroppedSection {
                     kind: tm_context::tokens::SectionKind::Retrieval,
                     reason: "exceeds remaining token budget".to_string(),
                     tokens_needed: 500,
+                    bytes_needed: 500,
                 },
                 DroppedSection {
                     kind: tm_context::tokens::SectionKind::GitHistory,
                     reason: "exceeds remaining token budget".to_string(),
                     tokens_needed: 300,
+                    bytes_needed: 300,
                 },
             ],
         };
@@ -266,17 +276,20 @@ mod tests {
         let pack = ContextPack {
             sections: vec![],
             tokens: 0,
+            bytes: 0,
             provenance: vec![],
             dropped: vec![
                 DroppedSection {
                     kind: tm_context::tokens::SectionKind::PriorFailures,
                     reason: "budget".to_string(),
                     tokens_needed: 100,
+                    bytes_needed: 100,
                 },
                 DroppedSection {
                     kind: tm_context::tokens::SectionKind::Conventions,
                     reason: "budget".to_string(),
                     tokens_needed: 200,
+                    bytes_needed: 200,
                 },
             ],
         };
@@ -301,9 +314,11 @@ mod tests {
                 title: "What to do".to_string(),
                 body: "Complete task X.".to_string(),
                 tokens: 20,
+                bytes: 20,
                 provenance: vec![],
             }],
             tokens: 20,
+            bytes: 20,
             provenance: vec![],
             dropped: vec![],
         };
@@ -334,9 +349,11 @@ mod tests {
                 title: "Objective".to_string(),
                 body: "Line 1\nLine 2\nLine 3".to_string(),
                 tokens: 30,
+                bytes: 30,
                 provenance: vec![],
             }],
             tokens: 30,
+            bytes: 30,
             provenance: vec![],
             dropped: vec![],
         };
@@ -358,9 +375,11 @@ mod tests {
                 title: "Empty".to_string(),
                 body: String::new(),
                 tokens: 0,
+                bytes: 0,
                 provenance: vec![],
             }],
             tokens: 0,
+            bytes: 0,
             provenance: vec![],
             dropped: vec![],
         };
@@ -377,6 +396,7 @@ mod tests {
         let pack = ContextPack {
             sections: vec![],
             tokens: 0,
+            bytes: 0,
             provenance: vec![],
             dropped: vec![],
         };

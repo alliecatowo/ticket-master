@@ -6,12 +6,16 @@
 //! silently truncated. Given the same `(ticket, view, codeintel-state, budget)`, `compile`
 //! always produces byte-identical output, so the pack is snapshot-testable.
 
+use std::fmt::Write as _;
+
 use tm_codeintel::{CodeIntel, SignalWeights};
 use tm_core::{ProjectView, Ticket};
 use tm_types::Result;
 
 use crate::sections;
-use crate::tokens::{estimate_tokens_prose, BudgetLedger, SectionKind, TokenBudget};
+use crate::tokens::{
+    estimate_tokens_prose, estimate_tokens_source, BudgetLedger, SectionKind, TokenBudget,
+};
 
 /// A pointer from a section's content back to the real-world thing it was drawn from
 /// (a decision, a file, a commit, an artifact), so a consumer of the pack can verify or dig
@@ -37,6 +41,9 @@ pub struct Section {
     pub body: String,
     /// Tokens this section was charged against the budget.
     pub tokens: usize,
+    /// Bytes of `body`, so a consumer can see the raw wire cost alongside the token estimate
+    /// (`SPEC.md` §30.2's "per-section byte and token breakdown").
+    pub bytes: usize,
     /// Provenance entries for this section's content.
     pub provenance: Vec<ProvenanceRef>,
 }
@@ -54,6 +61,8 @@ pub struct DroppedSection {
     pub reason: String,
     /// How many tokens the section would have needed to be admitted in full.
     pub tokens_needed: usize,
+    /// How many bytes the section's rendered body would have needed to be admitted in full.
+    pub bytes_needed: usize,
 }
 
 /// The compiled, bounded context handed to a worker for one ticket.
@@ -63,11 +72,105 @@ pub struct ContextPack {
     pub sections: Vec<Section>,
     /// Total tokens actually spent across `sections`.
     pub tokens: usize,
+    /// Total bytes across `sections` (sum of each [`Section::bytes`]).
+    pub bytes: usize,
     /// Provenance for every admitted section's content, flattened across sections in the same
     /// order they appear in `sections`.
     pub provenance: Vec<ProvenanceRef>,
     /// Sections that were dropped to fit the budget, lowest-priority first.
     pub dropped: Vec<DroppedSection>,
+}
+
+/// The byte/token cost of one tool's schema on the wire (`SPEC.md` §30.2): a tool definition is
+/// re-sent on every single turn just like a pack's sections are, so it needs the same
+/// attribution rather than being an invisible, uncounted cost. Lives in this crate (not
+/// `tm-agent`, which owns the actual tool catalog) so [`ContextPack::rent_report`] can accept it
+/// without `tm-context` depending back on `tm-agent`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolSurfaceCost {
+    /// The tool's dotted wire name (e.g. `"fs.read"`).
+    pub tool: String,
+    /// Bytes of `name` + `description` + the compact-serialized `input_schema`, i.e. the parts
+    /// of a `tm_provider::ToolDef` that cost bytes on the wire — excludes surrounding JSON
+    /// framing (field names, commas) shared with the rest of the request.
+    pub bytes: usize,
+    /// Tokens estimated for the same payload, via [`estimate_tokens_source`] for the schema
+    /// and [`estimate_tokens_prose`] for the description.
+    pub tokens: usize,
+}
+
+impl ToolSurfaceCost {
+    /// Compute one tool definition's cost from its wire-shape parts.
+    pub fn compute(name: &str, description: &str, input_schema: &serde_json::Value) -> Self {
+        let schema_text = input_schema.to_string();
+        let bytes = name.len() + description.len() + schema_text.len();
+        let tokens = estimate_tokens_source(name)
+            + estimate_tokens_prose(description)
+            + estimate_tokens_source(&schema_text);
+        ToolSurfaceCost {
+            tool: name.to_string(),
+            bytes,
+            tokens,
+        }
+    }
+}
+
+impl ContextPack {
+    /// A per-section byte/token breakdown, so bloat is visible rather than inferred
+    /// (`SPEC.md` §30.2: "An unattributed context is a bug"). Every admitted section is listed
+    /// with its cost; every dropped section is listed too, clearly marked, with the cost it
+    /// would have needed. When `tool_surface` is non-empty, its per-tool costs are listed as a
+    /// second block and folded into a combined per-turn total, since a request's tool schemas
+    /// (`SPEC.md` §30.1) are paid on every turn right alongside the pack itself.
+    pub fn rent_report(&self, tool_surface: &[ToolSurfaceCost]) -> String {
+        let mut out = String::new();
+        let _ = writeln!(
+            out,
+            "context pack: {} bytes, {} tokens across {} section(s)",
+            self.bytes,
+            self.tokens,
+            self.sections.len()
+        );
+        for section in &self.sections {
+            let _ = writeln!(
+                out,
+                "  {:?} {:?}: {} bytes, {} tokens",
+                section.kind, section.title, section.bytes, section.tokens
+            );
+        }
+        for dropped in &self.dropped {
+            let _ = writeln!(
+                out,
+                "  DROPPED {:?}: needed {} bytes, {} tokens ({})",
+                dropped.kind, dropped.bytes_needed, dropped.tokens_needed, dropped.reason
+            );
+        }
+        if !tool_surface.is_empty() {
+            let tool_bytes: usize = tool_surface.iter().map(|t| t.bytes).sum();
+            let tool_tokens: usize = tool_surface.iter().map(|t| t.tokens).sum();
+            let _ = writeln!(
+                out,
+                "tool surface: {} bytes, {} tokens across {} tool(s)",
+                tool_bytes,
+                tool_tokens,
+                tool_surface.len()
+            );
+            for tool in tool_surface {
+                let _ = writeln!(
+                    out,
+                    "  {}: {} bytes, {} tokens",
+                    tool.tool, tool.bytes, tool.tokens
+                );
+            }
+            let _ = writeln!(
+                out,
+                "total per-turn cost: {} bytes, {} tokens",
+                self.bytes + tool_bytes,
+                self.tokens + tool_tokens
+            );
+        }
+        out
+    }
 }
 
 /// Compile a [`ContextPack`] for `ticket`.
@@ -124,6 +227,7 @@ pub fn compile(
 
     for (kind, raw) in raw_sections {
         let cost = estimate_tokens_prose(&raw.body);
+        let byte_cost = raw.body.len();
         if ledger.spend(kind, cost) {
             provenance.extend(raw.provenance.iter().cloned());
             sections_out.push(Section {
@@ -131,6 +235,7 @@ pub fn compile(
                 title: raw.title,
                 body: raw.body,
                 tokens: cost,
+                bytes: byte_cost,
                 provenance: raw.provenance,
             });
         } else {
@@ -138,15 +243,18 @@ pub fn compile(
                 kind,
                 reason: "exceeds remaining token budget".to_string(),
                 tokens_needed: cost,
+                bytes_needed: byte_cost,
             });
         }
     }
 
     let tokens = ledger.total_used();
+    let bytes = sections_out.iter().map(|s| s.bytes).sum();
 
     Ok(ContextPack {
         sections: sections_out,
         tokens,
+        bytes,
         provenance,
         dropped,
     })
@@ -322,5 +430,175 @@ mod tests {
             .find(|s| s.kind == SectionKind::Conventions)
             .expect("conventions section admitted under a generous budget");
         assert!(conventions.body.contains("use tabs"));
+    }
+
+    #[test]
+    fn compile_reports_per_section_bytes_consistent_with_the_pack_total() {
+        let ticket = base_ticket();
+        let view = ProjectView::empty();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ci = open_empty_codeintel(dir.path());
+
+        let pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            TokenBudget::even(100_000),
+            SignalWeights::default(),
+            &[],
+        )
+        .expect("compile with a generous budget succeeds");
+
+        assert!(!pack.sections.is_empty());
+        for section in &pack.sections {
+            assert_eq!(section.bytes, section.body.len());
+        }
+        assert_eq!(
+            pack.bytes,
+            pack.sections.iter().map(|s| s.bytes).sum::<usize>()
+        );
+    }
+
+    #[test]
+    fn compile_reports_bytes_needed_for_a_dropped_section() {
+        let mut ticket = base_ticket();
+        ticket.failures.push(FailureRecord {
+            class: FailureClass::Other,
+            detail: "boom".to_string(),
+            at: Timestamp::EPOCH,
+            attempt: 1,
+        });
+        let view = ProjectView::empty();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ci = open_empty_codeintel(dir.path());
+
+        let mut shares = BTreeMap::new();
+        shares.insert(SectionKind::Objective, 1.0);
+        let budget = TokenBudget {
+            total: 1_000,
+            shares,
+        };
+
+        let pack = compile(&ticket, &view, &ci, budget, SignalWeights::default(), &[])
+            .expect("compile still succeeds when a section is dropped");
+
+        assert_eq!(pack.dropped.len(), 1);
+        let dropped = &pack.dropped[0];
+        assert_eq!(dropped.kind, SectionKind::PriorFailures);
+        assert!(dropped.bytes_needed > 0);
+    }
+
+    #[test]
+    fn rent_report_lists_every_admitted_section_with_its_cost() {
+        let ticket = base_ticket();
+        let view = ProjectView::empty();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ci = open_empty_codeintel(dir.path());
+
+        let pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            TokenBudget::even(100_000),
+            SignalWeights::default(),
+            &[],
+        )
+        .expect("compile with a generous budget succeeds");
+
+        let report = pack.rent_report(&[]);
+        for section in &pack.sections {
+            assert!(
+                report.contains(&format!("{} bytes", section.bytes)),
+                "report is missing {:?}'s byte cost:\n{report}",
+                section.kind
+            );
+            assert!(
+                report.contains(&format!("{} tokens", section.tokens)),
+                "report is missing {:?}'s token cost:\n{report}",
+                section.kind
+            );
+        }
+    }
+
+    #[test]
+    fn rent_report_clearly_marks_dropped_sections() {
+        let mut ticket = base_ticket();
+        ticket.failures.push(FailureRecord {
+            class: FailureClass::Other,
+            detail: "boom".to_string(),
+            at: Timestamp::EPOCH,
+            attempt: 1,
+        });
+        let view = ProjectView::empty();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ci = open_empty_codeintel(dir.path());
+
+        let mut shares = BTreeMap::new();
+        shares.insert(SectionKind::Objective, 1.0);
+        let budget = TokenBudget {
+            total: 1_000,
+            shares,
+        };
+
+        let pack = compile(&ticket, &view, &ci, budget, SignalWeights::default(), &[])
+            .expect("compile still succeeds when a section is dropped");
+
+        let report = pack.rent_report(&[]);
+        assert!(report.contains("DROPPED PriorFailures"));
+        assert!(!report.contains("DROPPED Objective"));
+    }
+
+    #[test]
+    fn rent_report_folds_in_the_tool_surface_and_a_combined_total() {
+        let ticket = base_ticket();
+        let view = ProjectView::empty();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ci = open_empty_codeintel(dir.path());
+
+        let pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            TokenBudget::even(100_000),
+            SignalWeights::default(),
+            &[],
+        )
+        .expect("compile with a generous budget succeeds");
+
+        let tool_surface = vec![
+            ToolSurfaceCost::compute(
+                "fs.read",
+                "Read a repository-relative file's full text content.",
+                &serde_json::json!({"type": "object"}),
+            ),
+            ToolSurfaceCost::compute(
+                "shell.run",
+                "Run a command.",
+                &serde_json::json!({"type": "object"}),
+            ),
+        ];
+        let tool_bytes: usize = tool_surface.iter().map(|t| t.bytes).sum();
+        let tool_tokens: usize = tool_surface.iter().map(|t| t.tokens).sum();
+
+        let report = pack.rent_report(&tool_surface);
+        assert!(report.contains("fs.read"));
+        assert!(report.contains("shell.run"));
+        assert!(report.contains(&format!(
+            "total per-turn cost: {} bytes, {} tokens",
+            pack.bytes + tool_bytes,
+            pack.tokens + tool_tokens
+        )));
+    }
+
+    #[test]
+    fn tool_surface_cost_compute_is_nonzero_for_a_nonempty_tool() {
+        let cost = ToolSurfaceCost::compute(
+            "fs.read",
+            "Read a repository-relative file's full text content.",
+            &serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        );
+        assert_eq!(cost.tool, "fs.read");
+        assert!(cost.bytes > 0);
+        assert!(cost.tokens > 0);
     }
 }
