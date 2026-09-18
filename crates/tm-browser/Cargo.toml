@@ -16,9 +16,11 @@ reqwest = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 blake3 = { workspace = true }
+async-trait = { workspace = true }
 tokio-tungstenite = "0.24"
-
-[target.'cfg(windows)'.dependencies]
-# Chrome/Edge installs register an App Paths key even when off the PATH; used as a last-resort
-# discovery probe on Windows only.
-winreg = "0.52"
+# `browser.toml` parsing (`config.rs`).
+toml = "0.9"
+# Chrome for Testing publishes SHA256 digests; `blake3` (above) is used for in-process content
+# addressing elsewhere in this crate and does not match the vendor-published digest format.
+sha2 = "0.10"
+hex = "0.4"

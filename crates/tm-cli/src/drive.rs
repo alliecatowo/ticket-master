@@ -16,7 +16,10 @@ use crate::args::{
 use crate::project::Project;
 use crate::render::Renderer;
 use serde::{Deserialize, Serialize};
-use tm_browser::{discover, session::BrowserSession, BrowserSessionConfig};
+use tm_browser::{
+    session::BrowserSession, BrowserSessionConfig, BrowserToml, ProviderRegistry,
+    ReqwestDownloader, SessionRequest,
+};
 use tm_computer::{backend, input::InputAction, input::Point, ComputerError, ComputerSession};
 use tm_types::{IdKind, IdSource, TmError};
 
@@ -118,21 +121,53 @@ pub async fn dispatch_browser(
     }
 }
 
+/// The project-root config file selecting and pinning browser providers, per `SPEC.md` §19.1a.
+/// Never a system browser: see [`tm_browser`]'s crate docs.
+const BROWSER_TOML_FILENAME: &str = "browser.toml";
+
+/// Load and parse `browser.toml` from `project`'s root.
+///
+/// # Errors
+/// [`tm_types::TmError::not_found`] when the file is missing — `tm browser open` has no
+/// system-browser fallback to silently reach for instead (`SPEC.md` §19.1) — naming the tables
+/// a minimal file needs, since there is no `tm browser install` (or other scaffolding command)
+/// in this workspace to point at instead. Otherwise whatever [`BrowserToml::parse`] returns for
+/// a malformed file.
+fn load_browser_toml(project: &Project) -> tm_types::Result<BrowserToml> {
+    let path = project.root.join(BROWSER_TOML_FILENAME);
+    let source = fs::read_to_string(&path).map_err(|_| {
+        TmError::not_found(
+            "browser.toml",
+            format!(
+                "{}; add a [managed] table with `version` and `sha256`, or a [remote_cdp] table \
+                 with `ws_url`, and list the ones you configure in `fallback_order`",
+                path.display()
+            ),
+        )
+    })?;
+    BrowserToml::parse(&source)
+}
+
 /// `tm browser open`
 ///
 /// # IMPL
-/// `tm_browser::discover::discover()` (clear error with `install_hint()` when no Chromium-family
-/// browser is found), then `BrowserSession::launch` with `headless: args.headless ||
-/// !std::io::stdout().is_terminal()`-style default-on behavior per the module docs (headless
-/// unless a visible window is truly wanted), then `navigate(&args.url)`. Persist the session
-/// handle per [`dispatch_browser`]'s note.
+/// Loads `browser.toml` (§19.1a — this crate never discovers or touches the user's installed
+/// browser), builds a [`ProviderRegistry`] from it, and asks it to acquire a session. Then
+/// `navigate(&args.url)`. Persist the session handle per [`dispatch_browser`]'s note.
+///
+/// `args.headless` is intentionally not threaded into the acquired [`SessionRequest`]: the only
+/// provider that launches a local process (`managed`) is unconditionally headless today (its
+/// argv hardcodes `--headless=new`, reusing the flags `tm_browser::launch::build_argv` always
+/// builds), so a capability that silently degraded "headed requested" to "headless anyway"
+/// would be exactly the quiet substitution §19.1a forbids. Wire this up once a provider can
+/// actually honour it.
 pub async fn browser_open(
     args: &BrowserOpenArgs,
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
-    let discovered = discover::discover()?;
-    let _headless = args.headless || !std::io::stdout().is_terminal();
+    let _ = args.headless;
+    let browser_toml = load_browser_toml(project)?;
 
     /// Simple in-memory artifact sink for testing.
     struct NullArtifactSink;
@@ -152,18 +187,26 @@ pub async fn browser_open(
     let authority = tm_types::Authority::root();
 
     let config = BrowserSessionConfig {
-        browser: discovered,
         authority,
         artifact_threshold_bytes: 1024 * 1024,
-        extra_launch_args: vec![],
     };
 
+    // Allocated before `acquire` so a session id always exists to name whatever gets acquired,
+    // even though this alone does not yet reclaim it (that is `BrowserSession::launch`'s
+    // release-on-handshake-failure job, once a session object exists).
     let session_id = tm_types::SessionId::new(project.ids.next(IdKind::Session).as_str())?;
+
+    let downloader = std::sync::Arc::new(ReqwestDownloader::new());
+    let registry = ProviderRegistry::from_config(&browser_toml, downloader, project.ids.clone())?;
+    let request = SessionRequest::default();
+    let (provider, endpoint) = registry.acquire(&request).await?;
+
     let mut session = BrowserSession::launch(
+        provider,
+        endpoint,
         config,
         sink,
         project.clock.clone(),
-        project.ids.clone(),
         session_id,
     )
     .await?;
