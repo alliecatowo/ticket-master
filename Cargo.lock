@@ -3318,8 +3318,11 @@ dependencies = [
  "assert_cmd",
  "axum",
  "clap",
+ "crossterm 0.29.0",
  "dirs",
+ "portable-pty",
  "predicates",
+ "ratatui-core",
  "serde",
  "serde_json",
  "tempfile",
@@ -3338,12 +3341,14 @@ dependencies = [
  "tm-provider",
  "tm-scheduler",
  "tm-server",
+ "tm-tui",
  "tm-types",
  "tokio",
  "toml",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "vt100",
 ]
 
 [[package]]

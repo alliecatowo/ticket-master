@@ -3,7 +3,7 @@
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 
-use crate::component::{Component, ComponentId, FrameContext};
+use crate::component::{Component, ComponentId, ComponentParent, FrameContext};
 use crate::event::{Event, InputEvent, KeyBinding, Propagation};
 use crate::theme::split_horizontal;
 use crate::widgets_data::list::List;
@@ -139,6 +139,36 @@ impl Component for Dashboard {
     }
 }
 
+/// Resolves this dashboard's own id and its two panes' ids, so a root above it (`tm-cli`'s `App`)
+/// can be a [`crate::component::ComponentParent`] over the whole tree without knowing the
+/// dashboard's internals — see `Table`/`List`'s IMPL notes, which are leaves and never need this
+/// themselves.
+impl ComponentParent for Dashboard {
+    fn resolve(&self, id: ComponentId) -> Option<&dyn Component> {
+        if id == self.id {
+            Some(self)
+        } else if id == self.tickets.id() {
+            Some(&self.tickets)
+        } else if id == self.sessions.id() {
+            Some(&self.sessions)
+        } else {
+            None
+        }
+    }
+
+    fn resolve_mut(&mut self, id: ComponentId) -> Option<&mut dyn Component> {
+        if id == self.id {
+            Some(self)
+        } else if id == self.tickets.id() {
+            Some(&mut self.tickets)
+        } else if id == self.sessions.id() {
+            Some(&mut self.sessions)
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,5 +191,40 @@ mod tests {
                 ComponentId::new("dashboard.sessions")
             ]
         );
+    }
+
+    #[test]
+    fn resolve_finds_self_and_both_panes_but_not_an_unknown_id() {
+        let dashboard = Dashboard::new(
+            ComponentId::new("dashboard"),
+            Table::new(
+                ComponentId::new("dashboard.tickets"),
+                vec![Column::new("Title", 1)],
+            ),
+            List::new(ComponentId::new("dashboard.sessions")),
+        );
+        assert!(dashboard.resolve(ComponentId::new("dashboard")).is_some());
+        assert!(dashboard
+            .resolve(ComponentId::new("dashboard.tickets"))
+            .is_some());
+        assert!(dashboard
+            .resolve(ComponentId::new("dashboard.sessions"))
+            .is_some());
+        assert!(dashboard.resolve(ComponentId::new("nope")).is_none());
+    }
+
+    #[test]
+    fn resolve_mut_finds_the_tickets_pane() {
+        let mut dashboard = Dashboard::new(
+            ComponentId::new("dashboard"),
+            Table::new(
+                ComponentId::new("dashboard.tickets"),
+                vec![Column::new("Title", 1)],
+            ),
+            List::new(ComponentId::new("dashboard.sessions")),
+        );
+        assert!(dashboard
+            .resolve_mut(ComponentId::new("dashboard.tickets"))
+            .is_some());
     }
 }
