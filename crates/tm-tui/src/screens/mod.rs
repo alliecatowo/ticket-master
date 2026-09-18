@@ -11,17 +11,17 @@
 //! One file per screen so the implementing agent for this part can work across all of them
 //! without collisions.
 
-/// The home screen: an overview of tickets and active sessions.
-pub mod dashboard;
-/// The ticket dependency graph screen.
-pub mod ticket_graph;
-/// A single ticket's full detail view.
-pub mod ticket_detail;
-/// The diff viewer screen, browsing changed files and their diffs.
-pub mod diff_viewer;
-/// The verification ladder: a ticket's ordered verification steps and their status.
-pub mod verification_ladder;
-/// A single agent/session's live streaming output.
-pub mod session_stream;
 /// The command palette overlay: fuzzy-searchable actions and navigation.
 pub mod command_palette;
+/// The home screen: an overview of tickets and active sessions.
+pub mod dashboard;
+/// The diff viewer screen, browsing changed files and their diffs.
+pub mod diff_viewer;
+/// A single agent/session's live streaming output.
+pub mod session_stream;
+/// A single ticket's full detail view.
+pub mod ticket_detail;
+/// The ticket dependency graph screen.
+pub mod ticket_graph;
+/// The verification ladder: a ticket's ordered verification steps and their status.
+pub mod verification_ladder;

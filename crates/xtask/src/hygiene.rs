@@ -185,9 +185,29 @@ impl TestRegionTracker {
     }
 }
 
+/// Everything before a line's `//` comment, treating `://` as part of a URL rather than the
+/// start of a comment — otherwise `"https://example.com"` truncates to `"https:"` and the URL
+/// checks below stop seeing URLs at all.
+fn strip_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'/' && bytes[i + 1] == b'/' {
+            if i > 0 && bytes[i - 1] == b':' {
+                i += 2;
+                continue;
+            }
+            return &line[..i];
+        }
+        i += 1;
+    }
+    line
+}
+
 /// (c) No network hosts reachable from test code: real client construction
 /// against http(s) URLs, or reads of `ANTHROPIC_API_KEY`. Plain URL string
-/// literals used as test fixture data are fine.
+/// literals used as test fixture data are fine, as are comments mentioning
+/// either.
 pub fn check_network_in_tests(root: &Path) -> Vec<String> {
     let mut violations = Vec::new();
     let crates_dir = root.join("crates");
@@ -209,7 +229,19 @@ pub fn check_network_in_tests(root: &Path) -> Vec<String> {
                         if !tracker.in_test() {
                             continue;
                         }
-                        if line.contains("ANTHROPIC_API_KEY") {
+                        // A comment *about* a key or a URL is not a use of one — several tests
+                        // document that an env var is deliberately unset, which the substring
+                        // match would otherwise read as a violation.
+                        let code = strip_line_comment(line);
+
+                        // Require an actual environment read, not a mention: the point of the
+                        // rule is a test that depends on a real credential being present.
+                        if code.contains("ANTHROPIC_API_KEY")
+                            && (code.contains("var(")
+                                || code.contains("var_os(")
+                                || code.contains("set_var")
+                                || code.contains("env!"))
+                        {
                             violations.push(format!(
                                 "{}:{}: test code reads ANTHROPIC_API_KEY (network dependency)",
                                 path.display(),
@@ -217,11 +249,14 @@ pub fn check_network_in_tests(root: &Path) -> Vec<String> {
                             ));
                             continue;
                         }
-                        let has_url = line.contains("http://") || line.contains("https://");
-                        let has_client = line.contains("reqwest")
-                            || line.contains("Client::new")
-                            || line.contains(".get(")
-                            || line.contains(".post(");
+                        let has_url = code.contains("http://") || code.contains("https://");
+                        // `.get(`/`.post(` alone also match `HashMap::get` and `HeaderMap::get`,
+                        // so require the URL to be the argument rather than merely on the same
+                        // line as some `.get(`.
+                        let has_client = code.contains("reqwest::Client")
+                            || code.contains("Client::new")
+                            || code.contains(".get(\"http")
+                            || code.contains(".post(\"http");
                         if has_url && has_client {
                             violations.push(format!(
                                 "{}:{}: test code constructs a network client against a real host",
@@ -418,6 +453,41 @@ mod tests {
             "#[cfg(test)]\nmod tests {\n    #[test]\n    fn fixture() {\n        let url = \"https://api.example.com/docs\";\n        assert!(url.starts_with(\"https\"));\n    }\n}\n",
         );
         assert!(check_network_in_tests(&root2).is_empty());
+    }
+
+    #[test]
+    fn network_in_tests_ignores_comments_mentioning_a_key_or_url() {
+        // A comment documenting that a var is deliberately unset is not a read of it, and a
+        // comment naming a host is not a request to it.
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-provider/src/lib.rs"),
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn documented() {\n        // ANTHROPIC_API_KEY is not set in the test environment\n        // see https://api.example.com for the wire shape\n        assert!(true);\n    }\n}\n",
+        );
+        assert!(check_network_in_tests(&root).is_empty());
+    }
+
+    #[test]
+    fn network_in_tests_ignores_map_get_on_a_line_holding_a_url() {
+        // `.get(` also matches HashMap/HeaderMap lookups; only a URL passed *to* the call is a
+        // network client construction.
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-provider/src/lib.rs"),
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn headers() {\n        assert_eq!(headers.get(\"HTTP-Referer\").unwrap(), \"https://example.com\");\n    }\n}\n",
+        );
+        assert!(check_network_in_tests(&root).is_empty());
+    }
+
+    #[test]
+    fn network_in_tests_still_flags_a_url_passed_to_get() {
+        // The tightened rule must keep its teeth: a real request is still a violation.
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-provider/src/lib.rs"),
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn hits_network() {\n        client.get(\"https://api.example.com/v1\").send();\n    }\n}\n",
+        );
+        assert_eq!(check_network_in_tests(&root).len(), 1);
     }
 
     #[test]

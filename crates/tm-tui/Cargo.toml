@@ -22,3 +22,4 @@ serde = { workspace = true }
 insta = { workspace = true }
 portable-pty = { workspace = true }
 tempfile = { workspace = true }
+vt100 = { workspace = true }

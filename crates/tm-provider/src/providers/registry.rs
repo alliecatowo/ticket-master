@@ -89,9 +89,9 @@ use std::sync::Arc;
 use tm_types::Clock;
 
 use crate::fabric::{Fabric, Provider};
-use crate::providers::ProviderInfo;
+use crate::providers::{Capabilities, EnvVarRequirement, ProviderInfo};
 use crate::role_config::{RoleCandidate, RoleTable};
-use crate::types::ProviderError;
+use crate::types::{ModelId, ProviderError};
 
 /// Autodetects and constructs this crate's provider fleet from the environment, and wires a
 /// [`RoleTable`] to a ready-to-use [`Fabric`]. See the module docs for the full dispatch table
@@ -99,63 +99,384 @@ use crate::types::ProviderError;
 pub struct Registry;
 
 impl Registry {
-    // IMPL: return one ProviderInfo per entry in the module docs' dispatch table (twenty total:
-    // the nineteen stub structs' own `X::info()` plus one synthesized literal for
-    // `crate::anthropic::AnthropicProvider`, per the module docs).
     /// Every backend this crate knows how to construct, regardless of whether it is currently
     /// configured. Callers wanting only what's usable right now want [`Registry::autodetect`].
     pub fn known_providers() -> Vec<ProviderInfo> {
-        todo!("return the literal ProviderInfo list from the module doc comment's dispatch table")
+        vec![
+            // Predates this module; no `info()` of its own, so synthesized here per the module
+            // docs rather than editing `anthropic.rs`, which this agent does not own.
+            ProviderInfo {
+                id: "anthropic",
+                display_name: "Anthropic",
+                env_vars: &[EnvVarRequirement {
+                    name: "ANTHROPIC_API_KEY",
+                    required: true,
+                    description: "Bearer API key for the Anthropic Messages API",
+                }],
+                capabilities: Capabilities {
+                    completion: true,
+                    embedding: false,
+                    streaming: true,
+                    tool_use: true,
+                    vision: false,
+                },
+            },
+            crate::providers::openai::OpenAiProvider::info(),
+            crate::providers::openrouter::OpenRouterProvider::info(),
+            crate::providers::openrouter::GithubModelsProvider::info(),
+            crate::providers::fast::GroqProvider::info(),
+            crate::providers::fast::CerebrasProvider::info(),
+            crate::providers::frontier::DeepSeekProvider::info(),
+            crate::providers::frontier::MistralProvider::info(),
+            crate::providers::frontier::XaiProvider::info(),
+            crate::providers::serverless::TogetherProvider::info(),
+            crate::providers::serverless::FireworksProvider::info(),
+            crate::providers::serverless::HuggingFaceProvider::info(),
+            crate::providers::gemini::GeminiProvider::info(),
+            crate::providers::local::OllamaProvider::info(),
+            crate::providers::local::LmStudioProvider::info(),
+            crate::providers::local::LlamaCppProvider::info(),
+            crate::providers::cloud::AzureOpenAiProvider::info(),
+            crate::providers::cloud::BedrockProvider::info(),
+            crate::providers::cloud::VertexProvider::info(),
+            crate::providers::compat::DevPassProvider::info(),
+            crate::providers::cloudflare::CloudflareWorkersAiProvider::info(),
+        ]
     }
 
-    // IMPL: `Self::known_providers().into_iter().filter(|info| info.is_configured()).collect()`.
-    // Note the `local` module's caveat (its `info()`s are *always* "configured" by this
-    // definition since every one of their env vars is optional) — callers that care whether a
-    // local backend is actually reachable need `crate::providers::local`'s own doc comment about
-    // probing, not this function.
     /// Every backend [`ProviderInfo::is_configured`] currently as present in the environment.
     pub fn autodetect() -> Vec<ProviderInfo> {
-        todo!("filter Self::known_providers() by ProviderInfo::is_configured(), per the IMPL comment above")
+        Self::known_providers()
+            .into_iter()
+            .filter(|info| info.is_configured())
+            .collect()
     }
 
-    // IMPL: match `candidate.provider.as_str()` against the twenty slugs in the module docs'
-    // dispatch table, calling the matching struct's
-    // `from_env(ModelId::new(candidate.provider.clone(), candidate.model.clone()), clock)`.
-    // An unmatched slug -> `Err(ProviderError::InvalidRequest(format!("unknown provider: {}",
-    // candidate.provider)))`.
     /// Construct one [`Provider`] for `candidate`, dispatching on [`RoleCandidate::provider`].
     pub fn build_provider(
         candidate: &RoleCandidate,
         clock: Arc<dyn Clock>,
     ) -> Result<Arc<dyn Provider>, ProviderError> {
-        let _ = (candidate, clock);
-        todo!("dispatch on candidate.provider to the matching struct's from_env, per the IMPL comment above")
+        let model = || ModelId::new(candidate.provider.clone(), candidate.model.clone());
+        let provider: Arc<dyn Provider> =
+            match candidate.provider.as_str() {
+                "anthropic" => Arc::new(crate::anthropic::AnthropicProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "openai" => Arc::new(crate::providers::openai::OpenAiProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "openrouter" => Arc::new(
+                    crate::providers::openrouter::OpenRouterProvider::from_env(model(), clock)?,
+                ),
+                "github-models" => Arc::new(
+                    crate::providers::openrouter::GithubModelsProvider::from_env(model(), clock)?,
+                ),
+                "groq" => Arc::new(crate::providers::fast::GroqProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "cerebras" => Arc::new(crate::providers::fast::CerebrasProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "deepseek" => Arc::new(crate::providers::frontier::DeepSeekProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "mistral" => Arc::new(crate::providers::frontier::MistralProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "xai" => Arc::new(crate::providers::frontier::XaiProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "together" => Arc::new(crate::providers::serverless::TogetherProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "fireworks" => Arc::new(crate::providers::serverless::FireworksProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "huggingface" => Arc::new(
+                    crate::providers::serverless::HuggingFaceProvider::from_env(model(), clock)?,
+                ),
+                "gemini" => Arc::new(crate::providers::gemini::GeminiProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "ollama" => Arc::new(crate::providers::local::OllamaProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "lm-studio" => Arc::new(crate::providers::local::LmStudioProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "llama-cpp" => Arc::new(crate::providers::local::LlamaCppProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "azure-openai" => Arc::new(crate::providers::cloud::AzureOpenAiProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "bedrock" => Arc::new(crate::providers::cloud::BedrockProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                "vertex" => Arc::new(crate::providers::cloud::VertexProvider::from_env(
+                    model(),
+                    clock,
+                )?),
+                // DevPass reads its own model from `DEVPASS_MODEL`, not `candidate.model` — it has no
+                // per-candidate model parameter, see `compat.rs`'s `DevPassProvider::from_env`.
+                "devpass" => Arc::new(crate::providers::compat::DevPassProvider::from_env(clock)?),
+                "cloudflare" => Arc::new(
+                    crate::providers::cloudflare::CloudflareWorkersAiProvider::from_env(
+                        model(),
+                        clock,
+                    )?,
+                ),
+                other => {
+                    return Err(ProviderError::InvalidRequest(format!(
+                        "unknown provider: {other}"
+                    )))
+                }
+            };
+        Ok(provider)
     }
 
-    // IMPL:
-    // 1. Build an empty `BTreeMap<String, RoleCandidate>` keyed by provider slug, to detect the
-    //    same-slug-different-model collision documented above while walking every role's
-    //    candidates exactly once.
-    // 2. For each `role in tm_types::Role::ALL`, for each `candidate in
-    //    table.candidates_for(*role)`: if the map already has this `candidate.provider` with a
-    //    *different* `model`, return the collision `ProviderError::InvalidRequest` described in
-    //    the module docs; otherwise insert/overwrite (same model re-seen is fine, not a
-    //    collision).
-    // 3. `let fabric = Fabric::new(table.clone(), clock.clone());` (the table itself has already
-    //    been consumed by reference above, and `Fabric::new` takes it by value — clone once here,
-    //    or restructure step 1-2 to borrow `&table` throughout and move it into `Fabric::new`
-    //    last; either is fine, this is not a design decision, just an ordering detail).
-    // 4. For each distinct slug collected in step 1: skip it if
-    //    `!Self::autodetect().iter().any(|info| info.id == slug)` (not configured — not an
-    //    error, see module docs); otherwise `Self::build_provider(&candidate, clock.clone())?`
-    //    and `fabric.register_provider(provider)`.
-    // 5. Return the built `fabric`.
     /// Build a [`Fabric`] for `table`, registering every distinct `provider` slug the table
     /// references that is currently configured, and skipping (not erroring on) any that isn't.
     /// Errors only on the slug-collision case documented above or a `provider` slug this crate
     /// does not recognize at all (surfaced through [`Registry::build_provider`]).
     pub fn build_fabric(table: RoleTable, clock: Arc<dyn Clock>) -> Result<Fabric, ProviderError> {
-        let _ = (table, clock);
-        todo!("walk Role::ALL, detect slug/model collisions, register every configured distinct provider slug, per the IMPL comment above")
+        let mut distinct: std::collections::BTreeMap<String, RoleCandidate> =
+            std::collections::BTreeMap::new();
+        for role in tm_types::Role::ALL {
+            for candidate in table.candidates_for(role) {
+                if let Some(existing) = distinct.get(&candidate.provider) {
+                    if existing.model != candidate.model {
+                        return Err(ProviderError::InvalidRequest(format!(
+                            "provider {} is routed to two different models ({} and {})",
+                            candidate.provider, existing.model, candidate.model
+                        )));
+                    }
+                } else {
+                    distinct.insert(candidate.provider.clone(), candidate.clone());
+                }
+            }
+        }
+
+        let fabric = Fabric::new(table, clock.clone());
+
+        let configured = Self::autodetect();
+        for (slug, candidate) in &distinct {
+            if !configured.iter().any(|info| info.id == slug) {
+                continue;
+            }
+            let provider = Self::build_provider(candidate, clock.clone())?;
+            fabric.register_provider(provider);
+        }
+
+        Ok(fabric)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tm_types::clock::FixedClock;
+
+    /// Every `known_providers()` entry's `id` should be unique — a duplicate would mean two
+    /// backends silently shadow each other in [`Registry::build_provider`]'s dispatch.
+    #[test]
+    fn known_provider_ids_are_unique() {
+        let ids: Vec<&str> = Registry::known_providers().iter().map(|i| i.id).collect();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(
+            ids.len(),
+            sorted.len(),
+            "duplicate provider id in known_providers(): {ids:?}"
+        );
+    }
+
+    /// [`Registry::build_provider`] must recognize every id [`Registry::known_providers`]
+    /// advertises, or autodetection and dispatch would silently disagree about the fleet.
+    #[test]
+    fn every_known_provider_id_is_dispatchable() {
+        // Anthropic requires ANTHROPIC_API_KEY; every other backend requires at least one env
+        // var too. None are set in the test environment, so every dispatch should fail with
+        // AuthFailed (proving the slug matched a real arm) rather than InvalidRequest("unknown
+        // provider: ...") (which would mean the dispatch table is missing an id).
+        for info in Registry::known_providers() {
+            // Skip devpass and the local backends here: local backends have no required env
+            // vars at all (see `providers::local`'s own doc comment) so `from_env` can succeed
+            // with defaults, and devpass's dispatch match arm ignores `candidate.model`
+            // entirely — neither breaks the "arm exists" assertion this test wants, so excluding
+            // them just avoids asserting on a shape this test isn't about.
+            if matches!(info.id, "devpass" | "ollama" | "lm-studio" | "llama-cpp") {
+                continue;
+            }
+            let candidate = RoleCandidate {
+                provider: info.id.to_string(),
+                model: "test-model".to_string(),
+                max_concurrency: 1,
+                degraded_ok: false,
+                price: None,
+                limits: crate::role_config::Limits::unlimited(),
+            };
+            let clock = Arc::new(FixedClock::epoch());
+            let err = Registry::build_provider(&candidate, clock)
+                .err()
+                .unwrap_or_else(|| panic!("{} unexpectedly built with no credentials", info.id));
+            assert!(
+                !matches!(err, ProviderError::InvalidRequest(ref m) if m.starts_with("unknown provider")),
+                "{} is missing from Registry::build_provider's dispatch table: {err}",
+                info.id
+            );
+        }
+    }
+
+    /// An id `build_provider` has never heard of is a config error naming the slug, not a panic.
+    #[test]
+    fn build_provider_rejects_unknown_slug() {
+        let candidate = RoleCandidate {
+            provider: "not-a-real-provider".to_string(),
+            model: "whatever".to_string(),
+            max_concurrency: 1,
+            degraded_ok: false,
+            price: None,
+            limits: crate::role_config::Limits::unlimited(),
+        };
+        let clock = Arc::new(FixedClock::epoch());
+        let err = match Registry::build_provider(&candidate, clock) {
+            Ok(_) => panic!("unknown provider slug unexpectedly built"),
+            Err(e) => e,
+        };
+        match err {
+            ProviderError::InvalidRequest(msg) => assert!(msg.contains("not-a-real-provider")),
+            other => panic!("expected InvalidRequest naming the unknown slug, got {other}"),
+        }
+    }
+
+    /// `autodetect()` only ever returns backends `known_providers()` also lists, and never more
+    /// than it.
+    #[test]
+    fn autodetect_is_a_subset_of_known_providers() {
+        let known: Vec<&str> = Registry::known_providers().iter().map(|i| i.id).collect();
+        for info in Registry::autodetect() {
+            assert!(known.contains(&info.id));
+        }
+    }
+
+    /// Two roles routed to the same provider slug under two different models must be refused,
+    /// per the module docs' `register_provider` single-model-per-id gap, rather than silently
+    /// misrouting one role's traffic onto the other role's model.
+    #[test]
+    fn build_fabric_rejects_same_provider_different_model_collision() {
+        let toml = r#"
+            [vision.frontier]
+            candidates = [
+                { provider = "openai", model = "gpt-4o", max_concurrency = 1 },
+            ]
+
+            [planner.frontier]
+            candidates = [
+                { provider = "openai", model = "gpt-4o-mini", max_concurrency = 1 },
+            ]
+
+            [architect.frontier]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [coder.deep]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [coder.fast]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [explorer.cheap]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [reviewer.semantic]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [auditor.semantic]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [synthesizer.long_context]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [summarizer.cheap]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [embedder]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [computer.use]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+        "#;
+        let table = RoleTable::parse(toml).expect("valid providers.toml");
+        let clock = Arc::new(FixedClock::epoch());
+        let err = match Registry::build_fabric(table, clock) {
+            Ok(_) => panic!("provider/model collision unexpectedly built a fabric"),
+            Err(e) => e,
+        };
+        match err {
+            ProviderError::InvalidRequest(msg) => {
+                assert!(msg.contains("gpt-4o"));
+                assert!(msg.contains("gpt-4o-mini"));
+            }
+            other => panic!("expected InvalidRequest naming the colliding models, got {other}"),
+        }
+    }
+
+    /// A table with no collisions and no env vars configured should build a `Fabric` with no
+    /// providers registered rather than erroring — every candidate's backend is simply skipped.
+    ///
+    /// Deliberately does *not* use [`RoleTable::default_table`]: that table routes frontier
+    /// roles through `claude-opus-4-1` and non-frontier roles through `claude-sonnet-5`/
+    /// `claude-haiku-3.5`, all under the single `"anthropic"` slug — exactly the same-slug,
+    /// different-model shape [`build_fabric_rejects_same_provider_different_model_collision`]
+    /// covers, and exactly the gap the module docs call out as real, not hypothetical. This test
+    /// wants a table with *no* collision, to isolate the "unconfigured backend is skipped"
+    /// behavior from that separately-tested collision behavior.
+    #[test]
+    fn build_fabric_skips_unconfigured_providers_without_erroring() {
+        let toml = r#"
+            [vision.frontier]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [planner.frontier]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [architect.frontier]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [coder.deep]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [coder.fast]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [explorer.cheap]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [reviewer.semantic]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [auditor.semantic]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [synthesizer.long_context]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [summarizer.cheap]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [embedder]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [computer.use]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+        "#;
+        let table = RoleTable::parse(toml).expect("valid providers.toml");
+        let clock = Arc::new(FixedClock::epoch());
+        // ANTHROPIC_API_KEY is not set in the test environment, so this should succeed with
+        // nothing registered rather than erroring (autodetection said "not configured", which is
+        // not a config error).
+        let fabric = Registry::build_fabric(table, clock);
+        assert!(
+            fabric.is_ok(),
+            "an unconfigured provider must be skipped, not error: {:?}",
+            fabric.err()
+        );
     }
 }

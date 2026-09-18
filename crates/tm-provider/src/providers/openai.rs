@@ -36,8 +36,8 @@ use async_trait::async_trait;
 use tm_types::Clock;
 
 use crate::fabric::Provider;
-use crate::providers::compat::CompatProvider;
-use crate::providers::ProviderInfo;
+use crate::providers::compat::{CompatConfig, CompatProvider};
+use crate::providers::{Capabilities, EnvVarRequirement, ProviderInfo};
 use crate::types::{
     Completion, CompletionRequest, EmbedRequest, Embeddings, ModelId, ProviderError,
 };
@@ -49,55 +49,74 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    // IMPL:
-    // 1. Read OPENAI_API_KEY; missing -> `Err(crate::providers::missing_env_var("OPENAI_API_KEY"))`.
-    // 2. Read OPENAI_BASE_URL, defaulting to "https://api.openai.com/v1".
-    // 3. Build `compat::CompatConfig::new("openai", base_url, model.model)`
-    //    `.with_api_key(key)` (default AuthStyle::Bearer is correct — leave as-is).
-    // 4. If OPENAI_ORGANIZATION is set, `.with_extra_header("OpenAI-Organization", value)`;
-    //    likewise OPENAI_PROJECT -> `.with_extra_header("OpenAI-Project", value)`.
-    // 5. `CompatProvider::new(config, clock)` and wrap it in `OpenAiProvider { compat }`.
     /// Build a provider for `model`, reading configuration from the environment.
     pub fn from_env(model: ModelId, clock: Arc<dyn Clock>) -> Result<Self, ProviderError> {
-        let _ = (model, clock);
-        todo!("read OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_ORGANIZATION / OPENAI_PROJECT and build a CompatProvider, per the IMPL comment above")
+        let api_key = std::env::var("OPENAI_API_KEY")
+            .map_err(|_| crate::providers::missing_env_var("OPENAI_API_KEY"))?;
+        let base_url = std::env::var("OPENAI_BASE_URL")
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+
+        let mut config = CompatConfig::new("openai", base_url, model.model).with_api_key(api_key);
+        if let Ok(org) = std::env::var("OPENAI_ORGANIZATION") {
+            config = config.with_extra_header("OpenAI-Organization", org);
+        }
+        if let Ok(project) = std::env::var("OPENAI_PROJECT") {
+            config = config.with_extra_header("OpenAI-Project", project);
+        }
+
+        let compat = CompatProvider::new(config, clock)?;
+        Ok(OpenAiProvider { compat })
     }
 
-    // IMPL: return the literal ProviderInfo below (already fully specified — this is metadata,
-    // not provider logic, so there is no remaining design decision):
-    // ProviderInfo {
-    //     id: "openai",
-    //     display_name: "OpenAI",
-    //     env_vars: &[
-    //         EnvVarRequirement { name: "OPENAI_API_KEY", required: true, description: "Bearer API key" },
-    //         EnvVarRequirement { name: "OPENAI_BASE_URL", required: false, description: "Override the default https://api.openai.com/v1" },
-    //         EnvVarRequirement { name: "OPENAI_ORGANIZATION", required: false, description: "Sent as the OpenAI-Organization header" },
-    //         EnvVarRequirement { name: "OPENAI_PROJECT", required: false, description: "Sent as the OpenAI-Project header" },
-    //     ],
-    //     capabilities: Capabilities { completion: true, embedding: true, streaming: true, tool_use: true, vision: false },
-    // }
     /// Static capability/env-var metadata; see `providers/mod.rs` module docs for the contract.
     pub fn info() -> ProviderInfo {
-        todo!("return the literal ProviderInfo from the IMPL comment above")
+        ProviderInfo {
+            id: "openai",
+            display_name: "OpenAI",
+            env_vars: &[
+                EnvVarRequirement {
+                    name: "OPENAI_API_KEY",
+                    required: true,
+                    description: "Bearer API key",
+                },
+                EnvVarRequirement {
+                    name: "OPENAI_BASE_URL",
+                    required: false,
+                    description: "Override the default https://api.openai.com/v1",
+                },
+                EnvVarRequirement {
+                    name: "OPENAI_ORGANIZATION",
+                    required: false,
+                    description: "Sent as the OpenAI-Organization header",
+                },
+                EnvVarRequirement {
+                    name: "OPENAI_PROJECT",
+                    required: false,
+                    description: "Sent as the OpenAI-Project header",
+                },
+            ],
+            capabilities: Capabilities {
+                completion: true,
+                embedding: true,
+                streaming: true,
+                tool_use: true,
+                vision: false,
+            },
+        }
     }
 }
 
 #[async_trait]
 impl Provider for OpenAiProvider {
-    // IMPL: `self.compat.id()`.
     fn id(&self) -> &str {
-        todo!("delegate to self.compat.id()")
+        self.compat.id()
     }
 
-    // IMPL: `self.compat.complete(req).await`.
     async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
-        let _ = req;
-        todo!("delegate to self.compat.complete(req).await")
+        self.compat.complete(req).await
     }
 
-    // IMPL: `self.compat.embed(req).await`.
     async fn embed(&self, req: EmbedRequest) -> Result<Embeddings, ProviderError> {
-        let _ = req;
-        todo!("delegate to self.compat.embed(req).await")
+        self.compat.embed(req).await
     }
 }

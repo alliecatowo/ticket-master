@@ -22,12 +22,10 @@
 //!   [`event::Propagation`], the bubbling result a [`component::Component`] returns.
 //! - [`component`] — the [`component::Component`] trait, [`component::ComponentId`], and
 //!   [`component::FrameContext`] (theme, capabilities, injected clock, focus state). This file
-//!   also holds [`component::FocusTree`], which is a stub: the tree/focus/bubbling *machinery*
-//!   built on top of the trait, left for parallel implementation like the modules below.
+//!   also holds [`component::FocusTree`], the tree/focus/bubbling *machinery* built on top of
+//!   the trait.
 //!
-//! The remaining modules are stubs — type definitions and method signatures with `// IMPL:`
-//! comments precise enough to implement against, `todo!()` bodies, one part per implementing
-//! agent:
+//! The remaining modules:
 //!
 //! - [`runtime`] — terminal lifecycle, the event loop, and the signal handling
 //!   (`SIGTERM`/`SIGHUP` restore, `SIGTSTP`/`SIGCONT` suspend/resume) ratatui's panic hook does

@@ -4,9 +4,36 @@ use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 
 use crate::component::{Component, ComponentId, FrameContext};
-use crate::event::{Event, KeyBinding, Propagation};
-use crate::widgets_data::table::Table;
+use crate::event::{Event, InputEvent, KeyBinding, Propagation};
+use crate::theme::split_horizontal;
 use crate::widgets_data::list::List;
+use crate::widgets_data::table::Table;
+
+/// Draw `heading` in the top row of `area`, styled `accent` when `active` (this pane holds
+/// internal focus) or `muted` otherwise, and return the remaining area below it for the pane's
+/// own widget to render into.
+fn heading(
+    area: Rect,
+    buf: &mut Buffer,
+    ctx: &FrameContext<'_>,
+    heading: &str,
+    active: bool,
+) -> Rect {
+    if area.height == 0 {
+        return area;
+    }
+    let style = if active {
+        ctx.theme.accent
+    } else {
+        ctx.theme.muted
+    };
+    buf.set_stringn(area.x, area.y, heading, area.width as usize, style);
+    Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..area
+    }
+}
 
 /// Which of the dashboard's two panes currently has internal focus.
 ///
@@ -45,7 +72,12 @@ impl Dashboard {
     /// A dashboard over the given ticket table and session list, starting with the ticket pane
     /// active.
     pub fn new(id: ComponentId, tickets: Table, sessions: List) -> Self {
-        Dashboard { id, tickets, sessions, active: Pane::Tickets }
+        Dashboard {
+            id,
+            tickets,
+            sessions,
+            active: Pane::Tickets,
+        }
     }
 }
 
@@ -55,13 +87,44 @@ impl Component for Dashboard {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &FrameContext<'_>) {
-        let _ = (area, buf, ctx);
-        todo!("split into ticket/session panes and render each per the IMPL note above")
+        let slots = split_horizontal(area, &[("tickets", 3), ("sessions", 2)]);
+
+        let tickets_area = heading(
+            slots.get("tickets"),
+            buf,
+            ctx,
+            "Tickets",
+            self.active == Pane::Tickets,
+        );
+        self.tickets.render(tickets_area, buf, ctx);
+
+        let sessions_area = heading(
+            slots.get("sessions"),
+            buf,
+            ctx,
+            "Sessions",
+            self.active == Pane::Sessions,
+        );
+        self.sessions.render(sessions_area, buf, ctx);
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &FrameContext<'_>) -> Propagation {
-        let _ = (event, ctx);
-        todo!("switch panes on Tab or forward to the active pane per the IMPL note above")
+        if ctx.focus.is_focused(self.id) {
+            if let Event::Input(InputEvent::Key(key)) = event {
+                if key.code == crossterm::event::KeyCode::Tab {
+                    self.active = match self.active {
+                        Pane::Tickets => Pane::Sessions,
+                        Pane::Sessions => Pane::Tickets,
+                    };
+                    return Propagation::Consumed;
+                }
+            }
+        }
+
+        match self.active {
+            Pane::Tickets => self.tickets.handle_event(event, ctx),
+            Pane::Sessions => self.sessions.handle_event(event, ctx),
+        }
     }
 
     fn keybindings(&self, ctx: &FrameContext<'_>) -> Vec<KeyBinding> {
@@ -85,12 +148,18 @@ mod tests {
     fn dashboard_reports_both_panes_as_focusable() {
         let dashboard = Dashboard::new(
             ComponentId::new("dashboard"),
-            Table::new(ComponentId::new("dashboard.tickets"), vec![Column::new("Title", 1)]),
+            Table::new(
+                ComponentId::new("dashboard.tickets"),
+                vec![Column::new("Title", 1)],
+            ),
             List::new(ComponentId::new("dashboard.sessions")),
         );
         assert_eq!(
             dashboard.focusable_children(),
-            vec![ComponentId::new("dashboard.tickets"), ComponentId::new("dashboard.sessions")]
+            vec![
+                ComponentId::new("dashboard.tickets"),
+                ComponentId::new("dashboard.sessions")
+            ]
         );
     }
 }

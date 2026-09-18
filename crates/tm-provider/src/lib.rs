@@ -27,6 +27,7 @@ pub mod types;
 pub use anthropic::AnthropicProvider;
 pub use fabric::{Fabric, Provider, ProviderRecord};
 pub use mock::MockProvider;
+pub use providers::registry::Registry;
 pub use providers::{Capabilities, EnvVarRequirement, ProviderInfo};
 pub use role_config::{RoleCandidate, RoleConfigError, RoleTable};
 pub use route::{route, Need, RouteDecision};

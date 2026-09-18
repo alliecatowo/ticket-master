@@ -6,6 +6,7 @@ use ratatui_core::layout::Rect;
 
 use crate::component::{Component, ComponentId, FrameContext};
 use crate::event::{Event, KeyBinding, Propagation};
+use crate::theme::split_horizontal;
 use crate::widgets_viz::graph::Graph;
 
 /// The ticket graph screen: [`Graph`] on the left, a plain-text detail panel on the right for
@@ -40,8 +41,24 @@ impl Component for TicketGraphScreen {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &FrameContext<'_>) {
-        let _ = (area, buf, ctx);
-        todo!("split into graph/detail panes and render each per the IMPL note above")
+        let slots = split_horizontal(area, &[("graph", 3), ("detail", 2)]);
+
+        self.graph.render(slots.get("graph"), buf, ctx);
+
+        let detail_area = slots.get("detail");
+        if detail_area.height > 0 {
+            let summary = match self.graph.selected() {
+                Some(id) => format!("Selected: {}", id.as_str()),
+                None => "No node selected".to_string(),
+            };
+            buf.set_stringn(
+                detail_area.x,
+                detail_area.y,
+                summary,
+                detail_area.width as usize,
+                ctx.theme.foreground,
+            );
+        }
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &FrameContext<'_>) -> Propagation {
@@ -67,6 +84,9 @@ mod tests {
             ComponentId::new("ticket_graph"),
             Graph::new(ComponentId::new("ticket_graph.graph")),
         );
-        assert_eq!(screen.focusable_children(), vec![ComponentId::new("ticket_graph.graph")]);
+        assert_eq!(
+            screen.focusable_children(),
+            vec![ComponentId::new("ticket_graph.graph")]
+        );
     }
 }

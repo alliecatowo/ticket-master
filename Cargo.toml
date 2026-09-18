@@ -67,3 +67,7 @@ crossterm = { version = "0.29", features = ["event-stream", "bracketed-paste"] }
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
 portable-pty = "0.9"
+# tm-tui test harness only: portable-pty hands back raw bytes, and PtyHarness::screen() needs a
+# rendered grid. A hand-rolled subset parser would make the SIGTERM/SIGHUP/SIGTSTP tests it gates
+# flaky in exactly the cases they exist to catch, so parse properly (D-002).
+vt100 = "0.15"

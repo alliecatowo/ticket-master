@@ -5,9 +5,9 @@
 //! file per widget so the implementing agent for this part can work across all three without
 //! collisions.
 
-/// A navigable graph of tickets and their dependency edges.
-pub mod graph;
 /// A unified diff viewer with syntax-aware line styling.
 pub mod diff;
+/// A navigable graph of tickets and their dependency edges.
+pub mod graph;
 /// A live, auto-scrolling pane for an agent/session's streaming output.
 pub mod stream;

@@ -7,13 +7,14 @@
 //! crate root docs and `event.rs`). Its shape is settled; do not change these signatures without
 //! updating every implementor.
 //!
-//! The **tree machinery** below it — [`FocusTree`] — is a stub, todo!()-bodied, and is one of the
-//! nine parts scaffolded for parallel implementation. It is the part of ratatui's missing
-//! "retained widget tree, focus management, event bubbling and hit testing" (D-002) that this
-//! crate exists to build.
+//! The **tree machinery** below it — [`FocusTree`] — is the part of ratatui's missing "retained
+//! widget tree, focus management, event bubbling and hit testing" (D-002) that this crate exists
+//! to build.
+
+use std::collections::HashMap;
 
 use ratatui_core::buffer::Buffer;
-use ratatui_core::layout::Rect;
+use ratatui_core::layout::{Position, Rect};
 use tm_types::Clock;
 
 use crate::caps::Capabilities;
@@ -162,35 +163,67 @@ pub trait Component: std::fmt::Debug {
     }
 }
 
+/// A [`Component`] that owns focusable children and can hand one back by id.
+///
+/// `Component` alone cannot support this: it is not `Any` (no downcasting), and
+/// `focusable_children` returns only ids, never a reference. Any component whose
+/// `focusable_children()` is non-empty implements `ComponentParent` so [`FocusTree`] can resolve
+/// those ids back to something it can call `render`/`handle_event`/`keybindings` on; a pure leaf
+/// never needs to.
+///
+/// `resolve`/`resolve_mut` are defined over the *whole* subtree rooted at `self`, not just
+/// immediate children — including `self` when `id == self.id()`. That is what lets `FocusTree`
+/// resolve any id in one call from the tree root, rather than needing `ComponentParent` at every
+/// intermediate level (which the type system cannot express without downcasting: a child handed
+/// back as `&dyn Component` has no way to be recognised as also implementing `ComponentParent`).
+/// A container's own implementation typically checks `id == self.id()`, then tries each child in
+/// turn — the same per-child match arms `focusable_children()` already needs.
+pub trait ComponentParent: Component {
+    /// Resolve `id` to the component that owns it, if `id` names `self` or a descendant.
+    fn resolve(&self, id: ComponentId) -> Option<&dyn Component>;
+
+    /// Resolve `id` to the component that owns it, mutably.
+    fn resolve_mut(&mut self, id: ComponentId) -> Option<&mut dyn Component>;
+}
+
 /// Computes and owns tab order and focus transitions across a [`Component`] tree, and dispatches
 /// an [`Event`] by bubbling it from the focused leaf up to the root.
 ///
-/// This is the stub half of this file (see the module docs): the contract above is finished, but
-/// the tree walk itself is todo!()-bodied for the implementing agent.
+/// This is the stub half of this file (see the module docs): the contract above is finished, and
+/// this is the tree walk built on top of it, plus [`ComponentParent`], the resolver trait the
+/// struct docs on the previous version of this stub called for.
 ///
-/// IMPL notes for the whole type:
-/// - Tab order is computed by a pre-order walk calling `focusable_children()` at each level;
-///   there is no reflection/downcasting available (`Component` is not `Any`), so `FocusTree` must
-///   ask each component for its children by id and separately ask the tree owner (whoever holds
-///   the actual child components, e.g. a screen's struct fields) to resolve an id to a
-///   `&dyn Component` / `&mut dyn Component`. The cleanest shape is likely a second trait,
-///   `ComponentParent`, that screens implement to hand back children by id — add it here if so;
-///   do not smuggle a lookup table into this struct that duplicates state the screen already
-///   owns.
-/// - `dispatch` bubbles: start at `self.focused()`, call `handle_event`, and on `Propagate` move
-///   to that component's parent (which requires the walk to have recorded parent links, not just
-///   a flat focus order) until `Consumed` or the root is reached and still propagates (meaning no
-///   one handled it — the runtime may have a final fallback, e.g. a global quit key).
-/// - Mouse events additionally need hit testing: given a `(column, row)` and the `Rect` each
-///   component rendered into last frame, find the deepest component containing the point. This
-///   requires `FocusTree` to remember last-rendered rects per id (populate this from `render`,
-///   e.g. by having `Component::render` take a `&mut FocusTree` to report its own `area` — that
-///   is a contract change and must be coordinated rather than done unilaterally, since it would
-///   touch the frozen `Component::render` signature above).
+/// - Tab order (`order`) is a pre-order walk of `focusable_children()` starting under the root
+///   (the root itself is never tabbable — only what it exposes as focusable is). `parents` records
+///   each visited id's immediate parent (the root's id for top-level children), which `keybindings`
+///   uses to climb back toward the root. `spans` records each visited id's contiguous `order` range
+///   (start, end) covering itself and every descendant, which is what makes `push_trap` an O(1)
+///   slice rather than a second walk: a pre-order traversal always lays a subtree out as one
+///   contiguous run.
+/// - `dispatch` does **not** walk the tree itself. A container `Component` already owns its
+///   children as typed struct fields (the same reason `render` recurses per the trait docs above,
+///   not through a generic id lookup), so bubbling is ordinary recursive function calls: a
+///   container's own `handle_event` checks `ctx.focus` against each child's id, offers the event
+///   to whichever one is focused first, and only runs its own handling once that returns
+///   `Propagate` (see `screens::Dashboard`'s `handle_event` for the pattern). `FocusTree`'s part is
+///   supplying the `ctx.focus` snapshot (`state()`) those checks read; `dispatch` itself is a thin
+///   `root.handle_event(event, ctx)`. This is also why `dispatch` takes `&mut dyn Component`, not
+///   `&mut dyn ComponentParent` like `rebuild`/`keybindings` — it never needs to resolve an id back
+///   to a component, only the root the runtime already holds directly.
+/// - Mouse hit testing is separate from focus: `record_rect` remembers where each component
+///   rendered this frame (last call for a point wins, so an overlay recorded after its backdrop is
+///   found first) and `hit_test` answers "what's at (column, row)". Wiring `record_rect` into an
+///   actual render pass needs `Component::render` to report its own area, which is a frozen-
+///   contract change coordinated elsewhere (see the crate root docs) — this type only owns the
+///   bookkeeping once that call happens.
 #[derive(Debug, Default)]
 pub struct FocusTree {
     order: Vec<ComponentId>,
     current: usize,
+    parents: HashMap<ComponentId, ComponentId>,
+    spans: HashMap<ComponentId, (usize, usize)>,
+    trap_stack: Vec<(usize, usize)>,
+    rects: Vec<(ComponentId, Rect)>,
 }
 
 impl FocusTree {
@@ -199,13 +232,53 @@ impl FocusTree {
         FocusTree::default()
     }
 
-    /// Recompute tab order from `root`'s `focusable_children()`, recursively.
-    ///
-    /// IMPL: pre-order walk; see the struct-level note about resolving a child id back to a
-    /// component to recurse into.
-    pub fn rebuild(&mut self, root: &dyn Component) {
-        let _ = root;
-        todo!("recompute `self.order` by walking `root.focusable_children()` per the struct docs")
+    /// Recompute tab order, parent links, and subtree spans from `root`'s `focusable_children()`,
+    /// recursively. Drops any active focus traps (`push_trap`): a rebuilt tree may not contain the
+    /// same ids at the same spans, so a stale trap range could silently confine focus to the wrong
+    /// components.
+    pub fn rebuild(&mut self, root: &dyn ComponentParent) {
+        self.order.clear();
+        self.parents.clear();
+        self.spans.clear();
+        self.trap_stack.clear();
+        self.current = 0;
+        for child in root.focusable_children() {
+            Self::visit(
+                root,
+                child,
+                root.id(),
+                &mut self.order,
+                &mut self.parents,
+                &mut self.spans,
+            );
+        }
+    }
+
+    /// Pre-order visit of `id` and its descendants, per the struct-level docs.
+    fn visit(
+        root: &dyn ComponentParent,
+        id: ComponentId,
+        parent: ComponentId,
+        order: &mut Vec<ComponentId>,
+        parents: &mut HashMap<ComponentId, ComponentId>,
+        spans: &mut HashMap<ComponentId, (usize, usize)>,
+    ) {
+        let start = order.len();
+        order.push(id);
+        parents.insert(id, parent);
+
+        let children = if id == root.id() {
+            root.focusable_children()
+        } else {
+            root.resolve(id)
+                .map(Component::focusable_children)
+                .unwrap_or_default()
+        };
+        for child in children {
+            Self::visit(root, child, id, order, parents, spans);
+        }
+
+        spans.insert(id, (start, order.len()));
     }
 
     /// The currently focused component, if the tree has any focusable components.
@@ -218,24 +291,133 @@ impl FocusTree {
         FocusState::new(self.focused())
     }
 
-    /// Move focus to the next component in tab order, wrapping around.
+    /// The `order` range tab traversal is currently confined to: the innermost active trap
+    /// (`push_trap`), or the whole tree when none is active.
+    fn active_range(&self) -> (usize, usize) {
+        self.trap_stack
+            .last()
+            .copied()
+            .unwrap_or((0, self.order.len()))
+    }
+
+    /// Move focus to the next component in tab order, wrapping around within the innermost
+    /// active focus trap (`push_trap`), or the whole tree when there is none.
     pub fn focus_next(&mut self) {
-        if !self.order.is_empty() {
-            self.current = (self.current + 1) % self.order.len();
+        let (start, end) = self.active_range();
+        if end > start {
+            let len = end - start;
+            let offset = self.current.saturating_sub(start);
+            self.current = start + (offset + 1) % len;
         }
     }
 
-    /// Move focus to the previous component in tab order, wrapping around.
+    /// Move focus to the previous component in tab order, wrapping around within the innermost
+    /// active focus trap (`push_trap`), or the whole tree when there is none.
     pub fn focus_prev(&mut self) {
-        if !self.order.is_empty() {
-            self.current = (self.current + self.order.len() - 1) % self.order.len();
+        let (start, end) = self.active_range();
+        if end > start {
+            let len = end - start;
+            let offset = self.current.saturating_sub(start);
+            self.current = start + (offset + len - 1) % len;
         }
     }
 
-    /// Bubble `event` from the focused leaf up to the root, per the struct-level IMPL note.
-    pub fn dispatch(&mut self, root: &mut dyn Component, event: &Event, ctx: &FrameContext<'_>) -> Propagation {
-        let _ = (root, event, ctx);
-        todo!("bubble `event` from the focused leaf to the root per the struct docs")
+    /// Trap tab traversal inside `modal_id`'s own subtree (as recorded by the last `rebuild`)
+    /// until the matching `pop_trap`, and move focus to the first component inside it — the
+    /// standard "open a modal, focus lands inside it, tab cannot escape it" behaviour.
+    ///
+    /// `modal_id` must have been visited by `rebuild` (reachable via some ancestor's
+    /// `focusable_children()`, directly or transitively) for the trap to confine anything; an
+    /// unknown id traps focus into an empty range, making `focus_next`/`focus_prev` no-ops until
+    /// `pop_trap` — the safe failure mode for a modal that turned out not to be focusable itself.
+    pub fn push_trap(&mut self, modal_id: ComponentId) {
+        let span = self.spans.get(&modal_id).copied().unwrap_or((0, 0));
+        self.trap_stack.push(span);
+        if span.0 < span.1 {
+            self.current = span.0;
+        }
+    }
+
+    /// Release the innermost focus trap pushed by `push_trap`, restoring the enclosing scope's
+    /// tab order (the whole tree, or the next trap out for nested modals).
+    pub fn pop_trap(&mut self) {
+        self.trap_stack.pop();
+    }
+
+    /// Deliver `event` to `root`, letting it bubble from whichever component `ctx.focus` names as
+    /// focused up to `root` itself, per the struct-level docs: `root`'s own `handle_event` (and,
+    /// transitively, each container it forwards to) is where the actual walk and the
+    /// consume-or-propagate decision at each level happen. `ctx.focus` should come from
+    /// `self.state()` for this to route anywhere below the root.
+    pub fn dispatch(
+        &mut self,
+        root: &mut dyn Component,
+        event: &Event,
+        ctx: &FrameContext<'_>,
+    ) -> Propagation {
+        root.handle_event(event, ctx)
+    }
+
+    /// The keybindings visible from the currently focused component up to the root, most specific
+    /// first — the list a help overlay or command palette shows. When two components in the chain
+    /// declare the same chord, the more specific (closer to focus) one wins and the root's is
+    /// dropped, which is what "per-component override" means in practice: a focused text input
+    /// binding "q" shadows a screen-level "q" quit binding without either side having to know
+    /// about the other.
+    pub fn keybindings(
+        &self,
+        root: &dyn ComponentParent,
+        ctx: &FrameContext<'_>,
+    ) -> Vec<KeyBinding> {
+        let root_id = root.id();
+        let mut seen = std::collections::HashSet::new();
+        let mut out = Vec::new();
+        let mut current = self.focused();
+
+        loop {
+            let id = current.unwrap_or(root_id);
+            let bindings = if id == root_id {
+                root.keybindings(ctx)
+            } else if let Some(component) = root.resolve(id) {
+                component.keybindings(ctx)
+            } else {
+                Vec::new()
+            };
+            for binding in bindings {
+                if seen.insert(binding.chord) {
+                    out.push(binding);
+                }
+            }
+            if id == root_id {
+                return out;
+            }
+            current = Some(self.parents.get(&id).copied().unwrap_or(root_id));
+        }
+    }
+
+    /// Forget every rect recorded by `record_rect`. Call once per frame before re-rendering: a
+    /// component that stopped rendering (collapsed panel, closed modal) must stop being hit-
+    /// testable, and a resize changes every rect anyway.
+    pub fn begin_frame(&mut self) {
+        self.rects.clear();
+    }
+
+    /// Record that `id` rendered into `rect` this frame. Call order is z-order: a later call
+    /// (e.g. an overlay drawn after its backdrop) is preferred by `hit_test` on overlap.
+    pub fn record_rect(&mut self, id: ComponentId, rect: Rect) {
+        self.rects.push((id, rect));
+    }
+
+    /// The topmost component whose last-recorded rect contains `(column, row)`, if any — how a
+    /// click, drag, or scroll routes to a component: hit-test first, then feed the same point's
+    /// owner to `dispatch` (typically after moving focus there for a click).
+    pub fn hit_test(&self, column: u16, row: u16) -> Option<ComponentId> {
+        let point = Position { x: column, y: row };
+        self.rects
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains(point))
+            .map(|(id, _)| *id)
     }
 }
 
@@ -243,11 +425,15 @@ impl FocusTree {
 mod tests {
     use super::*;
     use crate::caps::{Capabilities, ColorSupport, UnicodeSupport};
+    use crate::event::{InputEvent, KeyChord};
     use crate::theme::Theme;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use std::cell::Cell;
     use tm_types::FixedClock;
 
     const CHILD_A: ComponentId = ComponentId::new("test.child_a");
     const CHILD_B: ComponentId = ComponentId::new("test.child_b");
+    const ROOT: ComponentId = ComponentId::new("test.root");
 
     #[derive(Debug)]
     struct Leaf {
@@ -262,12 +448,151 @@ mod tests {
         fn render(&self, _area: Rect, _buf: &mut Buffer, _ctx: &FrameContext<'_>) {}
     }
 
+    /// A leaf that records how many times it was offered an event and either consumes or
+    /// propagates every one, for asserting on `FocusTree::dispatch`'s bubbling order.
+    #[derive(Debug)]
+    struct RecordingLeaf {
+        id: ComponentId,
+        consume: bool,
+        calls: Cell<u32>,
+        bindings: Vec<KeyBinding>,
+    }
+
+    impl RecordingLeaf {
+        fn new(id: ComponentId, consume: bool) -> Self {
+            RecordingLeaf {
+                id,
+                consume,
+                calls: Cell::new(0),
+                bindings: Vec::new(),
+            }
+        }
+    }
+
+    impl Component for RecordingLeaf {
+        fn id(&self) -> ComponentId {
+            self.id
+        }
+
+        fn render(&self, _area: Rect, _buf: &mut Buffer, _ctx: &FrameContext<'_>) {}
+
+        fn handle_event(&mut self, _event: &Event, _ctx: &FrameContext<'_>) -> Propagation {
+            self.calls.set(self.calls.get() + 1);
+            if self.consume {
+                Propagation::Consumed
+            } else {
+                Propagation::Propagate
+            }
+        }
+
+        fn keybindings(&self, _ctx: &FrameContext<'_>) -> Vec<KeyBinding> {
+            self.bindings.clone()
+        }
+    }
+
+    /// A container of [`RecordingLeaf`]s, standing in for a screen: `handle_event` forwards to
+    /// whichever child `ctx.focus` names first (the same pattern `screens::Dashboard`'s IMPL note
+    /// describes), and it resolves its children by id via [`ComponentParent`] for `rebuild`.
+    #[derive(Debug)]
+    struct Container {
+        id: ComponentId,
+        consume: bool,
+        calls: Cell<u32>,
+        bindings: Vec<KeyBinding>,
+        children: Vec<RecordingLeaf>,
+    }
+
+    impl Container {
+        fn new(id: ComponentId, consume: bool, children: Vec<RecordingLeaf>) -> Self {
+            Container {
+                id,
+                consume,
+                calls: Cell::new(0),
+                bindings: Vec::new(),
+                children,
+            }
+        }
+    }
+
+    impl Component for Container {
+        fn id(&self) -> ComponentId {
+            self.id
+        }
+
+        fn render(&self, _area: Rect, _buf: &mut Buffer, _ctx: &FrameContext<'_>) {}
+
+        fn handle_event(&mut self, event: &Event, ctx: &FrameContext<'_>) -> Propagation {
+            for child in &mut self.children {
+                if ctx.focus.is_focused(child.id()) && child.handle_event(event, ctx).is_consumed()
+                {
+                    return Propagation::Consumed;
+                }
+            }
+            self.calls.set(self.calls.get() + 1);
+            if self.consume {
+                Propagation::Consumed
+            } else {
+                Propagation::Propagate
+            }
+        }
+
+        fn keybindings(&self, _ctx: &FrameContext<'_>) -> Vec<KeyBinding> {
+            self.bindings.clone()
+        }
+
+        fn focusable_children(&self) -> Vec<ComponentId> {
+            self.children.iter().map(RecordingLeaf::id).collect()
+        }
+    }
+
+    impl ComponentParent for Container {
+        fn resolve(&self, id: ComponentId) -> Option<&dyn Component> {
+            if id == self.id {
+                return Some(self);
+            }
+            self.children
+                .iter()
+                .find(|child| child.id == id)
+                .map(|child| child as &dyn Component)
+        }
+
+        fn resolve_mut(&mut self, id: ComponentId) -> Option<&mut dyn Component> {
+            if id == self.id {
+                return Some(self);
+            }
+            self.children
+                .iter_mut()
+                .find(|child| child.id == id)
+                .map(|child| child as &mut dyn Component)
+        }
+    }
+
+    fn test_ctx<'a>(
+        theme: &'a Theme,
+        caps: &'a Capabilities,
+        clock: &'a FixedClock,
+        focus: FocusState,
+    ) -> FrameContext<'a> {
+        FrameContext {
+            theme,
+            caps,
+            clock,
+            focus,
+        }
+    }
+
+    fn key_event(event: crossterm::event::KeyEvent) -> Event {
+        Event::Input(InputEvent::Key(event))
+    }
+
     fn test_capabilities() -> Capabilities {
         Capabilities {
             color: ColorSupport::NoColor,
             unicode: UnicodeSupport::AsciiOnly,
             synchronized_output: false,
             mouse: false,
+            kitty_keyboard: false,
+            bracketed_paste: false,
         }
     }
 
@@ -306,7 +631,10 @@ mod tests {
             focus: FocusState::default(),
         };
 
-        let event = Event::Resize { width: 80, height: 24 };
+        let event = Event::Resize {
+            width: 80,
+            height: 24,
+        };
         assert_eq!(leaf.handle_event(&event, &ctx), Propagation::Propagate);
         assert!(leaf.keybindings(&ctx).is_empty());
         assert!(leaf.focusable_children().is_empty());
@@ -323,7 +651,11 @@ mod tests {
         tree.focus_next();
         assert_eq!(tree.focused(), Some(CHILD_A), "tab order must wrap forward");
         tree.focus_prev();
-        assert_eq!(tree.focused(), Some(CHILD_B), "tab order must wrap backward");
+        assert_eq!(
+            tree.focused(),
+            Some(CHILD_B),
+            "tab order must wrap backward"
+        );
     }
 
     #[test]
@@ -331,5 +663,204 @@ mod tests {
         let tree = FocusTree::new();
         assert_eq!(tree.focused(), None);
         assert_eq!(tree.state(), FocusState::default());
+    }
+
+    #[test]
+    fn rebuild_walks_focusable_children_in_pre_order_and_skips_the_root() {
+        let root = Container::new(
+            ROOT,
+            false,
+            vec![
+                RecordingLeaf::new(CHILD_A, false),
+                RecordingLeaf::new(CHILD_B, false),
+            ],
+        );
+        let mut tree = FocusTree::new();
+        tree.rebuild(&root);
+
+        assert_eq!(tree.order, vec![CHILD_A, CHILD_B]);
+        assert_eq!(
+            tree.focused(),
+            Some(CHILD_A),
+            "tab order starts at the first child"
+        );
+    }
+
+    #[test]
+    fn dispatch_consumed_at_the_focused_leaf_never_reaches_the_root() {
+        let mut root = Container::new(ROOT, true, vec![RecordingLeaf::new(CHILD_A, true)]);
+        let mut tree = FocusTree::new();
+        tree.rebuild(&root);
+
+        let theme = Theme::default();
+        let caps = test_capabilities();
+        let clock = FixedClock::epoch();
+        let ctx = test_ctx(&theme, &caps, &clock, tree.state());
+        let event = key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        let propagation = tree.dispatch(&mut root, &event, &ctx);
+
+        assert_eq!(propagation, Propagation::Consumed);
+        assert_eq!(root.children[0].calls.get(), 1);
+        assert_eq!(
+            root.calls.get(),
+            0,
+            "root must not see an event its child consumed"
+        );
+    }
+
+    #[test]
+    fn dispatch_bubbles_a_propagated_event_up_to_the_root() {
+        let mut root = Container::new(ROOT, true, vec![RecordingLeaf::new(CHILD_A, false)]);
+        let mut tree = FocusTree::new();
+        tree.rebuild(&root);
+
+        let theme = Theme::default();
+        let caps = test_capabilities();
+        let clock = FixedClock::epoch();
+        let ctx = test_ctx(&theme, &caps, &clock, tree.state());
+        let event = key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+
+        let propagation = tree.dispatch(&mut root, &event, &ctx);
+
+        assert_eq!(propagation, Propagation::Consumed);
+        assert_eq!(
+            root.children[0].calls.get(),
+            1,
+            "the leaf must be offered the event first"
+        );
+        assert_eq!(
+            root.calls.get(),
+            1,
+            "the root must see it after the leaf propagated"
+        );
+    }
+
+    #[test]
+    fn dispatch_propagates_past_the_root_when_nothing_consumes() {
+        let mut root = Container::new(ROOT, false, vec![RecordingLeaf::new(CHILD_A, false)]);
+        let mut tree = FocusTree::new();
+        tree.rebuild(&root);
+
+        let theme = Theme::default();
+        let caps = test_capabilities();
+        let clock = FixedClock::epoch();
+        let ctx = test_ctx(&theme, &caps, &clock, tree.state());
+        let event = key_event(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+
+        let propagation = tree.dispatch(&mut root, &event, &ctx);
+
+        assert_eq!(
+            propagation,
+            Propagation::Propagate,
+            "an unhandled event is the runtime's cue to try a global fallback"
+        );
+    }
+
+    #[test]
+    fn push_trap_confines_tab_order_and_pop_trap_releases_it() {
+        let child_c = ComponentId::new("test.child_c");
+        let mut tree = FocusTree::new();
+        tree.order = vec![CHILD_A, CHILD_B, child_c];
+        tree.spans.insert(CHILD_B, (1, 2));
+
+        tree.push_trap(CHILD_B);
+        assert_eq!(
+            tree.focused(),
+            Some(CHILD_B),
+            "opening a trap must focus inside it"
+        );
+        tree.focus_next();
+        assert_eq!(
+            tree.focused(),
+            Some(CHILD_B),
+            "a trap of one component must not escape to its siblings"
+        );
+        tree.focus_prev();
+        assert_eq!(tree.focused(), Some(CHILD_B));
+
+        tree.pop_trap();
+        tree.focus_next();
+        assert_eq!(
+            tree.focused(),
+            Some(child_c),
+            "after the trap is released, tab order covers the whole tree again"
+        );
+    }
+
+    #[test]
+    fn push_trap_with_an_unknown_id_is_a_safe_no_op() {
+        let mut tree = FocusTree::new();
+        tree.order = vec![CHILD_A, CHILD_B];
+
+        tree.push_trap(ComponentId::new("test.never_visited"));
+        let before = tree.focused();
+        tree.focus_next();
+        assert_eq!(
+            tree.focused(),
+            before,
+            "an empty trap range must not move focus anywhere"
+        );
+    }
+
+    #[test]
+    fn keybindings_prefers_the_focused_component_over_the_root_on_a_shared_chord() {
+        let shared = KeyChord::plain(KeyCode::Char('q'));
+        let mut root = Container::new(ROOT, false, vec![RecordingLeaf::new(CHILD_A, false)]);
+        root.bindings = vec![KeyBinding::new(shared, "root: quit")];
+        root.children[0].bindings = vec![
+            KeyBinding::new(shared, "leaf: shadow root's quit"),
+            KeyBinding::new(KeyChord::plain(KeyCode::Char('d')), "leaf: delete"),
+        ];
+
+        let mut tree = FocusTree::new();
+        tree.rebuild(&root);
+
+        let theme = Theme::default();
+        let caps = test_capabilities();
+        let clock = FixedClock::epoch();
+        let ctx = test_ctx(&theme, &caps, &clock, tree.state());
+
+        let bindings = tree.keybindings(&root, &ctx);
+        let descriptions: Vec<&str> = bindings.iter().map(|b| b.description).collect();
+
+        assert_eq!(
+            descriptions,
+            vec!["leaf: shadow root's quit", "leaf: delete"],
+            "the focused leaf's binding must win on a shared chord, and the root's distinct \
+             binding must not appear once its chord is already claimed"
+        );
+    }
+
+    #[test]
+    fn hit_test_prefers_the_most_recently_recorded_rect_on_overlap() {
+        let mut tree = FocusTree::new();
+        tree.begin_frame();
+        tree.record_rect(CHILD_A, Rect::new(0, 0, 10, 10));
+        tree.record_rect(CHILD_B, Rect::new(5, 5, 10, 10));
+
+        assert_eq!(
+            tree.hit_test(2, 2),
+            Some(CHILD_A),
+            "only child_a's rect covers this point"
+        );
+        assert_eq!(
+            tree.hit_test(6, 6),
+            Some(CHILD_B),
+            "on overlap, the later-recorded (topmost) rect wins"
+        );
+        assert_eq!(tree.hit_test(50, 50), None, "outside every rect");
+    }
+
+    #[test]
+    fn begin_frame_forgets_rects_from_a_previous_frame() {
+        let mut tree = FocusTree::new();
+        tree.record_rect(CHILD_A, Rect::new(0, 0, 10, 10));
+        tree.begin_frame();
+        assert_eq!(
+            tree.hit_test(1, 1),
+            None,
+            "a stale rect must not survive begin_frame"
+        );
     }
 }

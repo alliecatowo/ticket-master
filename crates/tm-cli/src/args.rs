@@ -615,6 +615,9 @@ pub enum DocsCommand {
 pub enum ProviderCommand {
     /// List configured providers and their role routing.
     List,
+    /// Inspect the environment and report which of this crate's known provider backends are
+    /// actually configured right now, without printing any key material.
+    Detect,
     /// Show live provider/candidate health (breaker state, quota, price).
     Status,
     /// Send a minimal live completion request to confirm a provider is reachable.

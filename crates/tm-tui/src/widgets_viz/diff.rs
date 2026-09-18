@@ -7,11 +7,20 @@
 //! or receives them (e.g. an [`crate::event::AppMessage::DiffReady`] handler reading a unified
 //! diff produced elsewhere).
 
+use std::cell::Cell;
+
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
+use ratatui_core::style::Style;
 
+use crate::caps::UnicodeSupport;
 use crate::component::{Component, ComponentId, FrameContext};
-use crate::event::{Event, KeyBinding, KeyChord, Propagation};
+use crate::event::{Event, InputEvent, KeyBinding, KeyChord, Propagation};
+use crate::text::truncate;
+
+/// Width of each line-number gutter column. Five digits covers files up to 99,999 lines, past
+/// which the number is truncated rather than the gutter widening and shifting every row.
+const GUTTER_WIDTH: usize = 5;
 
 /// What kind of line one row of a diff is, for styling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +68,8 @@ pub struct Diff {
     path: String,
     lines: Vec<DiffLine>,
     scroll_offset: usize,
+    /// Rows the last [`Component::render`] had available, so PageUp/PageDown move by a screenful.
+    visible_rows: Cell<u16>,
 }
 
 impl Diff {
@@ -69,6 +80,7 @@ impl Diff {
             path: path.into(),
             lines: Vec::new(),
             scroll_offset: 0,
+            visible_rows: Cell::new(0),
         }
     }
 
@@ -87,7 +99,10 @@ impl Diff {
     fn bindings() -> Vec<KeyBinding> {
         vec![
             KeyBinding::new(KeyChord::plain(crossterm::event::KeyCode::Up), "scroll up"),
-            KeyBinding::new(KeyChord::plain(crossterm::event::KeyCode::Down), "scroll down"),
+            KeyBinding::new(
+                KeyChord::plain(crossterm::event::KeyCode::Down),
+                "scroll down",
+            ),
         ]
     }
 }
@@ -98,16 +113,88 @@ impl Component for Diff {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &FrameContext<'_>) {
-        let _ = (area, buf, ctx);
-        todo!("draw the gutter, marker and text for visible lines per the IMPL note above")
+        if area.width == 0 || area.height == 0 {
+            self.visible_rows.set(0);
+            return;
+        }
+        self.visible_rows.set(area.height);
+
+        let width = area.width as usize;
+        for (index, line) in self
+            .lines
+            .iter()
+            .enumerate()
+            .skip(self.scroll_offset)
+            .take(area.height as usize)
+        {
+            let y = area.y + (index - self.scroll_offset) as u16;
+
+            let colour = match line.kind {
+                DiffLineKind::Added => ctx.theme.success,
+                DiffLineKind::Removed => ctx.theme.danger,
+                DiffLineKind::HunkHeader => ctx.theme.muted,
+                DiffLineKind::Context => ctx.theme.foreground,
+            };
+            let style = Style::default().fg(colour);
+
+            // A hunk header has no line numbers on either side, so it spans the gutter instead
+            // of drawing two columns of blanks.
+            let row = if line.kind == DiffLineKind::HunkHeader {
+                let marker = match ctx.caps.unicode {
+                    UnicodeSupport::AsciiOnly => "@@",
+                    _ => "❯❯",
+                };
+                format!("{marker} {}", line.text)
+            } else {
+                let marker = match line.kind {
+                    DiffLineKind::Added => '+',
+                    DiffLineKind::Removed => '-',
+                    _ => ' ',
+                };
+                format!(
+                    "{:>OLD_W$} {:>NEW_W$} {marker}{}",
+                    line.old_lineno.map(|n| n.to_string()).unwrap_or_default(),
+                    line.new_lineno.map(|n| n.to_string()).unwrap_or_default(),
+                    line.text,
+                    OLD_W = GUTTER_WIDTH,
+                    NEW_W = GUTTER_WIDTH,
+                )
+            };
+
+            let text = truncate(&row, width, "…");
+            buf.set_stringn(area.x, y, &text, width, style);
+        }
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &FrameContext<'_>) -> Propagation {
         if !ctx.focus.is_focused(self.id) {
             return Propagation::Propagate;
         }
-        let _ = event;
-        todo!("scroll `self.scroll_offset` over `self.lines` per the IMPL note above")
+        let Event::Input(InputEvent::Key(key)) = event else {
+            return Propagation::Propagate;
+        };
+        if self.lines.is_empty() {
+            return Propagation::Propagate;
+        }
+
+        use crossterm::event::KeyCode;
+        let page = self.visible_rows.get().max(1) as usize;
+        // Stop scrolling when the last line reaches the top of the viewport, so the view cannot
+        // be scrolled past the end into empty space.
+        let max_offset = self.lines.len().saturating_sub(1);
+
+        self.scroll_offset = match key.code {
+            KeyCode::Up | KeyCode::Char('k') => self.scroll_offset.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.scroll_offset.saturating_add(1).min(max_offset)
+            }
+            KeyCode::PageUp => self.scroll_offset.saturating_sub(page),
+            KeyCode::PageDown => self.scroll_offset.saturating_add(page).min(max_offset),
+            KeyCode::Home | KeyCode::Char('g') => 0,
+            KeyCode::End | KeyCode::Char('G') => max_offset,
+            _ => return Propagation::Propagate,
+        };
+        Propagation::Consumed
     }
 
     fn keybindings(&self, ctx: &FrameContext<'_>) -> Vec<KeyBinding> {

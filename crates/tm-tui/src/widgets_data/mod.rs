@@ -10,11 +10,11 @@
 //! One file per widget so the implementing agent for this part can work across all four without
 //! any of them colliding on the same file.
 
-/// A scrollable, sortable table.
-pub mod table;
-/// A scrollable, single-select list.
-pub mod list;
-/// An expandable/collapsible tree (e.g. the ticket dependency graph's list view).
-pub mod tree;
 /// A vertical form of labelled fields with tab-order navigation between them.
 pub mod form;
+/// A scrollable, single-select list.
+pub mod list;
+/// A scrollable, sortable table.
+pub mod table;
+/// An expandable/collapsible tree (e.g. the ticket dependency graph's list view).
+pub mod tree;

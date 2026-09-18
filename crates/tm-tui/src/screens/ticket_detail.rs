@@ -6,7 +6,8 @@ use ratatui_core::layout::Rect;
 use tm_types::TicketId;
 
 use crate::component::{Component, ComponentId, FrameContext};
-use crate::event::{Event, KeyBinding, Propagation};
+use crate::event::{Event, InputEvent, KeyBinding, Propagation};
+use crate::theme::split_vertical;
 use crate::widgets_data::form::Form;
 use crate::widgets_data::list::List;
 
@@ -39,7 +40,13 @@ pub struct TicketDetailScreen {
 impl TicketDetailScreen {
     /// A detail screen for `ticket`, with the given field form and activity list.
     pub fn new(id: ComponentId, ticket: TicketId, fields: Form, activity: List) -> Self {
-        TicketDetailScreen { id, ticket, fields, activity, active: Pane::Fields }
+        TicketDetailScreen {
+            id,
+            ticket,
+            fields,
+            activity,
+            active: Pane::Fields,
+        }
     }
 
     /// The ticket this screen is showing.
@@ -54,13 +61,46 @@ impl Component for TicketDetailScreen {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &FrameContext<'_>) {
-        let _ = (area, buf, ctx);
-        todo!("split into fields/activity panes, draw the heading, and render each per the IMPL note above")
+        if area.height == 0 {
+            return;
+        }
+        let heading_row = Rect { height: 1, ..area };
+        let heading = format!("Ticket {}", self.ticket.as_str());
+        buf.set_stringn(
+            heading_row.x,
+            heading_row.y,
+            heading,
+            heading_row.width as usize,
+            ctx.theme.accent,
+        );
+
+        let body = Rect {
+            y: area.y + 1,
+            height: area.height.saturating_sub(1),
+            ..area
+        };
+        let slots = split_vertical(body, &[("fields", 1), ("activity", 2)]);
+        self.fields.render(slots.get("fields"), buf, ctx);
+        self.activity.render(slots.get("activity"), buf, ctx);
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &FrameContext<'_>) -> Propagation {
-        let _ = (event, ctx);
-        todo!("switch panes on Tab or forward to the active pane per the IMPL note above")
+        if ctx.focus.is_focused(self.id) {
+            if let Event::Input(InputEvent::Key(key)) = event {
+                if key.code == crossterm::event::KeyCode::Tab {
+                    self.active = match self.active {
+                        Pane::Fields => Pane::Activity,
+                        Pane::Activity => Pane::Fields,
+                    };
+                    return Propagation::Consumed;
+                }
+            }
+        }
+
+        match self.active {
+            Pane::Fields => self.fields.handle_event(event, ctx),
+            Pane::Activity => self.activity.handle_event(event, ctx),
+        }
     }
 
     fn keybindings(&self, ctx: &FrameContext<'_>) -> Vec<KeyBinding> {
@@ -85,7 +125,10 @@ mod tests {
         let screen = TicketDetailScreen::new(
             ComponentId::new("ticket_detail"),
             TicketId::new("T-42").expect("T-42 is a valid TicketId in this test"),
-            Form::new(ComponentId::new("ticket_detail.fields"), vec![Field::text("Title")]),
+            Form::new(
+                ComponentId::new("ticket_detail.fields"),
+                vec![Field::text("Title")],
+            ),
             List::new(ComponentId::new("ticket_detail.activity")),
         );
         assert_eq!(screen.ticket().as_str(), "T-42");

@@ -133,6 +133,7 @@ pub async fn dispatch_provider(
 ) -> tm_types::Result<()> {
     match cmd {
         ProviderCommand::List => provider_list(project, renderer),
+        ProviderCommand::Detect => provider_detect(renderer),
         ProviderCommand::Status => provider_status(project, renderer),
         ProviderCommand::Test(args) => provider_test(args, project, renderer).await,
     }
@@ -182,6 +183,73 @@ pub fn provider_list(project: &Project, renderer: &Renderer) -> tm_types::Result
                 "Provider".to_string(),
                 "Model".to_string(),
                 "Concurrency".to_string(),
+            ],
+            rows,
+        );
+        renderer.emit(&(), &table.render())?;
+    }
+    Ok(())
+}
+
+/// `tm provider detect`
+///
+/// Inspects the environment via `tm_provider::Registry::known_providers` and reports, per known
+/// backend, its slug, display name, whether it is currently configured, and its static
+/// capabilities — never any env var's value, only which *names* [`tm_provider::ProviderInfo`]
+/// declares and whether each is set. No key material is ever read out of the environment here:
+/// [`tm_provider::ProviderInfo::is_configured`] only calls `std::env::var(..).is_ok()`.
+pub fn provider_detect(renderer: &Renderer) -> tm_types::Result<()> {
+    let known = tm_provider::Registry::known_providers();
+
+    if renderer.is_json() {
+        let rows: Vec<_> = known
+            .iter()
+            .map(|info| {
+                serde_json::json!({
+                    "id": info.id,
+                    "display_name": info.display_name,
+                    "configured": info.is_configured(),
+                    "env_vars": info.env_vars.iter().map(|v| serde_json::json!({
+                        "name": v.name,
+                        "required": v.required,
+                        "description": v.description,
+                    })).collect::<Vec<_>>(),
+                    "capabilities": {
+                        "completion": info.capabilities.completion,
+                        "embedding": info.capabilities.embedding,
+                        "streaming": info.capabilities.streaming,
+                        "tool_use": info.capabilities.tool_use,
+                        "vision": info.capabilities.vision,
+                    },
+                })
+            })
+            .collect();
+        renderer.emit(&rows, "")?;
+    } else {
+        let mut rows = Vec::new();
+        for info in &known {
+            rows.push(vec![
+                info.id.to_string(),
+                info.display_name.to_string(),
+                if info.is_configured() {
+                    "yes".to_string()
+                } else {
+                    "no".to_string()
+                },
+                info.env_vars
+                    .iter()
+                    .filter(|v| v.required)
+                    .map(|v| v.name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ]);
+        }
+        let table = Table::new(
+            vec![
+                "Id".to_string(),
+                "Name".to_string(),
+                "Configured".to_string(),
+                "Required env".to_string(),
             ],
             rows,
         );

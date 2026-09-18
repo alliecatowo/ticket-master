@@ -206,14 +206,16 @@ mod tests {
         assert!(chord.matches(&event));
 
         event.kind = crossterm::event::KeyEventKind::Repeat;
-        assert!(chord.matches(&event), "repeat should still match a plain press binding");
+        assert!(
+            chord.matches(&event),
+            "repeat should still match a plain press binding"
+        );
     }
 
     #[test]
     fn key_chord_requires_matching_modifiers() {
         let chord = KeyChord::plain(KeyCode::Char('s'));
-        let ctrl_s =
-            crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+        let ctrl_s = crossterm::event::KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
         assert!(!chord.matches(&ctrl_s));
     }
 
@@ -231,7 +233,10 @@ mod tests {
             Propagation::Propagate
         });
         assert_eq!(result, Propagation::Consumed);
-        assert!(!second_called, "or_else must not evaluate `next` once already consumed");
+        assert!(
+            !second_called,
+            "or_else must not evaluate `next` once already consumed"
+        );
     }
 
     #[test]
@@ -242,9 +247,18 @@ mod tests {
 
     #[test]
     fn events_are_comparable_for_test_assertions() {
-        let a = Event::Resize { width: 80, height: 24 };
-        let b = Event::Resize { width: 80, height: 24 };
-        let c = Event::Resize { width: 80, height: 25 };
+        let a = Event::Resize {
+            width: 80,
+            height: 24,
+        };
+        let b = Event::Resize {
+            width: 80,
+            height: 24,
+        };
+        let c = Event::Resize {
+            width: 80,
+            height: 25,
+        };
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
