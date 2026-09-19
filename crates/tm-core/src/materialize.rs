@@ -8,20 +8,43 @@
 //!
 //! Unknown-to-this-view event kinds are a no-op, never an error: `tm-core` materializes only the
 //! subset of the catalogue that names project/ticket/decision/milestone/artifact/evidence/
-//! participant state (`SPEC.md` §4.1's table list) with columns [`crate::schema`] actually has
-//! room for. A few kinds in `tm_events`' closed payload catalogue (`resource.claimed`/
-//! `released`, `usage.recorded`, `doc.*`, `provider.selected`, `harness.changed`,
-//! `mirror.*`) name fields that don't line up with the corresponding table's columns (e.g.
-//! `doc.registered` carries a `path`, not the `docs` table's `id`); since `tm_events` isn't this
-//! crate's to change, those are deliberate no-ops here too rather than writes that would
-//! misrepresent the event, documented at each such arm below.
+//! participant/session/doc/harness-epoch/mirror-link/provider-usage state (`SPEC.md` §4.1's
+//! table list) with columns [`crate::schema`] actually has room for. A few kinds in `tm_events`'
+//! closed payload catalogue (`resource.claimed`/`released`, `usage.recorded`, `harness.changed`,
+//! `harness.benchmarked`, `command.*`) name fields with genuinely nowhere to land in this
+//! crate's tables at all (no per-command, per-benchmark-run or per-field-diff table exists); since
+//! `tm_events` isn't this crate's to change, those are deliberate no-ops, documented at each such
+//! arm below rather than left to the catch-all. A few more (`doc.registered`, `provider.selected`
+//! vs. `usage.recorded`, `harness.promoted`, `mirror.linked`) name fields that line up only
+//! partially with their table's columns (e.g. `doc.registered` carries a `path`, not the `docs`
+//! table's `id`); those *are* materialized here, under a documented mapping decision at each such
+//! arm, rather than skipped — partial information is still real information.
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use tm_events::{Event, EventKind, Tx};
 use tm_types::{IdKind, TmError};
 
 fn storage_err(e: rusqlite::Error) -> TmError {
     TmError::storage(e.to_string())
+}
+
+/// One past the current value of `counter` in `counters` (0 if the counter has never been
+/// bumped), for a table whose primary key is an internally-allocated sequence number rather than
+/// a number parsed off an id string (see [`bump_counter`], which this pairs with: the caller
+/// reads the next value here, then persists it via `bump_counter` once the row it names has been
+/// written). Deterministic across the live path and replay because both process events through
+/// [`apply`] in the same total order.
+fn next_counter(tx: &Tx<'_>, counter: &str) -> tm_types::Result<u64> {
+    let current: Option<i64> = tx
+        .raw()
+        .query_row(
+            "SELECT value FROM counters WHERE counter_name = ?1",
+            params![counter],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage_err)?;
+    Ok(current.unwrap_or(0) as u64 + 1)
 }
 
 /// Record the high-water mark for one id counter, so `Store::rebuild` can restore `CounterIds`
@@ -464,12 +487,200 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
                 upsert_participant(tx, p.participant.as_str(), &p.status)?;
             }
         }
-        // The remaining catalogued kinds either aren't part of this crate's materialized view
-        // (authority.granted/delegated/revoked/reverted, resource.conflict_detected, command.*,
-        // executor.failed, index.updated, harness.benchmarked/promoted, comment/approval events,
-        // genesis.*) or name fields that don't correspond to columns the affected table actually
-        // has, per this module's doc comment (resource.claimed/released, usage.recorded, doc.*,
-        // provider.selected, harness.changed, mirror.*). Per this module's doc comment,
+        EventKind::CommandStarted | EventKind::CommandCompleted => {
+            // No `commands` table exists in `crate::schema` — every command run is already
+            // recoverable from the raw event log itself (that *is* the durable record `B-05`
+            // asks for: `Store::record_command` gets these onto the log at all, which is the gap
+            // that mattered; `tm-context::command::run`'s caller previously had nowhere to commit
+            // them). Materializing a redundant projection of the log into a new table is out of
+            // this item's scope (it owns durable homes for the tables `crate::schema` already
+            // declares, not new tables), so this is a deliberate no-op.
+        }
+        EventKind::DocRegistered => {
+            if let Some(p) = event.payload.as_doc_registered() {
+                // `doc.registered`'s payload carries `path` (and an optional originating
+                // `ticket`), not a separate doc id — the closed catalogue has no room for one.
+                // `path` is a doc's de facto stable identity elsewhere in this codebase too (see
+                // `tm-docs::registry::DocTomlEntry`, which always pairs one `path` with one
+                // `id`), so `path` is used as `docs.id` here. `title`/`content` have no source in
+                // this payload either — a doc's prose lives on disk, mirroring how artifact bytes
+                // live outside the log (see `store.rs`'s module note on `store_artifact`) — so
+                // `title` defaults to `path` and `content` to empty; a real doc-content event
+                // kind would be needed to do better, and adding one is out of this item's scope.
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "INSERT INTO docs (id, title, content, author, ts)
+                         VALUES (?1, ?1, '', ?2, ?3)
+                         ON CONFLICT(id) DO UPDATE SET author = excluded.author, ts = excluded.ts",
+                        params![p.path, event.actor.as_str(), now],
+                    )
+                    .map_err(storage_err)?;
+                if let Some(ticket) = &p.ticket {
+                    // `doc_provenance` is keyed `(doc_id, source)`; the originating ticket is
+                    // recorded as one provenance source among potentially several, exactly like
+                    // `tm-docs::registry::DocFrontMatter::derived_from` entries would be.
+                    tx.raw()
+                        .execute(
+                            "INSERT OR IGNORE INTO doc_provenance (doc_id, source, reason)
+                             VALUES (?1, ?2, 'doc.registered')",
+                            params![p.path, ticket.as_str()],
+                        )
+                        .map_err(storage_err)?;
+                }
+            }
+        }
+        EventKind::DocInvalidated => {
+            if let Some(p) = event.payload.as_doc_invalidated() {
+                // `docs` has no staleness/state column (`id/title/content/author/ts` only, per
+                // `crate::schema`), so `ts` is touched as a durable freshness signal ("this doc
+                // was last acted on at ..."), the same convention `doc.reconciled` below uses.
+                // `reason` has nowhere to persist under the existing schema and is intentionally
+                // dropped here (still recoverable from the raw event log). Upserts rather than a
+                // plain `UPDATE` so replay is order-tolerant if an invalidation is ever logged
+                // for a path this view hasn't seen a `doc.registered` for yet.
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "INSERT INTO docs (id, title, content, author, ts)
+                         VALUES (?1, ?1, '', ?2, ?3)
+                         ON CONFLICT(id) DO UPDATE SET ts = excluded.ts",
+                        params![p.path, event.actor.as_str(), now],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
+        EventKind::DocReconciled => {
+            if let Some(p) = event.payload.as_doc_reconciled() {
+                // Same mapping and same rationale as `doc.invalidated` above.
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "INSERT INTO docs (id, title, content, author, ts)
+                         VALUES (?1, ?1, '', ?2, ?3)
+                         ON CONFLICT(id) DO UPDATE SET ts = excluded.ts",
+                        params![p.path, event.actor.as_str(), now],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
+        EventKind::ProviderSelected => {
+            if let Some(p) = event.payload.as_provider_selected() {
+                // `provider_usage`'s primary key is `(provider, model)`, but the only catalogued
+                // event naming both together is `provider.selected` (`role`/`provider`/`model`);
+                // `usage.recorded` (below) carries `tokens`/`dollars_micros` but no
+                // `provider`/`model` to attribute them to, so no event this crate materializes
+                // can roll a selection's later spend into this table's `tokens_used`/
+                // `dollars_micros` columns without inventing state `tm_events` doesn't carry.
+                // `provider.selected` therefore seeds/refreshes an identity row per
+                // `(provider, model)` pair with zeroed counters rather than a running total; real
+                // spend accounting already happens per ticket/session via `budgets`
+                // (`Store::record_usage` -> `crate::budget::BudgetLedger::record_usage`), which is
+                // what actually enforces `SPEC.md`'s budget invariants. `provider_usage` is
+                // therefore a "which providers/models have been selected, and how recently"
+                // freshness table here, not a precise spend ledger.
+                tx.raw()
+                    .execute(
+                        "INSERT INTO provider_usage (provider, model, tokens_used, dollars_micros, last_updated)
+                         VALUES (?1, ?2, 0, 0, ?3)
+                         ON CONFLICT(provider, model) DO UPDATE SET last_updated = excluded.last_updated",
+                        params![p.provider, p.model, event.ts.to_rfc3339()],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
+        EventKind::UsageRecorded => {
+            // Deliberate no-op against `provider_usage`, per the `provider.selected` arm's doc
+            // comment above: this payload names no `provider`/`model` to key a row on. Nothing is
+            // silently dropped that matters — the budget debit this event accompanies already
+            // happened synchronously at the call site before the event was even built (see
+            // `store.rs`'s `record_usage`).
+        }
+        EventKind::HarnessChanged => {
+            // A field-level harness config diff (`field`/`from`/`to`) has no dedicated table:
+            // `harness_epochs` (`crate::schema`) stores one full `harness_config` snapshot per
+            // *promoted* epoch, not a diff log of the draft config leading up to a promotion.
+            // Adding a diff-history table is out of this item's scope (durable homes for the
+            // tables that already exist); deliberate no-op.
+        }
+        EventKind::HarnessBenchmarked => {
+            // Same reasoning as `harness.changed`: no per-suite benchmark-result table exists in
+            // `crate::schema` to hold `suite`/`score` against. Deliberate no-op (already covered
+            // by this module's own `unknown_to_this_view_kind_is_a_no_op_not_an_error` test).
+        }
+        EventKind::HarnessPromoted => {
+            if let Some(p) = event.payload.as_harness_promoted() {
+                // `harness.promoted`'s payload carries only `candidate` (an opaque harness-config
+                // identifier), not the `harness_epochs.epoch` integer primary key `crate::schema`
+                // gives that table — the closed catalogue has no room for a numeric epoch.
+                // `epoch` is therefore derived here from a private `harness_epoch` row in
+                // `counters`, bumped by one on every promotion; deterministic because `apply`
+                // sees promotions in the same total order on the live path and on replay.
+                let epoch = next_counter(tx, "harness_epoch")? as i64;
+                tx.raw()
+                    .execute(
+                        "INSERT INTO harness_epochs (epoch, harness_config, ts)
+                         VALUES (?1, ?2, ?3)
+                         ON CONFLICT(epoch) DO UPDATE SET harness_config = excluded.harness_config,
+                            ts = excluded.ts",
+                        params![epoch, p.candidate, event.ts.to_rfc3339()],
+                    )
+                    .map_err(storage_err)?;
+                bump_counter(tx, "harness_epoch", epoch as u64)?;
+            }
+        }
+        EventKind::MirrorLinked => {
+            if let Some(p) = event.payload.as_mirror_linked() {
+                // `mirror.linked`'s payload carries only `remote` (the adapter/tracker name,
+                // matching `tm-mirror::sync::SyncEngine::push`'s convention of putting
+                // `tracker.name()` there) — no ticket. The ticket this link is for is instead
+                // read from `event.subject`, the same convention `tm-mirror::sync` already uses
+                // when building this event's `EventDraft` (`subject = Id::from(ticket)`). No
+                // `remote_id` is known yet at link time (that arrives with the first
+                // `mirror.pushed`/`mirror.pulled`), so it is left empty on first insert and never
+                // clobbered by a later `mirror.linked` replay for the same ticket.
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "INSERT INTO mirror_links (ticket, remote_id, remote_system, last_synced)
+                         VALUES (?1, '', ?2, ?3)
+                         ON CONFLICT(ticket) DO UPDATE SET remote_system = excluded.remote_system,
+                            last_synced = excluded.last_synced",
+                        params![event.subject.as_str(), p.remote, now],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
+        EventKind::MirrorPushed | EventKind::MirrorPulled => {
+            let pushed = event
+                .payload
+                .as_mirror_pushed()
+                .map(|p| (&p.remote, &p.reference));
+            let pulled = event
+                .payload
+                .as_mirror_pulled()
+                .map(|p| (&p.remote, &p.reference));
+            if let Some((remote, reference)) = pushed.or(pulled) {
+                // Same `event.subject`-carries-the-ticket convention as `mirror.linked` above.
+                // Unlike `mirror.linked`, `mirror.pushed`/`mirror.pulled` do carry `reference`
+                // (the external id), so `remote_id` is written for real here.
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "INSERT INTO mirror_links (ticket, remote_id, remote_system, last_synced)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(ticket) DO UPDATE SET remote_id = excluded.remote_id,
+                            remote_system = excluded.remote_system,
+                            last_synced = excluded.last_synced",
+                        params![event.subject.as_str(), reference, remote, now],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
+        // The remaining catalogued kinds aren't part of this crate's materialized view at all
+        // (authority.granted/delegated/revoked/reverted, resource.conflict_detected,
+        // executor.failed, index.updated, comment/approval events, genesis.*) — no table in
+        // `crate::schema` names anything for them, and (per this module's doc comment)
         // unrecognized/unmaterialized kinds are a deliberate no-op, not an error, so replay never
         // fails on a kind this build doesn't project.
         _ => {}
@@ -680,6 +891,21 @@ mod tests {
             correlation: None,
             payload,
             hash: String::new(),
+        }
+    }
+
+    /// As [`draft_event`], but with an explicit `subject` — needed for the mirror-link arms,
+    /// which (per `tm-mirror::sync::SyncEngine`'s own event-building convention) read the ticket
+    /// a mirror event is about off `event.subject` rather than the payload.
+    fn draft_event_with_subject(
+        seq: u64,
+        kind: EK,
+        subject: Id,
+        payload: tm_events::Payload,
+    ) -> Event {
+        Event {
+            subject,
+            ..draft_event(seq, kind, payload)
         }
     }
 
@@ -1117,6 +1343,230 @@ mod tests {
                 [],
             );
             assert!(dup.is_err());
+        });
+    }
+
+    #[test]
+    fn doc_registered_upserts_docs_row_keyed_by_path() {
+        with_tx(|tx| {
+            let payload = tm_events::Payload::from(DocRegisteredPayload {
+                path: "docs/architecture.md".into(),
+                ticket: None,
+            });
+            apply(tx, &draft_event(1, EK::DocRegistered, payload)).unwrap();
+
+            let (title, content): (String, String) = tx
+                .raw()
+                .query_row(
+                    "SELECT title, content FROM docs WHERE id = 'docs/architecture.md'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(title, "docs/architecture.md");
+            assert_eq!(content, "");
+        });
+    }
+
+    #[test]
+    fn doc_registered_with_ticket_records_provenance() {
+        with_tx(|tx| {
+            let ticket = TicketId::new("T-1").unwrap();
+            let payload = tm_events::Payload::from(DocRegisteredPayload {
+                path: "docs/architecture.md".into(),
+                ticket: Some(ticket),
+            });
+            apply(tx, &draft_event(1, EK::DocRegistered, payload)).unwrap();
+
+            let source: String = tx
+                .raw()
+                .query_row(
+                    "SELECT source FROM doc_provenance WHERE doc_id = 'docs/architecture.md'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(source, "T-1");
+        });
+    }
+
+    #[test]
+    fn doc_invalidated_then_reconciled_touch_ts_without_a_prior_registration() {
+        with_tx(|tx| {
+            let invalidated = tm_events::Payload::from(DocInvalidatedPayload {
+                path: "docs/stale.md".into(),
+                reason: "source moved".into(),
+            });
+            apply(tx, &draft_event(1, EK::DocInvalidated, invalidated)).unwrap();
+
+            let count: i64 = tx
+                .raw()
+                .query_row(
+                    "SELECT COUNT(*) FROM docs WHERE id = 'docs/stale.md'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                count, 1,
+                "invalidation upserts a docs row even with no prior registration"
+            );
+
+            let reconciled = tm_events::Payload::from(DocReconciledPayload {
+                path: "docs/stale.md".into(),
+            });
+            apply(tx, &draft_event(2, EK::DocReconciled, reconciled)).unwrap();
+
+            let count: i64 = tx
+                .raw()
+                .query_row(
+                    "SELECT COUNT(*) FROM docs WHERE id = 'docs/stale.md'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "reconciliation must not duplicate the row");
+        });
+    }
+
+    #[test]
+    fn provider_selected_seeds_a_zeroed_provider_usage_row() {
+        with_tx(|tx| {
+            let payload = tm_events::Payload::from(ProviderSelectedPayload {
+                role: "coder_fast".into(),
+                provider: "anthropic".into(),
+                model: "claude-sonnet".into(),
+            });
+            apply(tx, &draft_event(1, EK::ProviderSelected, payload)).unwrap();
+
+            let (tokens, dollars): (i64, i64) = tx
+                .raw()
+                .query_row(
+                    "SELECT tokens_used, dollars_micros FROM provider_usage
+                     WHERE provider = 'anthropic' AND model = 'claude-sonnet'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(tokens, 0);
+            assert_eq!(dollars, 0);
+        });
+    }
+
+    #[test]
+    fn usage_recorded_is_a_no_op_not_an_error() {
+        with_tx(|tx| {
+            let payload = tm_events::Payload::from(UsageRecordedPayload {
+                ticket: None,
+                session: None,
+                tokens: 100,
+                dollars_micros: 5,
+                wall_seconds: 1,
+            });
+            let event = draft_event(1, EK::UsageRecorded, payload);
+            assert!(apply(tx, &event).is_ok());
+
+            let count: i64 = tx
+                .raw()
+                .query_row("SELECT COUNT(*) FROM provider_usage", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 0);
+        });
+    }
+
+    #[test]
+    fn harness_promoted_allocates_sequential_epochs() {
+        with_tx(|tx| {
+            let first = tm_events::Payload::from(HarnessPromotedPayload {
+                candidate: "config-a".into(),
+            });
+            apply(tx, &draft_event(1, EK::HarnessPromoted, first)).unwrap();
+            let second = tm_events::Payload::from(HarnessPromotedPayload {
+                candidate: "config-b".into(),
+            });
+            apply(tx, &draft_event(2, EK::HarnessPromoted, second)).unwrap();
+
+            let mut stmt = tx
+                .raw()
+                .prepare("SELECT epoch, harness_config FROM harness_epochs ORDER BY epoch")
+                .unwrap();
+            let rows: Vec<(i64, String)> = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            assert_eq!(
+                rows,
+                vec![(1, "config-a".to_string()), (2, "config-b".to_string())]
+            );
+        });
+    }
+
+    #[test]
+    fn mirror_linked_then_pushed_populates_remote_id() {
+        with_tx(|tx| {
+            let ticket = TicketId::new("T-1").unwrap();
+            let subject = Id::from(ticket.clone());
+            let linked = tm_events::Payload::from(MirrorLinkedPayload {
+                remote: "github".into(),
+            });
+            apply(
+                tx,
+                &draft_event_with_subject(1, EK::MirrorLinked, subject.clone(), linked),
+            )
+            .unwrap();
+
+            let (remote_id, remote_system): (String, String) = tx
+                .raw()
+                .query_row(
+                    "SELECT remote_id, remote_system FROM mirror_links WHERE ticket = 'T-1'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(remote_id, "");
+            assert_eq!(remote_system, "github");
+
+            let pushed = tm_events::Payload::from(MirrorPushedPayload {
+                remote: "github".into(),
+                reference: "owner/repo#42".into(),
+            });
+            apply(
+                tx,
+                &draft_event_with_subject(2, EK::MirrorPushed, subject, pushed),
+            )
+            .unwrap();
+
+            let remote_id: String = tx
+                .raw()
+                .query_row(
+                    "SELECT remote_id FROM mirror_links WHERE ticket = 'T-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(remote_id, "owner/repo#42");
+        });
+    }
+
+    #[test]
+    fn command_started_and_completed_are_a_no_op_not_an_error() {
+        with_tx(|tx| {
+            let started = tm_events::Payload::from(CommandStartedPayload {
+                command: "cargo test".into(),
+                ticket: None,
+                session: None,
+            });
+            assert!(apply(tx, &draft_event(1, EK::CommandStarted, started)).is_ok());
+
+            let completed = tm_events::Payload::from(CommandCompletedPayload {
+                command: "cargo test".into(),
+                ticket: None,
+                session: None,
+                exit_code: 0,
+                duration_ms: 10,
+            });
+            assert!(apply(tx, &draft_event(2, EK::CommandCompleted, completed)).is_ok());
         });
     }
 }
