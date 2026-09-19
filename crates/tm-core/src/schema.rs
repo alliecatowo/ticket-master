@@ -3,19 +3,29 @@
 //! Owns the schema for `tickets`, `ticket_deps`, `ticket_children`, `leases`, `resource_claims`,
 //! `decisions`, `milestones`, `artifacts`, `evidence`, `budgets`, `participants`, `sessions`,
 //! `counters`, `docs`, `doc_provenance`, `provider_usage`, `harness_epochs`, `mirror_links`,
-//! `effects` (`SPEC.md` §21.5, `crate::effect`), and `meta`, plus [`drop_views`] which
-//! `Store::rebuild` uses to blow away every one of these tables (never the `tm-events` `events`
-//! table itself) before replaying from `seq` 0.
+//! `effects` (`SPEC.md` §21.5, `crate::effect`), `workflows`, and `meta`, plus [`drop_views`]
+//! which `Store::rebuild` uses to blow away every one of these tables (never the `tm-events`
+//! `events` table itself) before replaying from `seq` 0.
 //!
 //! Every table here stores denormalized, derived state: the event log is the truth, these are a
 //! cache of it. Columns therefore favor the shapes [`crate::materialize::apply`] needs to write
 //! quickly and [`crate::view`] needs to read cheaply, not any particular normal form.
+//!
+//! `workflows` is the one exception to "the event log is the truth": `SPEC.md` §25's workflow
+//! definitions are versioned-by-content-hash reference material (`tm-workflow`'s `WorkflowDef`
+//! TOML source), not ticket-graph state, and the closed `tm_events` payload catalogue has no
+//! room for a free-form TOML blob (the same constraint [`Store::store_artifact`]'s module note
+//! documents for artifact bytes). It is therefore written directly, like `counters`, and is not
+//! restored by [`drop_views`]/replay; a running workflow instance's actual pin to the definition
+//! version it was expanded from survives that via the `ContextRef` `tm-workflow::commit` stamps
+//! onto every ticket it creates (`workflow:<name>@<content_hash>`), not via this table, which is
+//! a lookup cache only.
 
 use rusqlite::Connection;
 use tm_types::TmError;
 
 /// The schema version this build of `tm-core` expects. Bump when adding a migration.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// One materialized table's name, paired with the `CREATE TABLE IF NOT EXISTS` DDL for it.
 pub struct TableDef {
@@ -277,6 +287,18 @@ pub const TABLES: &[TableDef] = &[
         ",
     },
     TableDef {
+        name: "workflows",
+        create_sql: "
+            CREATE TABLE IF NOT EXISTS workflows (
+                content_hash TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                registered_at TEXT NOT NULL
+            )
+        ",
+    },
+    TableDef {
         name: "meta",
         create_sql: "
             CREATE TABLE IF NOT EXISTS meta (
@@ -302,6 +324,7 @@ CREATE INDEX IF NOT EXISTS sessions_participant_idx ON sessions (participant);
 CREATE INDEX IF NOT EXISTS tickets_parent_idx ON tickets (parent);
 CREATE INDEX IF NOT EXISTS tickets_milestone_idx ON tickets (milestone);
 CREATE INDEX IF NOT EXISTS effects_ticket_idx ON effects (ticket);
+CREATE INDEX IF NOT EXISTS workflows_name_idx ON workflows (name);
 ";
 
 /// Bring `conn`'s materialized-view schema forward to [`SCHEMA_VERSION`]. Shares the
@@ -329,7 +352,11 @@ pub fn migrate(conn: &mut Connection, clock: &dyn tm_types::Clock) -> tm_types::
         )
         .map_err(storage_err)?;
 
-    // Apply migration to version 1 if not yet applied
+    // Apply migration to SCHEMA_VERSION if not yet applied. Every table's DDL is
+    // `CREATE TABLE IF NOT EXISTS`, so re-running the whole `TABLES`/`INDEXES_SQL` batch against
+    // an already-migrated database (e.g. an existing project opened by a build that adds a new
+    // table, as B-13's `workflows` table did) is safe: prior tables are untouched, only the new
+    // one(s) get created, and the version row records the bump.
     if current_version < SCHEMA_VERSION {
         let tx = conn.transaction().map_err(storage_err)?;
 
@@ -451,6 +478,74 @@ mod tests {
             )
             .expect("query indexes");
         assert!(index_count >= 9);
+    }
+
+    #[test]
+    fn test_migrate_adds_a_new_table_to_a_database_already_on_an_older_schema_version() {
+        // Simulate a project database that was migrated by an older build of this crate, before
+        // `workflows` existed: create every table *except* `workflows`, and hand-record schema
+        // version 1 (SCHEMA_VERSION's value before B-13 bumped it to 2) directly, bypassing
+        // `migrate` so this test does not depend on whatever the constant happens to be today.
+        let path = temp_db_path("test_upgrade_adds_workflows_table");
+        let conn = rusqlite::Connection::open(&path).expect("create db");
+        for table in TABLES {
+            if table.name != "workflows" {
+                conn.execute_batch(table.create_sql).expect("create table");
+            }
+        }
+        // Deliberately not creating INDEXES_SQL here: it includes an index on `workflows`, which
+        // this setup is simulating as not-yet-existing. `migrate`'s own real run below is what
+        // exercises "creates the missing table and its index together".
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tm_core_schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )",
+        )
+        .expect("create version table");
+        conn.execute(
+            "INSERT INTO tm_core_schema_version (version, applied_at) VALUES (1, '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("record version 1");
+
+        let workflows_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workflows'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query tables before migrate");
+        assert_eq!(
+            workflows_before, 0,
+            "test setup should not have created workflows yet"
+        );
+
+        drop(conn);
+        let mut conn = rusqlite::Connection::open(&path).expect("reopen db");
+        migrate(&mut conn, &tm_types::FixedClock::epoch())
+            .expect("migrate an existing v1 database");
+
+        let workflows_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workflows'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query tables after migrate");
+        assert_eq!(
+            workflows_after, 1,
+            "migrate should add workflows to an existing v1 database"
+        );
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM tm_core_schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query version after migrate");
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     #[test]

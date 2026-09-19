@@ -21,6 +21,7 @@ tm-docs = { path = "crates/tm-docs" }
 tm-harness = { path = "crates/tm-harness" }
 tm-agent = { path = "crates/tm-agent" }
 tm-genesis = { path = "crates/tm-genesis" }
+tm-workflow = { path = "crates/tm-workflow" }
 tm-mirror = { path = "crates/tm-mirror" }
 tm-server = { path = "crates/tm-server" }
 tm-tui = { path = "crates/tm-tui" }

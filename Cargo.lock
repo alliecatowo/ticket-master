@@ -3352,6 +3352,7 @@ dependencies = [
  "tm-templates",
  "tm-tui",
  "tm-types",
+ "tm-workflow",
  "tokio",
  "toml",
  "tower-http",
@@ -3670,6 +3671,23 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "time",
+]
+
+[[package]]
+name = "tm-workflow"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "insta",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tm-core",
+ "tm-events",
+ "tm-genesis",
+ "tm-types",
+ "toml",
 ]
 
 [[package]]

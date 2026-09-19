@@ -1,0 +1,55 @@
+# "review-change": lint -> test -> review -> merge, roughly (SPEC.md §25.2's illustrative
+# example, adapted to this crate's node/field shape -- see crates/tm-workflow/src/def.rs's module
+# doc for what changed and why).
+#
+# `review` fans out across dimensions (correctness/security/performance/tests), each producing
+# `findings`; `audit` fans out over those findings via `for_each = "review.findings"`, trying to
+# refute each one; `merge` synthesizes the audited findings into a merge/no-merge decision.
+
+name = "review-change"
+
+[params.target]
+description = "The path or change identifier being reviewed."
+
+[[node]]
+id = "lint"
+role = "coder_fast"
+objective = "Lint {{target}}."
+budget = { tokens = 4000, dollars_micros = 0, wall_seconds = 300 }
+verification = "none"
+
+[[node]]
+id = "test"
+role = "coder_fast"
+objective = "Run the test suite against {{target}}."
+depends = ["lint"]
+budget = { tokens = 8000, dollars_micros = 0, wall_seconds = 900 }
+verification = "single"
+
+[[node]]
+id = "review"
+role = "reviewer_semantic"
+objective = "Review {{target}} for {{item}} problems."
+for_each = ["correctness", "security", "performance", "tests"]
+produces = "findings"
+depends = ["test"]
+budget = { tokens = 12000, dollars_micros = 0, wall_seconds = 1200 }
+verification = "none"
+
+[[node]]
+id = "audit"
+role = "auditor_semantic"
+objective = "Try to refute this finding: {{item.summary}}"
+for_each = "review.findings"
+depends = ["review"]
+budget = { tokens = 20000, dollars_micros = 0, wall_seconds = 1800 }
+verification = "single"
+
+[[node]]
+id = "merge"
+role = "synthesizer_long_context"
+objective = "Synthesize the audited findings for {{target}} into a merge/no-merge decision."
+depends = ["audit"]
+join = { kind = "all", timeout_seconds = 3600, merge = "concat" }
+budget = { tokens = 20000, dollars_micros = 0, wall_seconds = 1800 }
+verification = "single"

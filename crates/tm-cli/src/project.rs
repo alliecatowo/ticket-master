@@ -964,6 +964,38 @@ async fn provider_doctor_detail(clock: Arc<dyn Clock>) -> DoctorCheck {
     }
 }
 
+/// Build `tm doctor`'s `"workflow-1x1"` check: `SPEC.md` §25.3 -- "`tm doctor` should warn on a
+/// workflow whose graph is one node wide and one node deep, because that is a prompt wearing a
+/// costume." Advisory only (`ok: true` regardless -- a 1x1 workflow is a smell, not a
+/// correctness failure, matching the `"providers"` check's own always-`ok` precedent above), and
+/// silent (an empty, non-alarming detail) when the project has no `.tm/workflows/` at all, since
+/// most projects will not use this feature and that is not itself worth a note.
+fn workflow_doctor_detail(project: &Project) -> DoctorCheck {
+    if !crate::workflow::has_any_workflow(project) {
+        return DoctorCheck {
+            name: "workflow-1x1".to_string(),
+            ok: true,
+            detail: "no workflow definitions found under .tm/workflows/".to_string(),
+        };
+    }
+    let flagged = crate::workflow::one_by_one_workflow_names(project);
+    let detail = if flagged.is_empty() {
+        "no 1x1 workflows (every definition has real sequencing or fan-out)".to_string()
+    } else {
+        format!(
+            "{} workflow(s) are one node wide and one node deep, i.e. a prompt wearing a \
+             costume (SPEC.md §25.3): {}",
+            flagged.len(),
+            flagged.join(", ")
+        )
+    };
+    DoctorCheck {
+        name: "workflow-1x1".to_string(),
+        ok: true,
+        detail,
+    }
+}
+
 /// `tm doctor`: invariants, the hash-chain check, index health, provider availability, and
 /// (unless `--skip-computer-probe`) the computer-use permission probes.
 pub fn doctor(
@@ -1030,6 +1062,8 @@ pub fn doctor(
         Ok(provider_doctor_detail(clock).await)
     })?;
     checks.push(provider_check);
+
+    checks.push(workflow_doctor_detail(project));
 
     if !args.skip_computer_probe {
         let probed = run_async(|| async {
