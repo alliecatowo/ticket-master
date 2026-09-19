@@ -1564,10 +1564,13 @@ impl Store {
     /// currently `Leased` or `Running` (mid-run resource exhaustion, not a hard failure), this is
     /// a **handoff, not death** (`SPEC.md` §31.3, `docs/audit-2026-09-18-fable.md` B-10): the
     /// ticket's lease is released and it transitions `-> Ready` via [`Trigger::BudgetHandoff`],
-    /// never `Recovery` — no retry attempt is consumed. When `ticket` is in some other live state
-    /// (e.g. `Verifying`, where `Trigger::BudgetHandoff` has no legal target — see
+    /// never `Recovery` — no retry attempt is consumed, and only `ticket.budget_handoff` (not
+    /// `ticket.budget_exhausted`) is emitted at the ticket level, since a handoff must not read
+    /// as blocked work to a status digest. When `ticket` is in some other live state (e.g.
+    /// `Verifying`, where `Trigger::BudgetHandoff` has no legal target — see
     /// [`crate::machine::transition`]), this narrower case is not handoff-eligible and keeps the
-    /// prior behavior of routing toward `Recovery` like any other verification-time failure.
+    /// prior behavior of emitting `ticket.budget_exhausted` and routing toward `Recovery` like
+    /// any other verification-time failure.
     pub fn record_usage(
         &self,
         ticket: Option<&TicketId>,
@@ -1618,23 +1621,32 @@ impl Store {
                 if let Some(tid) = &ticket_id {
                     if view.tickets.contains_key(tid) {
                         let dimension = format!("{:?}", e.scope);
-                        drafts.push(EventDraft::new(
-                            actor.clone(),
-                            Id::from(tid.clone()),
-                            Payload::from(TicketBudgetExhaustedPayload {
-                                ticket: tid.clone(),
-                                dimension: dimension.clone(),
-                                limit: 0,
-                                spent: 0,
-                            }),
-                        ));
                         match budget_handoff_drafts(view, tid, &actor, &dimension) {
+                            // Handoff-eligible: emit only `ticket.budget_handoff`, never
+                            // `ticket.budget_exhausted` — the latter is read by
+                            // `tm-cli`'s status digest as "blocked" work
+                            // (`crates/tm-cli/src/project.rs`), and a handoff is deliberately
+                            // not that (`SPEC.md` §31.3: "not evidence of anything going
+                            // wrong"). The ceiling itself is still on record via this call's
+                            // own `usage.recorded` draft above and its `Err(TmError::
+                            // BudgetExhausted)` return value.
                             Some(handoff_drafts) => drafts.extend(handoff_drafts),
                             // Not handoff-eligible (ticket isn't `Leased`/`Running` right now,
-                            // e.g. `Verifying`): preserve the prior behavior of routing toward
-                            // `Recovery` like any other verification-time failure, rather than
-                            // silently dropping the state transition.
+                            // e.g. `Verifying`): this is a genuine failure-shaped exhaustion, so
+                            // it keeps the prior behavior — `ticket.budget_exhausted` plus
+                            // routing toward `Recovery` like any other verification-time
+                            // failure, rather than silently dropping the state transition.
                             None => {
+                                drafts.push(EventDraft::new(
+                                    actor.clone(),
+                                    Id::from(tid.clone()),
+                                    Payload::from(TicketBudgetExhaustedPayload {
+                                        ticket: tid.clone(),
+                                        dimension: dimension.clone(),
+                                        limit: 0,
+                                        spent: 0,
+                                    }),
+                                ));
                                 if let Some(t) = view.tickets.get(tid) {
                                     if let Ok(to) =
                                         machine::transition(t.state, Trigger::VerificationFailed)
@@ -3405,8 +3417,11 @@ mod tests {
                 tm_events::EventKind::TicketFailed
                     | tm_events::EventKind::TicketRetryScheduled
                     | tm_events::EventKind::TicketEscalated
+                    | tm_events::EventKind::TicketBudgetExhausted
             )),
-            "a budget handoff must never look like a failure/retry/escalation in the log"
+            "a budget handoff must never look like a failure/retry/escalation/exhaustion in the \
+             log -- ticket.budget_exhausted specifically is read by tm-cli's status digest as \
+             blocked work, which a clean handoff must not be"
         );
     }
 
@@ -3487,6 +3502,78 @@ mod tests {
             .budget_handoff(&ticket_id, "Tokens".to_string(), actor())
             .expect("budget_handoff is idempotent");
         assert!(again.is_empty());
+    }
+
+    /// The narrower, non-handoff-eligible case `budget_handoff_does_not_consume_a_retry_or_
+    /// enter_recovery` deliberately does not cover: a ticket whose usage is recorded while
+    /// `Verifying` (not `Leased`/`Running`) has no legal `Trigger::BudgetHandoff` target, so this
+    /// is a genuine failure-shaped exhaustion — `ticket.budget_exhausted` is still recorded and
+    /// the ticket still routes toward `Recovery`, exactly as before this track's changes.
+    #[test]
+    fn budget_exhaustion_outside_leased_running_still_records_budget_exhausted_and_recovery() {
+        let (_dir, store) = open_store();
+        let ticket_id = tight_budget_ticket(&store);
+
+        store.activate(&ticket_id, actor()).expect("activate");
+        store
+            .acquire_lease(&ticket_id, actor(), Authority::none(), vec![], 60, actor())
+            .expect("acquire lease");
+        store
+            .transition(&ticket_id, Trigger::WorkStarted, actor())
+            .expect("work started");
+        let artifact_events = store
+            .store_artifact(
+                ArtifactKind::File,
+                "text/plain".into(),
+                b"evidence".to_vec(),
+                serde_json::json!({}),
+                Some(ticket_id.clone()),
+                actor(),
+            )
+            .expect("store_artifact");
+        let artifact_id =
+            ArtifactId::new(artifact_events[0].subject.as_str()).expect("artifact id");
+        store
+            .submit(&ticket_id, "done".to_string(), vec![artifact_id], actor())
+            .expect("submit");
+        store
+            .transition(&ticket_id, Trigger::VerificationStarted, actor())
+            .expect("verification started");
+        assert_eq!(
+            store.view().unwrap().tickets.get(&ticket_id).unwrap().state,
+            TicketState::Verifying
+        );
+
+        let err = store
+            .record_usage(Some(&ticket_id), None, Spend::tokens(150), actor())
+            .expect_err("overspend must be reported");
+        assert!(matches!(err, TmError::BudgetExhausted(_)));
+
+        let ticket = store
+            .view()
+            .unwrap()
+            .tickets
+            .get(&ticket_id)
+            .unwrap()
+            .clone();
+        assert_eq!(ticket.state, TicketState::Recovery);
+
+        let recorded = store
+            .log
+            .read_subject(&Id::from(ticket_id.clone()))
+            .expect("read_subject");
+        assert!(
+            recorded
+                .iter()
+                .any(|e| e.kind == tm_events::EventKind::TicketBudgetExhausted),
+            "the genuine-failure path must still record ticket.budget_exhausted"
+        );
+        assert!(
+            !recorded
+                .iter()
+                .any(|e| e.kind == tm_events::EventKind::TicketBudgetHandoff),
+            "a non-handoff-eligible exhaustion must not also claim to be a handoff"
+        );
     }
 
     #[test]

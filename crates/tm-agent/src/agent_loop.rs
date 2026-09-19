@@ -353,8 +353,17 @@ impl AgentLoop {
     /// [`first_exhausted_dimension`] at the top of the *next* loop iteration is what actually
     /// produces `AgentOutcome::BudgetExhausted` — preserving the "never mid-edit" contract that
     /// method's doc comment promises (this step's tool calls still need to run to completion).
-    /// A real reconciliation between the loop's own ceiling and the ticket's durable budget is
-    /// `docs/audit-2026-09-18-fable.md` B-10's scope, not this one's.
+    ///
+    /// The reconciliation this doc comment used to defer to a future item
+    /// (`docs/audit-2026-09-18-fable.md` B-10) now exists on the *store* side of this same call:
+    /// when the overspend crosses the ticket's own durable budget and it is still `Leased`/
+    /// `Running`, [`tm_core::Store::record_usage`]'s handoff-eligible branch has already released
+    /// its lease and transitioned it `-> Ready` via `Trigger::BudgetHandoff` by the time this
+    /// method returns — swallowing the error here does not swallow that transition, only the
+    /// loop's own notification of it (which [`first_exhausted_dimension`]/[`AgentLoop::
+    /// can_afford`] still surface as `AgentOutcome::BudgetExhausted`, now itself backed by a
+    /// second, defensive call to [`tm_core::Store::budget_handoff`] — see
+    /// [`AgentLoop::budget_handoff_outcome`]).
     fn record_usage(&self, task: &AgentTask, spend: Spend) -> Result<()> {
         match self.store.record_usage(
             Some(&task.ticket),
