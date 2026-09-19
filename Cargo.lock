@@ -3327,6 +3327,7 @@ dependencies = [
  "clap",
  "crossterm 0.29.0",
  "dirs",
+ "git2",
  "portable-pty",
  "predicates",
  "ratatui-core",

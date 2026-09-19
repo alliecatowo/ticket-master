@@ -45,17 +45,22 @@ fn install_tracing() {
 
 /// Route a parsed [`Cli`] to its execution module.
 ///
-/// When `cli.command` is `None`, open the project and either run one prompt to completion
-/// (`--prompt`), open the ratatui TUI (a real tty, per [`tui::should_launch`] — D-002: "a mode of
-/// the existing binary, entered on the bare-`tm` TTY path"), or fall back to the plain interactive
-/// agent loop (`--plain`, `--json`, `--quiet`, `TERM=dumb`, or stdout/stdin not a tty). When
-/// `cli.command` is `Some`, delegate to the matching execution module. `Init` is the only command
-/// that doesn't need an already-open project.
+/// When `cli.command` is `None`, open the project (via [`project::open_bare`], which
+/// auto-bootstraps one when `--project` was not given and none exists yet anywhere above the
+/// current directory -- bare `tm` must "just work" in a fresh directory the same way
+/// `claude`/`codex` do, not require the user to already know to run `tm init`/`tm attach` first)
+/// and either run one prompt to completion (`--prompt`), open the ratatui TUI (a real tty, per
+/// [`tui::should_launch`] — D-002: "a mode of the existing binary, entered on the bare-`tm` TTY
+/// path"), or fall back to the plain interactive agent loop (`--plain`, `--json`, `--quiet`,
+/// `TERM=dumb`, or stdout/stdin not a tty). When `cli.command` is `Some`, delegate to the
+/// matching execution module -- every one of those still requires an already-open project and
+/// errors precisely as before when none exists, since a user who typed a specific subcommand
+/// already knows enough to run `tm init` first. `Init` is the only explicit command that doesn't
+/// need an already-open project.
 async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
     match cli.command {
         None => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_bare(cli.global.project.as_deref(), renderer)?;
             let project = Arc::new(opened);
 
             if let Some(prompt) = cli.prompt {
@@ -228,55 +233,20 @@ mod tests {
         assert!(tmp.path().join(".tm").is_dir());
     }
 
-    #[tokio::test]
-    async fn dispatch_bare_agent_no_project_error() {
-        let renderer = Renderer::from_flags(false, false, true);
-        let cli = Cli {
-            global: tm_cli::args::GlobalOpts {
-                json: false,
-                quiet: false,
-                no_color: true,
-                plain: false,
-                project: None,
-            },
-            prompt: None,
-            command: None,
-        };
-
-        let result = dispatch(cli, &renderer).await;
-        match result {
-            Err(tm_types::TmError::NotFound { .. }) => (),
-            other => panic!(
-                "expected NotFound error when no project exists, got {:?}",
-                other
-            ),
-        }
-    }
-
-    #[tokio::test]
-    async fn dispatch_prompt_no_project_error() {
-        let renderer = Renderer::from_flags(false, false, true);
-        let cli = Cli {
-            global: tm_cli::args::GlobalOpts {
-                json: false,
-                quiet: false,
-                no_color: true,
-                plain: false,
-                project: None,
-            },
-            prompt: Some("test prompt".to_string()),
-            command: None,
-        };
-
-        let result = dispatch(cli, &renderer).await;
-        match result {
-            Err(tm_types::TmError::NotFound { .. }) => (),
-            other => panic!(
-                "expected NotFound error when no project exists, got {:?}",
-                other
-            ),
-        }
-    }
+    // `dispatch_bare_agent_no_project_error` and `dispatch_prompt_no_project_error` used to
+    // assert that bare `tm`/`tm --prompt` (`command: None`) errored when no project existed yet.
+    // That was exactly the UX bug this auto-bootstrap fixes, so both assertions are gone.
+    // `dispatch`'s `None` branch now delegates the whole resolve-or-bootstrap decision to
+    // `project::open_bare`, which is covered directly and hermetically (no real cwd, no stdin, no
+    // provider) by `project::tests::open_bare_*` in `src/project.rs`. Proving the fix by driving
+    // `dispatch` itself in-process for the bare (no `--prompt`) arm isn't safe on top of that:
+    // past the bootstrap it falls into `session.run_interactive()`, which blocks reading real
+    // stdin, and this test binary doesn't control that the way a spawned subprocess with piped,
+    // explicitly-closed stdin can. That end-to-end path (including the plain loop actually being
+    // reached, and the git-history-assimilation decision) is covered by
+    // `tests/bare_bootstrap.rs`'s `bare_tm_bootstraps_a_project_in_a_genuinely_empty_directory`
+    // and `bare_tm_assimilates_an_existing_git_repository_with_commits`, which spawn the real
+    // compiled `tm` binary the same way `tests/tui_launch.rs` already does.
 
     #[tokio::test]
     async fn dispatch_ticket_subcommand_no_project_error() {
