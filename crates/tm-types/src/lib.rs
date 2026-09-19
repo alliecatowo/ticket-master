@@ -13,6 +13,7 @@
 pub mod action;
 pub mod authority;
 pub mod budget;
+pub mod capability;
 pub mod clock;
 pub mod error;
 pub mod id;
@@ -27,6 +28,9 @@ pub use authority::{
     ResourceAuthority, ShellAuthority, TicketAuthority,
 };
 pub use budget::{Budget, BudgetError, Spend};
+pub use capability::{
+    AuthorityRequirement, CallContext, CapabilityProvider, CostClass, ToolSchema,
+};
 pub use clock::{Clock, CounterIds, FixedClock, IdSource, SystemClock, TestIds};
 pub use error::{Result, TmError};
 pub use id::{

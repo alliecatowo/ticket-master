@@ -10,7 +10,9 @@
 //! cleanly rather than mid-edit.
 //!
 //! Non-negotiables this crate exists to enforce (`SPEC.md` §11):
-//! - Every tool call is gated by [`tm_types::Authority::permits`]; see [`tools::ToolRegistry`].
+//! - Every tool call is gated by [`tm_types::Authority::permits`]; see [`tools::ToolRegistry`],
+//!   which dispatches through whatever [`tm_types::CapabilityProvider`]s it was built with
+//!   (`docs/audit-2026-09-18-fable.md` A-01).
 //! - Approval-required actions suspend and resume via `approval.requested`/`approval.decided`.
 //! - Edits go through [`patch::PatchEngine`] with conflict detection, never blind overwrites.
 //! - Budget is checked before each provider call; exhaustion stops between steps, never
@@ -38,4 +40,4 @@ pub use outcome::{AgentOutcome, AgentTask, EvidenceBundle, StepRecord};
 pub use patch::{Edit, PatchEngine, PatchOutcome};
 pub use prompt::{render_system_prompt, render_task_prompt};
 pub use session::{DurablePromotion, Session};
-pub use tools::{ToolCall, ToolContext, ToolOutcome, ToolRegistry, ToolSpec};
+pub use tools::{BuiltinCapability, ToolCall, ToolOutcome, ToolRegistry};

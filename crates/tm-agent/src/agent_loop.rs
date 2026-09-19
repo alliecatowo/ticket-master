@@ -11,20 +11,26 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use tm_codeintel::CodeIntel;
-use tm_context::command::{CommandCache, CommandExecutor};
-use tm_core::{FailureClass, Store};
+use tm_core::FailureClass;
 use tm_harness::config::PromptFragments;
 use tm_provider::fabric::Fabric;
 use tm_provider::{CompletionRequest, ContentBlock, Message, MessageRole};
-use tm_types::{Authority, Budget, Clock, Decision, IdSource, ParticipantId, Result, Role, Spend};
+use tm_types::{
+    Authority, Budget, CallContext, Clock, Decision, IdSource, ParticipantId, Result, Role, Spend,
+};
 
 use crate::outcome::{
     AgentOutcome, AgentTask, BudgetDimension, PendingApproval, StepRecord, ToolCallRecord,
 };
-use crate::patch::PatchEngine;
 use crate::session::Session;
-use crate::tools::{ToolCall, ToolContext, ToolName, ToolOutcome, ToolRegistry};
+use crate::tools::{ToolCall, ToolOutcome, ToolRegistry};
+
+/// The `ticket.submit` wire name (`SPEC.md` §11), checked here by literal string rather than
+/// `crate::tools::ToolName` — that enum is a private implementation detail of
+/// [`crate::tools::BuiltinCapability`] now (`docs/audit-2026-09-18-fable.md` A-01), and this
+/// loop dispatches by wire name alone so it works identically for a future capability whose
+/// tools were never `ToolName` variants at all.
+const TICKET_SUBMIT: &str = "ticket.submit";
 
 /// Upper bound on steps a single [`AgentLoop::run`] call will take before it forces a
 /// [`AgentOutcome::Failed`] with `tm_core::FailureClass::Other`, guarding against a
@@ -59,10 +65,6 @@ pub struct AgentLoop {
     authority: Authority,
     budget: Budget,
     cache: PromptCacheState,
-    ci: Arc<CodeIntel>,
-    store: Arc<Store>,
-    command_cache: Arc<dyn CommandCache + Send + Sync>,
-    command_executor: Arc<dyn CommandExecutor + Send + Sync>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdSource>,
     role: Role,
@@ -71,19 +73,21 @@ pub struct AgentLoop {
 }
 
 impl AgentLoop {
-    /// Build a loop over `fabric`, offering the standard [`ToolRegistry`], gated by `authority`
-    /// and capped at `budget` (this is the loop's own ceiling; [`AgentTask::budget`] is
-    /// intersected with it per run so neither can override the other upward).
+    /// Build a loop over `fabric` and `tools` (however many [`tm_types::CapabilityProvider`]s
+    /// the caller assembled `tools` from — `docs/audit-2026-09-18-fable.md` A-01), gated by
+    /// `authority` and capped at `budget` (this is the loop's own ceiling; [`AgentTask::budget`]
+    /// is intersected with it per run so neither can override the other upward).
+    ///
+    /// Every dependency a builtin tool needs (code intelligence, project state, command
+    /// execution) is already baked into `tools` by whoever built it (see
+    /// [`ToolRegistry::standard`]); this loop only ever threads authority, identity and injected
+    /// time/id sources through per call via [`tm_types::CallContext`].
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         fabric: Arc<Fabric>,
         tools: ToolRegistry,
         authority: Authority,
         budget: Budget,
-        ci: Arc<CodeIntel>,
-        store: Arc<Store>,
-        command_cache: Arc<dyn CommandCache + Send + Sync>,
-        command_executor: Arc<dyn CommandExecutor + Send + Sync>,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdSource>,
         role: Role,
@@ -95,10 +99,6 @@ impl AgentLoop {
             authority,
             budget,
             cache: PromptCacheState::new(),
-            ci,
-            store,
-            command_cache,
-            command_executor,
             clock,
             ids,
             role,
@@ -152,7 +152,7 @@ impl AgentLoop {
         approved: bool,
     ) -> Result<AgentOutcome> {
         let effective_authority = self.authority.intersect(&task.authority);
-        let patch_engine = PatchEngine::new(project_root(), effective_authority.clone());
+        let root = project_root();
 
         let call = ToolCall {
             id: pending.tool_use_id.clone(),
@@ -161,20 +161,16 @@ impl AgentLoop {
         };
 
         let resolution = if approved {
-            let mut ctx = ToolContext {
+            let ctx = CallContext {
                 authority: &effective_authority,
-                ci: self.ci.as_ref(),
-                store: self.store.as_ref(),
-                patch_engine: &patch_engine,
-                command_cache: self.command_cache.as_ref(),
-                command_executor: self.command_executor.as_ref(),
-                clock: self.clock.as_ref(),
-                ids: self.ids.as_ref(),
                 ticket: &task.ticket,
                 session: &task.session,
                 actor: &self.actor,
+                clock: self.clock.as_ref(),
+                ids: self.ids.as_ref(),
+                root: &root,
             };
-            self.tools.dispatch(&call, &mut ctx)
+            self.tools.dispatch(&call, &ctx).await
         } else {
             ToolOutcome::Denied {
                 reason: "approval declined".to_string(),
@@ -198,7 +194,7 @@ impl AgentLoop {
             at: self.clock.now(),
         };
 
-        if pending.tool_name == ToolName::TicketSubmit.as_str() {
+        if pending.tool_name == TICKET_SUBMIT {
             if let ToolOutcome::Completed { .. } = &resolution {
                 steps.push(step);
                 let evidence = self.build_evidence(&task, &steps, &pending.input);
@@ -233,7 +229,7 @@ impl AgentLoop {
             }
         }
 
-        let patch_engine = PatchEngine::new(project_root(), effective_authority.clone());
+        let root = project_root();
         let fragments = PromptFragments {
             system_preamble: String::new(),
             closing_reminder: String::new(),
@@ -346,25 +342,21 @@ impl AgentLoop {
             let mut tool_call_records: Vec<ToolCallRecord> = Vec::new();
 
             for (id, name, input) in &tool_uses {
-                if let Some(spec) = self.tools.get(name) {
-                    if let Ok(action) = (spec.to_action)(input) {
-                        if let Decision::NeedsApproval(reason) =
-                            effective_authority.permits(&action)
-                        {
-                            // Steps completed before suspension only; this in-progress step
-                            // (including any calls already dispatched within it) is not
-                            // committed, per `AgentOutcome::AwaitingApproval`'s contract.
-                            return Ok(AgentOutcome::AwaitingApproval {
-                                steps,
-                                pending_call: PendingApproval {
-                                    tool_use_id: id.clone(),
-                                    tool_name: name.clone(),
-                                    input: input.clone(),
-                                    reason,
-                                    requested_at: self.clock.now(),
-                                },
-                            });
-                        }
+                if let Ok(action) = self.tools.to_action(name, input) {
+                    if let Decision::NeedsApproval(reason) = effective_authority.permits(&action) {
+                        // Steps completed before suspension only; this in-progress step
+                        // (including any calls already dispatched within it) is not
+                        // committed, per `AgentOutcome::AwaitingApproval`'s contract.
+                        return Ok(AgentOutcome::AwaitingApproval {
+                            steps,
+                            pending_call: PendingApproval {
+                                tool_use_id: id.clone(),
+                                tool_name: name.clone(),
+                                input: input.clone(),
+                                reason,
+                                requested_at: self.clock.now(),
+                            },
+                        });
                     }
                 }
 
@@ -374,20 +366,16 @@ impl AgentLoop {
                     input: input.clone(),
                 };
                 let resolution = {
-                    let mut ctx = ToolContext {
+                    let ctx = CallContext {
                         authority: &effective_authority,
-                        ci: self.ci.as_ref(),
-                        store: self.store.as_ref(),
-                        patch_engine: &patch_engine,
-                        command_cache: self.command_cache.as_ref(),
-                        command_executor: self.command_executor.as_ref(),
-                        clock: self.clock.as_ref(),
-                        ids: self.ids.as_ref(),
                         ticket: &task.ticket,
                         session: &task.session,
                         actor: &self.actor,
+                        clock: self.clock.as_ref(),
+                        ids: self.ids.as_ref(),
+                        root: &root,
                     };
-                    self.tools.dispatch(&call, &mut ctx)
+                    self.tools.dispatch(&call, &ctx).await
                 };
 
                 tool_call_records.push(ToolCallRecord {
@@ -397,7 +385,7 @@ impl AgentLoop {
                     resolution: resolution.clone(),
                 });
 
-                if name == ToolName::TicketSubmit.as_str() {
+                if name == TICKET_SUBMIT {
                     if let ToolOutcome::Completed { .. } = &resolution {
                         steps.push(StepRecord {
                             index: step_index,
@@ -475,7 +463,8 @@ impl AgentLoop {
     }
 }
 
-/// The project root a [`PatchEngine`] applies edits beneath.
+/// The project root threaded through [`tm_types::CallContext::root`] — a `PatchEngine` applies
+/// edits beneath it, and any future filesystem-touching capability would use it the same way.
 ///
 /// `AgentLoop`'s fixed constructor signature has no channel to carry a root path in, so this
 /// resolves it the only way available without touching the wall clock or randomness: the

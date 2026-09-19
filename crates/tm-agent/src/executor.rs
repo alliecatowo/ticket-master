@@ -105,17 +105,19 @@ impl BuiltinExecutor {
             .clone()
             .unwrap_or_else(|| session_id_from(self.ids.next(IdKind::Session).as_str()));
 
-        let agent_loop = AgentLoop::new(
-            self.fabric.clone(),
-            ToolRegistry::standard(),
-            // The loop's own ceiling is the ticket's own authority/budget, not root()/
-            // unlimited() — see this module's doc comment.
-            task.authority.clone(),
-            task.budget,
+        let tools = ToolRegistry::standard(
             self.ci.clone(),
             self.store.clone(),
             self.command_cache.clone(),
             self.command_executor.clone(),
+        );
+        let agent_loop = AgentLoop::new(
+            self.fabric.clone(),
+            tools,
+            // The loop's own ceiling is the ticket's own authority/budget, not root()/
+            // unlimited() — see this module's doc comment.
+            task.authority.clone(),
+            task.budget,
             self.clock.clone(),
             self.ids.clone(),
             task.role,
