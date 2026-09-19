@@ -353,6 +353,22 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
         std::io::stdin(),
     )?;
 
+    // Resolve the provider before touching the filesystem at all. This used to be a plain
+    // `require_anthropic_api_key()?` right here, before any `.tm/` directory got created, so a
+    // genesis run that fails on provider selection must keep failing before that side effect —
+    // not after creating a half-initialized project directory the caller then has to clean up by
+    // hand. A single candidate stands in for "the fabric": `GenesisDriver` takes one `Provider`
+    // for its whole run (every stage, regardless of role), so there is no per-call routing
+    // decision for a `Fabric` to make here. See `resolve_genesis_provider` for how that one
+    // provider gets picked — unchanged (Anthropic via `RoleTable::default_table`) when
+    // `ANTHROPIC_API_KEY` is set, falling back to a reachable zero-signup local provider when it
+    // is not.
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let (provider, fallback_note) = resolve_genesis_provider(clock)?;
+    if let Some(note) = &fallback_note {
+        renderer.note(note);
+    }
+
     let dir = std::env::current_dir()?;
     let root = if dir.join(".tm").is_dir() {
         dir.canonicalize()?
@@ -360,16 +376,6 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
         create_project_dir(&dir)?
     };
     let project = open(&root)?;
-
-    // A single candidate stands in for "the fabric": `GenesisDriver` takes one `Provider` for
-    // its whole run (every stage, regardless of role), so there is no per-call routing decision
-    // for a `Fabric` to make here. See `resolve_genesis_provider` for how that one provider gets
-    // picked — unchanged (Anthropic via `RoleTable::default_table`) when `ANTHROPIC_API_KEY` is
-    // set, falling back to a reachable zero-signup local provider when it is not.
-    let (provider, fallback_note) = resolve_genesis_provider(project.clock.clone())?;
-    if let Some(note) = &fallback_note {
-        renderer.note(note);
-    }
 
     // `GenesisState::project` is the only channel `GenesisDriver` has for threading the raw
     // prompt into `Stage::Seed`'s `analyze_prompt` call (it hands `state.project` straight to

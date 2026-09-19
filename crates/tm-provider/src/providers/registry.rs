@@ -95,6 +95,19 @@ use crate::providers::{
 use crate::role_config::{RoleCandidate, RoleTable};
 use crate::types::{ModelId, ProviderError};
 
+/// Pick the model id [`Registry::probe_local`] reports as `first_model`: the first entry in
+/// `models` that doesn't look embedding-only (name containing `"embed"`, e.g. Ollama's own
+/// `nomic-embed-text`), or the literal first entry if every one matches. A pure function, split
+/// out of `probe_local` so this name heuristic is unit-testable with no network access. `models`
+/// must be non-empty — callers already branch on emptiness before reaching this.
+fn pick_completion_model(models: &[String]) -> String {
+    models
+        .iter()
+        .find(|m| !m.to_lowercase().contains("embed"))
+        .cloned()
+        .unwrap_or_else(|| models[0].clone())
+}
+
 /// Autodetects and constructs this crate's provider fleet from the environment, and wires a
 /// [`RoleTable`] to a ready-to-use [`Fabric`]. See the module docs for the full dispatch table
 /// and the known `provider`-slug-collision gap.
@@ -196,11 +209,21 @@ impl Registry {
     /// [`Availability`]: distinguishes nothing listening from a live server with zero models
     /// pulled, which a caller such as `tm-cli`'s `genesis` command needs in order to pick an
     /// actually-usable `(provider, model)` pair rather than just reporting a yes/no.
+    ///
+    /// `first_model` prefers a listed model id that doesn't look embedding-only (a name
+    /// containing `"embed"`, e.g. Ollama's own `nomic-embed-text` — see the fixture in
+    /// `providers::local`'s tests) over the literal first entry: a caller picking a model for a
+    /// *completion* request off this field would otherwise silently get an embedding model
+    /// whenever one happens to sort first, and fail later with a confusing mid-run provider
+    /// error instead of a clear signal here. This is a name heuristic, not real capability
+    /// introspection (this crate has none for local backends), so it falls back to the literal
+    /// first entry if every listed model matches — a filtered guess is still strictly better
+    /// information than none, and there is nothing better to fall back to.
     pub async fn probe_local(id: &str, clock: Arc<dyn Clock>) -> LocalProbe {
         match Self::local_models(id, clock).await {
             Ok(models) if models.is_empty() => LocalProbe::ReachableNoModels,
             Ok(models) => LocalProbe::Ready {
-                first_model: models[0].clone(),
+                first_model: pick_completion_model(&models),
             },
             Err(_) => LocalProbe::Unreachable,
         }
@@ -365,6 +388,35 @@ impl Registry {
 mod tests {
     use super::*;
     use tm_types::clock::FixedClock;
+
+    // ---- pick_completion_model: pure, no network ----
+
+    #[test]
+    fn pick_completion_model_prefers_a_non_embedding_entry_even_when_it_sorts_second() {
+        let models = vec!["nomic-embed-text".to_string(), "llama3:latest".to_string()];
+        assert_eq!(pick_completion_model(&models), "llama3:latest");
+    }
+
+    #[test]
+    fn pick_completion_model_keeps_the_literal_first_entry_when_it_is_already_fine() {
+        let models = vec!["llama3:latest".to_string(), "nomic-embed-text".to_string()];
+        assert_eq!(pick_completion_model(&models), "llama3:latest");
+    }
+
+    #[test]
+    fn pick_completion_model_falls_back_to_the_first_entry_when_everything_looks_like_embeddings() {
+        let models = vec![
+            "nomic-embed-text".to_string(),
+            "mxbai-embed-large".to_string(),
+        ];
+        assert_eq!(pick_completion_model(&models), "nomic-embed-text");
+    }
+
+    #[test]
+    fn pick_completion_model_matches_embed_case_insensitively() {
+        let models = vec!["Embed-Model".to_string(), "chat-model".to_string()];
+        assert_eq!(pick_completion_model(&models), "chat-model");
+    }
 
     /// Every `known_providers()` entry's `id` should be unique — a duplicate would mean two
     /// backends silently shadow each other in [`Registry::build_provider`]'s dispatch.

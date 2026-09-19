@@ -379,7 +379,12 @@ pub async fn provider_detect(renderer: &Renderer) -> tm_types::Result<()> {
                 serde_json::json!({
                     "id": info.id,
                     "display_name": info.display_name,
-                    "configured": info.is_configured(),
+                    // Renamed from a plain `"configured"` deliberately: for the three local
+                    // backends this is `true` even with nothing listening (their env vars are
+                    // all optional), so a name that could be misread as "usable" would
+                    // reintroduce the exact lie `"availability"` exists to correct. This is
+                    // env-var presence only -- see `"availability"` for the honest answer.
+                    "env_vars_present": info.is_configured(),
                     "availability": availability_label(*availability),
                     "env_vars": info.env_vars.iter().map(|v| serde_json::json!({
                         "name": v.name,
