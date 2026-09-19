@@ -42,10 +42,12 @@ pub struct InvalidTransition {
 //   Leased           WorkStarted                  -> Running
 //   Leased           LeaseExpired                 -> Ready
 //   Leased           LeaseReleased                -> Ready
+//   Leased           BudgetHandoff                -> Ready
 //   Leased           Cancel                       -> Cancelled
 //   Running          Submit                       -> Submitted
 //   Running          LeaseExpired                 -> Ready
 //   Running          LeaseReleased                -> Ready
+//   Running          BudgetHandoff                -> Ready
 //   Running          Cancel                       -> Cancelled
 //   Submitted        VerificationStarted          -> Verifying
 //   Submitted        Cancel                       -> Cancelled
@@ -87,11 +89,13 @@ pub fn transition(from: TicketState, trigger: Trigger) -> Result<TicketState, In
         (Leased, Failed) => Ok(Recovery),
         (Leased, LeaseExpired) => Ok(Ready),
         (Leased, LeaseReleased) => Ok(Ready),
+        (Leased, BudgetHandoff) => Ok(Ready),
         (Leased, Cancel) => Ok(Cancelled),
         (Running, Submit) => Ok(Submitted),
         (Running, Failed) => Ok(Recovery),
         (Running, LeaseExpired) => Ok(Ready),
         (Running, LeaseReleased) => Ok(Ready),
+        (Running, BudgetHandoff) => Ok(Ready),
         (Running, Cancel) => Ok(Cancelled),
         (Submitted, VerificationStarted) => Ok(Verifying),
         (Submitted, Cancel) => Ok(Cancelled),
@@ -151,6 +155,7 @@ impl TransitionTable {
         Trigger::WorkStarted,
         Trigger::LeaseExpired,
         Trigger::LeaseReleased,
+        Trigger::BudgetHandoff,
         Trigger::Submit,
         Trigger::VerificationStarted,
         Trigger::VerificationPassed,
@@ -210,11 +215,13 @@ mod tests {
             (Leased, Failed, Recovery),
             (Leased, LeaseExpired, Ready),
             (Leased, LeaseReleased, Ready),
+            (Leased, BudgetHandoff, Ready),
             (Leased, Cancel, Cancelled),
             (Running, Submit, Submitted),
             (Running, Failed, Recovery),
             (Running, LeaseExpired, Ready),
             (Running, LeaseReleased, Ready),
+            (Running, BudgetHandoff, Ready),
             (Running, Cancel, Cancelled),
             (Submitted, VerificationStarted, Verifying),
             (Submitted, Cancel, Cancelled),
@@ -316,6 +323,41 @@ mod tests {
             transition(TicketState::Running, Trigger::LeaseReleased),
             Ok(TicketState::Ready)
         );
+    }
+
+    #[test]
+    fn leased_and_running_both_return_to_ready_on_budget_handoff_never_recovery() {
+        // The core B-10 fix: structurally the same `-> Ready` shape as `LeaseExpired`/
+        // `LeaseReleased` (`docs/audit-2026-09-18-fable.md` B-10, `SPEC.md` §31.3), and —
+        // unlike `Trigger::Failed` from the same two states — never `Recovery`.
+        assert_eq!(
+            transition(TicketState::Leased, Trigger::BudgetHandoff),
+            Ok(TicketState::Ready)
+        );
+        assert_eq!(
+            transition(TicketState::Running, Trigger::BudgetHandoff),
+            Ok(TicketState::Ready)
+        );
+        assert_ne!(
+            transition(TicketState::Leased, Trigger::BudgetHandoff),
+            Ok(TicketState::Recovery)
+        );
+        assert_ne!(
+            transition(TicketState::Running, Trigger::BudgetHandoff),
+            Ok(TicketState::Recovery)
+        );
+    }
+
+    #[test]
+    fn budget_handoff_is_illegal_outside_leased_and_running() {
+        for &state in TicketState::ALL {
+            if !matches!(state, TicketState::Leased | TicketState::Running) {
+                assert!(
+                    transition(state, Trigger::BudgetHandoff).is_err(),
+                    "{state:?} must reject BudgetHandoff"
+                );
+            }
+        }
     }
 
     #[test]

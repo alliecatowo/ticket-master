@@ -319,7 +319,11 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
         | EventKind::TicketFailed
         | EventKind::TicketRetryScheduled
         | EventKind::TicketEscalated
-        | EventKind::TicketBudgetExhausted => {}
+        | EventKind::TicketBudgetExhausted
+        // `ticket.budget_handoff` travels alongside its own `ticket.state_changed` event too
+        // (`Store::budget_handoff`/`Store::record_usage`'s handoff-eligible branch), same
+        // convention as every other ticket lifecycle kind in this arm.
+        | EventKind::TicketBudgetHandoff => {}
         EventKind::DecisionCreated => {
             if let Some(p) = event.payload.as_decision_created() {
                 // `decision.created`'s `summary` field carries the JSON blob `store.rs`'s
