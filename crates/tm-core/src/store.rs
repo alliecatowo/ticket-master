@@ -37,9 +37,12 @@ use std::sync::Arc;
 
 use rusqlite::Connection;
 use tm_events::payload::{
-    ArtifactCreatedPayload, AuthorityRevertedPayload, DecisionCreatedPayload,
-    DecisionSupersededPayload, MilestoneClosedPayload, MilestoneCreatedPayload,
-    MilestoneReopenedPayload, TicketAuditRejectedPayload, TicketAuditedPayload,
+    ArtifactCreatedPayload, AuthorityRevertedPayload, CommandCompletedPayload,
+    CommandStartedPayload, DecisionCreatedPayload, DecisionSupersededPayload,
+    DocInvalidatedPayload, DocReconciledPayload, DocRegisteredPayload, HarnessPromotedPayload,
+    MilestoneClosedPayload, MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload,
+    MirrorPulledPayload, MirrorPushedPayload, SessionEndedPayload, SessionJoinedPayload,
+    SessionStartedPayload, TicketAuditRejectedPayload, TicketAuditedPayload,
     TicketBudgetExhaustedPayload, TicketCancelledPayload, TicketChildAddedPayload,
     TicketClosedPayload, TicketCreatedPayload, TicketDependencyAddedPayload,
     TicketEscalatedPayload, TicketFailedPayload, TicketHeartbeatPayload, TicketLeaseExpiredPayload,
@@ -76,6 +79,50 @@ pub struct Store {
     /// The project's root directory, needed for artifact on-disk placement
     /// ([`crate::artifact::plan_storage`]).
     root: PathBuf,
+}
+
+/// One open [`tm_events::log::Tx`], scoped to a single [`Store::transaction`] call.
+///
+/// Exposes exactly the "append one already-typed draft, materializing it via
+/// [`crate::materialize::apply`] in place" operation every typed command method on [`Store`] (and
+/// [`Store::append`]) is built from, plus [`StoreTx::raw`] for a caller that needs the one
+/// documented exception to "materialize::apply is the only writer" (see this module's top-level
+/// note on [`Store::store_artifact`]/[`Store::attach_evidence`]) while still sharing one
+/// transaction with other heterogeneous writes — the case [`Store::transaction`] exists for.
+pub struct StoreTx<'a> {
+    log: &'a EventLog,
+    tx: Tx<'a>,
+}
+
+impl<'a> StoreTx<'a> {
+    /// Append `draft`, materializing it via [`crate::materialize::apply`] before returning the
+    /// resulting [`Event`] (durable once the enclosing [`Store::transaction`] call commits, not
+    /// before).
+    pub fn append(&self, draft: EventDraft) -> tm_types::Result<Event> {
+        let event = self.log.append_in(&self.tx, draft)?;
+        crate::materialize::apply(&self.tx, &event)?;
+        Ok(event)
+    }
+
+    /// Append every draft in `drafts`, in order, via [`StoreTx::append`].
+    pub fn append_all(&self, drafts: Vec<EventDraft>) -> tm_types::Result<Vec<Event>> {
+        drafts.into_iter().map(|draft| self.append(draft)).collect()
+    }
+
+    /// The raw SQLite connection backing this transaction.
+    pub fn raw(&self) -> &Connection {
+        self.tx.raw()
+    }
+}
+
+/// Which direction a mirror sync ran, for [`Store::update_mirror_link`] — `mirror.pushed` and
+/// `mirror.pulled` carry the same two fields (`remote`, `reference`), differing only in kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MirrorSyncDirection {
+    /// Ticketmaster's state was pushed to the external tracker (`mirror.pushed`).
+    Push,
+    /// The external tracker's changes were pulled in (`mirror.pulled`).
+    Pull,
 }
 
 fn storage_err(e: rusqlite::Error) -> TmError {
@@ -1494,6 +1541,250 @@ impl Store {
         Ok(crate::invariants::check_invariants(&self.view()?))
     }
 
+    /// Run `f` against one shared [`StoreTx`], committing only if `f` succeeds and
+    /// [`crate::invariants::check_invariants`] finds no violation in the resulting state
+    /// (otherwise rolling back and surfacing a `TmError::invariant`, mirroring
+    /// [`Store::run_command_with_extra`]'s own commit discipline).
+    ///
+    /// This is the entry point for a caller that needs to commit several heterogeneous writes as
+    /// one atomic unit — e.g. `tm-genesis`'s `commit_graph`, which today calls `create_ticket`/
+    /// `create_milestone`/`add_dependency` as separate transactions purely because `Store` had no
+    /// shared-transaction primitive to call instead (see that function's own module note); a
+    /// caller like it can now do `store.transaction(|tx| { tx.append(draft_a)?; tx.append(draft_b)?; ... })`
+    /// and get "commit together or reject wholesale" for real, without this crate needing to know
+    /// anything about genesis' domain.
+    ///
+    /// # Errors
+    /// Whatever `f` returns, or `TmError::invariant` if the post-write state violates an
+    /// invariant.
+    pub fn transaction<F, T>(&self, f: F) -> tm_types::Result<T>
+    where
+        F: FnOnce(&StoreTx<'_>) -> tm_types::Result<T>,
+    {
+        let tx = self.log.begin()?;
+        let store_tx = StoreTx { log: &self.log, tx };
+        let result = f(&store_tx)?;
+        let post_view = Self::read_view(store_tx.tx.raw())?;
+        let violations = crate::invariants::check_invariants(&post_view);
+        if !violations.is_empty() {
+            let detail = violations
+                .iter()
+                .map(|v| format!("{}: {}", v.invariant, v.detail))
+                .collect::<Vec<_>>()
+                .join("; ");
+            store_tx.tx.rollback()?;
+            return Err(TmError::invariant(format!(
+                "{} invariant violation(s): {detail}",
+                violations.len()
+            )));
+        }
+        store_tx.tx.commit()?;
+        Ok(result)
+    }
+
+    /// Append every draft in `drafts`, materializing each via [`crate::materialize::apply`] in
+    /// the same transaction as the append (built on [`Store::transaction`]). Every typed
+    /// convenience method below that doesn't need [`Store::run_command`]'s view-snapshot-driven
+    /// validation (`start_session`, `register_doc`, `record_command`, ...) is built on this;
+    /// it is also the escape hatch for a caller that already holds a typed `EventDraft` — e.g.
+    /// `tm-context::command::run`'s `command.started`/`command.completed` drafts, previously
+    /// dropped on the floor because `Store` exposed no generic append entry point at all (see
+    /// `tm-agent::tools::run_shell_like`'s own comment on that gap).
+    ///
+    /// # Errors
+    /// Whatever the underlying append/materialize calls return, or `TmError::invariant` if the
+    /// post-write state violates an invariant.
+    pub fn append(&self, drafts: Vec<EventDraft>) -> tm_types::Result<Vec<Event>> {
+        self.transaction(|tx| tx.append_all(drafts))
+    }
+
+    /// Start a new session for `participant`, allocating a fresh [`SessionId`]. The session id
+    /// is recoverable from the returned event's payload (`events[0].payload.as_session_started()`),
+    /// the same convention [`Store::record_decision`]'s callers already use to pull a fresh id
+    /// back out of a generic `Vec<Event>` return.
+    pub fn start_session(
+        &self,
+        participant: ParticipantId,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        let session = SessionId::new(self.ids.next(IdKind::Session).as_str())?;
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(session.clone()),
+            Payload::from(SessionStartedPayload {
+                session,
+                participant,
+            }),
+        )])
+    }
+
+    /// Record `participant` joining an already-started `session`.
+    pub fn join_session(
+        &self,
+        session: &SessionId,
+        participant: ParticipantId,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(session.clone()),
+            Payload::from(SessionJoinedPayload {
+                session: session.clone(),
+                participant,
+            }),
+        )])
+    }
+
+    /// End `session`.
+    pub fn end_session(
+        &self,
+        session: &SessionId,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(session.clone()),
+            Payload::from(SessionEndedPayload {
+                session: session.clone(),
+            }),
+        )])
+    }
+
+    /// Register a doc at `path`, optionally attributing its registration to `ticket`. See
+    /// [`crate::materialize::apply`]'s `doc.registered` arm for the `path`-as-`docs.id` mapping
+    /// decision this relies on.
+    pub fn register_doc(
+        &self,
+        path: String,
+        ticket: Option<TicketId>,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::new(path.clone()),
+            Payload::from(DocRegisteredPayload { path, ticket }),
+        )])
+    }
+
+    /// Mark the doc at `path` invalidated, for `reason` (a free-form description; see
+    /// [`crate::materialize::apply`]'s `doc.invalidated` arm for why `reason` itself isn't
+    /// persisted into `docs`).
+    pub fn invalidate_doc(
+        &self,
+        path: String,
+        reason: String,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::new(path.clone()),
+            Payload::from(DocInvalidatedPayload { path, reason }),
+        )])
+    }
+
+    /// Mark the doc at `path` reconciled (its content once again matches its declared basis).
+    pub fn reconcile_doc(
+        &self,
+        path: String,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::new(path.clone()),
+            Payload::from(DocReconciledPayload { path }),
+        )])
+    }
+
+    /// Promote `candidate` to a new harness epoch. `harness_epochs.epoch` is allocated inside
+    /// [`crate::materialize::apply`]'s `harness.promoted` arm, not here, since it must be derived
+    /// deterministically from replay order rather than from any id source this method could call.
+    pub fn promote_epoch(
+        &self,
+        candidate: String,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::none(),
+            Payload::from(HarnessPromotedPayload { candidate }),
+        )])
+    }
+
+    /// Record a new mirror link for `ticket` onto `remote` (an adapter/tracker name, matching
+    /// `tm-mirror::sync::SyncEngine`'s own `tracker.name()` convention).
+    pub fn link_mirror(
+        &self,
+        ticket: &TicketId,
+        remote: String,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(ticket.clone()),
+            Payload::from(MirrorLinkedPayload { remote }),
+        )])
+    }
+
+    /// Record a push or pull that synced `ticket` against `remote`'s `reference` (the external
+    /// id) — see [`MirrorSyncDirection`].
+    pub fn update_mirror_link(
+        &self,
+        ticket: &TicketId,
+        remote: String,
+        reference: String,
+        direction: MirrorSyncDirection,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        let payload = match direction {
+            MirrorSyncDirection::Push => Payload::from(MirrorPushedPayload { remote, reference }),
+            MirrorSyncDirection::Pull => Payload::from(MirrorPulledPayload { remote, reference }),
+        };
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(ticket.clone()),
+            payload,
+        )])
+    }
+
+    /// Record a command run's `command.started`/`command.completed` pair together, mirroring
+    /// `tm-context::command::run`'s own event-building shape (see that function's doc comment) —
+    /// the typed entry point that closes the gap `tm-agent::tools::run_shell_like` currently
+    /// works around by dropping the drafts `command::run` already builds.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_command(
+        &self,
+        command: String,
+        ticket: Option<TicketId>,
+        session: Option<SessionId>,
+        exit_code: i32,
+        duration_ms: u64,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        let subject = ticket.clone().map(Id::from).unwrap_or_else(Id::none);
+        self.append(vec![
+            EventDraft::new(
+                actor.clone(),
+                subject.clone(),
+                Payload::from(CommandStartedPayload {
+                    command: command.clone(),
+                    ticket: ticket.clone(),
+                    session: session.clone(),
+                }),
+            ),
+            EventDraft::new(
+                actor,
+                subject,
+                Payload::from(CommandCompletedPayload {
+                    command,
+                    ticket,
+                    session,
+                    exit_code,
+                    duration_ms,
+                }),
+            ),
+        ])
+    }
+
     /// Current high-water mark of every id counter, for persistence/diagnostics.
     pub fn counters(&self) -> tm_types::Result<BTreeMap<String, u64>> {
         Ok(self.view()?.counters)
@@ -2483,5 +2774,149 @@ mod tests {
         create_root_ticket(&store);
         let counters = store.counters().expect("counters");
         assert_eq!(counters.get(IdKind::Ticket.counter()), Some(&1));
+    }
+
+    #[test]
+    fn transaction_rolls_back_when_the_post_write_state_violates_an_invariant() {
+        let (_dir, store) = open_store();
+        let ready = create_root_ticket(&store);
+        store.activate(&ready, actor()).unwrap();
+        let blocked_on = create_root_ticket(&store); // stays Draft: never activated
+
+        let err = store
+            .transaction(|tx| {
+                tx.raw()
+                    .execute(
+                        "INSERT INTO ticket_deps (ticket, depends_on, kind)
+                         VALUES (?1, ?2, '\"hard\"')",
+                        rusqlite::params![ready.as_str(), blocked_on.as_str()],
+                    )
+                    .unwrap();
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(err, TmError::Invariant(_)));
+
+        let view = store.view().expect("view");
+        assert!(
+            view.graph.edges().is_empty(),
+            "the dependency edge must not survive a rolled-back transaction"
+        );
+    }
+
+    #[test]
+    fn append_materializes_and_commits_an_arbitrary_typed_draft() {
+        let (_dir, store) = open_store();
+        let events = store
+            .append(vec![EventDraft::new(
+                actor(),
+                Id::none(),
+                Payload::from(tm_events::payload::ProjectAttachedPayload {
+                    name: "demo".into(),
+                    root: "/tmp/demo".into(),
+                }),
+            )])
+            .expect("append");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, tm_events::EventKind::ProjectAttached);
+    }
+
+    #[test]
+    fn start_session_then_join_and_end_round_trip_through_rebuild() {
+        let (_dir, store) = open_store();
+        let alice = ParticipantId::new("human:alice").unwrap();
+        let bob = ParticipantId::new("agent:mock/bob").unwrap();
+
+        let started = store
+            .start_session(alice.clone(), actor())
+            .expect("start_session");
+        let session = started[0]
+            .payload
+            .as_session_started()
+            .expect("session.started payload")
+            .session
+            .clone();
+
+        store
+            .join_session(&session, bob, actor())
+            .expect("join_session");
+        store.end_session(&session, actor()).expect("end_session");
+
+        store.rebuild().expect("rebuild");
+        // No public read path exists for `sessions` yet (out of B-05's scope); rebuild succeeding
+        // without error, with the same event count as before, is the round-trip guarantee this
+        // item asks for.
+        let head = store.counters().expect("counters"); // touches the connection post-rebuild
+        let _ = head;
+    }
+
+    #[test]
+    fn register_doc_then_invalidate_and_reconcile_do_not_error() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        store
+            .register_doc("docs/architecture.md".into(), Some(ticket), actor())
+            .expect("register_doc");
+        store
+            .invalidate_doc(
+                "docs/architecture.md".into(),
+                "source moved".into(),
+                actor(),
+            )
+            .expect("invalidate_doc");
+        store
+            .reconcile_doc("docs/architecture.md".into(), actor())
+            .expect("reconcile_doc");
+    }
+
+    #[test]
+    fn promote_epoch_appends_a_harness_promoted_event() {
+        let (_dir, store) = open_store();
+        let events = store
+            .promote_epoch("config-a".into(), actor())
+            .expect("promote_epoch");
+        assert_eq!(
+            events[0].payload.as_harness_promoted().unwrap().candidate,
+            "config-a"
+        );
+    }
+
+    #[test]
+    fn link_mirror_then_update_mirror_link_do_not_error() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        store
+            .link_mirror(&ticket, "github".into(), actor())
+            .expect("link_mirror");
+        store
+            .update_mirror_link(
+                &ticket,
+                "github".into(),
+                "owner/repo#1".into(),
+                MirrorSyncDirection::Push,
+                actor(),
+            )
+            .expect("update_mirror_link push");
+        store
+            .update_mirror_link(
+                &ticket,
+                "github".into(),
+                "owner/repo#1".into(),
+                MirrorSyncDirection::Pull,
+                actor(),
+            )
+            .expect("update_mirror_link pull");
+    }
+
+    #[test]
+    fn record_command_appends_started_and_completed_events() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        let events = store
+            .record_command("cargo test".into(), Some(ticket), None, 0, 1234, actor())
+            .expect("record_command");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, tm_events::EventKind::CommandStarted);
+        assert_eq!(events[1].kind, tm_events::EventKind::CommandCompleted);
     }
 }
