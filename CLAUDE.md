@@ -17,6 +17,11 @@ never drift between sessions:
   network-in-tests, stray `.tm` literals — see `crates/xtask/src/hygiene.rs`).
 - `mise run verify` — the full gate (fmt check + clippy + `cargo test --workspace` + hygiene).
   **Run this before considering any change done**, not just a crate-scoped test pass.
+- `mise run check-drift -- <sha>` — advisory, post-merge only, **not** part of `verify`: flags an
+  unchanged cardinality assertion (`assert_eq!(Enum::X.len(), N)`-shaped) whose enum's variant
+  count changed elsewhere in the same file since `<sha>`. Run it by hand right after merging
+  parallel tracks, with `<sha>` set to the commit those tracks branched from. See "Parallel
+  tracks against a moving `main`" below for what it does and honestly does not catch.
 - `mise run clean` — `rm -rf target`. This machine runs tight on disk; do this after a verify
   pass lands, not mid-build. `mise run worktree:clean` sweeps every worktree under
   `.claude/worktrees/` the same way.
@@ -57,6 +62,69 @@ that rule is global, not repo-specific, and still applies here.
   code). `rust-analyzer` itself is a real LSP server available in this toolchain
   (`mise install rust-analyzer` if it's ever missing) for anything that wants go-to-definition
   or type-aware navigation beyond what `tm-codeintel`'s heuristics give you.
+
+## Background and parallel subagents
+
+Full playbook: `.claude/skills/dispatch-background-agent/SKILL.md`. The rules below are the
+load-bearing subset, stated plainly because getting them wrong has already cost real time in this
+repo.
+
+- **`isolation: 'worktree'` is mandatory** for any subagent that will edit files here. No
+  exceptions for "it's a small change."
+- **Never let a subagent run the real `tm` binary against the primary checkout.** Bare `tm` used
+  to auto-write a `.tm/` directory into whatever directory it ran in
+  (`docs/decisions/D-003-project-scope.md` fixed the product bug), but a subagent doing its own ad
+  hoc manual testing running the compiled binary against this repo's own primary checkout instead
+  of an isolated tempdir is a process failure that fix doesn't prevent — it happened three times
+  in one session, once leaving a real 37MB index behind and breaking the next `mise run verify`
+  for whoever ran it. Always a fresh tempdir; never the worktree root, never the primary checkout.
+  `.claude/settings.json` has a `PostToolUse` hook on `Bash` that warns once per session when
+  `.tm/` exists in the primary checkout — it is a **detector**, not a preventer (it only fires after the fact, and a
+  reliable *preventive* hook would need to pattern-match arbitrary shell commands, which is not
+  something that can be done without real false-positive/false-negative risk — see that file's
+  hook for the one thing that *is* reliably checkable: the artifact, not the command). Don't treat
+  its silence as permission to be careless.
+- **Worktree isolation can silently fail to hold across a resume.** Two subagents in one real
+  session were interrupted mid-task by a rate limit, resumed via a direct message to the same
+  agent, and resumed editing directly in the primary checkout instead of their assigned worktree —
+  their own final reports flagged it only after the fact. If a subagent's report expresses *any*
+  uncertainty about which checkout it's in, stop it before any further write and have it confirm
+  with `git rev-parse --show-toplevel` (compared against its assigned `.claude/worktrees/<name>`
+  path) before resuming.
+- **Adversarial self-review before declaring done, as a real instruction, not just a finding.**
+  Subagents that ran a deliberate skeptical pass over their own finished work (this session's
+  `advisor` tool, when available, is exactly this) caught real bugs that the implementation pass
+  missed. Ask it to do the work, then re-check the work distrustfully, before handing back.
+- **The hygiene checker's `#[cfg(test)]` region tracker is a one-way latch**, not a real parser:
+  it flips permanently "in test code" at the first `#[cfg(test)]`/`#[test]` line in a file and
+  never flips back (`crates/xtask/src/hygiene.rs`'s `TestRegionTracker`, deliberately simple —
+  see its own doc comment for why). A test-only helper placed above real production code in the
+  same file will make everything below it silently exempt from the hygiene checks; test code
+  placed before the file's real `mod tests` block gets exemptions too early. Put
+  `#[cfg(test)]`-gated code at the bottom of the file.
+
+### Parallel tracks against a moving `main`
+
+The real, historically-verified failure mode: two tracks each add a variant to the same enum from
+different base commits. Git auto-merges the enum cleanly (no conflict marker), but a test
+elsewhere in the same file that hardcoded arithmetic derived from the old variant count — neither
+branch's diff touched it — is now silently wrong, and only surfaces as a test failure in a full
+`mise run verify` after merging. This happened for real: `crates/tm-context/src/tokens.rs`'s
+`SectionKind` gained a variant during the B-10/B-14 merge (`2f86cfe`), and commit `dba4e7f` is the
+by-hand fix for the two tests that assumed the old count.
+
+`mise run check-drift -- <sha>` (see above) mechanically catches exactly one shape of this: an
+unchanged `assert_eq!(Enum::X.len(), N)`-style line where `N` is the enum's old variant count. It
+correctly does **not** claim to catch the harder half of the real incident — a test whose expected
+value is a *derived* computation (`floor(800 / 9) = 88`) three algebraic steps from the enum's
+cardinality, with no `.len()` call and no enum name anywhere on the line. Catching that
+generically would need real dataflow analysis, not a grep-shaped structural check; a broader
+pattern match was tried and rejected because on the real file it flagged on the order of thirty
+lines, which is noise, not triage. The honest fix for that harder half is a **convention**: when a
+test's expected value is derived from a collection's cardinality, compute the divisor from
+`X::PRIORITY_ORDER.len()` (or equivalent) at test time instead of hardcoding the quotient, so the
+value tracks the enum instead of relying on someone remembering to update it. Prefer that pattern
+in new tests going forward.
 
 ## Navigation
 

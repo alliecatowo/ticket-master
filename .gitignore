@@ -5,3 +5,10 @@
 *.db-wal
 *.db-shm
 .zvec-grep/
+
+# .claude/ itself is tracked (settings.json, skills/) now that this repo has both, but each
+# agent's own worktree lives under .claude/worktrees/<name>/ and must never be tracked: it's a
+# full checkout of this repo, and `git add .claude/` without this line would try to commit every
+# active worktree's contents as part of this repo's own history.
+.claude/worktrees/
+.claude/settings.local.json
