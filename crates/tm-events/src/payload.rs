@@ -205,6 +205,10 @@ payload_kinds! {
         limit: u64,
         spent: u64,
     };
+    "Payload for `ticket.budget_handoff` (`SPEC.md` §31.3, `docs/audit-2026-09-18-fable.md` B-10): never a failure, so this carries no `FailureClass` — just which dimension triggered the handoff.", TicketBudgetHandoffPayload, TicketBudgetHandoff, TicketBudgetHandoff, as_ticket_budget_handoff, {
+        ticket: TicketId,
+        dimension: String,
+    };
     "Payload for `decision.created`.", DecisionCreatedPayload, DecisionCreated, DecisionCreated, as_decision_created, {
         decision: DecisionId,
         ticket: Option<TicketId>,

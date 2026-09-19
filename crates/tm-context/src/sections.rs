@@ -9,7 +9,8 @@ use std::collections::HashSet;
 use tm_codeintel::hybrid::{Query, RetrievalContext, SignalWeights};
 use tm_codeintel::CodeIntel;
 use tm_core::{ProjectView, Ticket};
-use tm_types::{Predicate, Result};
+use tm_provider::RoleTable;
+use tm_types::{Predicate, Result, Role};
 
 use crate::pack::ProvenanceRef;
 use crate::tokens::SectionKind;
@@ -125,7 +126,109 @@ pub fn build_objective(ticket: &Ticket) -> RawSection {
     }
 }
 
-/// Section 2: active decisions affecting the ticket's claimed paths.
+/// A ballpark token count for "one provider call", used only to turn a per-token price into a
+/// human-legible "roughly how many calls" figure for [`build_budget`]'s tier menu — not an
+/// attempt to predict any particular call's real size.
+const NOMINAL_CALL_TOKENS: u64 = 2_000;
+
+/// `limit == u64::MAX` means unlimited (`tm_types::Budget`'s convention); render that as the
+/// word rather than a `u64::MAX`-sized number no one can act on.
+fn fmt_remaining(remaining: u64, limit: u64) -> String {
+    if limit == u64::MAX {
+        "unlimited".to_string()
+    } else {
+        remaining.to_string()
+    }
+}
+
+/// Same as [`fmt_remaining`] but for a micro-dollar amount, rendered as dollars to four decimal
+/// places.
+fn fmt_remaining_dollars(remaining_micros: u64, limit_micros: u64) -> String {
+    if limit_micros == u64::MAX {
+        "unlimited".to_string()
+    } else {
+        format!("{:.4}", remaining_micros as f64 / 1_000_000.0)
+    }
+}
+
+/// Section 2 (`SPEC.md` §31.1 "legible remaining budget", `docs/audit-2026-09-18-fable.md`
+/// B-10): what this ticket can still afford, expressed in terms a model can act on rather than a
+/// bare number — absolute remaining spend per dimension, a burn rate/projection derived from
+/// usage so far, and `roles`' tier-cost menu (`SPEC.md` §31.2 "tier down before running out") so
+/// a worker can see what switching to a cheaper role for a mechanical step would cost.
+///
+/// Ranked immediately after [`SectionKind::Objective`] (see [`SectionKind::PRIORITY_ORDER`]):
+/// budget awareness is cheap to render and operationally load-bearing enough that it should be
+/// one of the last sections dropped under a tight context budget, not one of the first.
+pub fn build_budget(ticket: &Ticket, roles: &RoleTable) -> RawSection {
+    let budget = &ticket.budget;
+    let remaining = budget.remaining();
+
+    let mut lines = vec![format!(
+        "Remaining: {} tokens, ${}, {} wall-seconds",
+        fmt_remaining(remaining.tokens, budget.tokens),
+        fmt_remaining_dollars(remaining.dollars_micros, budget.dollars_micros),
+        fmt_remaining(remaining.wall_seconds, budget.wall_seconds),
+    )];
+
+    if ticket.attempts > 0 && !budget.spent.is_zero() {
+        let tokens_per_attempt = budget.spent.tokens / u64::from(ticket.attempts);
+        lines.push(format!(
+            "Burn rate: ~{tokens_per_attempt} tokens/attempt over {} attempt(s) so far",
+            ticket.attempts
+        ));
+        if tokens_per_attempt > 0 && budget.tokens != u64::MAX {
+            let projected = remaining.tokens / tokens_per_attempt;
+            lines.push(format!(
+                "Projection: roughly {projected} more attempt(s) affordable at this rate"
+            ));
+        }
+    } else {
+        lines.push("Burn rate: no usage recorded yet".to_string());
+    }
+
+    lines.push(String::new());
+    lines.push("Tier menu (primary candidate per role):".to_string());
+    for role in Role::ALL {
+        let Some(candidate) = roles.candidates_for(role).first() else {
+            continue;
+        };
+        let label = format!(
+            "{} ({}/{})",
+            role.as_str(),
+            candidate.provider,
+            candidate.model
+        );
+        match candidate.price {
+            None => lines.push(format!("  {label}: subscription/unmetered capacity")),
+            Some(price) => {
+                let call_micros = NOMINAL_CALL_TOKENS
+                    * (price.input_micros_per_token + price.output_micros_per_token)
+                    / 2;
+                if call_micros == 0 {
+                    lines.push(format!("  {label}: effectively free"));
+                } else if budget.dollars_micros == u64::MAX {
+                    lines.push(format!("  {label}: unmetered dollar budget"));
+                } else {
+                    let calls = remaining.dollars_micros / call_micros;
+                    lines.push(format!(
+                        "  {label}: ~${:.4}/call of ~{NOMINAL_CALL_TOKENS} tokens — ~{calls} call(s) remain affordable",
+                        call_micros as f64 / 1_000_000.0
+                    ));
+                }
+            }
+        }
+    }
+
+    RawSection {
+        kind: SectionKind::Budget,
+        title: "Budget".to_string(),
+        body: lines.join("\n"),
+        provenance: Vec::new(),
+    }
+}
+
+/// Section 3: active decisions affecting the ticket's claimed paths.
 ///
 /// Renders active decisions overlapping claimed_paths(ticket) or naming ticket.id.
 pub fn build_decisions(ticket: &Ticket, view: &ProjectView) -> RawSection {
@@ -183,7 +286,7 @@ pub fn build_decisions(ticket: &Ticket, view: &ProjectView) -> RawSection {
     }
 }
 
-/// Section 3: parent/dependency outputs and evidence.
+/// Section 4: parent/dependency outputs and evidence.
 ///
 /// Renders dependency/parent ticket summaries + matching evidence from view.evidence.
 pub fn build_dependencies(ticket: &Ticket, view: &ProjectView) -> RawSection {
@@ -235,7 +338,7 @@ pub fn build_dependencies(ticket: &Ticket, view: &ProjectView) -> RawSection {
     }
 }
 
-/// Section 4: hybrid retrieval results for the ticket's objective.
+/// Section 5: hybrid retrieval results for the ticket's objective.
 ///
 /// Renders hybrid search results for the ticket's objective, seeded with claimed paths.
 pub fn build_retrieval(
@@ -290,7 +393,7 @@ pub fn build_retrieval(
     })
 }
 
-/// Section 5: symbol outlines for the ticket's claimed paths.
+/// Section 6: symbol outlines for the ticket's claimed paths.
 ///
 /// Renders symbol outlines for each claimed path, indented by depth.
 pub fn build_symbol_outlines(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSection> {
@@ -329,7 +432,7 @@ pub fn build_symbol_outlines(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSecti
     })
 }
 
-/// Section 6: relevant git history.
+/// Section 7: relevant git history.
 ///
 /// Renders relevant git history for each claimed path.
 pub fn build_git_history(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSection> {
@@ -373,7 +476,7 @@ pub fn build_git_history(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSection> 
     })
 }
 
-/// Section 7: prior failures recorded on this ticket.
+/// Section 8: prior failures recorded on this ticket.
 ///
 /// Renders failures from the ticket's failure history.
 pub fn build_prior_failures(ticket: &Ticket) -> RawSection {
@@ -396,7 +499,7 @@ pub fn build_prior_failures(ticket: &Ticket) -> RawSection {
     }
 }
 
-/// Section 8 (lowest priority, dropped first on overflow): project conventions.
+/// Section 9 (lowest priority, dropped first on overflow): project conventions.
 ///
 /// Renders project conventions.
 pub fn build_conventions(conventions: &[String]) -> RawSection {
@@ -741,5 +844,75 @@ mod tests {
         let rendered = render_predicate(&pred, 0);
         assert!(rendered.contains("Not:"));
         assert!(rendered.contains("FileExists: forbidden.rs"));
+    }
+
+    // ---- build_budget (SPEC.md §31.1, docs/audit-2026-09-18-fable.md B-10) ------------------
+
+    #[test]
+    fn build_budget_reports_unlimited_and_no_usage_yet() {
+        let ticket = minimal_ticket("T-1", "Task"); // fixture uses Budget::unlimited()
+        let section = build_budget(&ticket, &RoleTable::default_table());
+
+        assert_eq!(section.kind, SectionKind::Budget);
+        assert_eq!(section.title, "Budget");
+        assert!(section.body.contains("unlimited tokens"));
+        assert!(section.body.contains("$unlimited"));
+        assert!(section.body.contains("unlimited wall-seconds"));
+        assert!(section.body.contains("Burn rate: no usage recorded yet"));
+    }
+
+    #[test]
+    fn build_budget_reports_remaining_spend_and_burn_rate() {
+        let mut ticket = minimal_ticket("T-1", "Task");
+        ticket.budget = Budget::new(1_000, 5_000_000, 3_600);
+        ticket
+            .budget
+            .try_spend(tm_types::Spend {
+                tokens: 400,
+                dollars_micros: 0,
+                wall_seconds: 0,
+            })
+            .expect("spend within the budget");
+        ticket.attempts = 2;
+
+        let section = build_budget(&ticket, &RoleTable::default_table());
+
+        assert!(section.body.contains("Remaining: 600 tokens"));
+        assert!(section
+            .body
+            .contains("Burn rate: ~200 tokens/attempt over 2 attempt(s)"));
+        assert!(section
+            .body
+            .contains("Projection: roughly 3 more attempt(s)"));
+    }
+
+    #[test]
+    fn build_budget_tier_menu_lists_an_unpriced_role_as_unmetered() {
+        let ticket = minimal_ticket("T-1", "Task");
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("valid table");
+
+        let section = build_budget(&ticket, &table);
+        assert!(section
+            .body
+            .contains("coder.fast (mock/m1): subscription/unmetered capacity"));
+    }
+
+    #[test]
+    fn build_budget_tier_menu_prices_a_metered_role() {
+        let mut ticket = minimal_ticket("T-1", "Task");
+        ticket.budget = Budget::new(u64::MAX, 10_000_000, u64::MAX);
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"anthropic\", model = \"claude\", max_concurrency = 1, price = { input_micros_per_token = 10, output_micros_per_token = 10 } }]\n",
+        )
+        .expect("valid table");
+
+        let section = build_budget(&ticket, &table);
+        assert!(section
+            .body
+            .contains("coder.fast (anthropic/claude): ~$0.0200/call"));
+        assert!(section.body.contains("call(s) remain affordable"));
     }
 }

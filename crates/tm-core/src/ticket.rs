@@ -112,6 +112,16 @@ pub enum Trigger {
     LeaseExpired,
     /// Rule 4: `Leased|Running -> Ready`.
     LeaseReleased,
+    /// `Leased|Running -> Ready`: a worker approaching its budget ceiling finished or rolled
+    /// back its effect in flight and handed the ticket back clean, instead of discovering
+    /// exhaustion as a failure (`SPEC.md` §31.3 "handoff, not death"). Structurally identical to
+    /// [`Trigger::LeaseExpired`]/[`Trigger::LeaseReleased`] (same `Leased|Running -> Ready`
+    /// shape, `attempts` untouched — `attempts` only ever increments at
+    /// [`Trigger::LeaseAcquired`]) but distinct in meaning: this trigger, unlike
+    /// [`Trigger::Failed`], never routes through `Recovery`, so a budget handoff consumes no
+    /// retry and is not evidence that anything went wrong
+    /// (`docs/audit-2026-09-18-fable.md` B-10).
+    BudgetHandoff,
     /// Rule 5: `Running -> Submitted`. Must carry evidence (enforced in `store.rs`).
     Submit,
     /// Rule 6: `Submitted -> Verifying`, automatic.

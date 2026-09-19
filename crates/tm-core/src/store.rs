@@ -45,13 +45,13 @@ use tm_events::payload::{
     MilestoneClosedPayload, MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload,
     MirrorPulledPayload, MirrorPushedPayload, SessionEndedPayload, SessionJoinedPayload,
     SessionStartedPayload, TicketAuditRejectedPayload, TicketAuditedPayload,
-    TicketBudgetExhaustedPayload, TicketCancelledPayload, TicketChildAddedPayload,
-    TicketClosedPayload, TicketCreatedPayload, TicketDependencyAddedPayload,
-    TicketEscalatedPayload, TicketFailedPayload, TicketHeartbeatPayload, TicketLeaseExpiredPayload,
-    TicketLeaseReleasedPayload, TicketLeasedPayload, TicketReopenedPayload,
-    TicketRetryScheduledPayload, TicketStateChangedPayload, TicketSubmittedPayload,
-    TicketUpdatedPayload, TicketVerificationFailedPayload, TicketVerifiedPayload,
-    UsageRecordedPayload,
+    TicketBudgetExhaustedPayload, TicketBudgetHandoffPayload, TicketCancelledPayload,
+    TicketChildAddedPayload, TicketClosedPayload, TicketCreatedPayload,
+    TicketDependencyAddedPayload, TicketEscalatedPayload, TicketFailedPayload,
+    TicketHeartbeatPayload, TicketLeaseExpiredPayload, TicketLeaseReleasedPayload,
+    TicketLeasedPayload, TicketReopenedPayload, TicketRetryScheduledPayload,
+    TicketStateChangedPayload, TicketSubmittedPayload, TicketUpdatedPayload,
+    TicketVerificationFailedPayload, TicketVerifiedPayload, UsageRecordedPayload,
 };
 use tm_events::{Event, EventDraft, EventLog, Payload, Tx};
 use tm_types::{
@@ -245,6 +245,63 @@ fn state_changed_draft(
             to: state_str(to),
         }),
     )
+}
+
+/// Shared core of a budget handoff (`SPEC.md` §31.3, `docs/audit-2026-09-18-fable.md` B-10):
+/// `None` if `ticket_id` is not currently found in `view`, or is not `Leased`/`Running` (nothing
+/// structurally eligible to hand off — see [`crate::machine::transition`]'s
+/// `Trigger::BudgetHandoff` arms); otherwise the full draft set — `ticket.budget_handoff`, a
+/// lease-release plus authority-revert per live lease held on the ticket, and the
+/// `ticket.state_changed` draft for the `Trigger::BudgetHandoff` transition itself. Used
+/// identically whether the handoff was discovered reactively ([`Store::record_usage`], after a
+/// spend crossed the ceiling) or proactively ([`Store::budget_handoff`], before an effect the
+/// caller estimated it could not afford ever started) — SPEC.md §31.3 describes one mechanism,
+/// not two, regardless of which side noticed first.
+fn budget_handoff_drafts(
+    view: &ProjectView,
+    ticket_id: &TicketId,
+    actor: &ParticipantId,
+    dimension: &str,
+) -> Option<Vec<EventDraft>> {
+    let t = view.tickets.get(ticket_id)?;
+    let to = machine::transition(t.state, Trigger::BudgetHandoff).ok()?;
+
+    let mut drafts = vec![EventDraft::new(
+        actor.clone(),
+        Id::from(ticket_id.clone()),
+        Payload::from(TicketBudgetHandoffPayload {
+            ticket: ticket_id.clone(),
+            dimension: dimension.to_string(),
+        }),
+    )];
+
+    // The handed-off worker is finished with this attempt's lease, so it ends here and the
+    // authority it held reverts — the same reasoning `record_failure` documents for a genuine
+    // failure, except nothing here is a failure (SPEC.md §31.3: "not evidence of anything going
+    // wrong"). Leaving the lease live would block the next worker on the double-lease invariant
+    // (SPEC.md §4.5, §8).
+    for lease in view.leases.values().filter(|l| l.ticket == *ticket_id) {
+        drafts.push(EventDraft::new(
+            actor.clone(),
+            Id::from(ticket_id.clone()),
+            Payload::from(TicketLeaseReleasedPayload {
+                ticket: ticket_id.clone(),
+                lease: lease.id.clone(),
+            }),
+        ));
+        drafts.push(EventDraft::new(
+            actor.clone(),
+            Id::from(ticket_id.clone()),
+            Payload::from(AuthorityRevertedPayload {
+                subject: lease.holder.clone(),
+                ticket: Some(ticket_id.clone()),
+                to_seq: 0,
+            }),
+        ));
+    }
+
+    drafts.push(state_changed_draft(ticket_id, t.state, to, actor.clone()));
+    Some(drafts)
 }
 
 /// Fold the fields `decision.created`'s payload can't carry directly into `summary`, per the
@@ -1503,9 +1560,17 @@ impl Store {
     /// [`crate::budget::BudgetLedger::record_usage`].
     ///
     /// # Errors
-    /// `TmError::BudgetExhausted` naming the exhausted scope; on exhaustion, also transitions the
-    /// ticket to `Recovery` with `FailureClass::BudgetExhausted` (`SPEC.md` §4.7) when that
-    /// transition is structurally legal from the ticket's current state.
+    /// `TmError::BudgetExhausted` naming the exhausted scope. On exhaustion, when `ticket` is
+    /// currently `Leased` or `Running` (mid-run resource exhaustion, not a hard failure), this is
+    /// a **handoff, not death** (`SPEC.md` §31.3, `docs/audit-2026-09-18-fable.md` B-10): the
+    /// ticket's lease is released and it transitions `-> Ready` via [`Trigger::BudgetHandoff`],
+    /// never `Recovery` — no retry attempt is consumed, and only `ticket.budget_handoff` (not
+    /// `ticket.budget_exhausted`) is emitted at the ticket level, since a handoff must not read
+    /// as blocked work to a status digest. When `ticket` is in some other live state (e.g.
+    /// `Verifying`, where `Trigger::BudgetHandoff` has no legal target — see
+    /// [`crate::machine::transition`]), this narrower case is not handoff-eligible and keeps the
+    /// prior behavior of emitting `ticket.budget_exhausted` and routing toward `Recovery` like
+    /// any other verification-time failure.
     pub fn record_usage(
         &self,
         ticket: Option<&TicketId>,
@@ -1554,19 +1619,47 @@ impl Store {
             if let Err(e) = BudgetLedger::record_usage(chain, amount) {
                 exhausted = Some(e.scope.clone());
                 if let Some(tid) = &ticket_id {
-                    if let Some(t) = view.tickets.get(tid) {
-                        drafts.push(EventDraft::new(
-                            actor.clone(),
-                            Id::from(tid.clone()),
-                            Payload::from(TicketBudgetExhaustedPayload {
-                                ticket: tid.clone(),
-                                dimension: format!("{:?}", e.scope),
-                                limit: 0,
-                                spent: 0,
-                            }),
-                        ));
-                        if let Ok(to) = machine::transition(t.state, Trigger::VerificationFailed) {
-                            drafts.push(state_changed_draft(tid, t.state, to, actor.clone()));
+                    if view.tickets.contains_key(tid) {
+                        let dimension = format!("{:?}", e.scope);
+                        match budget_handoff_drafts(view, tid, &actor, &dimension) {
+                            // Handoff-eligible: emit only `ticket.budget_handoff`, never
+                            // `ticket.budget_exhausted` — the latter is read by
+                            // `tm-cli`'s status digest as "blocked" work
+                            // (`crates/tm-cli/src/project.rs`), and a handoff is deliberately
+                            // not that (`SPEC.md` §31.3: "not evidence of anything going
+                            // wrong"). The ceiling itself is still on record via this call's
+                            // own `usage.recorded` draft above and its `Err(TmError::
+                            // BudgetExhausted)` return value.
+                            Some(handoff_drafts) => drafts.extend(handoff_drafts),
+                            // Not handoff-eligible (ticket isn't `Leased`/`Running` right now,
+                            // e.g. `Verifying`): this is a genuine failure-shaped exhaustion, so
+                            // it keeps the prior behavior — `ticket.budget_exhausted` plus
+                            // routing toward `Recovery` like any other verification-time
+                            // failure, rather than silently dropping the state transition.
+                            None => {
+                                drafts.push(EventDraft::new(
+                                    actor.clone(),
+                                    Id::from(tid.clone()),
+                                    Payload::from(TicketBudgetExhaustedPayload {
+                                        ticket: tid.clone(),
+                                        dimension: dimension.clone(),
+                                        limit: 0,
+                                        spent: 0,
+                                    }),
+                                ));
+                                if let Some(t) = view.tickets.get(tid) {
+                                    if let Ok(to) =
+                                        machine::transition(t.state, Trigger::VerificationFailed)
+                                    {
+                                        drafts.push(state_changed_draft(
+                                            tid,
+                                            t.state,
+                                            to,
+                                            actor.clone(),
+                                        ));
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1579,6 +1672,34 @@ impl Store {
             (Ok(events), None) => Ok(events),
             (Err(e), _) => Err(e),
         }
+    }
+
+    /// Hand `ticket` off cleanly before an effect it cannot afford ever starts (`SPEC.md` §31.2
+    /// "refuse to start what it cannot finish", §31.3 "handoff, not death"): releases any live
+    /// lease(s) held on it and transitions it `Leased|Running -> Ready` via
+    /// [`Trigger::BudgetHandoff`] — never `Recovery`, never consuming a retry attempt
+    /// (`docs/audit-2026-09-18-fable.md` B-10). `dimension` names why (e.g. `"Tokens"`), carried
+    /// on the emitted `ticket.budget_handoff` event only — it drives no branching here.
+    ///
+    /// Goal state (`SPEC.md` §29) is left untouched by construction: the `goals` table is keyed
+    /// by ticket, not by lease or attempt, so a fresh worker that later re-leases this same
+    /// ticket via [`Store::goal_state`] reads it back exactly as it was left.
+    ///
+    /// A no-op (`Ok(vec![])`) if `ticket` does not exist or is not currently `Leased`/`Running` —
+    /// e.g. a race where [`Store::record_usage`]'s own reactive handoff, or a plain lease expiry,
+    /// already moved it back to `Ready` by the time this call lands. Callers (e.g.
+    /// `tm_agent::agent_loop::AgentLoop`'s proactive `can_afford` check) call this defensively
+    /// and should never fail a run just because it lost a race with the store's own bookkeeping.
+    pub fn budget_handoff(
+        &self,
+        ticket: &TicketId,
+        dimension: String,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        let ticket_id = ticket.clone();
+        self.run_command(move |view| {
+            Ok(budget_handoff_drafts(view, &ticket_id, &actor, &dimension).unwrap_or_default())
+        })
     }
 
     /// Read the current materialized `effects` row for `key`, if any (`SPEC.md` §21.5).
@@ -3190,6 +3311,268 @@ mod tests {
         assert!(
             escalated_after.is_some(),
             "a ticket that keeps failing must escalate, not retry forever"
+        );
+    }
+
+    // ---- Store::record_usage / Store::budget_handoff (SPEC.md §31, audit B-10) --------------
+
+    fn tight_budget_ticket(store: &Store) -> TicketId {
+        let events = store
+            .create_ticket(
+                TicketKind::Work,
+                "do the thing".into(),
+                None,
+                None,
+                Authority::root(),
+                vec![],
+                executor(),
+                vec![],
+                vec![],
+                VerificationPolicy::None,
+                Budget::new(100, u64::MAX, u64::MAX),
+                retry(),
+                0,
+                actor(),
+            )
+            .expect("create_ticket should succeed");
+        TicketId::new(events[0].subject.as_str()).expect("subject is a ticket id")
+    }
+
+    /// The deliberate regression test the audit calls for (`docs/audit-2026-09-18-fable.md`
+    /// B-10, `SPEC.md` §31.3): a ticket whose usage crosses its own budget ceiling while
+    /// `Running` must hand off cleanly — return to `Ready` with its lease released and its
+    /// attempt count untouched, recording `ticket.budget_handoff` — never `Recovery`, and never
+    /// `ticket.failed`/`ticket.retry_scheduled`/`ticket.escalated` alongside it.
+    #[test]
+    fn budget_handoff_does_not_consume_a_retry_or_enter_recovery() {
+        let (_dir, store) = open_store();
+        let ticket_id = tight_budget_ticket(&store);
+
+        store.activate(&ticket_id, actor()).expect("activate");
+        store
+            .acquire_lease(&ticket_id, actor(), Authority::none(), vec![], 60, actor())
+            .expect("acquire lease");
+        store
+            .transition(&ticket_id, Trigger::WorkStarted, actor())
+            .expect("work started");
+
+        let attempts_before = store
+            .view()
+            .unwrap()
+            .tickets
+            .get(&ticket_id)
+            .unwrap()
+            .attempts;
+        assert_eq!(attempts_before, 1, "leasing already spent the one attempt");
+
+        let err = store
+            .record_usage(Some(&ticket_id), None, Spend::tokens(150), actor())
+            .expect_err("spending past the ticket's own budget must be reported");
+        assert!(matches!(err, TmError::BudgetExhausted(_)));
+
+        let ticket = store
+            .view()
+            .unwrap()
+            .tickets
+            .get(&ticket_id)
+            .cloned()
+            .expect("ticket still exists");
+        assert_eq!(
+            ticket.state,
+            TicketState::Ready,
+            "a budget handoff returns the ticket to Ready"
+        );
+        assert_ne!(
+            ticket.state,
+            TicketState::Recovery,
+            "a budget handoff must never route through Recovery"
+        );
+        assert_eq!(
+            ticket.attempts, attempts_before,
+            "a budget handoff must not consume a retry attempt"
+        );
+        assert!(
+            store
+                .view()
+                .unwrap()
+                .leases
+                .values()
+                .all(|l| l.ticket != ticket_id),
+            "the lease must be released, not left dangling"
+        );
+
+        let recorded = store
+            .log
+            .read_subject(&Id::from(ticket_id.clone()))
+            .expect("read_subject");
+        assert!(
+            recorded
+                .iter()
+                .any(|e| e.kind == tm_events::EventKind::TicketBudgetHandoff),
+            "a ticket.budget_handoff event must be recorded"
+        );
+        assert!(
+            !recorded.iter().any(|e| matches!(
+                e.kind,
+                tm_events::EventKind::TicketFailed
+                    | tm_events::EventKind::TicketRetryScheduled
+                    | tm_events::EventKind::TicketEscalated
+                    | tm_events::EventKind::TicketBudgetExhausted
+            )),
+            "a budget handoff must never look like a failure/retry/escalation/exhaustion in the \
+             log -- ticket.budget_exhausted specifically is read by tm-cli's status digest as \
+             blocked work, which a clean handoff must not be"
+        );
+    }
+
+    /// `SPEC.md` §31.3/§29, `docs/audit-2026-09-18-fable.md` B-10's "done looks like": a budget
+    /// handoff leaves goal state exactly as it was, so the next worker that re-leases this ticket
+    /// reads it back unchanged rather than restarting from nothing.
+    #[test]
+    fn budget_handoff_preserves_goal_state_for_the_next_worker() {
+        let (_dir, store) = open_store();
+        let ticket_id = tight_budget_ticket(&store);
+
+        store.activate(&ticket_id, actor()).expect("activate");
+        store
+            .acquire_lease(&ticket_id, actor(), Authority::none(), vec![], 60, actor())
+            .expect("acquire lease");
+        store
+            .transition(&ticket_id, Trigger::WorkStarted, actor())
+            .expect("work started");
+        store
+            .set_goal(&ticket_id, "make the tests pass".to_string(), actor())
+            .expect("set_goal");
+        store
+            .add_goal_step(
+                &ticket_id,
+                "step-1".to_string(),
+                "write the fix".to_string(),
+                actor(),
+            )
+            .expect("add_goal_step");
+
+        let before = store
+            .goal_state(&ticket_id)
+            .expect("goal_state")
+            .expect("goal exists");
+
+        store
+            .record_usage(Some(&ticket_id), None, Spend::tokens(150), actor())
+            .expect_err("overspend must be reported");
+
+        let after = store
+            .goal_state(&ticket_id)
+            .expect("goal_state")
+            .expect("goal still exists");
+        assert_eq!(
+            before, after,
+            "a budget handoff must leave goal state exactly as it was"
+        );
+    }
+
+    /// `Store::budget_handoff` itself (`docs/audit-2026-09-18-fable.md` B-10's proactive path,
+    /// used by `tm_agent::agent_loop::AgentLoop::can_afford`): callable directly, before any
+    /// spend, and idempotent when the ticket has already left `Leased`/`Running`.
+    #[test]
+    fn budget_handoff_directly_hands_off_a_running_ticket_and_is_idempotent_after() {
+        let (_dir, store) = open_store();
+        let ticket_id = create_root_ticket(&store);
+        store.activate(&ticket_id, actor()).expect("activate");
+        store
+            .acquire_lease(&ticket_id, actor(), Authority::none(), vec![], 60, actor())
+            .expect("acquire lease");
+        store
+            .transition(&ticket_id, Trigger::WorkStarted, actor())
+            .expect("work started");
+
+        let events = store
+            .budget_handoff(&ticket_id, "Tokens".to_string(), actor())
+            .expect("budget_handoff");
+        assert!(!events.is_empty(), "a live handoff must produce events");
+        assert_eq!(
+            store.view().unwrap().tickets.get(&ticket_id).unwrap().state,
+            TicketState::Ready
+        );
+
+        // Calling it again on a ticket that is no longer Leased/Running is a defensive no-op,
+        // not an error — a caller (e.g. a proactive `can_afford` check) may lose a race with the
+        // store's own bookkeeping and must not fail the run just because of that.
+        let again = store
+            .budget_handoff(&ticket_id, "Tokens".to_string(), actor())
+            .expect("budget_handoff is idempotent");
+        assert!(again.is_empty());
+    }
+
+    /// The narrower, non-handoff-eligible case `budget_handoff_does_not_consume_a_retry_or_
+    /// enter_recovery` deliberately does not cover: a ticket whose usage is recorded while
+    /// `Verifying` (not `Leased`/`Running`) has no legal `Trigger::BudgetHandoff` target, so this
+    /// is a genuine failure-shaped exhaustion — `ticket.budget_exhausted` is still recorded and
+    /// the ticket still routes toward `Recovery`, exactly as before this track's changes.
+    #[test]
+    fn budget_exhaustion_outside_leased_running_still_records_budget_exhausted_and_recovery() {
+        let (_dir, store) = open_store();
+        let ticket_id = tight_budget_ticket(&store);
+
+        store.activate(&ticket_id, actor()).expect("activate");
+        store
+            .acquire_lease(&ticket_id, actor(), Authority::none(), vec![], 60, actor())
+            .expect("acquire lease");
+        store
+            .transition(&ticket_id, Trigger::WorkStarted, actor())
+            .expect("work started");
+        let artifact_events = store
+            .store_artifact(
+                ArtifactKind::File,
+                "text/plain".into(),
+                b"evidence".to_vec(),
+                serde_json::json!({}),
+                Some(ticket_id.clone()),
+                actor(),
+            )
+            .expect("store_artifact");
+        let artifact_id =
+            ArtifactId::new(artifact_events[0].subject.as_str()).expect("artifact id");
+        store
+            .submit(&ticket_id, "done".to_string(), vec![artifact_id], actor())
+            .expect("submit");
+        store
+            .transition(&ticket_id, Trigger::VerificationStarted, actor())
+            .expect("verification started");
+        assert_eq!(
+            store.view().unwrap().tickets.get(&ticket_id).unwrap().state,
+            TicketState::Verifying
+        );
+
+        let err = store
+            .record_usage(Some(&ticket_id), None, Spend::tokens(150), actor())
+            .expect_err("overspend must be reported");
+        assert!(matches!(err, TmError::BudgetExhausted(_)));
+
+        let ticket = store
+            .view()
+            .unwrap()
+            .tickets
+            .get(&ticket_id)
+            .unwrap()
+            .clone();
+        assert_eq!(ticket.state, TicketState::Recovery);
+
+        let recorded = store
+            .log
+            .read_subject(&Id::from(ticket_id.clone()))
+            .expect("read_subject");
+        assert!(
+            recorded
+                .iter()
+                .any(|e| e.kind == tm_events::EventKind::TicketBudgetExhausted),
+            "the genuine-failure path must still record ticket.budget_exhausted"
+        );
+        assert!(
+            !recorded
+                .iter()
+                .any(|e| e.kind == tm_events::EventKind::TicketBudgetHandoff),
+            "a non-handoff-eligible exhaustion must not also claim to be a handoff"
         );
     }
 

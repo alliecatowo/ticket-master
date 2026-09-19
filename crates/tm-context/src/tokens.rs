@@ -18,6 +18,10 @@ use std::collections::BTreeMap;
 pub enum SectionKind {
     /// Ticket objective and success predicates.
     Objective,
+    /// Remaining budget, burn rate, and the tier-cost menu (`SPEC.md` §31.1,
+    /// `docs/audit-2026-09-18-fable.md` B-10): what this ticket can still afford, expressed so a
+    /// worker can act on it — not just a number.
+    Budget,
     /// Active decisions affecting the ticket's claimed paths.
     Decisions,
     /// Parent/dependency outputs and evidence.
@@ -38,6 +42,7 @@ impl SectionKind {
     /// Every section kind, in priority order (highest priority first, i.e. dropped last).
     pub const PRIORITY_ORDER: &'static [SectionKind] = &[
         SectionKind::Objective,
+        SectionKind::Budget,
         SectionKind::Decisions,
         SectionKind::Dependencies,
         SectionKind::Retrieval,
@@ -194,7 +199,7 @@ mod tests {
 
     #[test]
     fn priority_order_covers_every_kind() {
-        assert_eq!(SectionKind::PRIORITY_ORDER.len(), 8);
+        assert_eq!(SectionKind::PRIORITY_ORDER.len(), 9);
     }
 
     #[test]
@@ -318,9 +323,9 @@ mod tests {
     fn token_budget_even_creates_equal_shares() {
         let budget = TokenBudget::even(8000);
         assert_eq!(budget.total, 8000);
-        assert_eq!(budget.shares.len(), 8);
+        assert_eq!(budget.shares.len(), 9);
         for &kind in SectionKind::PRIORITY_ORDER {
-            assert_eq!(budget.shares[&kind], 1.0 / 8.0);
+            assert_eq!(budget.shares[&kind], 1.0 / 9.0);
         }
     }
 
@@ -328,7 +333,7 @@ mod tests {
     fn token_budget_share_tokens_with_shares() {
         let budget = TokenBudget::even(8000);
         for &kind in SectionKind::PRIORITY_ORDER {
-            assert_eq!(budget.share_tokens(kind), 1000); // 8000 / 8 = 1000
+            assert_eq!(budget.share_tokens(kind), 888); // floor(8000 / 9)
         }
     }
 
@@ -375,11 +380,11 @@ mod tests {
         let ledger = BudgetLedger::new(&budget);
 
         assert_eq!(ledger.total, 8000);
-        assert_eq!(ledger.accounts.len(), 8);
+        assert_eq!(ledger.accounts.len(), 9);
 
         for (i, account) in ledger.accounts.iter().enumerate() {
             assert_eq!(account.kind, SectionKind::PRIORITY_ORDER[i]);
-            assert_eq!(account.allotted, 1000);
+            assert_eq!(account.allotted, 888); // floor(8000 / 9)
             assert_eq!(account.used, 0);
         }
     }
@@ -488,7 +493,9 @@ mod tests {
         ledger.spend(SectionKind::Decisions, 200);
         ledger.spend(SectionKind::Dependencies, 400);
 
-        assert_eq!(ledger.total_remaining(), 8000 - 900);
+        // 9 sections * floor(8000 / 9) = 9 * 888 = 7992 total allotted (the 8 leftover tokens
+        // from flooring go to no section), minus the 900 spent above.
+        assert_eq!(ledger.total_remaining(), 7992 - 900);
     }
 
     #[test]
@@ -501,7 +508,8 @@ mod tests {
         }
 
         assert_eq!(ledger.total_used(), 2000);
-        assert_eq!(ledger.total_remaining(), 6000);
+        // 9 * floor(8000 / 9) = 7992 total allotted, minus the 2000 spent above.
+        assert_eq!(ledger.total_remaining(), 7992 - 2000);
     }
 
     #[test]
@@ -509,7 +517,7 @@ mod tests {
         let budget = TokenBudget::even(800);
         let mut ledger = BudgetLedger::new(&budget);
 
-        assert!(ledger.spend(SectionKind::Objective, 100));
+        assert!(ledger.spend(SectionKind::Objective, 88)); // floor(800 / 9)
         let obj_acct = ledger
             .accounts
             .iter()
@@ -521,13 +529,14 @@ mod tests {
     #[test]
     fn section_kind_rank_is_correct() {
         assert_eq!(SectionKind::Objective.rank(), 0);
-        assert_eq!(SectionKind::Decisions.rank(), 1);
-        assert_eq!(SectionKind::Dependencies.rank(), 2);
-        assert_eq!(SectionKind::Retrieval.rank(), 3);
-        assert_eq!(SectionKind::SymbolOutlines.rank(), 4);
-        assert_eq!(SectionKind::GitHistory.rank(), 5);
-        assert_eq!(SectionKind::PriorFailures.rank(), 6);
-        assert_eq!(SectionKind::Conventions.rank(), 7);
+        assert_eq!(SectionKind::Budget.rank(), 1);
+        assert_eq!(SectionKind::Decisions.rank(), 2);
+        assert_eq!(SectionKind::Dependencies.rank(), 3);
+        assert_eq!(SectionKind::Retrieval.rank(), 4);
+        assert_eq!(SectionKind::SymbolOutlines.rank(), 5);
+        assert_eq!(SectionKind::GitHistory.rank(), 6);
+        assert_eq!(SectionKind::PriorFailures.rank(), 7);
+        assert_eq!(SectionKind::Conventions.rank(), 8);
     }
 
     #[test]
@@ -535,11 +544,11 @@ mod tests {
         let budget = TokenBudget::even(800);
         let ledger = BudgetLedger::new(&budget);
 
-        // Each section gets 100 tokens
+        // Each section gets floor(800 / 9) = 88 tokens.
         for (i, &kind) in SectionKind::PRIORITY_ORDER.iter().enumerate() {
             let acct = &ledger.accounts[i];
             assert_eq!(acct.kind, kind);
-            assert_eq!(acct.allotted, 100);
+            assert_eq!(acct.allotted, 88);
         }
     }
 }
