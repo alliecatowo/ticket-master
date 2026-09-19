@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn priority_order_covers_every_kind() {
-        assert_eq!(SectionKind::PRIORITY_ORDER.len(), 9);
+        assert_eq!(SectionKind::PRIORITY_ORDER.len(), 10);
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
         let budget = TokenBudget::even(9000);
         let mut ledger = BudgetLedger::new(&budget);
 
-        assert!(!ledger.spend(SectionKind::Objective, 1500)); // 1500 > 1000 allotted
+        assert!(!ledger.spend(SectionKind::Objective, 1500)); // 1500 > 900 allotted
         let obj_acct = ledger
             .accounts
             .iter()
@@ -544,14 +544,14 @@ mod tests {
 
     #[test]
     fn budget_ledger_spend_order_preserves_priority() {
-        let budget = TokenBudget::even(900);
+        let budget = TokenBudget::even(1000);
         let ledger = BudgetLedger::new(&budget);
 
-        // Each section gets floor(800 / 9) = 88 tokens.
+        // Each section gets 1000 / 10 = 100 tokens.
         for (i, &kind) in SectionKind::PRIORITY_ORDER.iter().enumerate() {
             let acct = &ledger.accounts[i];
             assert_eq!(acct.kind, kind);
-            assert_eq!(acct.allotted, 88);
+            assert_eq!(acct.allotted, 100);
         }
     }
 }
