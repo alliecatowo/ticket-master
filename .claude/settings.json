@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=\"$(cat)\"; sid=\"$(printf '%s' \"$input\" | jq -r '.session_id // \"unknown\"')\"; sentinel=\"/tmp/.tm-primary-checkout-warned-$sid\"; [ -e \"$sentinel\" ] && exit 0; primary=\"$(git rev-parse --git-common-dir 2>/dev/null)\" || exit 0; primary=\"$(cd \"$(dirname \"$primary\")\" && pwd)\"; if [ -e \"$primary/.tm\" ]; then touch \"$sentinel\"; jq -n --arg p \"$primary\" '{systemMessage: (\"WARNING: \" + $p + \"/.tm exists in the primary checkout. Bare tm is not supposed to write state there -- see docs/decisions/D-003-project-scope.md and CLAUDE.md. If this was not deliberate, a subagent likely ran the real tm binary against the primary checkout instead of an isolated tempdir. Confirm, then remove it before it breaks the next test run. (This warning fires once per session.)\")}'; fi",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

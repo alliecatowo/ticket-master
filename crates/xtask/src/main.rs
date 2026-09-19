@@ -4,6 +4,7 @@
 //! single command that runs the whole formatting/lint/test/hygiene pipeline
 //! so CI and local dev agree on one source of truth.
 
+mod drift;
 mod hygiene;
 
 use std::env;
@@ -18,8 +19,9 @@ fn main() -> ExitCode {
         "verify" => verify(),
         "hygiene" => run_hygiene(),
         "fmt" => run_fmt(),
+        "check-drift" => run_check_drift(),
         other => {
-            eprintln!("usage: xtask <verify|hygiene|fmt>");
+            eprintln!("usage: xtask <verify|hygiene|fmt|check-drift --base <ref>>");
             if !other.is_empty() {
                 eprintln!("unknown subcommand: {other}");
             }
@@ -112,4 +114,38 @@ fn hygiene_gate(root: &Path) -> Result<()> {
 fn run_fmt() -> Result<()> {
     let root = workspace_root()?;
     run_cargo(&root, "fmt", &["fmt", "--all"])
+}
+
+/// Advisory post-merge triage check, not part of `verify`/`hygiene` -- see `drift.rs`'s module
+/// docs for what it does and does not catch. Requires an explicit `--base` (the commit each
+/// merged track branched from, or the pre-merge SHA) since there is no default that means
+/// anything without knowing which merge is being triaged.
+fn run_check_drift() -> Result<()> {
+    let root = workspace_root()?;
+    let args: Vec<String> = env::args().collect();
+    let base = args
+        .iter()
+        .position(|a| a == "--base")
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+        .context(
+            "check-drift requires --base <ref>, e.g. `cargo run -p xtask -- check-drift --base \
+             <sha the merged tracks branched from>`",
+        )?;
+
+    println!("==> check-drift: scanning changes against {base}");
+    let warnings = drift::run(&root, &base)?;
+    if warnings.is_empty() {
+        println!("==> check-drift: no stale cardinality assertions found");
+        return Ok(());
+    }
+    println!(
+        "==> check-drift: {} possible stale cardinality assertion(s) -- advisory, not a hard \
+         failure, review each by hand:",
+        warnings.len()
+    );
+    for w in &warnings {
+        println!("{w}");
+    }
+    Ok(())
 }

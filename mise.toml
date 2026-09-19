@@ -42,6 +42,10 @@ run = "cargo run -p xtask -- hygiene"
 description = "The full gate: fmt check + clippy -D warnings + cargo test --workspace + hygiene. Run this before considering any change done."
 run = "cargo run -p xtask -- verify"
 
+[tasks."check-drift"]
+description = "Advisory post-merge triage (NOT part of verify): flags an unchanged `assert_eq!(Enum::X.len(), N)`-shaped line whose enum gained/lost variants since --base in the same file. Run by hand right after merging parallel tracks: mise run check-drift -- <sha the merged tracks branched from>. See crates/xtask/src/drift.rs's module docs for exactly what it does and does not catch."
+run = "cargo run -p xtask -- check-drift --base {{arg(name='base')}}"
+
 [tasks.clean]
 description = "Delete target/ to reclaim disk (this machine has real disk pressure; do this after a verify pass, not mid-build)"
 run = "rm -rf target"
