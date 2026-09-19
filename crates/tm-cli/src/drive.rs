@@ -8,6 +8,7 @@
 use std::fs;
 use std::io::{BufRead, IsTerminal};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::args::{
     BrowserCommand, BrowserOpenArgs, BrowserRefArgs, BrowserScreenshotArgs, BrowserTypeArgs,
@@ -146,6 +147,32 @@ fn load_browser_toml(project: &Project) -> tm_types::Result<BrowserToml> {
         )
     })?;
     BrowserToml::parse(&source)
+}
+
+/// Build the [`tm_agent::BrowserWiring`] a [`tm_agent::BuiltinExecutor`] needs to register
+/// `tm-browser`'s tools, or `None` when `project` has no `browser.toml` — every agent-running
+/// path (`tm run`, `tm sched run`, the interactive session) tolerates a project with no browser
+/// config by simply not offering browser tools for that run, rather than every dispatch failing
+/// (`docs/audit-2026-09-18-fable.md` B-02; contrast [`load_browser_toml`], which `tm browser
+/// open` uses and *does* want a hard failure from, since a human explicitly asked to open a
+/// browser).
+pub fn optional_browser_wiring(
+    project: &Project,
+) -> tm_types::Result<Option<tm_agent::BrowserWiring>> {
+    let path = project.root.join(BROWSER_TOML_FILENAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let browser_toml = load_browser_toml(project)?;
+    let downloader = Arc::new(ReqwestDownloader::new());
+    let providers = Arc::new(ProviderRegistry::from_config(
+        &browser_toml,
+        downloader,
+        project.ids.clone(),
+    )?);
+    let sink: Arc<dyn tm_browser::session::ArtifactSink> =
+        Arc::new(tm_agent::StoreArtifactSink::new(project.store.clone()));
+    Ok(Some(tm_agent::BrowserWiring { providers, sink }))
 }
 
 /// `tm browser open`
