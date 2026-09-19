@@ -25,6 +25,7 @@
 #![warn(missing_docs)]
 
 pub mod admission;
+pub mod dispatch;
 pub mod driver;
 pub mod plan;
 pub mod policy;
@@ -32,8 +33,11 @@ pub mod retry;
 pub mod select;
 
 pub use admission::{AdmissionDecision, AdmissionGate, AdmissionRefusal};
+pub use dispatch::{ContextPackSource, DispatchError, ExecutorDispatcher, ExecutorRegistry};
 pub use driver::{SchedulerLoop, SchedulerLoopEvent};
 pub use plan::{plan, SchedulerAction};
 pub use policy::{IgnitionRelaxations, OrderingWeights, SchedulingMode, SchedulingPolicy};
 pub use retry::{EscalationReason, RetryDecision, RetryOutcome};
-pub use select::{select_next, ExecutorMatch, SelectionError};
+pub use select::{
+    capabilities_satisfy, select_next, CapabilityMismatch, ExecutorMatch, SelectionError,
+};

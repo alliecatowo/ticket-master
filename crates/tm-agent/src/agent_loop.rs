@@ -61,8 +61,8 @@ pub struct AgentLoop {
     cache: PromptCacheState,
     ci: Arc<CodeIntel>,
     store: Arc<Store>,
-    command_cache: Arc<dyn CommandCache>,
-    command_executor: Arc<dyn CommandExecutor>,
+    command_cache: Arc<dyn CommandCache + Send + Sync>,
+    command_executor: Arc<dyn CommandExecutor + Send + Sync>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdSource>,
     role: Role,
@@ -82,8 +82,8 @@ impl AgentLoop {
         budget: Budget,
         ci: Arc<CodeIntel>,
         store: Arc<Store>,
-        command_cache: Arc<dyn CommandCache>,
-        command_executor: Arc<dyn CommandExecutor>,
+        command_cache: Arc<dyn CommandCache + Send + Sync>,
+        command_executor: Arc<dyn CommandExecutor + Send + Sync>,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdSource>,
         role: Role,
@@ -112,6 +112,20 @@ impl AgentLoop {
     pub fn with_max_steps(mut self, max_steps: u32) -> Self {
         self.max_steps = max_steps;
         self
+    }
+
+    /// This loop's own authority ceiling, as constructed via [`AgentLoop::new`] — i.e. before
+    /// intersecting with any particular [`AgentTask::authority`]. Exposed so a caller
+    /// constructing the loop (e.g. `BuiltinExecutor`) can be tested for *what* it passed as the
+    /// ceiling, not just inferred from run-time behaviour.
+    pub fn authority(&self) -> &Authority {
+        &self.authority
+    }
+
+    /// This loop's own budget ceiling, as constructed via [`AgentLoop::new`]. See
+    /// [`AgentLoop::authority`].
+    pub fn budget(&self) -> &Budget {
+        &self.budget
     }
 
     /// Run `task` to completion (or suspension), driving the provider fabric and tool registry.

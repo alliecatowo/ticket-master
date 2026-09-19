@@ -34,7 +34,7 @@ use crate::render::Renderer;
 /// The concrete Anthropic model this session's coder role is bound to. `Fabric`'s provider
 /// registry keys by provider slug rather than model, so this is the model every request this
 /// session issues is actually served by, regardless of which candidate a role table names.
-const AGENT_MODEL: &str = "claude-sonnet-5";
+pub(crate) const AGENT_MODEL: &str = "claude-sonnet-5";
 
 /// The role the interactive/scriptable session executes turns as: well-specified implementation
 /// work, the common case for a human driving `tm` directly.
@@ -220,9 +220,10 @@ impl AgentSession {
 
         let fabric = build_fabric(self.project.clock.clone())?;
         let tools = ToolRegistry::standard();
-        let command_cache: Arc<dyn CommandCache> =
+        let command_cache: Arc<dyn CommandCache + Send + Sync> =
             Arc::new(MemoryCommandCache::new(self.project.ids.clone()));
-        let command_executor: Arc<dyn CommandExecutor> = Arc::new(ProcessCommandExecutor);
+        let command_executor: Arc<dyn CommandExecutor + Send + Sync> =
+            Arc::new(ProcessCommandExecutor);
 
         let mut agent_loop = AgentLoop::new(
             fabric,
@@ -343,7 +344,7 @@ fn read_line<R: BufRead>(reader: &mut R, buf: &mut String) -> tm_types::Result<u
 
 /// Build the fabric this session issues completions through: a single real Anthropic provider
 /// bound to [`AGENT_MODEL`], registered against the workspace's default role table.
-fn build_fabric(clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric>> {
+pub(crate) fn build_fabric(clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric>> {
     let table = RoleTable::default_table();
     let fabric = Fabric::new(table, clock.clone());
     let provider = AnthropicProvider::from_env(ModelId::new("anthropic", AGENT_MODEL), clock)
@@ -455,14 +456,14 @@ fn format_budget_dimension(dim: BudgetDimension) -> &'static str {
 /// An in-process, non-durable [`CommandCache`]: correct within one `tm` invocation (a command
 /// run twice in the same session is still deduplicated) but never persisted, unlike the
 /// artifact-table-backed cache `SPEC.md` §8.2 describes for the durable multi-worker case.
-struct MemoryCommandCache {
+pub(crate) struct MemoryCommandCache {
     ids: Arc<dyn IdSource>,
     results: Mutex<BTreeMap<String, CommandResult>>,
     artifacts: Mutex<BTreeMap<ArtifactId, Vec<u8>>>,
 }
 
 impl MemoryCommandCache {
-    fn new(ids: Arc<dyn IdSource>) -> Self {
+    pub(crate) fn new(ids: Arc<dyn IdSource>) -> Self {
         MemoryCommandCache {
             ids,
             results: Mutex::new(BTreeMap::new()),
@@ -532,7 +533,7 @@ impl CommandCache for MemoryCommandCache {
 
 /// Runs a [`CommandSpec`]'s process via `std::process::Command`, honoring its working directory
 /// and environment allowlist (no other ambient environment leaks into the child).
-struct ProcessCommandExecutor;
+pub(crate) struct ProcessCommandExecutor;
 
 impl CommandExecutor for ProcessCommandExecutor {
     fn execute(&self, spec: &CommandSpec) -> tm_types::Result<ExecutionOutcome> {
