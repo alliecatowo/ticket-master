@@ -301,7 +301,15 @@ impl AgentSession {
         let view = self.project.store.view()?;
         let ci = CodeIntel::open(&self.project.root)?;
         let budget = TokenBudget::even(8_000);
-        let context_pack = compile(&ticket, &view, &ci, budget, SignalWeights::default(), &[])?;
+        let context_pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            budget,
+            SignalWeights::default(),
+            &[],
+            &RoleTable::default_table(),
+        )?;
 
         let fabric = build_fabric(self.project.clock.clone())?;
         let command_cache: Arc<dyn CommandCache + Send + Sync> =

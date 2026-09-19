@@ -43,6 +43,7 @@ impl ContextPackSource for ProjectContextPackSource {
             tm_context::tokens::TokenBudget::even(10_000),
             tm_codeintel::SignalWeights::default(),
             &[],
+            &tm_provider::RoleTable::default_table(),
         )?;
         Ok(tm_agent::render_task_prompt(ticket, &pack))
     }

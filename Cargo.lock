@@ -3437,6 +3437,7 @@ dependencies = [
  "tm-codeintel",
  "tm-core",
  "tm-events",
+ "tm-provider",
  "tm-types",
  "tracing",
 ]

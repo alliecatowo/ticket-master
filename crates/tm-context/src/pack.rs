@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 
 use tm_codeintel::{CodeIntel, SignalWeights};
 use tm_core::{ProjectView, Ticket};
+use tm_provider::RoleTable;
 use tm_types::Result;
 
 use crate::sections;
@@ -179,7 +180,10 @@ impl ContextPack {
 /// a [`BudgetLedger`] derived from `budget`: on overflow the lowest-priority section is the
 /// first to lose out, and every drop is recorded in [`ContextPack::dropped`] rather than
 /// silently truncating a section's body. Deterministic given identical `(ticket, view,
-/// ci-index-state, budget)`, since every section builder is a pure function of its inputs.
+/// ci-index-state, budget, roles)`, since every section builder is a pure function of its
+/// inputs. `roles` prices [`SectionKind::Budget`]'s tier menu (`SPEC.md` §31.1,
+/// `docs/audit-2026-09-18-fable.md` B-10) — pass `RoleTable::default_table()` when no
+/// project-specific `providers.toml` is loaded.
 pub fn compile(
     ticket: &Ticket,
     view: &ProjectView,
@@ -187,9 +191,11 @@ pub fn compile(
     budget: TokenBudget,
     weights: SignalWeights,
     conventions: &[String],
+    roles: &RoleTable,
 ) -> Result<ContextPack> {
     let raw_sections: Vec<(SectionKind, sections::RawSection)> = vec![
         (SectionKind::Objective, sections::build_objective(ticket)),
+        (SectionKind::Budget, sections::build_budget(ticket, roles)),
         (
             SectionKind::Decisions,
             sections::build_decisions(ticket, view),
@@ -327,6 +333,7 @@ mod tests {
             TokenBudget::even(100_000),
             SignalWeights::default(),
             &[],
+            &RoleTable::default_table(),
         )
         .expect("compile with a generous budget succeeds");
 
@@ -355,9 +362,10 @@ mod tests {
         let ci = open_empty_codeintel(dir.path());
 
         // Every other section renders empty (no decisions, deps, claimed paths or
-        // conventions) so it costs 0 tokens and is admitted regardless of share; only
-        // `Objective` gets a nonzero allotment, forcing `PriorFailures`' nonzero-cost body
-        // to be the one dropped.
+        // conventions) so it costs 0 tokens and is admitted regardless of share, except
+        // `Budget` (always renders remaining spend/burn rate/tier menu, so it always costs
+        // something) — only `Objective` gets a nonzero allotment, forcing both `Budget`'s and
+        // `PriorFailures`' nonzero-cost bodies to be dropped.
         let mut shares = BTreeMap::new();
         shares.insert(SectionKind::Objective, 1.0);
         let budget = TokenBudget {
@@ -365,18 +373,33 @@ mod tests {
             shares,
         };
 
-        let pack = compile(&ticket, &view, &ci, budget, SignalWeights::default(), &[])
-            .expect("compile still succeeds when a section is dropped");
+        let pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            budget,
+            SignalWeights::default(),
+            &[],
+            &RoleTable::default_table(),
+        )
+        .expect("compile still succeeds when a section is dropped");
 
-        assert_eq!(pack.dropped.len(), 1);
-        let dropped = &pack.dropped[0];
-        assert_eq!(dropped.kind, SectionKind::PriorFailures);
-        assert_eq!(dropped.reason, "exceeds remaining token budget");
-        assert!(dropped.tokens_needed > 0);
+        assert_eq!(pack.dropped.len(), 2);
+        assert!(pack
+            .dropped
+            .iter()
+            .any(|d| d.kind == SectionKind::PriorFailures
+                && d.reason == "exceeds remaining token budget"
+                && d.tokens_needed > 0));
+        assert!(pack
+            .dropped
+            .iter()
+            .any(|d| d.kind == SectionKind::Budget && d.tokens_needed > 0));
         assert!(!pack
             .sections
             .iter()
             .any(|s| s.kind == SectionKind::PriorFailures));
+        assert!(!pack.sections.iter().any(|s| s.kind == SectionKind::Budget));
         assert!(pack
             .sections
             .iter()
@@ -398,10 +421,19 @@ mod tests {
             budget.clone(),
             SignalWeights::default(),
             &[],
+            &RoleTable::default_table(),
         )
         .expect("first compile succeeds");
-        let second = compile(&ticket, &view, &ci, budget, SignalWeights::default(), &[])
-            .expect("second compile succeeds");
+        let second = compile(
+            &ticket,
+            &view,
+            &ci,
+            budget,
+            SignalWeights::default(),
+            &[],
+            &RoleTable::default_table(),
+        )
+        .expect("second compile succeeds");
 
         assert_eq!(first, second);
     }
@@ -420,6 +452,7 @@ mod tests {
             TokenBudget::even(10_000),
             SignalWeights::default(),
             &["use tabs".to_string()],
+            &RoleTable::default_table(),
         )
         .expect("compile succeeds");
 
@@ -446,6 +479,7 @@ mod tests {
             TokenBudget::even(100_000),
             SignalWeights::default(),
             &[],
+            &RoleTable::default_table(),
         )
         .expect("compile with a generous budget succeeds");
 
@@ -479,12 +513,25 @@ mod tests {
             shares,
         };
 
-        let pack = compile(&ticket, &view, &ci, budget, SignalWeights::default(), &[])
-            .expect("compile still succeeds when a section is dropped");
+        let pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            budget,
+            SignalWeights::default(),
+            &[],
+            &RoleTable::default_table(),
+        )
+        .expect("compile still succeeds when a section is dropped");
 
-        assert_eq!(pack.dropped.len(), 1);
-        let dropped = &pack.dropped[0];
-        assert_eq!(dropped.kind, SectionKind::PriorFailures);
+        // Both `PriorFailures` (nonzero body from the pushed failure) and `Budget` (always
+        // renders something) are dropped here; only `Objective` has a nonzero share.
+        assert_eq!(pack.dropped.len(), 2);
+        let dropped = pack
+            .dropped
+            .iter()
+            .find(|d| d.kind == SectionKind::PriorFailures)
+            .expect("PriorFailures was dropped");
         assert!(dropped.bytes_needed > 0);
     }
 
@@ -502,6 +549,7 @@ mod tests {
             TokenBudget::even(100_000),
             SignalWeights::default(),
             &[],
+            &RoleTable::default_table(),
         )
         .expect("compile with a generous budget succeeds");
 
@@ -540,11 +588,20 @@ mod tests {
             shares,
         };
 
-        let pack = compile(&ticket, &view, &ci, budget, SignalWeights::default(), &[])
-            .expect("compile still succeeds when a section is dropped");
+        let pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            budget,
+            SignalWeights::default(),
+            &[],
+            &RoleTable::default_table(),
+        )
+        .expect("compile still succeeds when a section is dropped");
 
         let report = pack.rent_report(&[]);
         assert!(report.contains("DROPPED PriorFailures"));
+        assert!(report.contains("DROPPED Budget"));
         assert!(!report.contains("DROPPED Objective"));
     }
 
@@ -562,6 +619,7 @@ mod tests {
             TokenBudget::even(100_000),
             SignalWeights::default(),
             &[],
+            &RoleTable::default_table(),
         )
         .expect("compile with a generous budget succeeds");
 
