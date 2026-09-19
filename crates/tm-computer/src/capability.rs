@@ -32,6 +32,26 @@
 //! policy ([`crate::session::PanicStop`]) is likewise not polled here: it needs a background
 //! cursor-sampling loop this module does not run, so only the approval gate — not the panic
 //! stop — is enforced on this path today.
+//!
+//! # Idempotent effects (`SPEC.md` §21.5, audit B-11) — deliberately not wired here
+//!
+//! B-11's mechanism (`tm_core::Store::begin_effect`/`EffectGuard`) is keyed on `(ticket, attempt,
+//! kind, canonical_args)` and exists for effects that are individually irreversible and
+//! individually re-runnable in a well-defined way (a git push, a mirror write). There is no
+//! `computer.input` tool here to wrap — [`TOOLS`] instead has a dozen granular primitives
+//! (`computer.click`/`double_click`/`right_click`/`drag`/`type`/`key`/`scroll`/`focus`/
+//! `move_window`/`resize_window`/`launch`/`quit`), any one of which might be a single meaningless
+//! step inside a longer sequence (an agent typing a password field one keystroke at a time) or,
+//! rarely, an effect with real consequence (clicking "Pay Now" in a native app) — and this module
+//! has no way to tell which from the tool call alone: `computer.click`'s input is a screen point
+//! or an accessibility-tree ref with no semantic label, `computer.key` is a raw key chord, and
+//! neither has a receipt-shaped, replayable outcome the way a `git commit`'s SHA or a GitHub
+//! issue's number does (re-issuing the identical click/keystroke against a desktop that has since
+//! changed state has no reliable "was this already done" answer to give). Wrapping arbitrary
+//! input in a "one effect, one receipt" guard would not fit the model; per B-11's own guidance
+//! this is scoped down rather than forced, and computer wrapping is skipped entirely on this
+//! pass — same call as `tm_browser::capability` makes for the analogous `browser.click`/`type`
+//! case, see that module's doc comment.
 
 use std::collections::HashMap;
 use std::sync::Arc;
