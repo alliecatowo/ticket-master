@@ -707,11 +707,13 @@ impl BuiltinCapability {
             ticket: Some(ctx.ticket.clone()),
             session: Some(ctx.session.clone()),
         };
-        // `command::run`'s own `command.started`/`command.completed` event drafts are dropped
-        // here: `Store` exposes no generic "append arbitrary event drafts" entry point, only the
-        // typed commands used elsewhere in this impl, so there is nowhere in `tm-core`'s
-        // finished public API to commit them.
-        let (result, _drafts) = command::run(
+        // `command::run`'s own `command.started`/`command.completed` event drafts previously had
+        // nowhere to land (`Store` exposed no generic "append arbitrary event drafts" entry
+        // point); `docs/audit-2026-09-18-fable.md` B-05 added `Store::append(Vec<EventDraft>)`
+        // for exactly this, so they are committed below instead of dropped. Empty on a cache
+        // hit (`command::run` never builds them for one), so this is a no-op transaction in that
+        // case rather than an empty-but-real one.
+        let (result, drafts) = command::run(
             &spec,
             &key,
             self.command_cache.as_ref(),
@@ -720,6 +722,9 @@ impl BuiltinCapability {
             ctx.clock,
             ctx.actor,
         )?;
+        if !drafts.is_empty() {
+            self.store.append(drafts)?;
+        }
         Ok(command_result_json(&result))
     }
 
@@ -741,7 +746,7 @@ impl BuiltinCapability {
             ticket: Some(ctx.ticket.clone()),
             session: Some(ctx.session.clone()),
         };
-        let (result, _drafts) = command::run(
+        let (result, drafts) = command::run(
             &spec,
             &key,
             self.command_cache.as_ref(),
@@ -750,6 +755,9 @@ impl BuiltinCapability {
             ctx.clock,
             ctx.actor,
         )?;
+        if !drafts.is_empty() {
+            self.store.append(drafts)?;
+        }
         Ok(command_result_json(&result))
     }
 
@@ -2680,6 +2688,56 @@ mod tests {
             ToolOutcome::Completed { result, .. } => assert!(result.as_array().unwrap().is_empty()),
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn shell_run_commits_command_started_and_completed_events() {
+        // `docs/audit-2026-09-18-fable.md` B-07: `command::run`'s own drafts previously had no
+        // `Store` entry point to land on and were silently dropped (see this method's own doc
+        // comment); assert they now actually reach the durable log.
+        let h = Harness::new();
+        let outcome = h
+            .registry
+            .dispatch(
+                &call(
+                    "shell.run",
+                    json!({"argv": ["echo", "hi"], "cacheable": false}),
+                ),
+                &h.ctx(),
+            )
+            .await;
+        assert!(matches!(outcome, ToolOutcome::Completed { .. }));
+
+        let db_path = h.root().join(".tm").join("project.db");
+        // A fresh clock instance is fine here: `read_from` never touches it, only `append` does.
+        let clock: Arc<dyn tm_types::Clock> = Arc::new(FixedClock::epoch());
+        let log = tm_events::EventLog::open_with_clock(&db_path, clock).expect("open log");
+        let events = log.read_from(1, 1024).expect("read_from");
+
+        let started = events
+            .iter()
+            .find(|e| e.kind == tm_events::EventKind::CommandStarted)
+            .expect("command.started landed");
+        let completed = events
+            .iter()
+            .find(|e| e.kind == tm_events::EventKind::CommandCompleted)
+            .expect("command.completed landed");
+        assert_eq!(
+            started
+                .payload
+                .as_command_started()
+                .expect("command.started payload")
+                .command,
+            "echo hi"
+        );
+        assert_eq!(
+            completed
+                .payload
+                .as_command_completed()
+                .expect("command.completed payload")
+                .exit_code,
+            0
+        );
     }
 
     #[tokio::test]

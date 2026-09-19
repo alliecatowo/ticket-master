@@ -284,6 +284,7 @@ impl BuiltinExecutor {
             self.ids.clone(),
             task.role,
             task.actor.clone(),
+            self.store.clone(),
         );
 
         let agent_task = AgentTask {

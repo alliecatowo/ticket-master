@@ -270,6 +270,7 @@ impl AgentSession {
             self.project.ids.clone(),
             AGENT_ROLE,
             self.project.actor.clone(),
+            self.project.store.clone(),
         );
 
         let task = AgentTask {
