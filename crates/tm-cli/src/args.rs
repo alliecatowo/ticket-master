@@ -665,12 +665,23 @@ pub struct HarnessSetArgs {
 /// `tm harness promote`
 #[derive(Debug, Args)]
 pub struct HarnessPromoteArgs {
-    /// The epoch number to promote.
+    /// The epoch number to promote. Must equal the current highest persisted epoch (0 if none
+    /// has ever been promoted) plus one — a safety check against a stale/racy invocation, since
+    /// promotion is append-only.
     #[arg(value_name = "EPOCH")]
     pub epoch: u64,
     /// Skip the benchmark-gain gate (requires explicit human authority).
     #[arg(long)]
     pub force: bool,
+    /// The `BenchmarkReport` JSON to promote with (e.g. from `tm bench run --out`). Defaults to
+    /// the newest file under `.tm/bench/*.json`. Required unless `--force` and none exists.
+    #[arg(long, value_name = "PATH")]
+    pub report: Option<PathBuf>,
+    /// A prior `BenchmarkReport` JSON to gate the candidate's benchmark against. `harness_epochs`
+    /// does not persist a benchmark per epoch, so there is no baseline to compare against unless
+    /// one is supplied here; without it (and without `--force`), the gate rejects.
+    #[arg(long, value_name = "PATH")]
+    pub baseline: Option<PathBuf>,
 }
 
 /// `tm bench ...`
@@ -725,6 +736,16 @@ pub struct MirrorLinkArgs {
     /// The adapter to link: `github`, `gitlab`, `jira`, or `linear`.
     #[arg(value_name = "ADAPTER")]
     pub adapter: String,
+    /// Additional named credential fields beyond the adapter's default token, as
+    /// `field=ENV_VAR_NAME` (the value is an environment variable *name*, never a secret itself
+    /// — matching `tm_mirror::CredentialEnv`'s contract). Each adapter's tracker needs more than
+    /// a bare token to identify *which* external project/team it talks to: `github` needs
+    /// `owner`+`repo`; `gitlab` needs `project_id`; `jira` needs `email`+`api_token` (in place of
+    /// the default `token` field) +`project_key`; `linear` needs `api_key` (in place of `token`)
+    /// +`team_id`. Repeatable, e.g. `--credential owner=TM_GITHUB_OWNER --credential
+    /// repo=TM_GITHUB_REPO`.
+    #[arg(long = "credential", value_name = "FIELD=ENV_VAR")]
+    pub credentials: Vec<String>,
 }
 
 /// `tm serve [--addr]`

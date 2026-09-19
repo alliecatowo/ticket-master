@@ -128,6 +128,62 @@ pub enum MirrorSyncDirection {
     Pull,
 }
 
+/// One row of the `docs` table, joined with its `doc_provenance` ticket links -- the durable
+/// record [`Store::register_doc`]/[`Store::invalidate_doc`]/[`Store::reconcile_doc`] produce.
+///
+/// This is deliberately *not* `tm_docs::registry::DocRecord`: that type additionally carries
+/// `mode`/`state`/`derived_from`, none of which any catalogued event names (see `doc.registered`'s
+/// materializer arm), so this crate has nothing to populate them from. A caller that needs a full
+/// `DocRecord` (e.g. `tm-cli`'s `docs` verbs) joins this row against the on-disk
+/// `docs/.tmdocs.toml`/front-matter declaration itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocRow {
+    /// The doc's id (== its registered path; see `doc.registered`'s materializer arm).
+    pub id: String,
+    /// `docs.title` (defaults to `id` -- see the module note on `doc.registered`).
+    pub title: String,
+    /// `docs.author` -- the actor that most recently registered/invalidated/reconciled this doc.
+    pub author: ParticipantId,
+    /// `docs.ts` -- when this doc was last touched.
+    pub ts: Timestamp,
+    /// Tickets recorded in `doc_provenance` as an originating source for this doc.
+    pub provenance_tickets: Vec<TicketId>,
+}
+
+/// One row of the `mirror_links` table: the thin, single-adapter-per-ticket summary
+/// [`Store::link_mirror`]/[`Store::update_mirror_link`] persist.
+///
+/// Unlike `tm_mirror::sync::MirrorLink`, this carries no `content_hash`/`degradations`/
+/// `last_pulled_at` -- `crate::schema`'s `mirror_links` table has no columns for them -- so a
+/// caller cannot recover push-idempotency-across-restarts or an incremental pull `since` cursor
+/// from this row alone. `mirror_links.ticket` is also the table's primary key, so a ticket
+/// mirrored to more than one adapter only has the most recently synced adapter's link visible
+/// here; this is a pre-existing `crate::schema` limitation, not something a caller can work
+/// around from this read API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorLinkRow {
+    /// The linked ticket.
+    pub ticket: TicketId,
+    /// The external system's id for the mirrored issue; empty until the first push or pull.
+    pub remote_id: String,
+    /// The adapter instance name (matches `mirror.toml`'s table key / `Tracker::name()`).
+    pub remote_system: String,
+    /// When this link was last pushed or pulled.
+    pub last_synced: Timestamp,
+}
+
+/// One row of the `harness_epochs` table: a promoted harness config snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessEpochRow {
+    /// Monotonically increasing epoch number; never `0` (see [`Store::harness_epochs`]).
+    pub epoch: u64,
+    /// The opaque harness-config payload [`Store::promote_epoch`]'s caller supplied as
+    /// `candidate`.
+    pub harness_config: String,
+    /// When this epoch was promoted.
+    pub ts: Timestamp,
+}
+
 fn storage_err(e: rusqlite::Error) -> TmError {
     TmError::storage(e.to_string())
 }
@@ -1800,6 +1856,113 @@ impl Store {
     /// Current high-water mark of every id counter, for persistence/diagnostics.
     pub fn counters(&self) -> tm_types::Result<BTreeMap<String, u64>> {
         Ok(self.view()?.counters)
+    }
+
+    /// Every registered doc, joined with its `doc_provenance` originating tickets. See
+    /// [`DocRow`]'s own doc comment for why this is a distinct, thinner shape than
+    /// `tm_docs::registry::DocRecord`.
+    pub fn docs(&self) -> tm_types::Result<Vec<DocRow>> {
+        let conn = tm_events::schema::open_read_connection(self.log.path())?;
+        let mut stmt = conn
+            .prepare("SELECT id, title, author, ts FROM docs ORDER BY id")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(storage_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_err)?;
+
+        let mut docs = Vec::with_capacity(rows.len());
+        for (id, title, author, ts) in rows {
+            let mut prov_stmt = conn
+                .prepare("SELECT source FROM doc_provenance WHERE doc_id = ?1 ORDER BY source")
+                .map_err(storage_err)?;
+            let provenance_tickets = prov_stmt
+                .query_map(rusqlite::params![&id], |r| r.get::<_, String>(0))
+                .map_err(storage_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(storage_err)?
+                .into_iter()
+                .filter_map(|s| TicketId::new(s).ok())
+                .collect();
+            docs.push(DocRow {
+                id,
+                title,
+                author: author.parse::<ParticipantId>()?,
+                ts: parse_ts(&ts)?,
+                provenance_tickets,
+            });
+        }
+        Ok(docs)
+    }
+
+    /// Every persisted mirror link, one row per ticket (`mirror_links.ticket` is the table's
+    /// primary key -- see [`MirrorLinkRow`]'s doc comment for what that means for a ticket
+    /// mirrored to more than one adapter).
+    pub fn mirror_links(&self) -> tm_types::Result<Vec<MirrorLinkRow>> {
+        let conn = tm_events::schema::open_read_connection(self.log.path())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT ticket, remote_id, remote_system, last_synced FROM mirror_links ORDER BY ticket",
+            )
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(storage_err)?;
+        let mut links = Vec::new();
+        for row in rows {
+            let (ticket, remote_id, remote_system, last_synced) = row.map_err(storage_err)?;
+            links.push(MirrorLinkRow {
+                ticket: TicketId::new(ticket)?,
+                remote_id,
+                remote_system,
+                last_synced: parse_ts(&last_synced)?,
+            });
+        }
+        Ok(links)
+    }
+
+    /// Every promoted harness epoch, oldest first. The genesis epoch (number `0`) is never
+    /// persisted here -- see `harness.promoted`'s materializer arm -- so an empty result means
+    /// "nothing has ever been promoted", not "no epochs exist".
+    pub fn harness_epochs(&self) -> tm_types::Result<Vec<HarnessEpochRow>> {
+        let conn = tm_events::schema::open_read_connection(self.log.path())?;
+        let mut stmt = conn
+            .prepare("SELECT epoch, harness_config, ts FROM harness_epochs ORDER BY epoch")
+            .map_err(storage_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(storage_err)?;
+        let mut epochs = Vec::new();
+        for row in rows {
+            let (epoch, harness_config, ts) = row.map_err(storage_err)?;
+            epochs.push(HarnessEpochRow {
+                epoch: epoch as u64,
+                harness_config,
+                ts: parse_ts(&ts)?,
+            });
+        }
+        Ok(epochs)
     }
 
     /// Assemble a [`ProjectView`] from every row visible on `conn`, the single read path shared

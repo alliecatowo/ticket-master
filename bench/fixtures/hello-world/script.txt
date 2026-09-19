@@ -1,0 +1,1 @@
+read bench/fixtures/hello-world/NOTE.md

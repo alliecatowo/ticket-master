@@ -1,0 +1,35 @@
+# Fallback doc declarations for docs that do not (or cannot) carry an embedded front-matter
+# block (see `tm-docs::registry` -- `SPEC.md` §9). Paths are relative to the project root.
+#
+# This file is itself the minimal fixture that makes `tm docs list/check/reconcile` real on this
+# repository: without at least one declared doc, `tm docs check` (the CI gate SPEC.md §16 item
+# 15 asks for) has nothing to check and passes vacuously. Registering the project's own top-level
+# docs here closes that gap. Every entry below is `human` (or `maintained` for `providers.md`,
+# whose provider list should track `crates/tm-provider`): none is `generated`, so `tm docs
+# reconcile` will only ever open review tickets for these, never attempt to rewrite them.
+
+[[doc]]
+path = "SPEC.md"
+id = "spec"
+mode = "human"
+
+[[doc]]
+path = "docs/backlog.md"
+id = "backlog"
+mode = "human"
+
+[[doc]]
+path = "docs/thesis.md"
+id = "thesis"
+mode = "human"
+
+[[doc]]
+path = "docs/vision.md"
+id = "vision"
+mode = "human"
+
+[[doc]]
+path = "docs/providers.md"
+id = "providers"
+mode = "maintained"
+derived_from = ["crates/tm-provider/src/**"]

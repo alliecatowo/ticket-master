@@ -1,0 +1,32 @@
+# A minimal, real `tm-harness::bench::BenchTask` (SPEC.md §10) proving `tm bench list`/`run`
+# discover and replay a genuine task rather than fabricating one (see B-06's audit entry).
+#
+# The pass/fail outcome is driven entirely by `fixtures/hello-world/script.txt`, the scripted
+# transcript `tm-cli`'s `SeededProvider` implementation replays step by step: the predicate below
+# is only satisfied because that script's one line attests `fixtures/hello-world/NOTE.md`. Edit
+# the script (or delete the attestation) and this task genuinely fails its own `FileExists` check
+# — it is not a check that always passes by construction.
+
+id = "hello-world"
+task = "Confirm the hello-world fixture note exists and report it."
+
+[fixture]
+path = "fixtures/hello-world"
+description = "A single NOTE.md the scripted transcript attests to, proving the replay is real."
+
+[scoring]
+success_weight = 0.6
+cost_weight = 0.1
+latency_weight = 0.1
+tool_count_weight = 0.1
+context_weight = 0.1
+unnecessary_ops_weight = 0.0
+
+[expected]
+max_cost_micros = 10000
+max_wall_seconds = 60
+max_tool_calls = 5
+max_context_bytes = 10000
+
+[expected.predicate]
+file_exists = { path = "bench/fixtures/hello-world/NOTE.md" }
