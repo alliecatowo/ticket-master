@@ -2,14 +2,17 @@
 //!
 //! Owns request/response shaping (our wire-independent [`crate::types`] <-> the Messages API
 //! JSON shape), tool-use blocks, streaming, usage accounting, prompt-cache-aware headers, and
-//! retry on 429/5xx honoring `Retry-After`. The API key is read once at construction from
-//! `ANTHROPIC_API_KEY`; nothing in this module reads environment or wall-clock state elsewhere,
-//! so shaping is unit-testable against recorded JSON without a network call.
+//! retry on 429/5xx honoring `Retry-After`. The API key is read once at construction, via
+//! [`tm_auth::EnvApiKey`] against [`API_KEY_ENV_VAR`] (`SPEC.md` §28.2's auth-adapter layer,
+//! rather than a bare `std::env::var` call); nothing in this module reads environment or
+//! wall-clock state elsewhere, so shaping is unit-testable against recorded JSON without a
+//! network call.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tm_auth::EnvApiKey;
 use tm_types::Clock;
 
 use crate::fabric::Provider;
@@ -47,13 +50,17 @@ pub struct AnthropicProvider {
 }
 
 impl AnthropicProvider {
-    /// Build a provider for `model`, reading the API key from [`API_KEY_ENV_VAR`].
+    /// Build a provider for `model`, reading the API key from [`API_KEY_ENV_VAR`] through
+    /// [`tm_auth::EnvApiKey`].
     pub fn from_env(
         model: ModelId,
         clock: std::sync::Arc<dyn Clock>,
     ) -> Result<Self, ProviderError> {
-        let api_key = std::env::var(API_KEY_ENV_VAR)
-            .map_err(|_| ProviderError::AuthFailed(format!("{API_KEY_ENV_VAR} is not set")))?;
+        let api_key = EnvApiKey::new(API_KEY_ENV_VAR)
+            .resolve()
+            .map_err(|e| ProviderError::AuthFailed(e.to_string()))?
+            .expose_secret()
+            .to_string();
         Self::with_config(model, api_key, DEFAULT_BASE_URL.to_string(), clock)
     }
 
@@ -645,6 +652,31 @@ mod tests {
             headers.get("anthropic-beta").unwrap(),
             "prompt-caching-2024-07-31"
         );
+    }
+
+    #[test]
+    fn build_headers_never_leaks_a_key_it_cannot_encode_as_a_header_value() {
+        // A key resolved through `EnvApiKey` that happens to contain a byte `HeaderValue`
+        // rejects (a bare newline is the simplest one) must not have that value surface in the
+        // resulting header map at all -- `build_headers` falls back to an empty header rather
+        // than propagating an error, so there is no code path here that could format the
+        // rejected key into an error message either.
+        let var = "TM_ANTHROPIC_TEST_HEADER_LEAK_CANARY";
+        std::env::set_var(var, "canary-value\nwith-a-newline");
+        let cred = EnvApiKey::new(var)
+            .resolve()
+            .expect("var is set to an invalid-but-present value");
+        std::env::remove_var(var);
+
+        let headers = build_headers(cred.expose_secret());
+        let value = headers
+            .get("x-api-key")
+            .expect("x-api-key is always inserted, even on the fallback path");
+        assert_eq!(
+            value, "",
+            "invalid header bytes must fall back to empty, not leak"
+        );
+        assert!(!format!("{value:?}").contains("canary-value"));
     }
 
     const RECORDED_RESPONSE_TEXT: &str = r#"{

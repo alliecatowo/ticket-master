@@ -11,7 +11,8 @@
 //! notably it has no way to set a thinking-token budget, which the native `generationConfig`
 //! exposes directly. Paying for the extra wire shapes here buys full feature access.
 //!
-//! Env vars read by [`GeminiProvider::from_env`]:
+//! Env vars read by [`GeminiProvider::from_env`] (each via [`tm_auth::EnvApiKey`], `SPEC.md`
+//! §28.2's auth-adapter layer, rather than a bare `std::env::var` call):
 //! - `GEMINI_API_KEY` (required unless `GOOGLE_API_KEY` is set instead — check `GEMINI_API_KEY`
 //!   first, fall back to `GOOGLE_API_KEY`, since both names are in common use).
 //! - `GEMINI_BASE_URL` (optional, default `"https://generativelanguage.googleapis.com/v1beta"`).
@@ -24,6 +25,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tm_auth::EnvApiKey;
 use tm_types::Clock;
 
 use crate::fabric::Provider;
@@ -61,9 +63,12 @@ pub struct GeminiProvider {
 impl GeminiProvider {
     /// Build a provider for `model`, reading configuration from the environment.
     pub fn from_env(model: ModelId, clock: Arc<dyn Clock>) -> Result<Self, ProviderError> {
-        let api_key = std::env::var("GEMINI_API_KEY")
-            .or_else(|_| std::env::var("GOOGLE_API_KEY"))
-            .map_err(|_| missing_env_var("GEMINI_API_KEY"))?;
+        let api_key = EnvApiKey::new("GEMINI_API_KEY")
+            .resolve()
+            .or_else(|_| EnvApiKey::new("GOOGLE_API_KEY").resolve())
+            .map_err(|_| missing_env_var("GEMINI_API_KEY"))?
+            .expose_secret()
+            .to_string();
         let base_url =
             std::env::var("GEMINI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         Self::with_config(model, api_key, base_url, clock)

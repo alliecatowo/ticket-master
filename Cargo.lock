@@ -3297,6 +3297,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "tm-auth"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "parking_lot",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tm-core",
+ "tm-events",
+ "tm-types",
+ "tokio",
+]
+
+[[package]]
 name = "tm-browser"
 version = "0.1.0"
 dependencies = [
@@ -3336,6 +3353,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tm-agent",
+ "tm-auth",
  "tm-browser",
  "tm-codeintel",
  "tm-computer",
@@ -3563,6 +3581,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "tm-auth",
  "tm-types",
  "tokio",
  "tokio-stream",

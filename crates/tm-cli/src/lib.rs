@@ -16,6 +16,7 @@
 //! - [`sched`] — the `sched`, `lease`, and `run` command groups.
 //! - [`search`] — the `search`, `symbol`, and `history` command groups over `tm-codeintel`.
 //! - [`ops`] — the `docs`, `provider`, `harness`, `bench`, `mirror`, and `events` command groups.
+//! - [`auth`] — the `auth` command (`SPEC.md` §28.2) over `tm-auth`.
 //! - [`workflow`] — the `workflow` command group (`SPEC.md` §25) over `tm-workflow`.
 //! - [`drive`] — the `browser` and `computer` command groups over `tm-browser`/`tm-computer`.
 //! - [`serve`] — the `serve` command.
@@ -33,6 +34,7 @@
 
 pub mod agent;
 pub mod args;
+pub mod auth;
 pub mod dispatch;
 pub mod drive;
 pub mod ops;

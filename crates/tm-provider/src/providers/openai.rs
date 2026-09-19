@@ -33,6 +33,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tm_auth::EnvApiKey;
 use tm_types::Clock;
 
 use crate::fabric::Provider;
@@ -51,8 +52,14 @@ pub struct OpenAiProvider {
 impl OpenAiProvider {
     /// Build a provider for `model`, reading configuration from the environment.
     pub fn from_env(model: ModelId, clock: Arc<dyn Clock>) -> Result<Self, ProviderError> {
-        let api_key = std::env::var("OPENAI_API_KEY")
-            .map_err(|_| crate::providers::missing_env_var("OPENAI_API_KEY"))?;
+        // The bearer API key goes through `tm_auth::EnvApiKey` (`SPEC.md` §28.2's auth-adapter
+        // layer). `OPENAI_ORGANIZATION`/`OPENAI_PROJECT` stay plain `std::env::var` reads below:
+        // they're routing identifiers OpenAI's API happens to read from headers, not secrets.
+        let api_key = EnvApiKey::new("OPENAI_API_KEY")
+            .resolve()
+            .map_err(|_| crate::providers::missing_env_var("OPENAI_API_KEY"))?
+            .expose_secret()
+            .to_string();
         let base_url = std::env::var("OPENAI_BASE_URL")
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
 

@@ -128,6 +128,9 @@ pub enum Command {
     #[command(subcommand)]
     Provider(ProviderCommand),
 
+    /// Interactive login for a provider's credential (`SPEC.md` §28.2's auth-adapter layer).
+    Auth(AuthArgs),
+
     /// The project's harness configuration and epoch history.
     #[command(subcommand)]
     Harness(HarnessCommand),
@@ -663,6 +666,15 @@ pub struct ProviderTestArgs {
     /// The provider to test; defaults to every configured provider.
     #[arg(value_name = "PROVIDER")]
     pub provider: Option<String>,
+}
+
+/// `tm auth <provider>`
+#[derive(Debug, Args)]
+pub struct AuthArgs {
+    /// The provider to authenticate, e.g. `anthropic`, `openai`, `gemini` — any id `tm provider
+    /// detect` lists.
+    #[arg(value_name = "PROVIDER")]
+    pub provider: String,
 }
 
 /// `tm harness ...`
