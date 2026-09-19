@@ -22,6 +22,7 @@
 #![warn(missing_docs)]
 
 pub mod authority;
+pub mod capability;
 pub mod cdp;
 pub mod config;
 pub mod downloader;
@@ -33,6 +34,7 @@ pub mod session;
 pub mod snapshot;
 
 pub use authority::{ActionKind, NavigationGuard, SessionTrace, TraceEvent};
+pub use capability::{BrowserCapability, SessionRegistry};
 pub use cdp::{CdpClient, CdpError, CdpEvent, CdpMessage, CdpRequest, CdpResponse, TargetInfo};
 pub use config::{BrowserToml, ManagedConfig, RemoteCdpConfig};
 pub use downloader::{BrowserDownloader, ReqwestDownloader};

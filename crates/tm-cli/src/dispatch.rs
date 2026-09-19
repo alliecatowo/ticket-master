@@ -131,6 +131,7 @@ pub fn build_dispatcher(
     let command_executor: Arc<dyn tm_context::CommandExecutor + Send + Sync> =
         Arc::new(ProcessCommandExecutor);
 
+    let browser = crate::drive::optional_browser_wiring(project)?;
     let builtin = Arc::new(BuiltinExecutor::new(
         "builtin",
         fabric,
@@ -140,6 +141,8 @@ pub fn build_dispatcher(
         command_executor,
         project.clock.clone(),
         project.ids.clone(),
+        browser,
+        tm_agent::ComputerWiring::default(),
     ));
 
     let human = Arc::new(HumanExecutor::new(

@@ -14,6 +14,12 @@ tm-provider = { workspace = true }
 tm-codeintel = { workspace = true }
 tm-context = { workspace = true }
 tm-harness = { workspace = true }
+# Not yet promoted to [workspace.dependencies] in the root manifest, matching how tm-cli already
+# pulls these two in (docs/audit-2026-09-18-fable.md B-02: tm-agent finally depends on both so
+# their CapabilityProvider impls are reachable by an agent, not just by a human running `tm
+# browser`/`tm computer`).
+tm-browser = { path = "../tm-browser" }
+tm-computer = { path = "../tm-computer" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

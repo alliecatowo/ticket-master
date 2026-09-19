@@ -223,11 +223,42 @@ impl AgentSession {
             Arc::new(MemoryCommandCache::new(self.project.ids.clone()));
         let command_executor: Arc<dyn CommandExecutor + Send + Sync> =
             Arc::new(ProcessCommandExecutor);
-        let tools = ToolRegistry::standard(
+
+        // `docs/audit-2026-09-18-fable.md` B-02: register `tm-browser`/`tm-computer` alongside
+        // the builtin tool set, the same `ToolRegistry::with_capabilities` seam
+        // `tm_agent::executor::BuiltinExecutor::build` uses. `browser_handle`/`computer_handle`
+        // are kept as concrete `Arc`s (not just registered as `dyn CapabilityProvider`) so this
+        // turn's sessions can be torn down explicitly once it ends, mirroring
+        // `BuiltinExecutor::execute`'s `SessionHandles::close_all`.
+        let mut extra: Vec<Arc<dyn tm_types::CapabilityProvider>> = Vec::new();
+        let browser_handle = crate::drive::optional_browser_wiring(&self.project)?.map(|wiring| {
+            let registry = tm_browser::SessionRegistry::new(
+                wiring.providers,
+                wiring.sink,
+                self.project.clock.clone(),
+                tm_agent::tools::MAX_INLINE_RESULT_BYTES,
+            );
+            let capability = Arc::new(tm_browser::BrowserCapability::new(registry));
+            extra.push(capability.clone() as Arc<dyn tm_types::CapabilityProvider>);
+            capability
+        });
+        let computer_registry = tm_computer::ComputerSessionRegistry::new(
+            tm_computer::SelectionEnv::from_process(),
+            false,
+            tm_computer::session::PanicStopConfig {
+                abort_chord: None,
+                mouse_move_threshold_px: 5.0,
+            },
+        );
+        let computer_handle = Arc::new(tm_computer::ComputerCapability::new(computer_registry));
+        extra.push(computer_handle.clone() as Arc<dyn tm_types::CapabilityProvider>);
+
+        let tools = ToolRegistry::with_capabilities(
             Arc::new(ci),
             self.project.store.clone(),
             command_cache,
             command_executor,
+            extra,
         );
 
         let mut agent_loop = AgentLoop::new(
@@ -250,6 +281,31 @@ impl AgentSession {
             session: self.session.clone(),
         };
 
+        let result = self.drive_turn(&mut agent_loop, task).await;
+
+        // Torn down on every path (success or `?` propagation inside `drive_turn`), not just
+        // the happy one — see this method's doc comment.
+        if let Some(browser) = &browser_handle {
+            if let Err(e) = browser.close_all().await {
+                tracing::warn!(error = %e, "failed to close one or more browser sessions after this turn");
+            }
+        }
+        if let Err(e) = computer_handle.close_all().await {
+            tracing::warn!(error = %e, "failed to close one or more computer sessions after this turn");
+        }
+
+        result
+    }
+
+    /// The approval-suspend/resume loop `run_turn` drives, split out so `run_turn` can tear down
+    /// this turn's browser/computer sessions after this returns regardless of how it returns
+    /// (`?` inside this method propagates from *this* method, not from `run_turn`, which is the
+    /// point of the split).
+    async fn drive_turn(
+        &mut self,
+        agent_loop: &mut AgentLoop,
+        task: AgentTask,
+    ) -> tm_types::Result<()> {
         let mut outcome = agent_loop.run(task.clone()).await?;
         loop {
             self.renderer.note(&format_steps(outcome.steps()));

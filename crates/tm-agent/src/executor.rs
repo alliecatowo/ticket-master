@@ -21,13 +21,140 @@ use tm_core::executor::{
     CostClass, ExecutionHandle, Executor, ExecutorCapabilities, ExecutorFailure, ExecutorOutcome,
     ExecutorTask,
 };
-use tm_core::{FailureClass, Store};
+use tm_core::{ArtifactKind, FailureClass, Store};
 use tm_provider::fabric::Fabric;
-use tm_types::{Clock, IdKind, IdSource, SessionId};
+use tm_types::{CapabilityProvider, Clock, IdKind, IdSource, ParticipantId, SessionId};
 
 use crate::agent_loop::AgentLoop;
 use crate::outcome::{AgentOutcome, AgentTask};
 use crate::tools::ToolRegistry;
+
+/// Oversized `tm-browser` tool outputs (screenshots, network bodies, PDFs) at or above this size
+/// are spilled to a stored artifact instead of inlined — the same threshold
+/// [`crate::tools::MAX_INLINE_RESULT_BYTES`] uses for the builtin capability's own results, kept
+/// as a separate constant because `tm_browser::session::BrowserSessionConfig` takes it as a raw
+/// `usize` rather than importing this crate's constant.
+const BROWSER_ARTIFACT_THRESHOLD_BYTES: usize = crate::tools::MAX_INLINE_RESULT_BYTES;
+
+/// A [`tm_browser::session::ArtifactSink`] backed by `tm-core`'s `Store`, for wiring
+/// [`tm_browser::BrowserCapability`] to durable storage the same way
+/// [`crate::tools::bound_result`] does for the builtin capability's own oversized results.
+///
+/// Every artifact is stored under [`ParticipantId::system`] rather than the specific ticket/actor
+/// a browser tool call happened on behalf of: `ArtifactSink::store` carries no ticket/actor
+/// context (a `BrowserSession`'s sink is bound once at session-launch time, not threaded through
+/// every call), and `Store::store_artifact` requires one. This is a real simplification, not an
+/// oversight — an artifact stored this way is attributable to "the browser capability" but not to
+/// the exact ticket that triggered it. Fixing that would need `ArtifactSink::store` itself to
+/// grow ticket/actor parameters, a `tm-browser` API change out of this task's scope.
+pub struct StoreArtifactSink {
+    store: Arc<Store>,
+}
+
+impl StoreArtifactSink {
+    /// Build a sink writing into `store`.
+    pub fn new(store: Arc<Store>) -> Self {
+        StoreArtifactSink { store }
+    }
+}
+
+impl tm_browser::session::ArtifactSink for StoreArtifactSink {
+    fn store(&self, bytes: &[u8], content_type: &str) -> tm_types::Result<tm_types::ArtifactId> {
+        let events = self.store.store_artifact(
+            ArtifactKind::Report,
+            content_type.to_string(),
+            bytes.to_vec(),
+            serde_json::json!({"source": "browser"}),
+            None,
+            ParticipantId::system(),
+        )?;
+        events
+            .iter()
+            .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone()))
+            .ok_or_else(|| {
+                tm_types::TmError::invariant("store_artifact did not emit artifact.created")
+            })
+    }
+}
+
+/// What [`BuiltinExecutor`] needs to register a [`tm_browser::BrowserCapability`] per dispatched
+/// task: an already-constructed provider registry (from `browser.toml`) and an artifact sink.
+/// `BuiltinExecutor::browser` being `None` means the project has no `browser.toml` configured (or
+/// the binary assembling this executor chose not to load one) — browser tools are then simply
+/// never registered for any task this executor runs, rather than every dispatch failing.
+pub struct BrowserWiring {
+    /// The provider fallback order `browser.toml` selected (`SPEC.md` §19.1a).
+    pub providers: Arc<tm_browser::ProviderRegistry>,
+    /// Where oversized browser tool outputs are stored; [`StoreArtifactSink`] is the ready-made
+    /// choice when the caller already has this executor's own `Store`.
+    pub sink: Arc<dyn tm_browser::session::ArtifactSink>,
+}
+
+/// What [`BuiltinExecutor`] needs to register a [`tm_computer::ComputerCapability`] per
+/// dispatched task. Unlike [`BrowserWiring`], this is never optional: unlike a browser session, a
+/// computer session needs no project-level config file to be worth registering — an unsupported
+/// or permission-less backend fails clearly on first tool call
+/// (`tm_computer::ComputerError::BackendUnavailable`/`PermissionMissing`) rather than at
+/// construction, so there is no "silently no computer tools at all" state to choose here the way
+/// there is for a missing `browser.toml`.
+#[derive(Clone)]
+pub struct ComputerWiring {
+    /// Backend selection signals (`WAYLAND_DISPLAY`/`DISPLAY`/`TM_COMPUTER_BACKEND`), mirroring
+    /// `tm computer`'s own `SelectionEnv::from_process`.
+    pub env: tm_computer::SelectionEnv,
+    /// Whether to request a headless (`Xvfb`) session — Linux only, per `SPEC.md` §20.3.
+    pub headless: bool,
+    /// The panic-stop policy (`SPEC.md` §20.3) attended sessions are configured with. Note this
+    /// module's doc comment on why the panic stop is not actually polled on this path yet.
+    pub panic_stop: tm_computer::session::PanicStopConfig,
+}
+
+impl Default for ComputerWiring {
+    /// The same defaults `tm computer`'s CLI dispatcher uses (`crates/tm-cli/src/drive.rs`):
+    /// backend selection from the real process environment, attended (not headless), a 5px
+    /// panic-stop threshold and no configured abort chord.
+    fn default() -> Self {
+        ComputerWiring {
+            env: tm_computer::SelectionEnv::from_process(),
+            headless: false,
+            panic_stop: tm_computer::session::PanicStopConfig {
+                abort_chord: None,
+                mouse_move_threshold_px: 5.0,
+            },
+        }
+    }
+}
+
+/// Concrete handles to one call's browser/computer session registries, kept alongside their
+/// registration as `Arc<dyn CapabilityProvider>` in the [`ToolRegistry`] so
+/// [`Executor::execute`] can tear every session down once the dispatched task ends without
+/// downcasting a trait object. See `tm_browser::capability`'s module doc comment for the honest
+/// scope of what "torn down" means here: this is task-dispatch-scoped teardown, not true
+/// lease-expiry-triggered teardown (`SPEC.md` §19.1b) — nothing in this workspace yet fires a
+/// callback when a lease expires mid-task.
+struct SessionHandles {
+    browser: Option<Arc<tm_browser::BrowserCapability>>,
+    computer: Arc<tm_computer::ComputerCapability>,
+}
+
+impl SessionHandles {
+    async fn close_all(&self) {
+        if let Some(browser) = &self.browser {
+            if let Err(e) = browser.close_all().await {
+                tracing::warn!(
+                    error = %e,
+                    "failed to close one or more browser sessions after task dispatch"
+                );
+            }
+        }
+        if let Err(e) = self.computer.close_all().await {
+            tracing::warn!(
+                error = %e,
+                "failed to close one or more computer sessions after task dispatch"
+            );
+        }
+    }
+}
 
 /// Wrap an [`ExecutorTask::context_pack`]'s rendered text into a single-section
 /// `tm_context::ContextPack`, since `tm-core` (where `ExecutorTask` lives) cannot depend on
@@ -65,14 +192,22 @@ pub struct BuiltinExecutor {
     command_executor: Arc<dyn CommandExecutor + Send + Sync>,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdSource>,
+    /// `docs/audit-2026-09-18-fable.md` B-02: `None` when no `browser.toml` is configured.
+    browser: Option<BrowserWiring>,
+    /// B-02: always present — see [`ComputerWiring`]'s doc comment for why this has no `None`
+    /// state the way [`BuiltinExecutor::browser`] does.
+    computer: ComputerWiring,
 }
 
 impl BuiltinExecutor {
     /// Build a `BuiltinExecutor` identified as `id` (used in the dispatcher's
     /// `agent:<id>/<ticket>` lease holder), sharing the given infrastructure across every
-    /// [`Executor::execute`] call. A fresh [`ToolRegistry::standard`] and [`AgentLoop`] are
-    /// built per call (`ToolRegistry` is not `Clone`, and a fresh loop per run keeps concurrent
-    /// executions from sharing mutable prompt-cache state).
+    /// [`Executor::execute`] call. A fresh [`ToolRegistry`], [`AgentLoop`] and pair of
+    /// browser/computer session registries are built per call (`ToolRegistry` is not `Clone`, a
+    /// fresh loop per run keeps concurrent executions from sharing mutable prompt-cache state,
+    /// and a fresh `tm_browser`/`tm_computer` `SessionRegistry` per run is what lets
+    /// [`Executor::execute`] tear every session it opened down before returning — see
+    /// [`SessionHandles`]).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: impl Into<String>,
@@ -83,6 +218,8 @@ impl BuiltinExecutor {
         command_executor: Arc<dyn CommandExecutor + Send + Sync>,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdSource>,
+        browser: Option<BrowserWiring>,
+        computer: ComputerWiring,
     ) -> Self {
         BuiltinExecutor {
             id: id.into(),
@@ -93,23 +230,48 @@ impl BuiltinExecutor {
             command_executor,
             clock,
             ids,
+            browser,
+            computer,
         }
     }
 
-    /// Build the [`AgentLoop`] and [`AgentTask`] `execute` would drive for `task`, without
-    /// running anything — the seam a test uses to observe what ceiling the loop was actually
-    /// constructed with (see `crate::executor::tests::builtin_executor_passes_ticket_authority`).
-    fn build(&self, task: &ExecutorTask) -> (AgentLoop, AgentTask) {
+    /// Build the [`AgentLoop`], [`AgentTask`] and [`SessionHandles`] `execute` would drive for
+    /// `task`, without running anything — the seam a test uses to observe what ceiling the loop
+    /// was actually constructed with (see
+    /// `crate::executor::tests::builtin_executor_passes_ticket_authority`).
+    fn build(&self, task: &ExecutorTask) -> (AgentLoop, AgentTask, SessionHandles) {
         let session = task
             .session
             .clone()
             .unwrap_or_else(|| session_id_from(self.ids.next(IdKind::Session).as_str()));
 
-        let tools = ToolRegistry::standard(
+        let mut extra: Vec<Arc<dyn CapabilityProvider>> = Vec::new();
+        let browser_handle = self.browser.as_ref().map(|wiring| {
+            let registry = tm_browser::SessionRegistry::new(
+                wiring.providers.clone(),
+                wiring.sink.clone(),
+                self.clock.clone(),
+                BROWSER_ARTIFACT_THRESHOLD_BYTES,
+            );
+            let capability = Arc::new(tm_browser::BrowserCapability::new(registry));
+            extra.push(capability.clone() as Arc<dyn CapabilityProvider>);
+            capability
+        });
+
+        let computer_registry = tm_computer::ComputerSessionRegistry::new(
+            self.computer.env.clone(),
+            self.computer.headless,
+            self.computer.panic_stop.clone(),
+        );
+        let computer_handle = Arc::new(tm_computer::ComputerCapability::new(computer_registry));
+        extra.push(computer_handle.clone() as Arc<dyn CapabilityProvider>);
+
+        let tools = ToolRegistry::with_capabilities(
             self.ci.clone(),
             self.store.clone(),
             self.command_cache.clone(),
             self.command_executor.clone(),
+            extra,
         );
         let agent_loop = AgentLoop::new(
             self.fabric.clone(),
@@ -133,7 +295,12 @@ impl BuiltinExecutor {
             session,
         };
 
-        (agent_loop, agent_task)
+        let handles = SessionHandles {
+            browser: browser_handle,
+            computer: computer_handle,
+        };
+
+        (agent_loop, agent_task, handles)
     }
 }
 
@@ -166,9 +333,14 @@ impl Executor for BuiltinExecutor {
 
     async fn execute(&self, task: ExecutorTask) -> tm_types::Result<ExecutorOutcome> {
         let ticket = task.ticket.clone();
-        let (mut agent_loop, agent_task) = self.build(&task);
+        let (mut agent_loop, agent_task, handles) = self.build(&task);
 
-        let outcome = agent_loop.run(agent_task).await?;
+        // Tear every browser/computer session this run opened down before returning, on every
+        // path — success, failure, or a mid-run `?` — not just the happy path. This is the
+        // task-dispatch-scoped teardown `SessionHandles`'s doc comment describes.
+        let outcome = agent_loop.run(agent_task).await;
+        handles.close_all().await;
+        let outcome = outcome?;
 
         Ok(match outcome {
             AgentOutcome::Submitted { evidence, steps } => {
@@ -425,6 +597,8 @@ mod tests {
             Arc::new(NoopCommandExecutor),
             clock,
             ids,
+            None,
+            ComputerWiring::default(),
         )
     }
 
@@ -448,7 +622,7 @@ mod tests {
             session: None,
         };
 
-        let (agent_loop, agent_task) = executor.build(&task);
+        let (agent_loop, agent_task, _handles) = executor.build(&task);
 
         assert_eq!(agent_loop.authority(), &restricted);
         assert_ne!(agent_loop.authority(), &Authority::root());
@@ -456,5 +630,31 @@ mod tests {
         assert_ne!(agent_loop.budget(), &Budget::unlimited());
         assert_eq!(agent_task.authority, restricted);
         assert_eq!(agent_task.budget, scoped_budget);
+    }
+
+    #[test]
+    fn build_registers_the_computer_capability_and_no_browser_capability_by_default() {
+        // `test_executor` passes `browser: None` and the default `ComputerWiring`: this asserts
+        // the resulting tool surface reflects exactly that — computer.* tools present,
+        // browser.* tools absent — rather than merely that `build` doesn't panic.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let executor = test_executor(dir.path());
+        let task = ExecutorTask {
+            ticket: TicketId::new("T-1").expect("ticket id"),
+            role: Role::CoderFast,
+            objective: "narrow work".to_string(),
+            context_pack: "pack text".to_string(),
+            authority: Authority::root(),
+            budget: Budget::unlimited(),
+            harness_epoch: 0,
+            actor: ParticipantId::new("agent:test-builtin/T-1").expect("participant"),
+            session: None,
+        };
+
+        let (agent_loop, _agent_task, handles) = executor.build(&task);
+        assert!(handles.browser.is_none());
+        let defs = agent_loop.tools().tool_defs();
+        assert!(defs.iter().any(|d| d.name == "computer.snapshot"));
+        assert!(!defs.iter().any(|d| d.name.starts_with("browser.")));
     }
 }

@@ -1899,10 +1899,12 @@ impl ToolRegistry {
     }
 
     /// The standard single-provider registry: [`BuiltinCapability`] alone (`SPEC.md` §11's 39
-    /// tools), over already-open project infrastructure. A binary that also wants
-    /// `tm-browser`/`tm-computer`/`tm-pty`/an MCP client calls [`ToolRegistry::new`] directly
-    /// with a longer provider list instead — deliberately not done here; see
-    /// `docs/audit-2026-09-18-fable.md` A-01/B-02.
+    /// tools), over already-open project infrastructure. Left builtin-only deliberately — several
+    /// tests in this module assert exact admitted-tool counts against `ToolName::ALL.len()`
+    /// (`standard_registers_every_tool_name_exactly_once`, the `tool_defs_for_*` `- N` counts) and
+    /// would need rewriting the moment a second provider joined this constructor. A binary that
+    /// also wants `tm-browser`/`tm-computer`/`tm-pty`/an MCP client calls
+    /// [`ToolRegistry::with_capabilities`] instead (`docs/audit-2026-09-18-fable.md` A-01/B-02).
     pub fn standard(
         ci: Arc<CodeIntel>,
         store: Arc<Store>,
@@ -1916,6 +1918,30 @@ impl ToolRegistry {
             command_executor,
         ));
         ToolRegistry::new(vec![builtin], store)
+    }
+
+    /// [`ToolRegistry::standard`] plus whatever additional [`CapabilityProvider`]s a binary
+    /// assembled (`docs/audit-2026-09-18-fable.md` B-02: `tm-browser`'s `BrowserCapability`,
+    /// `tm-computer`'s `ComputerCapability`, later a PTY or MCP-client provider) — the builtin
+    /// capability always comes first, in the same registration-order-preserving slot `standard`
+    /// gives it, so a caller migrating from `standard` to this constructor sees byte-identical
+    /// builtin tool ordering with the extra providers' tools appended after.
+    pub fn with_capabilities(
+        ci: Arc<CodeIntel>,
+        store: Arc<Store>,
+        command_cache: Arc<dyn CommandCache + Send + Sync>,
+        command_executor: Arc<dyn CommandExecutor + Send + Sync>,
+        extra: Vec<Arc<dyn CapabilityProvider>>,
+    ) -> Self {
+        let builtin: Arc<dyn CapabilityProvider> = Arc::new(BuiltinCapability::new(
+            ci,
+            store.clone(),
+            command_cache,
+            command_executor,
+        ));
+        let mut providers = vec![builtin];
+        providers.extend(extra);
+        ToolRegistry::new(providers, store)
     }
 
     /// Look up a tool by its dotted wire name.
@@ -2868,5 +2894,236 @@ mod tests {
         let a = deterministic_command_key(&["echo".into(), "hi".into()], "/root");
         let b = deterministic_command_key(&["echo".into(), "bye".into()], "/root");
         assert_ne!(a, b);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // docs/audit-2026-09-18-fable.md B-02: browser/computer providers are admitted by authority
+    // exactly like the builtin one — mirrors the `tool_defs_for_*_disabled_omits_*` tests above,
+    // now across providers instead of within one.
+    // -----------------------------------------------------------------------------------------
+
+    struct NoopBrowserProvider;
+
+    #[async_trait::async_trait]
+    impl tm_browser::provider::BrowserProvider for NoopBrowserProvider {
+        fn id(&self) -> &str {
+            "noop"
+        }
+        fn capabilities(&self) -> tm_browser::provider::BrowserCapabilities {
+            tm_browser::provider::BrowserCapabilities::default()
+        }
+        async fn acquire(
+            &self,
+            _req: &tm_browser::provider::SessionRequest,
+        ) -> Result<tm_browser::provider::BrowserEndpoint> {
+            Err(TmError::invariant("not used in this test"))
+        }
+        async fn release(&self, _endpoint: &tm_browser::provider::BrowserEndpoint) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    struct NullSink;
+
+    impl tm_browser::session::ArtifactSink for NullSink {
+        fn store(&self, _bytes: &[u8], _content_type: &str) -> Result<ArtifactId> {
+            ArtifactId::new("A-test")
+        }
+    }
+
+    fn test_browser_capability() -> tm_browser::BrowserCapability {
+        let providers = Arc::new(
+            tm_browser::ProviderRegistry::new(
+                vec![Arc::new(NoopBrowserProvider)],
+                vec!["noop".to_string()],
+            )
+            .expect("valid provider registry"),
+        );
+        let sessions = tm_browser::SessionRegistry::new(
+            providers,
+            Arc::new(NullSink),
+            Arc::new(FixedClock::epoch()) as Arc<dyn tm_types::Clock>,
+            1024,
+        );
+        tm_browser::BrowserCapability::new(sessions)
+    }
+
+    fn test_computer_capability() -> tm_computer::ComputerCapability {
+        let sessions = tm_computer::ComputerSessionRegistry::new(
+            tm_computer::SelectionEnv::default(),
+            false,
+            tm_computer::session::PanicStopConfig {
+                abort_chord: None,
+                mouse_move_threshold_px: 5.0,
+            },
+        );
+        tm_computer::ComputerCapability::new(sessions)
+    }
+
+    /// A [`ToolRegistry`] over the builtin capability plus a real `tm-browser`/`tm-computer`
+    /// provider pair, so admission can be exercised through the real dispatch-facing type
+    /// (`ToolRegistry::tool_defs_for`) rather than each provider's own `requires()` in isolation.
+    fn registry_with_browser_and_computer() -> (TempDir, ToolRegistry) {
+        let dir = TempDir::new().expect("tempdir");
+        let ci = Arc::new(CodeIntel::open(dir.path()).expect("codeintel"));
+        let store = Arc::new(
+            Store::open_with(
+                dir.path(),
+                Arc::new(FixedClock::epoch()),
+                Arc::new(TestIds::new()),
+            )
+            .expect("store"),
+        );
+        let command_cache: Arc<dyn CommandCache + Send + Sync> = Arc::new(FakeCache::new());
+        let command_executor: Arc<dyn CommandExecutor + Send + Sync> = Arc::new(FakeExecutor);
+
+        let browser: Arc<dyn CapabilityProvider> = Arc::new(test_browser_capability());
+        let computer: Arc<dyn CapabilityProvider> = Arc::new(test_computer_capability());
+
+        let registry = ToolRegistry::with_capabilities(
+            ci,
+            store,
+            command_cache,
+            command_executor,
+            vec![browser, computer],
+        );
+        (dir, registry)
+    }
+
+    #[test]
+    fn no_authority_admits_neither_browser_nor_computer_tools() {
+        let (_dir, registry) = registry_with_browser_and_computer();
+        let defs = registry.tool_defs_for(&Authority::none());
+        assert!(
+            !defs.iter().any(|d| d.name.starts_with("browser.")),
+            "browser.* tools must not be admitted without network authority: {:?}",
+            defs.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !defs.iter().any(|d| d.name.starts_with("computer.")),
+            "computer.* tools must not be admitted without any computer authority: {:?}",
+            defs.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+        // The builtin capability's own admission behavior is unaffected by the extra providers.
+        assert!(defs.is_empty());
+    }
+
+    #[test]
+    fn root_authority_admits_browser_and_computer_tools_alongside_the_builtin_set() {
+        let (_dir, registry) = registry_with_browser_and_computer();
+        let defs = registry.tool_defs_for(&Authority::root());
+        assert!(defs.iter().any(|d| d.name == "browser.navigate"));
+        assert!(defs.iter().any(|d| d.name == "computer.click"));
+        assert!(defs.iter().any(|d| d.name == "computer.clipboard_get"));
+        assert!(defs.iter().any(|d| d.name == "fs.read"));
+        let expected = ToolName::ALL.len()
+            + test_browser_capability().tools().len()
+            + test_computer_capability().tools().len();
+        assert_eq!(defs.len(), expected);
+    }
+
+    #[test]
+    fn computer_input_is_admitted_only_when_that_specific_authority_field_is_granted() {
+        let (_dir, registry) = registry_with_browser_and_computer();
+        let mut authority = Authority::none();
+        authority.computer.capture = true; // a different computer power, not input
+        let defs = registry.tool_defs_for(&authority);
+        assert!(!defs.iter().any(|d| d.name == "computer.click"));
+        assert!(defs.iter().any(|d| d.name == "computer.snapshot"));
+
+        authority.computer.input = true;
+        let defs = registry.tool_defs_for(&authority);
+        assert!(defs.iter().any(|d| d.name == "computer.click"));
+    }
+
+    fn ctx_over<'a>(
+        authority: &'a Authority,
+        ticket: &'a TicketId,
+        session: &'a SessionId,
+        actor: &'a ParticipantId,
+        clock: &'a FixedClock,
+        ids: &'a TestIds,
+        root: &'a Path,
+    ) -> CallContext<'a> {
+        CallContext {
+            authority,
+            ticket,
+            session,
+            actor,
+            clock,
+            ids,
+            root,
+        }
+    }
+
+    // The two tests below exercise `ToolRegistry::dispatch` itself, not `to_action` +
+    // `Authority::permits` composed by hand: `dispatch` is what actually guarantees `permits` is
+    // checked *before* `provider.invoke` ever runs, mirroring
+    // `filter_is_an_economy_optimization_not_a_replacement_for_dispatch_time_enforcement` above
+    // for the builtin provider. Both fixture providers fail on `acquire`/backend-open, so a
+    // `ToolOutcome::Denied` (not `Errored`) is proof the denial happened before invocation was
+    // ever attempted — an `Errored` result here would mean `invoke` ran first and failed instead.
+
+    #[tokio::test]
+    async fn browser_navigate_to_a_disallowed_origin_is_denied_before_any_session_launches() {
+        let (dir, registry) = registry_with_browser_and_computer();
+        let mut authority = Authority::none();
+        authority
+            .network
+            .allowlist
+            .insert("allowed.example".to_string());
+        let ticket: TicketId = "T-1".parse().unwrap();
+        let session: SessionId = "S-1".parse().unwrap();
+        let actor: ParticipantId = "agent:test/worker".parse().unwrap();
+        let clock = FixedClock::epoch();
+        let ids = TestIds::new();
+        let ctx = ctx_over(
+            &authority,
+            &ticket,
+            &session,
+            &actor,
+            &clock,
+            &ids,
+            dir.path(),
+        );
+
+        let outcome = registry
+            .dispatch(
+                &call("browser.navigate", json!({"url": "https://evil.example/x"})),
+                &ctx,
+            )
+            .await;
+        assert!(
+            matches!(outcome, ToolOutcome::Denied { .. }),
+            "expected Denied (permits checked before invoke), got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn computer_click_without_input_authority_is_denied_before_any_backend_opens() {
+        let (dir, registry) = registry_with_browser_and_computer();
+        let authority = Authority::none();
+        let ticket: TicketId = "T-1".parse().unwrap();
+        let session: SessionId = "S-1".parse().unwrap();
+        let actor: ParticipantId = "agent:test/worker".parse().unwrap();
+        let clock = FixedClock::epoch();
+        let ids = TestIds::new();
+        let ctx = ctx_over(
+            &authority,
+            &ticket,
+            &session,
+            &actor,
+            &clock,
+            &ids,
+            dir.path(),
+        );
+
+        let outcome = registry
+            .dispatch(&call("computer.click", json!({"x": 1.0, "y": 2.0})), &ctx)
+            .await;
+        assert!(
+            matches!(outcome, ToolOutcome::Denied { .. }),
+            "expected Denied (permits checked before invoke), got {outcome:?}"
+        );
     }
 }

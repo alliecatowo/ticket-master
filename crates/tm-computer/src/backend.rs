@@ -126,6 +126,57 @@ pub fn select_backend(env: &SelectionEnv) -> Result<BackendKind, ComputerError> 
     })
 }
 
+/// Construct the concrete [`Backend`] [`select_backend`] would choose for `env`, or a precise
+/// error when the resulting [`BackendKind`] is not compiled in for this target.
+///
+/// Shared by `tm-cli`'s `tm computer` dispatcher (`crates/tm-cli/src/drive.rs`) and
+/// [`crate::session::ComputerCapability`] so backend construction has exactly one
+/// `cfg(target_os = ...)` decision tree in the workspace instead of two copies drifting apart
+/// (`docs/audit-2026-09-18-fable.md` B-02).
+pub fn open_selected(env: &SelectionEnv) -> TmResult<Box<dyn Backend>> {
+    let kind = select_backend(env)?;
+    match kind {
+        BackendKind::Macos => {
+            #[cfg(target_os = "macos")]
+            {
+                Ok(Box::new(crate::macos::MacosBackend::new()))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Err(tm_types::TmError::Invariant(
+                    "macOS backend not available on this build".to_string(),
+                ))
+            }
+        }
+        BackendKind::X11 => {
+            #[cfg(target_os = "linux")]
+            {
+                let backend: Box<dyn Backend> = Box::new(crate::linux::X11Backend::connect(None)?);
+                Ok(backend)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(tm_types::TmError::Invariant(
+                    "X11 backend not available on this build".to_string(),
+                ))
+            }
+        }
+        BackendKind::Wayland => {
+            #[cfg(target_os = "linux")]
+            {
+                let backend: Box<dyn Backend> = Box::new(crate::linux::WaylandBackend::connect()?);
+                Ok(backend)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                Err(tm_types::TmError::Invariant(
+                    "Wayland backend not available on this build".to_string(),
+                ))
+            }
+        }
+    }
+}
+
 /// What a backend can currently do on this machine, and — when something is missing — exactly
 /// why, so a caller never has to guess between "not implemented" and "not permitted".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

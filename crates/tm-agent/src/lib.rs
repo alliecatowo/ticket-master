@@ -35,7 +35,10 @@ pub mod session;
 pub mod tools;
 
 pub use agent_loop::AgentLoop;
-pub use executor::{BuiltinExecutor, HumanApprovalSink, HumanDecision, HumanExecutor};
+pub use executor::{
+    BrowserWiring, BuiltinExecutor, ComputerWiring, HumanApprovalSink, HumanDecision,
+    HumanExecutor, StoreArtifactSink,
+};
 pub use outcome::{AgentOutcome, AgentTask, EvidenceBundle, StepRecord};
 pub use patch::{Edit, PatchEngine, PatchOutcome};
 pub use prompt::{render_system_prompt, render_task_prompt};

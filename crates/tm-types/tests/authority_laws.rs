@@ -6,8 +6,8 @@
 use proptest::prelude::*;
 use std::collections::BTreeSet;
 use tm_types::authority::{
-    Authority, GitAuthority, NetworkAuthority, ProjectAuthority, RepoAuthority, ResourceAuthority,
-    ShellAuthority, TicketAuthority,
+    Authority, ComputerAuthority, GitAuthority, NetworkAuthority, ProjectAuthority, RepoAuthority,
+    ResourceAuthority, ShellAuthority, TicketAuthority,
 };
 use tm_types::budget::{Budget, Spend};
 use tm_types::pattern::PatternSet;
@@ -125,6 +125,14 @@ fn shell_authority() -> impl Strategy<Value = ShellAuthority> {
     })
 }
 
+fn computer_authority() -> impl Strategy<Value = ComputerAuthority> {
+    any::<(bool, bool, bool)>().prop_map(|(input, capture, clipboard)| ComputerAuthority {
+        input,
+        capture,
+        clipboard,
+    })
+}
+
 fn resource_authority() -> impl Strategy<Value = ResourceAuthority> {
     (
         prop_oneof![Just(0u32), Just(1u32), 0u32..8, Just(u32::MAX)],
@@ -180,19 +188,23 @@ fn authority() -> impl Strategy<Value = Authority> {
         project_authority(),
         network_authority(),
         shell_authority(),
+        computer_authority(),
         resource_authority(),
         budget(),
     )
         .prop_map(
-            |(repository, git, tickets, project, network, shell, resources, budget)| Authority {
-                repository,
-                git,
-                tickets,
-                project,
-                network,
-                shell,
-                resources,
-                budget,
+            |(repository, git, tickets, project, network, shell, computer, resources, budget)| {
+                Authority {
+                    repository,
+                    git,
+                    tickets,
+                    project,
+                    network,
+                    shell,
+                    computer,
+                    resources,
+                    budget,
+                }
             },
         )
 }
