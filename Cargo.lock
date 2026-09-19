@@ -3567,6 +3567,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tm-pty"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tm-types",
+ "tokio",
+ "vt100",
+]
+
+[[package]]
 name = "tm-scheduler"
 version = "0.1.0"
 dependencies = [
@@ -3614,17 +3628,16 @@ dependencies = [
  "crossterm 0.29.0",
  "futures",
  "insta",
- "portable-pty",
  "ratatui",
  "ratatui-core",
  "serde",
  "tempfile",
  "thiserror 2.0.20",
+ "tm-pty",
  "tm-types",
  "tokio",
  "unicode-segmentation",
  "unicode-width 0.2.2",
- "vt100",
 ]
 
 [[package]]

@@ -84,6 +84,23 @@ pub enum AuthorityRequirement {
     ComputerCapture,
     /// Admitted iff `authority.computer.clipboard` is granted (`SPEC.md` §20.5).
     ComputerClipboard,
+    /// Admitted iff `authority.shell.pty` is granted, on top of ordinary `Shell` admission
+    /// (`SPEC.md` §22.4, `docs/audit-2026-09-18-fable.md` B-16). Distinct from [`Self::Shell`]
+    /// so `tm-pty`'s `pty.send` tool gets no schema at all — not merely a call-time denial — for
+    /// a worker that holds `shell.enabled`/`shell.allow` but not the separate `shell.pty` grant,
+    /// matching the "no schema in the context at all" bar `SPEC.md` §30.1 sets and the
+    /// `ComputerInput`-needs-its-own-gate precedent above.
+    PtySend,
+    /// Admitted iff `authority.shell.enabled` alone — no `allow`-list match required, unlike
+    /// [`Self::Shell`]. Covers `tm-pty`'s observe/manage-only tools (`pty.screen`/`pty.diff`/
+    /// `pty.resize`/`pty.expect`/`pty.wait_exit`/`pty.record`, `tm_types::Action::PtyControl`):
+    /// none of them runs a new command, so there is no argv for an `allow`/`deny` pattern to
+    /// match against, and gating their *listing* on a nonempty `shell.allow` (as [`Self::Shell`]
+    /// does for `pty.spawn`) would disagree with `Action::PtyControl`'s own call-time gate in
+    /// `Authority::permits`, which checks only `shell.enabled` — the listing-time and call-time
+    /// gates must agree, or a tool that would be allowed at call time is never advertised
+    /// (`SPEC.md` §30.1).
+    PtyControl,
     /// Admitted iff every inner requirement is.
     All(Vec<AuthorityRequirement>),
     /// Admitted iff at least one inner requirement is.
@@ -124,6 +141,8 @@ impl AuthorityRequirement {
             AuthorityRequirement::ComputerInput => authority.computer.input,
             AuthorityRequirement::ComputerCapture => authority.computer.capture,
             AuthorityRequirement::ComputerClipboard => authority.computer.clipboard,
+            AuthorityRequirement::PtySend => authority.shell.permits_pty_send(),
+            AuthorityRequirement::PtyControl => authority.shell.enabled,
             AuthorityRequirement::All(reqs) => reqs.iter().all(|r| r.admits(authority)),
             AuthorityRequirement::Any(reqs) => reqs.iter().any(|r| r.admits(authority)),
         }
@@ -255,6 +274,7 @@ mod tests {
                 enabled: true,
                 allow: PatternSet::empty(),
                 deny: PatternSet::empty(),
+                pty: false,
             }
         });
         assert!(!AuthorityRequirement::Shell.admits(&enabled_no_allow));
@@ -264,6 +284,7 @@ mod tests {
                 enabled: true,
                 allow: PatternSet::parse(["echo *"]).unwrap(),
                 deny: PatternSet::empty(),
+                pty: false,
             }
         });
         assert!(AuthorityRequirement::Shell.admits(&enabled_with_allow));
@@ -304,6 +325,29 @@ mod tests {
         assert!(AuthorityRequirement::ComputerInput.admits(&a));
         assert!(!AuthorityRequirement::ComputerCapture.admits(&a));
         assert!(!AuthorityRequirement::ComputerClipboard.admits(&a));
+    }
+
+    #[test]
+    fn pty_send_requirement_needs_the_distinct_pty_grant() {
+        let mut enabled_only = Authority::default();
+        enabled_only.shell.enabled = true;
+        assert!(!AuthorityRequirement::PtySend.admits(&enabled_only));
+
+        let mut with_pty = enabled_only.clone();
+        with_pty.shell.pty = true;
+        assert!(AuthorityRequirement::PtySend.admits(&with_pty));
+    }
+
+    #[test]
+    fn pty_control_requirement_needs_only_shell_enabled_not_a_nonempty_allowlist() {
+        // `Action::PtyControl`'s call-time gate (`Authority::permits`) checks only
+        // `shell.enabled` — this requirement must agree, or a listing-time denial would exclude
+        // a tool a call-time check would allow.
+        assert!(!AuthorityRequirement::PtyControl.admits(&Authority::default()));
+
+        let mut enabled_no_allow = Authority::default();
+        enabled_no_allow.shell.enabled = true;
+        assert!(AuthorityRequirement::PtyControl.admits(&enabled_no_allow));
     }
 
     #[test]

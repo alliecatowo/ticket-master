@@ -24,6 +24,7 @@ tm-genesis = { path = "crates/tm-genesis" }
 tm-mirror = { path = "crates/tm-mirror" }
 tm-server = { path = "crates/tm-server" }
 tm-tui = { path = "crates/tm-tui" }
+tm-pty = { path = "crates/tm-pty" }
 
 anyhow = "1"
 thiserror = "2"

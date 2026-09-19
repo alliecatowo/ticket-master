@@ -3,9 +3,15 @@
 //! - [`Harness`] drives a [`Component`] against ratatui's in-memory `TestBackend` and renders to
 //!   a plain string grid suitable for `insta` snapshotting — fast, no real terminal, one process
 //!   per test.
-//! - [`PtyHarness`] spawns a real command inside a pseudo-terminal via `portable-pty`, for the
-//!   event-loop and signal behaviour (`SIGTERM`/`SIGHUP` restore, `SIGTSTP`/`SIGCONT`) that only
-//!   a real tty triggers and `TestBackend` cannot reach.
+//! - The event-loop and signal tests `TestBackend` cannot reach (D-002: `SIGTERM`/`SIGHUP`
+//!   restore, `SIGTSTP`/`SIGCONT`) spawn a real command inside a real pseudo-terminal via
+//!   [`tm_pty::PtySession`] — `docs/audit-2026-09-18-fable.md` B-16's "done looks like" for this
+//!   crate: this module used to carry its own `PtyHarness` (`portable-pty` + `vt100`, hand-rolled
+//!   reader thread and screen parser) as a `cfg(test)`-gated duplicate of the same logic B-16
+//!   extracted into `tm-pty` as a real, production-usable crate. `tm-pty` is now the one
+//!   implementation; this crate depends on it as a `[dev-dependencies]` entry instead of
+//!   re-deriving it. See `crates/tm-pty/src/session.rs`'s module doc for the bounded-memory and
+//!   `Clock`-vs-real-wait reasoning that implementation follows.
 //!
 //! VHS-tape visual-regression gates on the highest-value screens (D-002) are deliberately out of
 //! scope for this module: they run out-of-process against a built `tm` binary, not against this
@@ -13,39 +19,23 @@
 //!
 //! # Why this module is `#[cfg(test)]`-gated
 //!
-//! `insta`, `portable-pty` and `vt100` are `[dev-dependencies]`, so Cargo does not link them into the
-//! plain library build — only into the `cargo test` unittests binary, where `cfg(test)` is true
-//! for the whole crate (see `lib.rs`). That makes [`Harness`] reachable from any sibling module's
+//! `insta` is a `[dev-dependencies]` entry, so Cargo does not link it into the plain library
+//! build — only into the `cargo test` unittests binary, where `cfg(test)` is true for the whole
+//! crate (see `lib.rs`). That makes [`Harness`] reachable from any sibling module's
 //! `#[cfg(test)] mod tests` (e.g. `widgets_data::table`'s own tests), which covers the
 //! per-screen `insta` snapshot layer D-002 asks for.
 //!
-//! It does **not** make [`PtyHarness`] reachable from a separate integration-test binary under
+//! It does **not** make the tests below reachable from a separate integration-test binary under
 //! `crates/tm-tui/tests/*.rs`: those link against the *non*-`cfg(test)` build of this crate, so a
 //! `cfg(test)`-gated module does not exist for them, even though integration tests do get their
-//! own access to `[dev-dependencies]`. If the event-loop/signal tests need to live there (spawning
-//! a real compiled binary is usually cleaner as an integration test than a unit test), write the
-//! pty-driving helper directly under `tests/support/` instead of trying to import it from here —
-//! or, if sharing this exact code is worth it, promote `portable-pty`/`vt100`/`insta` to optional
-//! regular dependencies behind a feature.
-//!
-//! [`PtyHarness::screen`] parses the child's output with `vt100` rather than a hand-rolled subset
-//! parser: this harness gates the `SIGTERM`/`SIGHUP`/`SIGTSTP` behaviour of D-002, and a parser
-//! that mishandled an escape sequence would make those tests flaky in precisely the cases they
-//! exist to catch.
+//! own access to `[dev-dependencies]` — including `tm-pty` directly, which is exactly how
+//! `crates/tm-cli/tests/support/mod.rs` reaches the same real-pty behaviour for `tm-cli`'s own
+//! integration tests instead of carrying a fourth copy of this logic.
 
 // Redundant with `#[cfg(test)] pub mod testing;` in lib.rs, but stated here so the fact that this
-// whole file is test-only is visible in the file itself — and so `xtask verify`'s hygiene scan,
-// which reads one file at a time and cannot see lib.rs's gate, treats `PtyHarness::wait_for`'s
-// wall-clock timeout as the test code it is rather than a non-deterministic production clock read.
+// whole file is test-only is visible in the file itself.
 #![cfg(test)]
 
-use std::io;
-use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
-
-use portable_pty::{native_pty_system, Child, CommandBuilder, PtyPair, PtySize};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
 
@@ -177,186 +167,28 @@ impl Harness {
     }
 }
 
-/// A real terminal session driving a child process, for the event-loop and signal tests
-/// `TestBackend` cannot reach (D-002: `SIGTERM`/`SIGHUP` restore, `SIGTSTP`/`SIGCONT`).
-///
-/// IMPL, at the struct level: `portable_pty::native_pty_system()` gives a `PtySystem` whose
-/// `openpty` returns this `pair` plus a `Box<dyn Child + Send + Sync>` from
-/// `pair.slave.spawn_command(command)`. Reading `pair.master`'s output and writing input both go
-/// through `PtyPair::master`'s `try_clone_reader`/`take_writer`.
-pub struct PtyHarness {
-    pair: PtyPair,
-    child: Box<dyn Child + Send + Sync>,
-    /// Everything the child has written so far. A reader thread owns the pty's read side and
-    /// appends here, because a pty read blocks until the child writes — polling it inline from
-    /// `screen()` would deadlock a test whose child is idle and waiting for input.
-    output: Arc<Mutex<Vec<u8>>>,
-    /// Bytes already fed to `parser`, so each `screen()` only processes what is new.
-    consumed: usize,
-    parser: vt100::Parser,
-}
-
-impl PtyHarness {
-    /// Spawn `command` inside a `cols`x`rows` pty.
-    ///
-    /// IMPL: `portable_pty::native_pty_system().openpty(PtySize { rows, cols, .. })`, then
-    /// `pair.slave.spawn_command(command)`. Keep `pair.master`'s reader/writer accessible for
-    /// `screen()`/input helpers to be added alongside this stub as needed.
-    pub fn spawn(command: CommandBuilder, cols: u16, rows: u16) -> io::Result<Self> {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows,
-                cols,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .map_err(|e| io::Error::other(format!("opening a pty: {e}")))?;
-
-        let child = pair
-            .slave
-            .spawn_command(command)
-            .map_err(|e| io::Error::other(format!("spawning the child in the pty: {e}")))?;
-
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .map_err(|e| io::Error::other(format!("cloning the pty reader: {e}")))?;
-
-        let output = Arc::new(Mutex::new(Vec::new()));
-        let sink = Arc::clone(&output);
-        // Detached deliberately: the thread ends when the child closes the pty, and a test that
-        // fails should not also hang waiting to join it.
-        thread::spawn(move || {
-            let mut reader = reader;
-            let mut chunk = [0u8; 4096];
-            loop {
-                match reader.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
-                        if let Ok(mut buf) = sink.lock() {
-                            buf.extend_from_slice(&chunk[..n]);
-                        } else {
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(PtyHarness {
-            pair,
-            child,
-            output,
-            consumed: 0,
-            parser: vt100::Parser::new(rows, cols, 0),
-        })
-    }
-
-    /// The child's rendered screen right now, as plain text lines.
-    ///
-    /// IMPL: this needs a VT100-ish interpreter over the pty's raw output (cursor moves, erases,
-    /// at minimum) — `portable-pty` hands back bytes, not a parsed screen, and this crate has no
-    /// terminal-emulator dependency to lean on (SPEC.md §19's `pty.screen()` sandbox tool solves
-    /// the same problem for a different crate; check whether it can be shared before writing a
-    /// second parser). If no shared parser is available, implement the minimal subset `tm`'s own
-    /// output actually uses rather than a general VT100 emulator, and say so in a doc comment —
-    /// do not silently claim full VT100 fidelity.
-    pub fn screen(&mut self) -> Vec<String> {
-        // Feed only the bytes that arrived since the last call: vt100::Parser is stateful, so
-        // re-processing the whole buffer would replay every escape sequence from the start.
-        if let Ok(buf) = self.output.lock() {
-            if buf.len() > self.consumed {
-                self.parser.process(&buf[self.consumed..]);
-                self.consumed = buf.len();
-            }
-        }
-
-        let screen = self.parser.screen();
-        let (rows, cols) = screen.size();
-        // One entry per screen row, always — including blank ones — so a caller can index by row
-        // and so an assertion failure shows the real geometry rather than a collapsed list.
-        (0..rows)
-            .map(|row| {
-                screen
-                    .contents_between(row, 0, row, cols)
-                    .trim_end()
-                    .to_string()
-            })
-            .collect()
-    }
-
-    /// Write `input` to the child's terminal, as if typed.
-    pub fn write(&mut self, input: &[u8]) -> io::Result<()> {
-        let mut writer = self
-            .pair
-            .master
-            .take_writer()
-            .map_err(|e| io::Error::other(format!("taking the pty writer: {e}")))?;
-        writer.write_all(input)?;
-        writer.flush()
-    }
-
-    /// Send `signal` to the child process — the entry point for the `SIGTERM`/`SIGHUP`/`SIGTSTP`
-    /// restore tests D-002 requires, which only a real process in a real pty can exercise.
-    ///
-    /// Shells out to `kill(1)` rather than calling `libc::kill`, because this crate is
-    /// `#![forbid(unsafe_code)]` with no `libc`/`nix` dependency (see `runtime.rs`, which makes
-    /// the same choice for the same reason). Delivering a real signal is the point of this
-    /// harness, so the signal must be real rather than a simulated in-process notification.
-    pub fn signal(&mut self, signal: i32) -> io::Result<()> {
-        let Some(pid) = self.child.process_id() else {
-            return Err(io::Error::other("child has already exited"));
-        };
-        let status = std::process::Command::new("kill")
-            .arg(format!("-{signal}"))
-            .arg(pid.to_string())
-            .status()?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(io::Error::other(format!("kill -{signal} {pid} failed")))
-        }
-    }
-
-    /// Wait for the child to exit, returning whether it exited successfully.
-    pub fn wait(&mut self) -> io::Result<bool> {
-        self.child
-            .wait()
-            .map(|status| status.success())
-            .map_err(|e| io::Error::other(format!("waiting on the child: {e}")))
-    }
-
-    /// Block until `screen()` contains `pattern` or `timeout` elapses, returning the screen
-    /// either way so a timeout assertion failure shows what was actually on screen (this is the
-    /// same "diagnosis over bare error" shape SPEC.md §19 asks of `pty.expect`).
-    ///
-    /// IMPL: poll `screen()` on a short interval (e.g. every 20ms) until it contains `pattern` or
-    /// `timeout` elapses; this is one of the few places in this crate where a direct
-    /// `std::time::Instant` read is legitimate (a test's own wall-clock timeout, not production
-    /// replay state) — confirm against the hygiene check's test-region carve-out rather than
-    /// assuming.
-    pub fn wait_for(&mut self, pattern: &str, timeout: Duration) -> io::Result<Vec<String>> {
-        // A test's own wall-clock timeout, not replay state — the hygiene check's test-region
-        // carve-out is what makes a direct `Instant` read legitimate here.
-        let deadline = Instant::now() + timeout;
-        loop {
-            let screen = self.screen();
-            if screen.iter().any(|line| line.contains(pattern)) {
-                return Ok(screen);
-            }
-            if Instant::now() >= deadline {
-                // Return the screen rather than a bare timeout error, so the assertion failure
-                // shows what was actually displayed instead of only that nothing matched.
-                return Ok(screen);
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tm_pty::PtySession;
+    use tm_types::SystemClock;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `PATH` alone, resolved from this test process's real environment — `PtySession::spawn`
+    /// clears the child's environment and expects an explicit allowlist, so a spawned `echo`
+    /// otherwise cannot even be resolved.
+    fn default_env() -> Vec<(String, String)> {
+        vec![(
+            "PATH".to_string(),
+            std::env::var("PATH").unwrap_or_default(),
+        )]
+    }
 
     #[test]
     fn harness_construction_does_not_panic() {
@@ -365,26 +197,37 @@ mod tests {
 
     #[test]
     fn pty_harness_captures_a_child_process_output() {
-        let mut command = CommandBuilder::new("echo");
-        command.arg("hello-from-the-pty");
-        let mut pty = PtyHarness::spawn(command, 40, 10).expect("spawning `echo` in a pty");
+        let mut pty = PtySession::spawn(
+            &argv(&["echo", "hello-from-the-pty"]),
+            None,
+            &default_env(),
+            40,
+            10,
+            Arc::new(SystemClock),
+        )
+        .expect("spawning `echo` in a pty");
 
-        let screen = pty
-            .wait_for("hello-from-the-pty", Duration::from_secs(5))
-            .expect("polling the pty screen");
+        let outcome = pty.expect("hello-from-the-pty", Duration::from_secs(5));
 
         assert!(
-            screen.iter().any(|l| l.contains("hello-from-the-pty")),
-            "child output should appear on the parsed screen, got: {screen:?}"
+            outcome.matched(),
+            "child output should appear on the parsed screen, got: {:?}",
+            outcome.screen()
         );
     }
 
     #[test]
     fn pty_screen_has_one_entry_per_row() {
-        let mut command = CommandBuilder::new("echo");
-        command.arg("x");
-        let mut pty = PtyHarness::spawn(command, 40, 10).expect("spawning `echo` in a pty");
-        let _ = pty.wait_for("x", Duration::from_secs(5));
+        let mut pty = PtySession::spawn(
+            &argv(&["echo", "x"]),
+            None,
+            &default_env(),
+            40,
+            10,
+            Arc::new(SystemClock),
+        )
+        .expect("spawning `echo` in a pty");
+        let _ = pty.expect("x", Duration::from_secs(5));
         // Blank rows are kept so callers can index by row rather than guessing which were elided.
         assert_eq!(pty.screen().len(), 10);
     }
@@ -393,13 +236,18 @@ mod tests {
     fn wait_for_returns_the_screen_on_timeout_rather_than_only_an_error() {
         // A timeout must still show what was on screen — a bare error tells you nothing about
         // why the expected text never appeared.
-        let mut command = CommandBuilder::new("echo");
-        command.arg("present");
-        let mut pty = PtyHarness::spawn(command, 40, 10).expect("spawning `echo` in a pty");
+        let mut pty = PtySession::spawn(
+            &argv(&["echo", "present"]),
+            None,
+            &default_env(),
+            40,
+            10,
+            Arc::new(SystemClock),
+        )
+        .expect("spawning `echo` in a pty");
 
-        let screen = pty
-            .wait_for("never-printed", Duration::from_millis(200))
-            .expect("a timeout is not an error, it returns the screen");
-        assert_eq!(screen.len(), 10);
+        let outcome = pty.expect("never-printed", Duration::from_millis(200));
+        assert!(!outcome.matched(), "this pattern was never printed");
+        assert_eq!(outcome.screen().len(), 10);
     }
 }

@@ -1,0 +1,19 @@
+[package]
+name = "tm-pty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Interactive processes: a real pseudo-terminal session (spawn/screen/diff/send/expect/resize/wait_exit) with an asciicast recording, so an agent can drive a REPL, a TUI installer or anything else that behaves differently under a real tty (SPEC.md §22)."
+
+[dependencies]
+tm-types = { workspace = true }
+portable-pty = { workspace = true }
+vt100 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

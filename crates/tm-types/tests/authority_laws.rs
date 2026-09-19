@@ -116,13 +116,14 @@ fn network_authority() -> impl Strategy<Value = NetworkAuthority> {
 }
 
 fn shell_authority() -> impl Strategy<Value = ShellAuthority> {
-    (any::<bool>(), pattern_set(), pattern_set()).prop_map(|(enabled, allow, deny)| {
-        ShellAuthority {
+    (any::<bool>(), pattern_set(), pattern_set(), any::<bool>()).prop_map(
+        |(enabled, allow, deny, pty)| ShellAuthority {
             enabled,
             allow,
             deny,
-        }
-    })
+            pty,
+        },
+    )
 }
 
 fn computer_authority() -> impl Strategy<Value = ComputerAuthority> {

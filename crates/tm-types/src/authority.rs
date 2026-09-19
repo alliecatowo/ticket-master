@@ -160,6 +160,19 @@ pub struct ShellAuthority {
     /// Command lines that are refused even when allowed above.
     #[serde(default)]
     pub deny: PatternSet,
+    /// May synthesize input into a live `tm-pty` session (`Action::PtySend`, `SPEC.md` §22.4).
+    ///
+    /// Deliberately a separate grant from `enabled`/`allow`/`deny`, not folded into them: SPEC
+    /// §22.4 draws this distinction explicitly because a live interactive session can receive
+    /// arbitrary keystrokes into an already-running process — answering a destructive
+    /// confirmation prompt, or driving a REPL that itself runs further commands — which is a
+    /// materially larger attack surface than one bounded `shell.run` command whose full argv is
+    /// checked against `allow`/`deny` up front. Granting `shell.enabled` (even with a permissive
+    /// `allow`) does not implicitly grant this; see [`ShellAuthority::permits_pty_send`].
+    /// Defaults to `false` like every other authority field (`docs/audit-2026-09-18-fable.md`
+    /// B-16, matching the `computer.input`-needs-its-own-gate precedent from B-02).
+    #[serde(default)]
+    pub pty: bool,
 }
 
 impl ShellAuthority {
@@ -168,7 +181,10 @@ impl ShellAuthority {
         command.join(" ")
     }
 
-    /// True when this authority permits running `command`.
+    /// True when this authority permits running `command`. Also governs `Action::PtySpawn`
+    /// (`SPEC.md` §22.4: "`pty.spawn` is governed by the same `shell.allow`/`shell.deny`
+    /// patterns as `RunCommand`") — a pty session can run arbitrary commands just as `shell.run`
+    /// can, so spawning one is gated identically, argv and all.
     pub fn permits(&self, command: &[String]) -> bool {
         if !self.enabled || command.is_empty() {
             return false;
@@ -178,6 +194,13 @@ impl ShellAuthority {
             return false;
         }
         self.allow.matches_text(&line) || self.allow.matches_text(&command[0])
+    }
+
+    /// True when this authority permits synthesizing input into an already-spawned pty session
+    /// (`Action::PtySend`). Requires both `enabled` and the distinct `pty` grant — see
+    /// [`ShellAuthority::pty`]'s doc comment for why the two are not the same bit.
+    pub fn permits_pty_send(&self) -> bool {
+        self.enabled && self.pty
     }
 }
 
@@ -289,6 +312,7 @@ impl Authority {
                 enabled: true,
                 allow: PatternSet::all(),
                 deny: PatternSet::empty(),
+                pty: true,
             },
             computer: ComputerAuthority {
                 input: true,
@@ -411,6 +435,7 @@ impl Authority {
                 other.network.arbitrary,
             ),
             ("shell.enabled", self.shell.enabled, other.shell.enabled),
+            ("shell.pty", self.shell.pty, other.shell.pty),
             ("computer.input", self.computer.input, other.computer.input),
             (
                 "computer.capture",
@@ -511,6 +536,7 @@ impl Authority {
                 enabled: self.shell.enabled && other.shell.enabled,
                 allow: self.shell.allow.intersect(&other.shell.allow),
                 deny: self.shell.deny.union(&other.shell.deny),
+                pty: self.shell.pty && other.shell.pty,
             },
             computer: ComputerAuthority {
                 input: self.computer.input && other.computer.input,
@@ -676,6 +702,33 @@ impl Authority {
                     deny("no computer.clipboard authority".to_string())
                 }
             }
+            Action::PtySpawn { command } => {
+                if self.shell.permits(command) {
+                    Decision::Allow
+                } else {
+                    deny(format!(
+                        "no shell authority for pty session `{}`",
+                        ShellAuthority::command_line(command)
+                    ))
+                }
+            }
+            Action::PtySend => {
+                if self.shell.permits_pty_send() {
+                    Decision::Allow
+                } else {
+                    deny(
+                        "no shell.pty authority (distinct from shell.enabled/shell.run)"
+                            .to_string(),
+                    )
+                }
+            }
+            Action::PtyControl => {
+                if self.shell.enabled {
+                    Decision::Allow
+                } else {
+                    deny("no shell.enabled authority".to_string())
+                }
+            }
         }
     }
 }
@@ -708,6 +761,7 @@ mod tests {
                 enabled: true,
                 allow: PatternSet::parse(["cargo*", "git*"]).unwrap(),
                 deny: PatternSet::parse(["*rm -rf*"]).unwrap(),
+                pty: false,
             },
             resources: ResourceAuthority {
                 max_workers: 4,
@@ -773,6 +827,7 @@ mod tests {
                 enabled: true,
                 allow: PatternSet::parse(["cargo*"]).unwrap(),
                 deny: PatternSet::empty(),
+                pty: false,
             },
             ..Authority::none()
         };
@@ -823,6 +878,7 @@ mod tests {
                 enabled: true,
                 allow: PatternSet::parse(["cargo*"]).unwrap(),
                 deny: PatternSet::parse(["*rm -rf*"]).unwrap(),
+                pty: false,
             },
             resources: ResourceAuthority {
                 max_workers: 1,
@@ -953,6 +1009,46 @@ mod tests {
     }
 
     #[test]
+    fn pty_spawn_is_gated_exactly_like_run_command() {
+        let a = scoped();
+        let allowed = Action::PtySpawn {
+            command: vec!["cargo".into(), "test".into()],
+        };
+        let denied = Action::PtySpawn {
+            command: vec!["curl".into(), "evil".into()],
+        };
+        assert!(a.permits(&allowed).is_allowed());
+        assert!(!a.permits(&denied).is_allowed());
+    }
+
+    #[test]
+    fn pty_send_needs_the_distinct_pty_grant_not_just_shell_enabled() {
+        let mut a = Authority::none();
+        a.shell.enabled = true;
+        a.shell.allow = PatternSet::all();
+        // Plain shell reach — even an unrestricted allowlist — does not imply pty.send.
+        assert!(!a.permits(&Action::PtySend).is_allowed());
+
+        a.shell.pty = true;
+        assert!(a.permits(&Action::PtySend).is_allowed());
+
+        // And the pty bit alone, without shell being enabled at all, is not enough either.
+        let mut disabled = Authority::none();
+        disabled.shell.pty = true;
+        assert!(!disabled.permits(&Action::PtySend).is_allowed());
+    }
+
+    #[test]
+    fn pty_control_only_needs_shell_enabled() {
+        let none = Authority::none();
+        assert!(!none.permits(&Action::PtyControl).is_allowed());
+
+        let mut enabled = Authority::none();
+        enabled.shell.enabled = true;
+        assert!(enabled.permits(&Action::PtyControl).is_allowed());
+    }
+
+    #[test]
     fn shell_denials_beat_allowances() {
         let a = scoped();
         let cmd = vec!["cargo".into(), "run".into(), "--".into(), "rm -rf /".into()];
@@ -1019,6 +1115,7 @@ mod tests {
                 enabled: true,
                 allow: PatternSet::parse(["cargo*"]).unwrap(),
                 deny: PatternSet::parse(["*sudo*"]).unwrap(),
+                pty: false,
             },
             resources: ResourceAuthority {
                 max_workers: 8,
