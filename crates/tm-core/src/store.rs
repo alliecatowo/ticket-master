@@ -89,6 +89,9 @@ pub struct Store {
 /// documented exception to "materialize::apply is the only writer" (see this module's top-level
 /// note on [`Store::store_artifact`]/[`Store::attach_evidence`]) while still sharing one
 /// transaction with other heterogeneous writes — the case [`Store::transaction`] exists for.
+///
+/// Do not call back out to any `Store` method from inside the [`Store::transaction`] closure that
+/// hands you one of these — see that method's `# Warning`.
 pub struct StoreTx<'a> {
     log: &'a EventLog,
     tx: Tx<'a>,
@@ -1554,6 +1557,15 @@ impl Store {
     /// and get "commit together or reject wholesale" for real, without this crate needing to know
     /// anything about genesis' domain.
     ///
+    /// # Warning
+    /// `f` must not call any other `Store` method (including [`Store::append`]/
+    /// [`Store::run_command`] and every typed command/helper built on them) — `tm_events::EventLog`
+    /// serializes writers with one non-reentrant lock, held for the whole transaction by the
+    /// [`tm_events::log::Tx`] this call already opened, so a nested `Store` call deadlocks rather
+    /// than erroring. Build every write inside `f` as an [`tm_events::EventDraft`] and append it
+    /// through [`StoreTx::append`]/[`StoreTx::append_all`] (or write raw SQL via [`StoreTx::raw`],
+    /// per this module's top-level note) instead of calling back out to `Store`.
+    ///
     /// # Errors
     /// Whatever `f` returns, or `TmError::invariant` if the post-write state violates an
     /// invariant.
@@ -2804,6 +2816,88 @@ mod tests {
         );
     }
 
+    /// Row counts for a couple of the B-05 tables, read off a raw connection (no public `Store`
+    /// read path exists for them yet — out of B-05's scope).
+    fn session_and_doc_row_counts(db_path: &std::path::Path) -> (i64, i64) {
+        let conn = Connection::open(db_path).expect("raw connection");
+        let sessions = conn
+            .query_row("SELECT COUNT(*) FROM sessions", [], |r| r.get(0))
+            .expect("count sessions");
+        let docs = conn
+            .query_row("SELECT COUNT(*) FROM docs", [], |r| r.get(0))
+            .expect("count docs");
+        (sessions, docs)
+    }
+
+    #[test]
+    fn transaction_commits_heterogeneous_writes_together() {
+        let (dir, store) = open_store();
+        let alice = ParticipantId::new("human:alice").unwrap();
+
+        store
+            .transaction(|tx| {
+                let session = SessionId::new("S-1").unwrap();
+                tx.append(EventDraft::new(
+                    actor(),
+                    Id::from(session.clone()),
+                    Payload::from(SessionStartedPayload {
+                        session,
+                        participant: alice.clone(),
+                    }),
+                ))?;
+                tx.append(EventDraft::new(
+                    actor(),
+                    Id::new("docs/a.md"),
+                    Payload::from(DocRegisteredPayload {
+                        path: "docs/a.md".into(),
+                        ticket: None,
+                    }),
+                ))?;
+                Ok(())
+            })
+            .expect("transaction");
+
+        let db_path = dir.path().join(".tm").join("project.db");
+        assert_eq!(session_and_doc_row_counts(&db_path), (1, 1));
+    }
+
+    #[test]
+    fn transaction_rolls_back_heterogeneous_writes_together_when_the_closure_errs() {
+        let (dir, store) = open_store();
+        let alice = ParticipantId::new("human:alice").unwrap();
+
+        let err = store
+            .transaction(|tx| {
+                let session = SessionId::new("S-1").unwrap();
+                tx.append(EventDraft::new(
+                    actor(),
+                    Id::from(session.clone()),
+                    Payload::from(SessionStartedPayload {
+                        session,
+                        participant: alice.clone(),
+                    }),
+                ))?;
+                tx.append(EventDraft::new(
+                    actor(),
+                    Id::new("docs/a.md"),
+                    Payload::from(DocRegisteredPayload {
+                        path: "docs/a.md".into(),
+                        ticket: None,
+                    }),
+                ))?;
+                Err::<(), TmError>(TmError::invariant("synthetic failure after both writes"))
+            })
+            .unwrap_err();
+        assert!(matches!(err, TmError::Invariant(_)));
+
+        let db_path = dir.path().join(".tm").join("project.db");
+        assert_eq!(
+            session_and_doc_row_counts(&db_path),
+            (0, 0),
+            "neither write should survive since the closure itself returned Err"
+        );
+    }
+
     #[test]
     fn append_materializes_and_commits_an_arbitrary_typed_draft() {
         let (_dir, store) = open_store();
@@ -2823,7 +2917,7 @@ mod tests {
 
     #[test]
     fn start_session_then_join_and_end_round_trip_through_rebuild() {
-        let (_dir, store) = open_store();
+        let (dir, store) = open_store();
         let alice = ParticipantId::new("human:alice").unwrap();
         let bob = ParticipantId::new("agent:mock/bob").unwrap();
 
@@ -2838,16 +2932,45 @@ mod tests {
             .clone();
 
         store
-            .join_session(&session, bob, actor())
+            .join_session(&session, bob.clone(), actor())
             .expect("join_session");
         store.end_session(&session, actor()).expect("end_session");
 
+        // No public read path exists for `sessions`/`participants` yet (out of B-05's scope), so
+        // this reaches for a raw connection the same way `tm-e2e`'s replay fixture does.
+        let db_path = dir.path().join(".tm").join("project.db");
+        let session_row = |conn: &Connection| -> (String, String) {
+            conn.query_row(
+                "SELECT id, participant FROM sessions WHERE id = ?1",
+                rusqlite::params![session.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("sessions row")
+        };
+        let bob_status = |conn: &Connection| -> String {
+            conn.query_row(
+                "SELECT status FROM participants WHERE id = ?1",
+                rusqlite::params![bob.as_str()],
+                |r| r.get(0),
+            )
+            .expect("participants row")
+        };
+
+        let before_conn = Connection::open(&db_path).expect("raw connection before rebuild");
+        let before_session = session_row(&before_conn);
+        assert_eq!(before_session.0, session.as_str());
+        assert_eq!(before_session.1, alice.as_str());
+        assert_eq!(bob_status(&before_conn), "active");
+
         store.rebuild().expect("rebuild");
-        // No public read path exists for `sessions` yet (out of B-05's scope); rebuild succeeding
-        // without error, with the same event count as before, is the round-trip guarantee this
-        // item asks for.
-        let head = store.counters().expect("counters"); // touches the connection post-rebuild
-        let _ = head;
+
+        let after_conn = Connection::open(&db_path).expect("raw connection after rebuild");
+        assert_eq!(
+            session_row(&after_conn),
+            before_session,
+            "the sessions row must survive rebuild byte-identical"
+        );
+        assert_eq!(bob_status(&after_conn), "active");
     }
 
     #[test]

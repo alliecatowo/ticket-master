@@ -639,16 +639,23 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
                 // `remote_id` is known yet at link time (that arrives with the first
                 // `mirror.pushed`/`mirror.pulled`), so it is left empty on first insert and never
                 // clobbered by a later `mirror.linked` replay for the same ticket.
-                let now = event.ts.to_rfc3339();
-                tx.raw()
-                    .execute(
-                        "INSERT INTO mirror_links (ticket, remote_id, remote_system, last_synced)
-                         VALUES (?1, '', ?2, ?3)
-                         ON CONFLICT(ticket) DO UPDATE SET remote_system = excluded.remote_system,
-                            last_synced = excluded.last_synced",
-                        params![event.subject.as_str(), p.remote, now],
-                    )
-                    .map_err(storage_err)?;
+                //
+                // `mirror_links.ticket` is the table's primary key, so a `mirror.linked` with no
+                // subject (e.g. a malformed draft built outside `Store::link_mirror`, which
+                // always sets one) must not silently collide every such event onto one `ticket =
+                // ''` row; skip rather than corrupt the table.
+                if !event.subject.is_empty() {
+                    let now = event.ts.to_rfc3339();
+                    tx.raw()
+                        .execute(
+                            "INSERT INTO mirror_links (ticket, remote_id, remote_system, last_synced)
+                             VALUES (?1, '', ?2, ?3)
+                             ON CONFLICT(ticket) DO UPDATE SET remote_system = excluded.remote_system,
+                                last_synced = excluded.last_synced",
+                            params![event.subject.as_str(), p.remote, now],
+                        )
+                        .map_err(storage_err)?;
+                }
             }
         }
         EventKind::MirrorPushed | EventKind::MirrorPulled => {
@@ -661,20 +668,23 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
                 .as_mirror_pulled()
                 .map(|p| (&p.remote, &p.reference));
             if let Some((remote, reference)) = pushed.or(pulled) {
-                // Same `event.subject`-carries-the-ticket convention as `mirror.linked` above.
-                // Unlike `mirror.linked`, `mirror.pushed`/`mirror.pulled` do carry `reference`
-                // (the external id), so `remote_id` is written for real here.
-                let now = event.ts.to_rfc3339();
-                tx.raw()
-                    .execute(
-                        "INSERT INTO mirror_links (ticket, remote_id, remote_system, last_synced)
-                         VALUES (?1, ?2, ?3, ?4)
-                         ON CONFLICT(ticket) DO UPDATE SET remote_id = excluded.remote_id,
-                            remote_system = excluded.remote_system,
-                            last_synced = excluded.last_synced",
-                        params![event.subject.as_str(), reference, remote, now],
-                    )
-                    .map_err(storage_err)?;
+                // Same `event.subject`-carries-the-ticket convention (and same empty-subject
+                // guard) as `mirror.linked` above. Unlike `mirror.linked`, `mirror.pushed`/
+                // `mirror.pulled` do carry `reference` (the external id), so `remote_id` is
+                // written for real here.
+                if !event.subject.is_empty() {
+                    let now = event.ts.to_rfc3339();
+                    tx.raw()
+                        .execute(
+                            "INSERT INTO mirror_links (ticket, remote_id, remote_system, last_synced)
+                             VALUES (?1, ?2, ?3, ?4)
+                             ON CONFLICT(ticket) DO UPDATE SET remote_id = excluded.remote_id,
+                                remote_system = excluded.remote_system,
+                                last_synced = excluded.last_synced",
+                            params![event.subject.as_str(), reference, remote, now],
+                        )
+                        .map_err(storage_err)?;
+                }
             }
         }
         // The remaining catalogued kinds aren't part of this crate's materialized view at all
@@ -1546,6 +1556,31 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(remote_id, "owner/repo#42");
+        });
+    }
+
+    #[test]
+    fn mirror_events_with_no_subject_do_not_collide_on_an_empty_ticket_row() {
+        with_tx(|tx| {
+            let linked = tm_events::Payload::from(MirrorLinkedPayload {
+                remote: "github".into(),
+            });
+            apply(tx, &draft_event(1, EK::MirrorLinked, linked)).unwrap();
+
+            let pushed = tm_events::Payload::from(MirrorPushedPayload {
+                remote: "github".into(),
+                reference: "owner/repo#1".into(),
+            });
+            apply(tx, &draft_event(2, EK::MirrorPushed, pushed)).unwrap();
+
+            let count: i64 = tx
+                .raw()
+                .query_row("SELECT COUNT(*) FROM mirror_links", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(
+                count, 0,
+                "a mirror event with no subject must not write a ticket = '' row"
+            );
         });
     }
 
