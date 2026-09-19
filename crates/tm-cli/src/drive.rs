@@ -329,43 +329,7 @@ pub async fn dispatch_computer(
         env.tm_computer_backend = Some("wayland".to_string());
     }
 
-    let backend_kind =
-        backend::select_backend(&env).map_err(|e: ComputerError| TmError::from(e))?;
-
-    let backend_impl: Box<dyn backend::Backend> = match backend_kind {
-        backend::BackendKind::Macos => {
-            #[cfg(target_os = "macos")]
-            {
-                Box::new(tm_computer::macos::MacosBackend::new())
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                return Err(TmError::Invariant("macOS backend not available".into()));
-            }
-        }
-        backend::BackendKind::X11 => {
-            #[cfg(target_os = "linux")]
-            {
-                let x11 = tm_computer::linux::X11Backend::connect(None)?;
-                Box::new(x11)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                return Err(TmError::Invariant("X11 backend not available".into()));
-            }
-        }
-        backend::BackendKind::Wayland => {
-            #[cfg(target_os = "linux")]
-            {
-                let wayland = tm_computer::linux::WaylandBackend::connect()?;
-                Box::new(wayland)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                return Err(TmError::Invariant("Wayland backend not available".into()));
-            }
-        }
-    };
+    let backend_impl: Box<dyn backend::Backend> = backend::open_selected(&env)?;
 
     backend_impl.probe().await?;
 

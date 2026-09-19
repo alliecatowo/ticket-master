@@ -38,6 +38,7 @@
 #![warn(missing_docs)]
 
 pub mod backend;
+pub mod capability;
 pub mod input;
 pub mod session;
 
@@ -47,7 +48,10 @@ pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
-pub use backend::{select_backend, Backend, BackendKind, Capabilities, SelectionEnv};
+pub use backend::{
+    open_selected, select_backend, Backend, BackendKind, Capabilities, SelectionEnv,
+};
+pub use capability::{ComputerCapability, SessionRegistry as ComputerSessionRegistry};
 pub use input::{InputAction, KeyChord, Modifier, MouseButton, Point, ScrollDelta};
 pub use session::{ComputerSession, PanicStop, SessionMode};
 
