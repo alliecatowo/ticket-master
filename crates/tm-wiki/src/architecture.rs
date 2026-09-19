@@ -39,13 +39,18 @@ fn crate_names(project_root: &Path) -> Result<Vec<String>> {
 
 /// Build one `architecture/<crate>` page per workspace crate that has at least one indexed Rust
 /// file under `crates/<name>/src/`: a module tree (from the live working-tree file list) plus
-/// each file's public symbols ([`CodeIntel::outline`], filtered by [`looks_public`]).
+/// each file's public symbols ([`CodeIntel::symbol_index`]'s per-file `outline`, filtered by
+/// [`looks_public`]).
 ///
 /// Requires `ci` to already reflect the current tree ([`CodeIntel::update_incremental`]) — this
-/// function only reads from the existing index via `outline`, it never (re)indexes anything.
+/// function only reads from the existing index, it never (re)indexes anything. [`CodeIntel::symbol_index`]
+/// is called exactly once, up front, rather than once per file: it re-parses every indexed file
+/// from disk on each call (see its own doc comment), so calling it inside the per-file loop
+/// below would parse the whole workspace once per file instead of once total.
 pub fn pages(project_root: &Path, ci: &CodeIntel) -> Result<Vec<WikiPage>> {
     let files = RepoWalker::new(project_root).walk()?;
     let names = crate_names(project_root)?;
+    let index = ci.symbol_index()?;
     let mut out = Vec::with_capacity(names.len());
 
     for name in names {
@@ -69,7 +74,7 @@ pub fn pages(project_root: &Path, ci: &CodeIntel) -> Result<Vec<WikiPage>> {
         body.push_str("\n## Public symbols\n");
         let mut any_symbols = false;
         for path in &crate_files {
-            let outline = ci.outline(path)?;
+            let outline = index.outline(path);
             let public: Vec<_> = outline
                 .into_iter()
                 .filter(|e| looks_public(&e.rendered))
