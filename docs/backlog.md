@@ -363,6 +363,34 @@ keeping `tm serve` and its event stream the real product boundary.
 - Secret and PII redaction before the model call, restored locally (the `vibeguard` shape).
 - Context enrichment on read: resolved types alongside a file read, from `tm-codeintel`.
 
+## A head-to-head benchmark: opencode vs. Codex vs. Claude Code vs. Ticketmaster
+
+Eventually, not now — this is a marker for later, once the standalone chat UX (D-003) and the
+core coding loop are solid enough that a comparison is actually informative rather than noise.
+
+The point isn't a leaderboard for its own sake: running the same task set through all four on a
+schedule (or on every significant harness/architecture change) is how regressions in *our own*
+product get caught before a person notices them by hand — a smoke-test tier for quick per-change
+signal, and a larger periodic tier across a broader task set for the kind of drift a smoke test
+is too shallow to catch. Feed findings back into the self-improvement loop rather than letting
+them sit in a report nobody reads.
+
+Auth, so this doesn't quietly burn real API budget on every run: default each tool to whatever
+credential is cheapest/already sitting there rather than Anthropic's real metered API — opencode
+and Codex both already read `OPENAI_API_KEY`/an OpenAI-compatible credential from the environment
+for their own default paths, and DevPass (already a `tm-provider` backend,
+`crates/tm-provider/src/providers/compat.rs`) is the equivalent zero-additional-cost option for
+Claude Code and for Ticketmaster's own runs. Keep a real-Claude-auth switch available as an
+explicit opt-in for the rare deliberate "how does actual Claude Sonnet/Opus perform here" run —
+gate it behind a flag/env var so it's never the accidental default.
+
+Shape (sketch, refine when actually built): a fixed task suite (bug-fix-with-tests, add-a-small-
+feature, refactor-under-constraint, multi-file navigation) run identically against all four,
+scored on objective signal already available for free from Ticketmaster's own kernel — did tests
+pass, how many turns/tool calls, tokens spent, wall time, did verification actually catch what it
+claimed to. Store results as real event-log/ticket state (dogfood the product to measure the
+product) rather than a bespoke reporting format.
+
 ## Stretch
 
 - iOS simulator executor (SPEC §23).

@@ -51,6 +51,13 @@ that rule is global, not repo-specific, and still applies here.
   `docs/decisions/D-003-project-scope.md`) — `sqlite3 <state_dir>/project.db` is a legitimate way
   to inspect what actually got written, and `tm events` reads the same log a UI would.
 
+- `mise run lsp` runs a full-workspace `rust-analyzer diagnostics` dump — informational, not a
+  gate (it exits non-zero on *any* diagnostic, including the benign `#[cfg(test)]`
+  "inactive-code" note every test module produces, so read the output rather than the exit
+  code). `rust-analyzer` itself is a real LSP server available in this toolchain
+  (`mise install rust-analyzer` if it's ever missing) for anything that wants go-to-definition
+  or type-aware navigation beyond what `tm-codeintel`'s heuristics give you.
+
 ## Navigation
 
 - `docs/audit-2026-09-18-fable.md` is a comprehensive, file:line-anchored implementation status
@@ -61,3 +68,31 @@ that rule is global, not repo-specific, and still applies here.
 - Prefer `symbol.*`/`search.hybrid`-shaped retrieval (or zvec-grep, above) over blind
   multi-file `Read` sweeps — this workspace's own `tm-codeintel` crate exists because that's
   faster and more precise than grepping cold.
+
+## Keep documentation honest as you change things
+
+A change that lands without its documentation landing with it is half-finished, not done. When
+you touch behavior this repo documents, update the same turn, not a follow-up:
+
+- A new/changed decision (an architecture choice, a tradeoff, something a future session would
+  otherwise have to re-derive) gets a `docs/decisions/D-NNN-*.md` in the existing format
+  (`docs/decisions/D-002-terminal-ui-stack.md` is the template: Status/Date/Supersedes, then
+  Context/Decision/Why/"What this costs, stated plainly").
+- A SPEC.md section whose actual implementation now disagrees with what's written gets corrected
+  or pointed at the decision doc that supersedes it — don't let SPEC.md silently drift out of
+  sync with reality the way parts of it already have (see the fable audit's "Part 3:
+  corrections to the baseline").
+- `docs/audit-2026-09-18-fable.md` is a point-in-time snapshot, not a living document — don't
+  edit it after the fact to mark things done; a stale audit is still useful as history, a
+  silently-edited one isn't. Track new status in the SPEC/decision docs instead.
+- New CLI verbs, mise tasks, or dev-workflow changes get a line in this file, not just in the
+  code's own `--help` output — this file is what a fresh session reads first.
+
+## This harness should keep improving itself
+
+Treat friction — a repeated manual fix, a stray file some track created by mistake, a check that
+should have caught something but didn't, a convention two agents independently reinvented
+slightly differently — as a signal to fix the harness itself, not just the immediate symptom.
+That means: add the missing hygiene check, write the missing `SKILL.md`, add the missing mise
+task, correct this file, rather than only patching the one instance. This is a standing
+directive, not a one-time cleanup — it doesn't expire when the current backlog does.

@@ -3,6 +3,7 @@ go = "latest"
 node = "latest"
 pnpm = "latest"
 rust = "latest"
+rust-analyzer = "latest"
 uv = "latest"
 
 # Every task here is the canonical way to do this thing in this repo. Use `mise run <task>`
@@ -56,6 +57,10 @@ run = "cargo run -p tm-cli --bin tm -- doctor"
 [tasks.dev]
 description = "Build + run the TUI with debug logging to stderr (RUST_LOG=tm=debug)"
 run = "RUST_LOG=tm=debug,tm_core=debug,tm_agent=debug cargo run -p tm-cli --bin tm 2> /tmp/tm-dev.log"
+
+[tasks.lsp]
+description = "Full-workspace rust-analyzer diagnostics dump (informational, not a gate -- it exits non-zero on ANY diagnostic including benign #[cfg(test)] inactive-code notes; read the output, don't trust the exit code)"
+run = "rust-analyzer diagnostics . || true"
 
 [tasks."worktree:clean"]
 description = "Remove every merged worktree under .claude/worktrees/ and prune"
