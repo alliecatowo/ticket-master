@@ -1,0 +1,856 @@
+---
+source: crates/tm-workflow/tests/expand_snapshot.rs
+expression: "&proposal"
+---
+{
+  "source_spec": null,
+  "tickets": [
+    {
+      "ticket_ref": "lint",
+      "kind": "work",
+      "objective": "Lint crates/tm-workflow/src/expand.rs.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": []
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "coder_fast",
+        "human_required": false,
+        "min_capability": "any"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Lint crates/tm-workflow/src/expand.rs."
+          }
+        }
+      ],
+      "verification": "none",
+      "budget": {
+        "tokens": 4000,
+        "dollars_micros": 0,
+        "wall_seconds": 300,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "test",
+      "kind": "work",
+      "objective": "Run the test suite against crates/tm-workflow/src/expand.rs.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": []
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "coder_fast",
+        "human_required": false,
+        "min_capability": "any"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Run the test suite against crates/tm-workflow/src/expand.rs."
+          }
+        }
+      ],
+      "verification": "single",
+      "budget": {
+        "tokens": 8000,
+        "dollars_micros": 0,
+        "wall_seconds": 900,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "review[0]",
+      "kind": "work",
+      "objective": "Review crates/tm-workflow/src/expand.rs for correctness problems.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": []
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "reviewer_semantic",
+        "human_required": false,
+        "min_capability": "preferred"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Review crates/tm-workflow/src/expand.rs for correctness problems."
+          }
+        }
+      ],
+      "verification": "none",
+      "budget": {
+        "tokens": 12000,
+        "dollars_micros": 0,
+        "wall_seconds": 1200,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "review[1]",
+      "kind": "work",
+      "objective": "Review crates/tm-workflow/src/expand.rs for security problems.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": []
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "reviewer_semantic",
+        "human_required": false,
+        "min_capability": "preferred"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Review crates/tm-workflow/src/expand.rs for security problems."
+          }
+        }
+      ],
+      "verification": "none",
+      "budget": {
+        "tokens": 12000,
+        "dollars_micros": 0,
+        "wall_seconds": 1200,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "review[2]",
+      "kind": "work",
+      "objective": "Review crates/tm-workflow/src/expand.rs for performance problems.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": []
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "reviewer_semantic",
+        "human_required": false,
+        "min_capability": "preferred"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Review crates/tm-workflow/src/expand.rs for performance problems."
+          }
+        }
+      ],
+      "verification": "none",
+      "budget": {
+        "tokens": 12000,
+        "dollars_micros": 0,
+        "wall_seconds": 1200,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "review[3]",
+      "kind": "work",
+      "objective": "Review crates/tm-workflow/src/expand.rs for tests problems.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": []
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "reviewer_semantic",
+        "human_required": false,
+        "min_capability": "preferred"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Review crates/tm-workflow/src/expand.rs for tests problems."
+          }
+        }
+      ],
+      "verification": "none",
+      "budget": {
+        "tokens": 12000,
+        "dollars_micros": 0,
+        "wall_seconds": 1200,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "audit",
+      "kind": "work",
+      "objective": "Fan out over review.findings once available; for each item, run: Try to refute this finding: {{item.summary}}",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": []
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "auditor_semantic",
+        "human_required": false,
+        "min_capability": "strict"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Fan out over review.findings once available; for each item, run: Try to refute this finding: {{item.summary}}"
+          }
+        }
+      ],
+      "verification": "single",
+      "budget": {
+        "tokens": 20000,
+        "dollars_micros": 0,
+        "wall_seconds": 1800,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "merge",
+      "kind": "work",
+      "objective": "Synthesize the audited findings for crates/tm-workflow/src/expand.rs into a merge/no-merge decision.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": []
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "synthesizer_long_context",
+        "human_required": false,
+        "min_capability": "any"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Synthesize the audited findings for crates/tm-workflow/src/expand.rs into a merge/no-merge decision."
+          }
+        }
+      ],
+      "verification": "single",
+      "budget": {
+        "tokens": 20000,
+        "dollars_micros": 0,
+        "wall_seconds": 1800,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    }
+  ],
+  "dependencies": [
+    {
+      "from_ref": "test",
+      "to_ref": "lint",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "review[0]",
+      "to_ref": "test",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "review[1]",
+      "to_ref": "test",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "review[2]",
+      "to_ref": "test",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "review[3]",
+      "to_ref": "test",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "audit",
+      "to_ref": "review[0]",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "audit",
+      "to_ref": "review[1]",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "audit",
+      "to_ref": "review[2]",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "audit",
+      "to_ref": "review[3]",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "merge",
+      "to_ref": "audit",
+      "kind": "hard"
+    }
+  ],
+  "milestones": [],
+  "authority_domains": [],
+  "attempt": 1
+}

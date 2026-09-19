@@ -1,0 +1,22 @@
+[package]
+name = "tm-workflow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Workflow definitions (SPEC.md §25): a TOML-defined, parameterized DSL that expands into a ticket graph, reusing tm-genesis's graph validation and tm-core's Store::transaction to commit it atomically."
+
+[dependencies]
+tm-types = { workspace = true }
+tm-core = { workspace = true }
+tm-events = { workspace = true }
+tm-genesis = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+tempfile = { workspace = true }

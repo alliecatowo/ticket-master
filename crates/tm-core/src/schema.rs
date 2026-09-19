@@ -2,19 +2,30 @@
 //!
 //! Owns the schema for `tickets`, `ticket_deps`, `ticket_children`, `leases`, `resource_claims`,
 //! `decisions`, `milestones`, `artifacts`, `evidence`, `budgets`, `participants`, `sessions`,
-//! `counters`, `docs`, `doc_provenance`, `provider_usage`, `harness_epochs`, `mirror_links`, and
-//! `meta`, plus [`drop_views`] which `Store::rebuild` uses to blow away every one of these
-//! tables (never the `tm-events` `events` table itself) before replaying from `seq` 0.
+//! `counters`, `docs`, `doc_provenance`, `provider_usage`, `harness_epochs`, `mirror_links`,
+//! `workflows`, and `meta`, plus [`drop_views`] which `Store::rebuild` uses to blow away every
+//! one of these tables (never the `tm-events` `events` table itself) before replaying from `seq`
+//! 0.
 //!
 //! Every table here stores denormalized, derived state: the event log is the truth, these are a
 //! cache of it. Columns therefore favor the shapes [`crate::materialize::apply`] needs to write
 //! quickly and [`crate::view`] needs to read cheaply, not any particular normal form.
+//!
+//! `workflows` is the one exception to "the event log is the truth": `SPEC.md` §25's workflow
+//! definitions are versioned-by-content-hash reference material (`tm-workflow`'s `WorkflowDef`
+//! TOML source), not ticket-graph state, and the closed `tm_events` payload catalogue has no
+//! room for a free-form TOML blob (the same constraint [`Store::store_artifact`]'s module note
+//! documents for artifact bytes). It is therefore written directly, like `counters`, and is not
+//! restored by [`drop_views`]/replay; a running workflow instance's actual pin to the definition
+//! version it was expanded from survives that via the `ContextRef` `tm-workflow::commit` stamps
+//! onto every ticket it creates (`workflow:<name>@<content_hash>`), not via this table, which is
+//! a lookup cache only.
 
 use rusqlite::Connection;
 use tm_types::TmError;
 
 /// The schema version this build of `tm-core` expects. Bump when adding a migration.
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// One materialized table's name, paired with the `CREATE TABLE IF NOT EXISTS` DDL for it.
 pub struct TableDef {
@@ -261,6 +272,18 @@ pub const TABLES: &[TableDef] = &[
         ",
     },
     TableDef {
+        name: "workflows",
+        create_sql: "
+            CREATE TABLE IF NOT EXISTS workflows (
+                content_hash TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                registered_at TEXT NOT NULL
+            )
+        ",
+    },
+    TableDef {
         name: "meta",
         create_sql: "
             CREATE TABLE IF NOT EXISTS meta (
@@ -285,6 +308,7 @@ CREATE INDEX IF NOT EXISTS evidence_ticket_idx ON evidence (ticket);
 CREATE INDEX IF NOT EXISTS sessions_participant_idx ON sessions (participant);
 CREATE INDEX IF NOT EXISTS tickets_parent_idx ON tickets (parent);
 CREATE INDEX IF NOT EXISTS tickets_milestone_idx ON tickets (milestone);
+CREATE INDEX IF NOT EXISTS workflows_name_idx ON workflows (name);
 ";
 
 /// Bring `conn`'s materialized-view schema forward to [`SCHEMA_VERSION`]. Shares the
@@ -312,7 +336,11 @@ pub fn migrate(conn: &mut Connection, clock: &dyn tm_types::Clock) -> tm_types::
         )
         .map_err(storage_err)?;
 
-    // Apply migration to version 1 if not yet applied
+    // Apply migration to SCHEMA_VERSION if not yet applied. Every table's DDL is
+    // `CREATE TABLE IF NOT EXISTS`, so re-running the whole `TABLES`/`INDEXES_SQL` batch against
+    // an already-migrated database (e.g. an existing project opened by a build that adds a new
+    // table, as B-13's `workflows` table did) is safe: prior tables are untouched, only the new
+    // one(s) get created, and the version row records the bump.
     if current_version < SCHEMA_VERSION {
         let tx = conn.transaction().map_err(storage_err)?;
 

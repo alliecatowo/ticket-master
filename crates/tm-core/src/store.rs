@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use tm_events::payload::{
     ArtifactCreatedPayload, AuthorityRevertedPayload, CommandCompletedPayload,
     CommandStartedPayload, DecisionCreatedPayload, DecisionSupersededPayload,
@@ -182,6 +182,25 @@ pub struct HarnessEpochRow {
     pub harness_config: String,
     /// When this epoch was promoted.
     pub ts: Timestamp,
+}
+
+/// One row of the `workflows` table: a versioned `tm-workflow` `WorkflowDef` TOML source,
+/// keyed by its blake3 content hash. See [`Store::register_workflow_def`]/[`Store::workflow_defs`]
+/// and `crate::schema`'s module doc for why this table is a lookup cache rather than
+/// replay-restored state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowDefRow {
+    /// The blake3 hex digest of `source`, this row's primary key.
+    pub content_hash: String,
+    /// The workflow's declared name (`WorkflowDef::name`).
+    pub name: String,
+    /// This name's version number, one past the highest version already registered for `name`
+    /// when this content hash was first seen; stable for the life of the row.
+    pub version: u32,
+    /// The exact TOML source this hash was computed over.
+    pub source: String,
+    /// When this content hash was first registered.
+    pub registered_at: Timestamp,
 }
 
 fn storage_err(e: rusqlite::Error) -> TmError {
@@ -1963,6 +1982,111 @@ impl Store {
             });
         }
         Ok(epochs)
+    }
+
+    /// Register a `tm-workflow` `WorkflowDef`'s TOML `source` under `content_hash` (its blake3
+    /// hex digest, computed by the caller -- `tm-core` has no notion of `WorkflowDef`), returning
+    /// the version number assigned to it.
+    ///
+    /// Idempotent: registering a `content_hash` already present returns the version it was
+    /// first assigned, `source` unchanged (a hash collision on differing source is not possible
+    /// short of a blake3 break, so this never needs to detect or reject one). Otherwise assigns
+    /// one past the highest version already registered under `name`, so two different
+    /// definitions sharing a `name` (an edited `.toml` on disk, re-registered) are distinguishable
+    /// and orderable without this table needing its own id counter.
+    ///
+    /// Written directly to `workflows`' raw columns via [`Store::transaction`], the same
+    /// exception [`Store::store_artifact`]'s module note documents -- see `crate::schema`'s
+    /// module doc for why this table is not part of replay-derived state.
+    pub fn register_workflow_def(
+        &self,
+        name: String,
+        content_hash: String,
+        source: String,
+    ) -> tm_types::Result<u32> {
+        let now = self.clock.now().to_rfc3339();
+        self.transaction(move |tx| {
+            let existing: Option<i64> = tx
+                .raw()
+                .query_row(
+                    "SELECT version FROM workflows WHERE content_hash = ?1",
+                    rusqlite::params![content_hash],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage_err)?;
+            if let Some(version) = existing {
+                return Ok(version as u32);
+            }
+            let next_version: i64 = tx
+                .raw()
+                .query_row(
+                    "SELECT COALESCE(MAX(version), 0) + 1 FROM workflows WHERE name = ?1",
+                    rusqlite::params![name],
+                    |row| row.get(0),
+                )
+                .map_err(storage_err)?;
+            tx.raw()
+                .execute(
+                    "INSERT INTO workflows (content_hash, name, version, source, registered_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    rusqlite::params![content_hash, name, next_version, source, now],
+                )
+                .map_err(storage_err)?;
+            Ok(next_version as u32)
+        })
+    }
+
+    /// Every registered workflow definition version, newest first, optionally filtered to one
+    /// `name`.
+    pub fn workflow_defs(&self, name: Option<&str>) -> tm_types::Result<Vec<WorkflowDefRow>> {
+        let conn = tm_events::schema::open_read_connection(self.log.path())?;
+        let mut stmt = match name {
+            Some(_) => conn
+                .prepare(
+                    "SELECT content_hash, name, version, source, registered_at FROM workflows
+                     WHERE name = ?1 ORDER BY version DESC",
+                )
+                .map_err(storage_err)?,
+            None => conn
+                .prepare(
+                    "SELECT content_hash, name, version, source, registered_at FROM workflows
+                     ORDER BY name, version DESC",
+                )
+                .map_err(storage_err)?,
+        };
+        let map_row = |row: &rusqlite::Row<'_>| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        };
+        let rows = match name {
+            Some(n) => stmt
+                .query_map(rusqlite::params![n], map_row)
+                .map_err(storage_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(storage_err)?,
+            None => stmt
+                .query_map([], map_row)
+                .map_err(storage_err)?
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(storage_err)?,
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for (content_hash, name, version, source, registered_at) in rows {
+            out.push(WorkflowDefRow {
+                content_hash,
+                name,
+                version: version as u32,
+                source,
+                registered_at: parse_ts(&registered_at)?,
+            });
+        }
+        Ok(out)
     }
 
     /// Assemble a [`ProjectView`] from every row visible on `conn`, the single read path shared

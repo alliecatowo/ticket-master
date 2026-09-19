@@ -23,6 +23,7 @@ tm-docs = { workspace = true }
 tm-harness = { workspace = true }
 tm-agent = { workspace = true }
 tm-genesis = { workspace = true }
+tm-workflow = { workspace = true }
 tm-mirror = { workspace = true }
 tm-server = { workspace = true }
 tm-tui = { workspace = true }

@@ -1,0 +1,25 @@
+# "harness-benchmark": run the harness benchmark suite against the current epoch, then promote on
+# success. Two plain, sequential nodes -- no fan-out -- so `tm doctor`'s 1x1-workflow smell check
+# (SPEC.md §25.3) has a real, positive example to *not* fire on: two nodes wide/deep is enough
+# real sequencing to justify being a workflow rather than one ad hoc ticket, even without fan-out.
+
+name = "harness-benchmark"
+
+[params.epoch]
+description = "The harness epoch label the benchmark run and promotion should reference."
+default = "current"
+
+[[node]]
+id = "run"
+role = "coder_fast"
+objective = "Run the repository-local benchmark suite against harness epoch {{epoch}} and record a BenchmarkReport."
+budget = { tokens = 15000, dollars_micros = 0, wall_seconds = 2400 }
+verification = "single"
+
+[[node]]
+id = "promote"
+role = "auditor_semantic"
+objective = "If the benchmark run for epoch {{epoch}} shows a gain, promote it as the new current epoch."
+depends = ["run"]
+budget = { tokens = 4000, dollars_micros = 0, wall_seconds = 300 }
+verification = "audited"

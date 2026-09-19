@@ -16,6 +16,7 @@
 //! - [`sched`] — the `sched`, `lease`, and `run` command groups.
 //! - [`search`] — the `search`, `symbol`, and `history` command groups over `tm-codeintel`.
 //! - [`ops`] — the `docs`, `provider`, `harness`, `bench`, `mirror`, and `events` command groups.
+//! - [`workflow`] — the `workflow` command group (`SPEC.md` §25) over `tm-workflow`.
 //! - [`drive`] — the `browser` and `computer` command groups over `tm-browser`/`tm-computer`.
 //! - [`serve`] — the `serve` command.
 //! - [`agent`] — the bare-`tm` interactive coding client and its `tm -p` scriptable form.
@@ -42,3 +43,4 @@ pub mod search;
 pub mod serve;
 pub mod tickets;
 pub mod tui;
+pub mod workflow;

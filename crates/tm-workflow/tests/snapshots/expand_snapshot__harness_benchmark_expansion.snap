@@ -1,0 +1,217 @@
+---
+source: crates/tm-workflow/tests/expand_snapshot.rs
+expression: "&proposal"
+---
+{
+  "source_spec": null,
+  "tickets": [
+    {
+      "ticket_ref": "run",
+      "kind": "work",
+      "objective": "Run the repository-local benchmark suite against harness epoch 7 and record a BenchmarkReport.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": []
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "coder_fast",
+        "human_required": false,
+        "min_capability": "any"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Run the repository-local benchmark suite against harness epoch 7 and record a BenchmarkReport."
+          }
+        }
+      ],
+      "verification": "single",
+      "budget": {
+        "tokens": 15000,
+        "dollars_micros": 0,
+        "wall_seconds": 2400,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "promote",
+      "kind": "work",
+      "objective": "If the benchmark run for epoch 7 shows a gain, promote it as the new current epoch.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": []
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "auditor_semantic",
+        "human_required": false,
+        "min_capability": "strict"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "If the benchmark run for epoch 7 shows a gain, promote it as the new current epoch."
+          }
+        }
+      ],
+      "verification": "audited",
+      "budget": {
+        "tokens": 4000,
+        "dollars_micros": 0,
+        "wall_seconds": 300,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    }
+  ],
+  "dependencies": [
+    {
+      "from_ref": "promote",
+      "to_ref": "run",
+      "kind": "hard"
+    }
+  ],
+  "milestones": [],
+  "authority_domains": [],
+  "attempt": 1
+}

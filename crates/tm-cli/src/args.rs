@@ -136,6 +136,11 @@ pub enum Command {
     #[command(subcommand)]
     Bench(BenchCommand),
 
+    /// Workflow definitions (`SPEC.md` §25): reusable, parameterized recipes that expand into a
+    /// ticket graph.
+    #[command(subcommand)]
+    Workflow(WorkflowCommand),
+
     /// External tracker mirrors (GitHub, Linear, Jira, GitLab).
     #[command(subcommand)]
     Mirror(MirrorCommand),
@@ -717,6 +722,39 @@ pub struct BenchCompareArgs {
     pub candidate: PathBuf,
 }
 
+/// `tm workflow ...`
+#[derive(Debug, Subcommand)]
+pub enum WorkflowCommand {
+    /// List every workflow definition discovered under `.tm/workflows/*.toml`.
+    List,
+    /// Show one workflow definition's parsed shape.
+    Show(WorkflowShowArgs),
+    /// Expand a workflow definition against concrete parameters, validate the result, and commit
+    /// it as a ticket graph.
+    Run(WorkflowRunArgs),
+}
+
+/// `tm workflow show`
+#[derive(Debug, Args)]
+pub struct WorkflowShowArgs {
+    /// The workflow's name (its filename under `.tm/workflows/`, without `.toml`).
+    #[arg(value_name = "NAME")]
+    pub name: String,
+}
+
+/// `tm workflow run`
+#[derive(Debug, Args)]
+pub struct WorkflowRunArgs {
+    /// The workflow's name.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// A parameter value as `key=value`, repeatable. Overrides the definition's own declared
+    /// default for `key`, if any; a required parameter with no default and no `--param` here is
+    /// an error.
+    #[arg(long = "param", value_name = "KEY=VALUE")]
+    pub param: Vec<String>,
+}
+
 /// `tm mirror ...`
 #[derive(Debug, Subcommand)]
 pub enum MirrorCommand {
@@ -961,5 +999,49 @@ mod tests {
     fn run_requires_a_ticket() {
         let result = Cli::try_parse_from(["tm", "run"]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn workflow_run_parses_repeated_params() {
+        let cli = Cli::parse_from([
+            "tm",
+            "workflow",
+            "run",
+            "review-change",
+            "--param",
+            "target=src/lib.rs",
+            "--param",
+            "reviewer=alice",
+        ]);
+        match cli.command {
+            Some(Command::Workflow(WorkflowCommand::Run(args))) => {
+                assert_eq!(args.name, "review-change");
+                assert_eq!(
+                    args.param,
+                    vec![
+                        "target=src/lib.rs".to_string(),
+                        "reviewer=alice".to_string()
+                    ]
+                );
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_list_and_show_parse() {
+        let cli = Cli::parse_from(["tm", "workflow", "list"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Workflow(WorkflowCommand::List))
+        ));
+
+        let cli = Cli::parse_from(["tm", "workflow", "show", "harness-benchmark"]);
+        match cli.command {
+            Some(Command::Workflow(WorkflowCommand::Show(args))) => {
+                assert_eq!(args.name, "harness-benchmark");
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
     }
 }
