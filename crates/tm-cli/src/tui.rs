@@ -70,7 +70,8 @@ pub async fn run(project: Arc<Project>) -> tm_types::Result<()> {
         .store
         .view()
         .map_err(|e| tm_types::TmError::storage(e.to_string()))?;
-    let dashboard = build_dashboard(&view);
+    // No ticket is active yet at launch, so there is nothing to show a goal for.
+    let dashboard = build_dashboard(&view, None);
 
     let (mut runtime, sender) = Runtime::start(project.clock.clone(), Theme::dark())
         .await
@@ -114,7 +115,13 @@ fn runtime_error(err: RuntimeError) -> tm_types::TmError {
 /// which ticket): `tm_core::ProjectView` has no separate "session" collection, and a lease *is*
 /// the closest existing notion of "a worker session in progress" (see `agent.rs`'s `SessionId`,
 /// which is not persisted in `ProjectView` at all).
-fn build_dashboard(view: &tm_core::ProjectView) -> Dashboard {
+///
+/// `goal` is the active ticket's current durable goal text (`SPEC.md` §29,
+/// `docs/audit-2026-09-18-fable.md` B-09), already read via `tm_core::Store::goal_state` by the
+/// caller (`App::refresh_dashboard`) — `view` alone carries no goal state (`goal_state` reads the
+/// `goals` materialized table directly, not `ProjectView`), and there being no active ticket yet
+/// (the initial dashboard `run` builds before any prompt is submitted) is exactly `None`.
+fn build_dashboard(view: &tm_core::ProjectView, goal: Option<String>) -> Dashboard {
     let mut tickets = Table::new(
         ComponentId::new("tm.dashboard.tickets"),
         vec![
@@ -144,7 +151,9 @@ fn build_dashboard(view: &tm_core::ProjectView) -> Dashboard {
             .collect(),
     );
 
-    Dashboard::new(ComponentId::new("tm.dashboard"), tickets, sessions)
+    let mut dashboard = Dashboard::new(ComponentId::new("tm.dashboard"), tickets, sessions);
+    dashboard.set_goal(goal);
+    dashboard
 }
 
 /// This crate's root component: wraps `tm-tui`'s [`Home`] screen and adds the two things every
@@ -229,9 +238,20 @@ impl App {
     /// dashboard just stays on screen one more frame) rather than tearing down the TUI over a
     /// transient store error; `tm-cli`'s other commands already treat a `view()` failure as fatal
     /// where that is the right call, which driving a live UI is not.
-    fn refresh_dashboard(&mut self) {
+    ///
+    /// `ticket` is `changed`'s own id: the ticket whose state just moved is also the one whose
+    /// goal (`SPEC.md` §29) is worth showing — `Store::goal_state` failing or finding nothing set
+    /// yet is not an error here either, it just means no goal line renders this frame.
+    fn refresh_dashboard(&mut self, ticket: &tm_types::TicketId) {
         if let Ok(view) = self.project.store.view() {
-            self.home.set_dashboard(build_dashboard(&view));
+            let goal = self
+                .project
+                .store
+                .goal_state(ticket)
+                .ok()
+                .flatten()
+                .map(|g| g.text);
+            self.home.set_dashboard(build_dashboard(&view, goal));
         }
     }
 
@@ -359,8 +379,8 @@ impl Component for App {
         // Domain-aware (needs `tm_core::ProjectView`, which `tm-tui` deliberately never depends
         // on): handled here rather than forwarded into `self.home`, which only ever sees the
         // already-built `Dashboard` this hands it via `refresh_dashboard`.
-        if let Event::App(AppMessage::TicketChanged { .. }) = event {
-            self.refresh_dashboard();
+        if let Event::App(AppMessage::TicketChanged { id }) = event {
+            self.refresh_dashboard(id);
             return Propagation::Consumed;
         }
 
@@ -476,7 +496,7 @@ mod tests {
         create_real_ticket(&store, "wire the tui");
 
         let view = store.view().expect("view");
-        let dashboard = build_dashboard(&view);
+        let dashboard = build_dashboard(&view, None);
         // `Dashboard` does not expose its rows directly; a full render assertion is `tm-tui`'s
         // own insta-snapshot layer's job. What this crate owns is that real project state
         // actually made it into the widget, which the debug repr is enough to prove.
@@ -486,11 +506,58 @@ mod tests {
     #[test]
     fn build_dashboard_over_an_empty_project_has_no_fake_rows() {
         let view = tm_core::ProjectView::empty();
-        let dashboard = build_dashboard(&view);
+        let dashboard = build_dashboard(&view, None);
         let rendered = format!("{dashboard:?}");
         assert!(
             !rendered.contains("placeholder") && !rendered.contains("example"),
             "an empty project must render an honestly empty dashboard, not a fabricated row"
         );
+    }
+
+    #[test]
+    fn build_dashboard_with_no_goal_carries_none() {
+        let view = tm_core::ProjectView::empty();
+        let dashboard = build_dashboard(&view, None);
+        // `Dashboard`'s derived `Debug` always names the `goal` field; `None` here is what
+        // distinguishes "no active goal" from `build_dashboard_with_a_goal_carries_its_text`
+        // below, since `tm-tui` has no render-to-string assertion this crate can reach for.
+        assert!(format!("{dashboard:?}").contains("goal: None"));
+    }
+
+    #[test]
+    fn build_dashboard_with_a_goal_carries_its_text() {
+        let view = tm_core::ProjectView::empty();
+        let dashboard = build_dashboard(&view, Some("ship the login fix".to_string()));
+        // `Dashboard` does not expose its `goal` field directly; the debug repr is enough to
+        // prove the text this function was given actually made it into the widget, the same
+        // convention `build_dashboard_reflects_a_real_ticket_from_project_state` above uses for
+        // ticket rows.
+        assert!(format!("{dashboard:?}").contains("ship the login fix"));
+    }
+
+    #[test]
+    fn goal_state_read_for_a_changed_ticket_carries_through_to_build_dashboard() {
+        // `App::refresh_dashboard` reads `Store::goal_state` for the changed ticket and passes
+        // its text to `build_dashboard`; this exercises that exact composition (not just
+        // `build_dashboard` in isolation), so a regression that drops the goal along the way
+        // would actually be caught here.
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).expect("open store");
+        let ticket = create_real_ticket(&store, "wire the tui");
+        store
+            .set_goal(
+                &ticket,
+                "make the dashboard show this".to_string(),
+                ParticipantId::new("human:tester").unwrap(),
+            )
+            .expect("set_goal");
+
+        let view = store.view().expect("view");
+        let goal = store
+            .goal_state(&ticket)
+            .expect("goal_state")
+            .map(|g| g.text);
+        let dashboard = build_dashboard(&view, goal);
+        assert!(format!("{dashboard:?}").contains("make the dashboard show this"));
     }
 }
