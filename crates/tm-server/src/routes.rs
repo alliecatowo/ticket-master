@@ -1107,6 +1107,7 @@ mod tests {
         let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
         let config = ServerConfig {
             project_root: dir.path().to_path_buf(),
+            state_dir: dir.path().join(".tm"),
             bind_addr: "127.0.0.1:0".parse().expect("valid loopback addr"),
             token: None,
             presence_ttl_seconds: 60,
@@ -1205,6 +1206,44 @@ mod tests {
         make_ticket(&state).await;
         let Json(tickets) = list_tickets(State(state)).await.expect("list tickets");
         assert_eq!(tickets.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn app_state_open_with_a_state_dir_outside_project_root_serves_tickets_from_it() {
+        // D-003: `state_dir` need not be `<project_root>/.tm` (a global-scope project's state
+        // lives under `$TM_HOME/projects/<key>/`, unrelated to the workspace it indexes). Assert
+        // the server reads/writes tickets from `config.state_dir`, not a `.tm` under
+        // `project_root`.
+        let workspace = TempDir::new().expect("workspace tempdir");
+        let state_home = TempDir::new().expect("state tempdir");
+        let state_dir = state_home.path().join("global-state");
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let config = ServerConfig {
+            project_root: workspace.path().to_path_buf(),
+            state_dir: state_dir.clone(),
+            bind_addr: "127.0.0.1:0".parse().expect("valid loopback addr"),
+            token: None,
+            presence_ttl_seconds: 60,
+            broadcast_poll_interval: Duration::from_millis(10),
+            sse_replay_page_size: 100,
+        };
+        let state = AppState::open(config, clock, ids).expect("open app state");
+
+        make_ticket(&state).await;
+        make_ticket(&state).await;
+        let Json(tickets) = list_tickets(State(state)).await.expect("list tickets");
+        assert_eq!(tickets.len(), 2);
+
+        assert!(
+            state_dir.join("project.db").exists(),
+            "AppState::open must write project.db under config.state_dir"
+        );
+        assert!(
+            !workspace.path().join(".tm").exists(),
+            "AppState::open must not create a .tm directory under project_root when state_dir \
+             points elsewhere"
+        );
     }
 
     #[tokio::test]

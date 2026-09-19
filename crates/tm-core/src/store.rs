@@ -80,9 +80,10 @@ pub struct Store {
     log: EventLog,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdSource>,
-    /// The project's root directory, needed for artifact on-disk placement
-    /// ([`crate::artifact::plan_storage`]).
-    root: PathBuf,
+    /// The project's state directory (`<root>/.tm` for a repo-scoped project, or
+    /// `$TM_HOME/projects/<key>/` for a global-scope one), needed for artifact on-disk
+    /// placement ([`crate::artifact::plan_storage`]).
+    state_dir: PathBuf,
 }
 
 /// One open [`tm_events::log::Tx`], scoped to a single [`Store::transaction`] call.
@@ -361,35 +362,54 @@ fn decode_artifact_storage(text: &str) -> tm_types::Result<ArtifactStorage> {
 }
 
 impl Store {
-    /// Open (creating if absent) the project at `project_root`, using the real wall clock and a
-    /// fresh [`tm_types::CounterIds`] restored from persisted counters. Prefer
+    /// Open (creating if absent) the project rooted at `project_root`, using the real wall clock
+    /// and a fresh [`tm_types::CounterIds`] restored from persisted counters. Prefer
     /// [`Store::open_with`] in tests for deterministic clock/id injection.
+    ///
+    /// Shim over [`Store::open_at`] for the repo-scoped layout (`<project_root>/.tm`); prefer
+    /// [`Store::open_at`] when the caller already knows the state directory (e.g. a global-scope
+    /// project under `$TM_HOME/projects/<key>/`).
     pub fn open(project_root: &Path) -> tm_types::Result<Self> {
+        Store::open_at(&project_root.join(".tm"))
+    }
+
+    /// Open (creating if absent) the project state directory at `state_dir`, using the real wall
+    /// clock and a fresh [`tm_types::CounterIds`] restored from persisted counters. Prefer
+    /// [`Store::open_with_at`] in tests for deterministic clock/id injection.
+    pub fn open_at(state_dir: &Path) -> tm_types::Result<Self> {
         let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-        let db_path = project_root.join(".tm").join("project.db");
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let db_path = state_dir.join("project.db");
+        std::fs::create_dir_all(state_dir)?;
         let counters = {
             let mut conn = Connection::open(&db_path).map_err(storage_err)?;
             crate::schema::migrate(&mut conn, clock.as_ref())?;
             Self::read_counters(&conn)?
         };
         let ids: Arc<dyn IdSource> = Arc::new(CounterIds::with_counters(counters, 0));
-        Store::open_with(project_root, clock, ids)
+        Store::open_with_at(state_dir, clock, ids)
     }
 
     /// Open with an injected clock and id source, the constructor tests and deterministic
     /// callers use.
+    ///
+    /// Shim over [`Store::open_with_at`] for the repo-scoped layout (`<project_root>/.tm`).
     pub fn open_with(
         project_root: &Path,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdSource>,
     ) -> tm_types::Result<Self> {
-        let db_path = project_root.join(".tm").join("project.db");
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        Store::open_with_at(&project_root.join(".tm"), clock, ids)
+    }
+
+    /// Open with an injected clock and id source at an explicit state directory (the directory
+    /// that will hold `project.db` and `artifacts/`, not the workspace root).
+    pub fn open_with_at(
+        state_dir: &Path,
+        clock: Arc<dyn Clock>,
+        ids: Arc<dyn IdSource>,
+    ) -> tm_types::Result<Self> {
+        let db_path = state_dir.join("project.db");
+        std::fs::create_dir_all(state_dir)?;
         let log = EventLog::open_with_clock(&db_path, clock.clone())?;
         {
             let mut conn = Connection::open(&db_path).map_err(storage_err)?;
@@ -399,8 +419,14 @@ impl Store {
             log,
             clock,
             ids,
-            root: project_root.to_path_buf(),
+            state_dir: state_dir.to_path_buf(),
         })
+    }
+
+    /// The directory holding this project's `project.db` and `artifacts/` (not necessarily the
+    /// workspace root — see the `state_dir` vs. `root` distinction in D-003).
+    pub fn state_dir(&self) -> &Path {
+        &self.state_dir
     }
 
     fn read_counters(conn: &Connection) -> tm_types::Result<BTreeMap<String, u64>> {
@@ -1476,7 +1502,7 @@ impl Store {
         actor: ParticipantId,
     ) -> tm_types::Result<Vec<Event>> {
         let id = ArtifactId::new(self.ids.next(IdKind::Artifact).as_str())?;
-        let (hash, storage) = crate::artifact::plan_storage(&self.root, &bytes);
+        let (hash, storage) = crate::artifact::plan_storage(&self.state_dir, &bytes);
         if let ArtifactStorage::OnDisk(path) = &storage {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -1846,9 +1872,25 @@ impl Store {
     }
 
     /// The full project view, assembled from materialized state.
+    ///
+    /// Applies the on-disk artifact read fallback: an [`ArtifactStorage::OnDisk`] path recorded
+    /// at write time that no longer exists (e.g. because the state directory was copied
+    /// elsewhere, as `tm init`'s promotion does) is re-resolved to
+    /// `<state_dir>/artifacts/<hash>` before being handed back. This never rewrites what was
+    /// persisted to the event log or the `artifacts` table — see this module's top-level note.
     pub fn view(&self) -> tm_types::Result<ProjectView> {
         let conn = tm_events::schema::open_read_connection(self.log.path())?;
-        Self::read_view(&conn)
+        let mut view = Self::read_view(&conn)?;
+        for artifact in view.artifacts.values_mut() {
+            if let ArtifactStorage::OnDisk(path) = &artifact.storage {
+                if !path.exists() {
+                    artifact.storage = ArtifactStorage::OnDisk(
+                        self.state_dir.join("artifacts").join(&artifact.hash),
+                    );
+                }
+            }
+        }
+        Ok(view)
     }
 
     /// The narrow view `tm-scheduler` needs.
@@ -3688,6 +3730,129 @@ mod tests {
             .expect("artifact materialized");
         assert_eq!(artifact.bytes_len, 5);
         assert!(matches!(artifact.storage, ArtifactStorage::Inline(_)));
+    }
+
+    #[test]
+    fn open_at_creates_project_db_and_spills_large_artifacts_under_state_dir_with_no_dot_tm() {
+        let tmp = TempDir::new().expect("tempdir");
+        // `state_dir` here is deliberately *not* named `.tm` and is not nested under a project
+        // root, the way a global-scope project's `$TM_HOME/projects/<key>/` would be.
+        let state_dir = tmp.path().join("global-state");
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store =
+            Store::open_with_at(&state_dir, clock, ids).expect("open_with_at should succeed");
+
+        assert!(
+            state_dir.join("project.db").exists(),
+            "open_at/open_with_at must create <state_dir>/project.db"
+        );
+        assert!(
+            !tmp.path().join(".tm").exists(),
+            "open_at/open_with_at must never create a .tm directory"
+        );
+        assert!(
+            !state_dir.join(".tm").exists(),
+            "open_at/open_with_at must never create a .tm directory under state_dir itself"
+        );
+        assert_eq!(store.state_dir(), state_dir.as_path());
+
+        let big = vec![0xABu8; crate::artifact::INLINE_LIMIT_BYTES + 1024];
+        let events = store
+            .store_artifact(
+                ArtifactKind::File,
+                "application/octet-stream".into(),
+                big.clone(),
+                serde_json::json!({}),
+                None,
+                actor(),
+            )
+            .expect("store_artifact");
+        let artifact_id = ArtifactId::new(events[0].subject.as_str()).unwrap();
+        let view = store.view().expect("view");
+        let artifact = view.artifacts.get(&artifact_id).expect("materialized");
+        match &artifact.storage {
+            ArtifactStorage::OnDisk(path) => {
+                assert!(
+                    path.starts_with(state_dir.join("artifacts")),
+                    "spilled artifact should live under <state_dir>/artifacts, got {path:?}"
+                );
+                let on_disk = std::fs::read(path).expect("read spilled bytes");
+                assert_eq!(on_disk, big);
+            }
+            ArtifactStorage::Inline(_) => panic!("bytes over INLINE_LIMIT_BYTES must spill"),
+        }
+        assert!(!tmp.path().join(".tm").exists());
+    }
+
+    #[test]
+    fn relocated_state_dir_reads_spilled_artifact_bytes_back_via_the_fallback() {
+        let tmp = TempDir::new().expect("tempdir");
+        let dir_a = tmp.path().join("a");
+        let dir_b = tmp.path().join("b");
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store_a =
+            Store::open_with_at(&dir_a, clock, ids).expect("open_with_at A should succeed");
+
+        let big = vec![0x5Au8; crate::artifact::INLINE_LIMIT_BYTES + 4096];
+        let events = store_a
+            .store_artifact(
+                ArtifactKind::File,
+                "application/octet-stream".into(),
+                big.clone(),
+                serde_json::json!({}),
+                None,
+                actor(),
+            )
+            .expect("store_artifact");
+        let artifact_id = ArtifactId::new(events[0].subject.as_str()).unwrap();
+
+        // The event/table-recorded storage descriptor is an absolute path under `dir_a`; it is
+        // never rewritten. Copy the whole state directory tree to `dir_b` (as `tm init`'s
+        // promotion will) and confirm a fresh `Store` opened at `dir_b` can still read the
+        // artifact's bytes back, via the read-time fallback to `<state_dir>/artifacts/<hash>`.
+        copy_dir_recursive(&dir_a, &dir_b);
+        drop(store_a);
+        // Simulate a genuine relocation (not just a copy that leaves the original in place, which
+        // would let the stale absolute path still resolve and never exercise the fallback).
+        std::fs::remove_dir_all(&dir_a).expect("remove original state dir");
+
+        let clock_b: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let ids_b: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store_b =
+            Store::open_with_at(&dir_b, clock_b, ids_b).expect("open_with_at B should succeed");
+        let view_b = store_b.view().expect("view B");
+        let artifact_b = view_b
+            .artifacts
+            .get(&artifact_id)
+            .expect("artifact present in relocated store");
+        let bytes_b = match &artifact_b.storage {
+            ArtifactStorage::OnDisk(path) => {
+                assert!(
+                    path.starts_with(&dir_b),
+                    "the read fallback must resolve to a path under the *new* state dir, got \
+                     {path:?}"
+                );
+                std::fs::read(path).expect("read relocated artifact bytes")
+            }
+            ArtifactStorage::Inline(_) => panic!("bytes over INLINE_LIMIT_BYTES must spill"),
+        };
+        assert_eq!(bytes_b, big, "relocated bytes must round-trip identically");
+    }
+
+    fn copy_dir_recursive(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).expect("create dest dir");
+        for entry in std::fs::read_dir(from).expect("read dir") {
+            let entry = entry.expect("dir entry");
+            let file_type = entry.file_type().expect("file type");
+            let dest = to.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_dir_recursive(&entry.path(), &dest);
+            } else {
+                std::fs::copy(entry.path(), &dest).expect("copy file");
+            }
+        }
     }
 
     #[test]

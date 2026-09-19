@@ -136,8 +136,13 @@ fn write_file_content(
 impl CodeIntel {
     /// Open (creating if absent) the code-intelligence index for the project at
     /// `project_root`, using the default no-network [`LocalHashEmbedder`].
+    ///
+    /// Shim over [`CodeIntel::open_at`] for the repo-scoped layout (index at
+    /// `<project_root>/.tm/index.db`, workspace = `project_root`); prefer [`CodeIntel::open_at`]
+    /// when the caller already knows the index directory (e.g. a global-scope project under
+    /// `$TM_HOME/projects/<key>/`).
     pub fn open(project_root: &Path) -> Result<CodeIntel> {
-        Self::open_with_embedder(project_root, Arc::new(LocalHashEmbedder::new()))
+        Self::open_at(&project_root.join(".tm"), project_root)
     }
 
     /// Open with an explicit embedder (e.g. an API-backed one supplied by a higher layer),
@@ -146,9 +151,32 @@ impl CodeIntel {
         project_root: &Path,
         embedder: Arc<dyn Embedder>,
     ) -> Result<CodeIntel> {
-        let store = Arc::new(Store::open(project_root)?);
+        Self::open_at_with_embedder(&project_root.join(".tm"), project_root, embedder)
+    }
+
+    /// Open (creating if absent) the code-intelligence index at `<index_dir>/index.db`, indexing
+    /// the workspace at `workspace_root`, using the default no-network [`LocalHashEmbedder`].
+    /// `index_dir` and `workspace_root` are independent: `index_dir` is where `index.db` lives
+    /// (a project's state directory), `workspace_root` is what gets walked/indexed (the git
+    /// toplevel or cwd) — see the `state_dir` vs. `root` distinction in D-003.
+    pub fn open_at(index_dir: &Path, workspace_root: &Path) -> Result<CodeIntel> {
+        Self::open_at_with_embedder(
+            index_dir,
+            workspace_root,
+            Arc::new(LocalHashEmbedder::new()),
+        )
+    }
+
+    /// Open at an explicit index directory and workspace root with an explicit embedder,
+    /// otherwise identical to [`CodeIntel::open_at`].
+    pub fn open_at_with_embedder(
+        index_dir: &Path,
+        workspace_root: &Path,
+        embedder: Arc<dyn Embedder>,
+    ) -> Result<CodeIntel> {
+        let store = Arc::new(Store::open_at(index_dir)?);
         Ok(CodeIntel {
-            project_root: project_root.to_path_buf(),
+            project_root: workspace_root.to_path_buf(),
             store,
             embedder,
             write_lock: Mutex::new(()),
@@ -542,6 +570,45 @@ mod tests {
         let embedder: Arc<dyn Embedder> = Arc::new(LocalHashEmbedder::new());
         let intel = CodeIntel::open_with_embedder(dir.path(), Arc::clone(&embedder)).expect("open");
         assert_eq!(intel.embedder.identifier(), embedder.identifier());
+    }
+
+    #[test]
+    fn open_at_separates_index_dir_from_workspace_and_writes_only_index_db_there() {
+        let workspace = new_project();
+        fs::write(
+            workspace.path().join("hello.py"),
+            "def greet():\n    return 'hi'\n",
+        )
+        .expect("write");
+        // `index_dir` is deliberately outside `workspace` and not named `.tm`, the way a
+        // global-scope project's `$TM_HOME/projects/<key>/` would be relative to the repo it
+        // indexes.
+        let state = TempDir::new().expect("state dir");
+        let index_dir = state.path().join("global-state");
+
+        let intel =
+            CodeIntel::open_at(&index_dir, workspace.path()).expect("open_at should succeed");
+        assert_eq!(intel.project_root(), workspace.path());
+        assert!(
+            index_dir.join("index.db").exists(),
+            "open_at must create <index_dir>/index.db"
+        );
+        assert!(
+            !workspace.path().join(".tm").exists(),
+            "open_at must never create a .tm directory under the workspace"
+        );
+
+        let clock = FixedClock::epoch();
+        let delta = intel
+            .update_incremental(&clock)
+            .expect("update_incremental should index the workspace");
+        assert_eq!(delta.files_added, 1);
+        assert!(delta.chunks_written >= 1);
+
+        // Still true after indexing: nothing was written under the workspace, only under
+        // `index_dir`.
+        assert!(!workspace.path().join(".tm").exists());
+        assert!(index_dir.join("index.db").exists());
     }
 
     #[test]

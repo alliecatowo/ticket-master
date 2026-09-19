@@ -1,8 +1,10 @@
 //! Artifacts and evidence: content-addressed storage (`SPEC.md` §4.6).
 //!
 //! Artifacts are addressed by their blake3 hash. Small ones (<= 64 KiB) live inline in SQLite;
-//! larger ones spill to `.tm/artifacts/<hash>` on disk. This module owns the pure
-//! hashing/threshold/path logic; `Store` owns the actual filesystem and SQLite I/O.
+//! larger ones spill to `<state_dir>/artifacts/<hash>` on disk, where `state_dir` is
+//! `Store::state_dir()` (`<root>/.tm` for a repo-scoped project, `$TM_HOME/projects/<key>/` for a
+//! global-scope one — see D-003). This module owns the pure hashing/threshold/path logic;
+//! `Store` owns the actual filesystem and SQLite I/O.
 
 use std::path::{Path, PathBuf};
 
@@ -37,7 +39,7 @@ pub enum ArtifactKind {
 pub enum ArtifactStorage {
     /// Bytes stored directly in the `artifacts` table.
     Inline(Vec<u8>),
-    /// Bytes spilled to `.tm/artifacts/<hash>`, relative to the project root.
+    /// Bytes spilled to `<state_dir>/artifacts/<hash>`.
     OnDisk(PathBuf),
 }
 
@@ -102,13 +104,13 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
 
 /// Decide storage placement for `bytes`: [`ArtifactStorage::Inline`] at or under
 /// [`INLINE_LIMIT_BYTES`], otherwise [`ArtifactStorage::OnDisk`] at
-/// `<project_root>/.tm/artifacts/<hash>`.
-pub fn plan_storage(project_root: &Path, bytes: &[u8]) -> (String, ArtifactStorage) {
+/// `<state_dir>/artifacts/<hash>`.
+pub fn plan_storage(state_dir: &Path, bytes: &[u8]) -> (String, ArtifactStorage) {
     let hash = hash_bytes(bytes);
     let storage = if bytes.len() <= INLINE_LIMIT_BYTES {
         ArtifactStorage::Inline(bytes.to_vec())
     } else {
-        ArtifactStorage::OnDisk(project_root.join(".tm").join("artifacts").join(&hash))
+        ArtifactStorage::OnDisk(state_dir.join("artifacts").join(&hash))
     };
     (hash, storage)
 }
@@ -148,11 +150,11 @@ mod tests {
 
     #[test]
     fn test_plan_storage_small_bytes_inline() {
-        let project_root = Path::new("/test/project");
+        let state_dir = Path::new("/test/project/.tm");
         let bytes = b"small content";
         assert!(bytes.len() <= INLINE_LIMIT_BYTES);
 
-        let (hash, storage) = plan_storage(project_root, bytes);
+        let (hash, storage) = plan_storage(state_dir, bytes);
 
         assert!(!hash.is_empty(), "hash should not be empty");
         match storage {
@@ -165,10 +167,10 @@ mod tests {
 
     #[test]
     fn test_plan_storage_empty_bytes_inline() {
-        let project_root = Path::new("/test/project");
+        let state_dir = Path::new("/test/project/.tm");
         let bytes = b"";
 
-        let (hash, storage) = plan_storage(project_root, bytes);
+        let (hash, storage) = plan_storage(state_dir, bytes);
 
         assert_eq!(
             hash,
@@ -187,10 +189,10 @@ mod tests {
 
     #[test]
     fn test_plan_storage_at_inline_limit() {
-        let project_root = Path::new("/test/project");
+        let state_dir = Path::new("/test/project/.tm");
         let bytes = vec![0u8; INLINE_LIMIT_BYTES];
 
-        let (hash, storage) = plan_storage(project_root, &bytes);
+        let (hash, storage) = plan_storage(state_dir, &bytes);
 
         assert!(!hash.is_empty());
         match storage {
@@ -205,10 +207,10 @@ mod tests {
 
     #[test]
     fn test_plan_storage_just_over_inline_limit() {
-        let project_root = Path::new("/test/project");
+        let state_dir = Path::new("/test/project/.tm");
         let bytes = vec![0u8; INLINE_LIMIT_BYTES + 1];
 
-        let (hash, storage) = plan_storage(project_root, &bytes);
+        let (hash, storage) = plan_storage(state_dir, &bytes);
 
         assert!(!hash.is_empty());
         match storage {
@@ -224,10 +226,10 @@ mod tests {
 
     #[test]
     fn test_plan_storage_large_bytes_ondisk() {
-        let project_root = Path::new("/test/project");
+        let state_dir = Path::new("/test/project/.tm");
         let bytes = vec![0xFFu8; 1024 * 1024]; // 1 MiB
 
-        let (hash, storage) = plan_storage(project_root, &bytes);
+        let (hash, storage) = plan_storage(state_dir, &bytes);
 
         assert!(!hash.is_empty());
         match storage {
@@ -248,7 +250,7 @@ mod tests {
                     hash
                 );
                 // Verify path structure
-                assert_eq!(path, project_root.join(".tm").join("artifacts").join(&hash));
+                assert_eq!(path, state_dir.join("artifacts").join(&hash));
             }
         }
     }
@@ -256,8 +258,8 @@ mod tests {
     #[test]
     fn test_plan_storage_different_project_roots() {
         let bytes = b"test content";
-        let root1 = Path::new("/project/one");
-        let root2 = Path::new("/project/two");
+        let root1 = Path::new("/project/one/.tm");
+        let root2 = Path::new("/project/two/.tm");
 
         let (hash1, storage1) = plan_storage(root1, bytes);
         let (hash2, storage2) = plan_storage(root2, bytes);
@@ -277,14 +279,14 @@ mod tests {
 
     #[test]
     fn test_plan_storage_path_with_spaces() {
-        let project_root = Path::new("/path with spaces/project");
+        let state_dir = Path::new("/path with spaces/project/.tm");
         let bytes = vec![0u8; INLINE_LIMIT_BYTES + 100];
 
-        let (_hash, storage) = plan_storage(project_root, bytes.as_ref());
+        let (_hash, storage) = plan_storage(state_dir, bytes.as_ref());
 
         match storage {
             ArtifactStorage::OnDisk(path) => {
-                assert!(path.starts_with(project_root));
+                assert!(path.starts_with(state_dir));
             }
             _ => panic!("large bytes should be on disk"),
         }

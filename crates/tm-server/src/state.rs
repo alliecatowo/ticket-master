@@ -6,7 +6,8 @@
 //! * `store` — the single [`tm_core::Store`] open on the project, the only thing that ever
 //!   writes durable state.
 //! * `events`/`broadcaster` — a *second*, read-only [`EventLog`] opened on the same
-//!   `.tm/project.db`, plus an in-process [`EventHub`] this crate feeds by polling that log.
+//!   `config.state_dir`-relative `project.db`, plus an in-process [`EventHub`] this crate feeds
+//!   by polling that log.
 //!   This split exists because `Store` does not expose its internal `EventLog` or a
 //!   subscribe hook: two `EventLog` handles on the same WAL-mode SQLite file see each other's
 //!   committed writes just fine for reads (`read_from`/`head`), so a small polling loop
@@ -41,8 +42,13 @@ use crate::presence::PresenceTable;
 /// Server-wide configuration, resolved once at startup.
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
-    /// The project root this server serves (`.tm/project.db` lives under it).
+    /// The project root this server serves (the workspace, used for wiki/CodeIntel — see
+    /// `crate::wiki`).
     pub project_root: PathBuf,
+    /// The project's state directory (`project.db`/`index.db`/`artifacts/` live under it). For
+    /// a repo-scoped project this is `<project_root>/.tm`; a global-scope project's state
+    /// directory lives elsewhere (`$TM_HOME/projects/<key>/`) — see D-003.
+    pub state_dir: PathBuf,
     /// The address the HTTP listener binds to.
     pub bind_addr: SocketAddr,
     /// Bearer token required when `bind_addr` is not loopback. `None` is only valid alongside a
@@ -95,23 +101,23 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// Open `store` and a second read-only `EventLog` on `config.project_root`, with fresh empty
+    /// Open `store` and a second read-only `EventLog` on `config.state_dir`, with fresh empty
     /// presence/approval tables and a not-yet-started broadcaster.
     ///
     /// # Errors
-    /// Whatever [`tm_core::Store::open_with`]/[`EventLog::open_with_clock`] return opening the
+    /// Whatever [`tm_core::Store::open_with_at`]/[`EventLog::open_with_clock`] return opening the
     /// project database.
     pub fn open(
         config: ServerConfig,
         clock: Arc<dyn Clock>,
         ids: Arc<dyn IdSource>,
     ) -> tm_types::Result<Self> {
-        let store = Arc::new(Store::open_with(
-            &config.project_root,
+        let store = Arc::new(Store::open_with_at(
+            &config.state_dir,
             clock.clone(),
             ids.clone(),
         )?);
-        let db_path = config.project_root.join(".tm").join("project.db");
+        let db_path = config.state_dir.join("project.db");
         let events = Arc::new(EventLog::open_with_clock(&db_path, clock.clone())?);
         Ok(AppState {
             store,
@@ -447,6 +453,7 @@ mod tests {
     fn server_config_requires_auth_on_non_loopback() {
         let config = ServerConfig {
             project_root: PathBuf::from("/tmp/test"),
+            state_dir: PathBuf::from("/tmp/test/.tm"),
             bind_addr: "127.0.0.1:8080".parse().unwrap(),
             token: None,
             presence_ttl_seconds: 300,
@@ -460,6 +467,7 @@ mod tests {
     fn server_config_requires_auth_on_non_loopback_ip() {
         let config = ServerConfig {
             project_root: PathBuf::from("/tmp/test"),
+            state_dir: PathBuf::from("/tmp/test/.tm"),
             bind_addr: (IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 8080).into(),
             token: Some("token".into()),
             presence_ttl_seconds: 300,
