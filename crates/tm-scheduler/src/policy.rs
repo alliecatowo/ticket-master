@@ -130,6 +130,18 @@ pub struct SchedulingPolicy {
     /// `human_required` tickets) immediately before calling `plan`, the same way it snapshots
     /// `SchedulerView` from `Store`.
     pub available_roles: BTreeSet<Role>,
+    /// Project-wide ceiling on the total number of events one ticket's subject may accumulate
+    /// before a goal-oriented worker loop must stop regardless of its own `CycleBudget`/step
+    /// limit (`SPEC.md` §29, `docs/audit-2026-09-18-fable.md` B-09's "dumb global backstop",
+    /// mirroring §21.5's phrase for idempotent effects). Named here so a caller that assembles
+    /// both a `SchedulingPolicy` and a `tm_agent::agent_loop::AgentLoop` for the same project can
+    /// derive one ceiling and keep the two in agreement; nothing in `tm-scheduler` itself reads
+    /// or enforces this field (no ticket, lease or event lives on `SchedulerView`), and no
+    /// `Cargo.toml` dependency runs from `tm-agent` to this crate, so the actual enforcement is
+    /// `tm_agent::agent_loop::DEFAULT_MAX_EVENTS_PER_TICKET` / `AgentLoop::
+    /// with_max_events_per_ticket` — see that constant's doc comment for the same default value
+    /// and the arithmetic behind it.
+    pub max_events_per_ticket: u32,
 }
 
 impl SchedulingPolicy {
@@ -149,6 +161,9 @@ impl SchedulingPolicy {
             harness_capacity_fraction: 0.125,
             milestone_deadlines: BTreeMap::new(),
             available_roles: BTreeSet::new(),
+            // Matches `tm_agent::agent_loop::DEFAULT_MAX_EVENTS_PER_TICKET` exactly; see this
+            // field's own doc comment for why the two are duplicated rather than shared.
+            max_events_per_ticket: 5000,
         }
     }
 
@@ -215,6 +230,7 @@ mod tests {
         assert_eq!(policy.harness_capacity_fraction, 0.125);
         assert!(policy.milestone_deadlines.is_empty());
         assert!(policy.available_roles.is_empty());
+        assert_eq!(policy.max_events_per_ticket, 5000);
     }
 
     #[test]

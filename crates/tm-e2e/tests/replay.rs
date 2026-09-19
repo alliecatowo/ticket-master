@@ -110,15 +110,44 @@ fn build_fixture_project(store: &tm_core::Store) {
         )])
         .expect("append provider.selected");
 
+    // The goal loop (`SPEC.md` §29, `docs/audit-2026-09-18-fable.md` B-09): one event of each of
+    // the five `goal.*` kinds, so `rebuild_reproduces_byte_identical_state_over_200_events` below
+    // exercises the `goals` materializer arms too, not just the B-05 ones above.
+    store
+        .set_goal(
+            &doc_ticket,
+            "keep the architecture doc in sync".into(),
+            system.clone(),
+        )
+        .expect("set_goal");
+    store
+        .add_goal_step(
+            &doc_ticket,
+            "step-1".into(),
+            "review the current doc".into(),
+            system.clone(),
+        )
+        .expect("add_goal_step");
+    store
+        .complete_goal_step(&doc_ticket, "step-1".into(), system.clone())
+        .expect("complete_goal_step");
+    store
+        .reorient_goal(&doc_ticket, 2, system.clone())
+        .expect("reorient_goal");
+    store
+        .claim_goal_complete(&doc_ticket, "doc reconciled".into(), system.clone())
+        .expect("claim_goal_complete");
+
     store
         .record_command("cargo test -p tm-core".into(), None, None, 0, 4200, system)
         .expect("record_command");
 }
 
-/// Row counts for every table B-05 gave a durable write path, keyed by table name, read directly
-/// off the raw connection (no `Store` read API for these exists yet — out of B-05's scope — so
-/// this mirrors how `hash_chain_detects_a_tampered_event` below already reaches for a raw
-/// connection when the fixture needs to see something `Store`'s own API doesn't expose).
+/// Row counts for every table B-05 gave a durable write path, plus `goals` (B-09), keyed by table
+/// name, read directly off the raw connection rather than through `Store::goal_state` (which
+/// exists for `goals`, unlike the B-05 tables here) so every row in this snapshot is captured the
+/// same uniform way, mirroring how `hash_chain_detects_a_tampered_event` below already reaches
+/// for a raw connection when the fixture needs to see something `Store`'s own API doesn't expose.
 fn b05_table_snapshot(db_path: &std::path::Path) -> Vec<(&'static str, Vec<String>)> {
     let conn = rusqlite::Connection::open(db_path).expect("open raw connection");
     let tables: &[(&str, &str)] = &[
@@ -128,6 +157,7 @@ fn b05_table_snapshot(db_path: &std::path::Path) -> Vec<(&'static str, Vec<Strin
         ("provider_usage", "SELECT provider || '|' || model || '|' || tokens_used || '|' || dollars_micros FROM provider_usage ORDER BY provider, model"),
         ("harness_epochs", "SELECT epoch || '|' || harness_config || '|' || ts FROM harness_epochs ORDER BY epoch"),
         ("mirror_links", "SELECT ticket || '|' || remote_id || '|' || remote_system || '|' || last_synced FROM mirror_links ORDER BY ticket"),
+        ("goals", "SELECT ticket || '|' || text || '|' || steps || '|' || claimed_complete || '|' || last_reoriented_step FROM goals ORDER BY ticket"),
     ];
     tables
         .iter()
