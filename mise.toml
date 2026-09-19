@@ -4,3 +4,64 @@ node = "latest"
 pnpm = "latest"
 rust = "latest"
 uv = "latest"
+
+# Every task here is the canonical way to do this thing in this repo. Use `mise run <task>`
+# instead of hand-rolling the equivalent `cargo`/`rm` invocation, so build flags (job caps on
+# this machine, hygiene, -p scoping) never drift between people and sessions working here.
+
+[tasks.build]
+description = "Build the tm binary only (fast default for a quick compile check)"
+run = "cargo build -p tm-cli -j 2"
+
+[tasks."build:all"]
+description = "Build the entire workspace"
+run = "cargo build --workspace -j 2"
+
+[tasks.test]
+description = "Run the whole workspace test suite"
+run = "cargo test --workspace -j 2"
+
+[tasks."test:crate"]
+description = "Run one crate's tests: mise run test:crate -- tm-core"
+run = "cargo test -j 2 -p {{arg(name='crate')}}"
+
+[tasks.clippy]
+description = "Lint the whole workspace with warnings denied, matching CI"
+run = "cargo clippy --workspace --all-targets -j 2 -- -D warnings"
+
+[tasks.fmt]
+description = "Apply rustfmt across the workspace (xtask fmt)"
+run = "cargo run -p xtask -- fmt"
+
+[tasks.hygiene]
+description = "Run the xtask hygiene scan alone (fast; catches non-determinism, unwrap/expect, network-in-tests, stray .tm literals)"
+run = "cargo run -p xtask -- hygiene"
+
+[tasks.verify]
+description = "The full gate: fmt check + clippy -D warnings + cargo test --workspace + hygiene. Run this before considering any change done."
+run = "cargo run -p xtask -- verify"
+
+[tasks.clean]
+description = "Delete target/ to reclaim disk (this machine has real disk pressure; do this after a verify pass, not mid-build)"
+run = "rm -rf target"
+
+[tasks.tui]
+description = "Build and launch the ratatui TUI against the current directory's project"
+run = "cargo run -p tm-cli --bin tm"
+
+[tasks.doctor]
+description = "Run tm doctor against the current directory"
+run = "cargo run -p tm-cli --bin tm -- doctor"
+
+[tasks.dev]
+description = "Build + run the TUI with debug logging to stderr (RUST_LOG=tm=debug)"
+run = "RUST_LOG=tm=debug,tm_core=debug,tm_agent=debug cargo run -p tm-cli --bin tm 2> /tmp/tm-dev.log"
+
+[tasks."worktree:clean"]
+description = "Remove every merged worktree under .claude/worktrees/ and prune"
+run = """
+for wt in .claude/worktrees/*/; do
+  git worktree remove --force "$wt" 2>/dev/null || true
+done
+git worktree prune
+"""
