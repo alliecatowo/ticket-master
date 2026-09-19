@@ -89,7 +89,9 @@ use std::sync::Arc;
 use tm_types::Clock;
 
 use crate::fabric::{Fabric, Provider};
-use crate::providers::{Capabilities, EnvVarRequirement, ProviderInfo};
+use crate::providers::{
+    Availability, Capabilities, EnvVarRequirement, LocalProbe, ProviderInfo, LOCAL_PROVIDER_IDS,
+};
 use crate::role_config::{RoleCandidate, RoleTable};
 use crate::types::{ModelId, ProviderError};
 
@@ -150,6 +152,77 @@ impl Registry {
             .into_iter()
             .filter(|info| info.is_configured())
             .collect()
+    }
+
+    /// `GET /v1/models` against one of [`LOCAL_PROVIDER_IDS`], returning the model ids it lists.
+    /// Dispatches by `id` to the matching struct's `from_env`/`list_models`, mirroring
+    /// [`Registry::build_provider`]'s dispatch shape but scoped to the three local backends.
+    /// `Err` for a non-local `id` (this is not a general "list models for any backend" method —
+    /// only the three local backends have a cheap, key-free `/v1/models` this crate can call
+    /// speculatively).
+    pub async fn local_models(
+        id: &str,
+        clock: Arc<dyn Clock>,
+    ) -> Result<Vec<String>, ProviderError> {
+        match id {
+            "ollama" => {
+                crate::providers::local::OllamaProvider::from_env(ModelId::new(id, "probe"), clock)?
+                    .list_models()
+                    .await
+            }
+            "lm-studio" => {
+                crate::providers::local::LmStudioProvider::from_env(
+                    ModelId::new(id, "probe"),
+                    clock,
+                )?
+                .list_models()
+                .await
+            }
+            "llama-cpp" => {
+                crate::providers::local::LlamaCppProvider::from_env(
+                    ModelId::new(id, "probe"),
+                    clock,
+                )?
+                .list_models()
+                .await
+            }
+            other => Err(ProviderError::InvalidRequest(format!(
+                "not a local backend with a reachability probe: {other}"
+            ))),
+        }
+    }
+
+    /// Short-timeout reachability probe for one [`LOCAL_PROVIDER_IDS`] backend, richer than
+    /// [`Availability`]: distinguishes nothing listening from a live server with zero models
+    /// pulled, which a caller such as `tm-cli`'s `genesis` command needs in order to pick an
+    /// actually-usable `(provider, model)` pair rather than just reporting a yes/no.
+    pub async fn probe_local(id: &str, clock: Arc<dyn Clock>) -> LocalProbe {
+        match Self::local_models(id, clock).await {
+            Ok(models) if models.is_empty() => LocalProbe::ReachableNoModels,
+            Ok(models) => LocalProbe::Ready {
+                first_model: models[0].clone(),
+            },
+            Err(_) => LocalProbe::Unreachable,
+        }
+    }
+
+    /// The honest three-state [`Availability`] for one [`ProviderInfo`], probing reachability for
+    /// the three [`LOCAL_PROVIDER_IDS`] backends (whose `is_configured()` is vacuously `true`
+    /// with nothing listening, per `providers::local`'s module docs) and falling back to
+    /// [`ProviderInfo::is_configured`] alone for every other backend — this crate has no general
+    /// reachability probe for a paid third-party API, only for the three that can be probed for
+    /// free with no key.
+    pub async fn availability(info: &ProviderInfo, clock: Arc<dyn Clock>) -> Availability {
+        let is_configured = info.is_configured();
+        if !is_configured {
+            return Availability::NotConfigured;
+        }
+        if LOCAL_PROVIDER_IDS.contains(&info.id) {
+            let reachable = Self::probe_local(info.id, clock).await.reachable();
+            Availability::derive(is_configured, Some(reachable))
+        } else {
+            Availability::derive(is_configured, None)
+        }
     }
 
     /// Construct one [`Provider`] for `candidate`, dispatching on [`RoleCandidate::provider`].

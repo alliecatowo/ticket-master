@@ -198,14 +198,8 @@ fn render_attach_report(report: &tm_genesis::attach::AttachReport) -> String {
     sections.join("\n\n")
 }
 
-/// `ANTHROPIC_API_KEY` must be set for [`genesis`] to run: every stage calls a real model
-/// provider, and failing fast with a precise message beats an opaque provider error mid-run.
-fn require_anthropic_api_key() -> tm_types::Result<()> {
-    api_key_gate(std::env::var("ANTHROPIC_API_KEY"))
-}
-
-/// Pure gating logic behind [`require_anthropic_api_key`], split out so the presence check is
-/// testable without reading or writing the real process environment.
+/// Pure gating logic behind [`resolve_genesis_provider`]'s `ANTHROPIC_API_KEY` check, split out
+/// so the presence check is testable without reading or writing the real process environment.
 fn api_key_gate(key: Result<String, std::env::VarError>) -> tm_types::Result<()> {
     if key.is_ok() {
         Ok(())
@@ -258,6 +252,98 @@ where
     .unwrap_or_else(|_| Err(TmError::invariant("background async task panicked")))
 }
 
+/// Resolve the single [`tm_provider::Provider`] [`genesis`] should use for this run.
+///
+/// Keeps the original behavior byte-for-byte when `ANTHROPIC_API_KEY` is set: build
+/// `AnthropicProvider` from `RoleTable::default_table`'s `VisionFrontier` candidate, same as
+/// before this function existed, and return `None` for the note (nothing changed, so genesis
+/// stays silent about a choice that didn't move).
+///
+/// Only when `ANTHROPIC_API_KEY` is *not* set does this probe for a fallback: the three
+/// zero-account local backends in [`tm_provider::LOCAL_PROVIDER_IDS`], in priority order, each a
+/// single short-timeout `GET /v1/models` (`tm_provider::providers::local::PROBE_TIMEOUT`,
+/// currently 750ms) — a brand-new user who has never heard of `ANTHROPIC_API_KEY` but happens to
+/// have Ollama running locally should not be stuck with a bare "set this env var" error. The
+/// first one that answers with at least one model pulled is used automatically (with a printed
+/// note saying so, never silently); if none does, the error names what's actually true about
+/// each local backend's state plus the fastest zero-cost next step, rather than only mentioning
+/// Anthropic.
+///
+/// This gate (probe only when nothing else is configured) is deliberate: a slow-by-comparison
+/// network probe has no business running on every `tm genesis` invocation that already has a
+/// working `ANTHROPIC_API_KEY`.
+fn resolve_genesis_provider(
+    clock: Arc<dyn Clock>,
+) -> tm_types::Result<(Arc<dyn tm_provider::Provider>, Option<String>)> {
+    if api_key_gate(std::env::var("ANTHROPIC_API_KEY")).is_ok() {
+        let table = tm_provider::RoleTable::default_table();
+        let candidate = table
+            .candidates_for(tm_types::Role::VisionFrontier)
+            .first()
+            .cloned()
+            .ok_or_else(|| {
+                TmError::invariant("default role table has no VisionFrontier candidate")
+            })?;
+        let model = tm_provider::ModelId::new(candidate.provider.clone(), candidate.model.clone());
+        let provider = tm_provider::AnthropicProvider::from_env(model, clock)
+            .map_err(|e| TmError::Provider(e.to_string()))?;
+        return Ok((Arc::new(provider), None));
+    }
+
+    let probe_clock = clock.clone();
+    let probes: Vec<(&'static str, tm_provider::LocalProbe)> = run_async(move || async move {
+        let mut results = Vec::with_capacity(tm_provider::LOCAL_PROVIDER_IDS.len());
+        for id in tm_provider::LOCAL_PROVIDER_IDS {
+            let probe = tm_provider::Registry::probe_local(id, probe_clock.clone()).await;
+            results.push((id, probe));
+        }
+        Ok(results)
+    })?;
+
+    if let Some((id, model)) = probes.iter().find_map(|(id, probe)| match probe {
+        tm_provider::LocalProbe::Ready { first_model } => Some((*id, first_model.clone())),
+        _ => None,
+    }) {
+        let candidate = tm_provider::RoleCandidate {
+            provider: id.to_string(),
+            model: model.clone(),
+            max_concurrency: 1,
+            degraded_ok: false,
+            price: None,
+            limits: tm_provider::role_config::Limits::unlimited(),
+        };
+        let provider = tm_provider::Registry::build_provider(&candidate, clock)
+            .map_err(|e| TmError::Provider(e.to_string()))?;
+        let note = format!(
+            "ANTHROPIC_API_KEY is not set; using detected local provider `{id}` (model \
+             `{model}`) for Genesis instead. Set ANTHROPIC_API_KEY to use Anthropic instead."
+        );
+        return Ok((provider, Some(note)));
+    }
+
+    let detail = probes
+        .iter()
+        .map(|(id, probe)| match probe {
+            tm_provider::LocalProbe::Unreachable => format!("{id}: not running"),
+            tm_provider::LocalProbe::ReachableNoModels => {
+                format!("{id}: running, no models pulled yet")
+            }
+            tm_provider::LocalProbe::Ready { .. } => {
+                unreachable!("a Ready probe would have returned above")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    Err(TmError::Provider(format!(
+        "ANTHROPIC_API_KEY is not set and no local model provider is reachable ({detail}). \
+         Fastest zero-cost path: install Ollama (https://ollama.com) and run `ollama pull \
+         <model>`, then re-run `tm genesis`. Or set ANTHROPIC_API_KEY, or (if you have a GitHub \
+         account) run `gh auth login` and export GITHUB_TOKEN=$(gh auth token) to route through \
+         GitHub Models instead."
+    )))
+}
+
 /// `tm genesis [--prompt <text>|-]`: turn a prompt into a running project via the Genesis stage
 /// driver.
 pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> {
@@ -266,7 +352,6 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
         std::io::stdin().is_terminal(),
         std::io::stdin(),
     )?;
-    require_anthropic_api_key()?;
 
     let dir = std::env::current_dir()?;
     let root = if dir.join(".tm").is_dir() {
@@ -278,18 +363,13 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
 
     // A single candidate stands in for "the fabric": `GenesisDriver` takes one `Provider` for
     // its whole run (every stage, regardless of role), so there is no per-call routing decision
-    // for a `Fabric` to make here. `RoleTable::default_table` still names which (provider,
-    // model) pair Genesis should use, keeping that choice in one place shared with `tm-provider`
-    // configuration rather than hardcoding a model string in this crate.
-    let table = tm_provider::RoleTable::default_table();
-    let candidate = table
-        .candidates_for(tm_types::Role::VisionFrontier)
-        .first()
-        .cloned()
-        .ok_or_else(|| TmError::invariant("default role table has no VisionFrontier candidate"))?;
-    let model = tm_provider::ModelId::new(candidate.provider.clone(), candidate.model.clone());
-    let provider = tm_provider::AnthropicProvider::from_env(model, project.clock.clone())
-        .map_err(|e| TmError::Provider(e.to_string()))?;
+    // for a `Fabric` to make here. See `resolve_genesis_provider` for how that one provider gets
+    // picked — unchanged (Anthropic via `RoleTable::default_table`) when `ANTHROPIC_API_KEY` is
+    // set, falling back to a reachable zero-signup local provider when it is not.
+    let (provider, fallback_note) = resolve_genesis_provider(project.clock.clone())?;
+    if let Some(note) = &fallback_note {
+        renderer.note(note);
+    }
 
     // `GenesisState::project` is the only channel `GenesisDriver` has for threading the raw
     // prompt into `Stage::Seed`'s `analyze_prompt` call (it hands `state.project` straight to
@@ -303,7 +383,7 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
         let mut state = initial_state;
         let driver = tm_genesis::GenesisDriver::new(
             project.store.as_ref(),
-            &provider,
+            provider.as_ref(),
             project.clock.as_ref(),
             project.ids.as_ref(),
         );
@@ -715,8 +795,92 @@ fn render_doctor_report(report: &DoctorReport) -> String {
     .render()
 }
 
-/// `tm doctor`: invariants, the hash-chain check, index health, and (unless
-/// `--skip-computer-probe`) the computer-use permission probes.
+/// Build `tm doctor`'s `"providers"` check: whether any model provider is actually usable right
+/// now, prioritizing the genuinely free/zero-signup options ahead of anything that needs a new
+/// signup — matching this crate's onboarding goal of not leaving a fresh install stuck with no
+/// guidance toward a free path. Ordering, deliberately: the three local backends
+/// ([`tm_provider::LOCAL_PROVIDER_IDS`] — Ollama, LM Studio, llama.cpp: no account at all, and the
+/// only backends this function actually probes for reachability, via
+/// [`tm_provider::Registry::probe_local`]), then GitHub Models (a token most developers already
+/// have from `gh auth login`, checked by env-var presence only — this deliberately does not shell
+/// out to `gh auth status`, which validates against the network with no timeout this crate
+/// controls), then every other known backend, reported as configured/not by env-var presence
+/// alone (this crate has no free way to probe a paid third-party API's reachability).
+///
+/// This check is always `ok: true` — it is advisory ("here's what's available, here's the
+/// fastest free path if nothing is"), not a correctness invariant like `"invariants"` or
+/// `"hash-chain"`; a freshly-`tm init`'d project genuinely has no provider configured yet, and
+/// that is expected, not a doctor failure.
+async fn provider_doctor_detail(clock: Arc<dyn Clock>) -> DoctorCheck {
+    let known = tm_provider::Registry::known_providers();
+
+    let mut local_lines = Vec::with_capacity(tm_provider::LOCAL_PROVIDER_IDS.len());
+    let mut any_local_ready = false;
+    for id in tm_provider::LOCAL_PROVIDER_IDS {
+        let probe = tm_provider::Registry::probe_local(id, clock.clone()).await;
+        local_lines.push(match &probe {
+            tm_provider::LocalProbe::Unreachable => format!("{id}: not running"),
+            tm_provider::LocalProbe::ReachableNoModels => {
+                format!("{id}: running, no models pulled yet")
+            }
+            tm_provider::LocalProbe::Ready { first_model } => {
+                any_local_ready = true;
+                format!("{id}: ready (model \"{first_model}\")")
+            }
+        });
+    }
+
+    let github_configured = known
+        .iter()
+        .find(|info| info.id == "github-models")
+        .is_some_and(tm_provider::ProviderInfo::is_configured);
+    let github_line = if github_configured {
+        "github-models: ready (GITHUB_TOKEN set)".to_string()
+    } else {
+        "github-models: GITHUB_TOKEN not set (if you use the gh CLI: export \
+         GITHUB_TOKEN=$(gh auth token))"
+            .to_string()
+    };
+
+    let mut other_lines = Vec::new();
+    let mut any_other_ready = false;
+    for info in &known {
+        if tm_provider::LOCAL_PROVIDER_IDS.contains(&info.id) || info.id == "github-models" {
+            continue;
+        }
+        if info.is_configured() {
+            any_other_ready = true;
+            other_lines.push(format!("{}: ready", info.id));
+        }
+    }
+
+    let any_ready = any_local_ready || github_configured || any_other_ready;
+
+    let mut detail = local_lines.join("; ");
+    detail.push_str("; ");
+    detail.push_str(&github_line);
+    if !other_lines.is_empty() {
+        detail.push_str("; ");
+        detail.push_str(&other_lines.join("; "));
+    }
+    if !any_ready {
+        detail.push_str(
+            "; no model provider is ready. Fastest zero-cost path: install Ollama \
+             (https://ollama.com) and run `ollama pull <model>`, or, if you have a GitHub \
+             account, run `gh auth login` and export GITHUB_TOKEN=$(gh auth token) to use \
+             GitHub Models.",
+        );
+    }
+
+    DoctorCheck {
+        name: "providers".to_string(),
+        ok: true,
+        detail,
+    }
+}
+
+/// `tm doctor`: invariants, the hash-chain check, index health, provider availability, and
+/// (unless `--skip-computer-probe`) the computer-use permission probes.
 pub fn doctor(
     project: &Project,
     args: &DoctorArgs,
@@ -775,6 +939,12 @@ pub fn doctor(
         },
     };
     checks.push(index_check);
+
+    let provider_check = run_async(|| async {
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        Ok(provider_doctor_detail(clock).await)
+    })?;
+    checks.push(provider_check);
 
     if !args.skip_computer_probe {
         let probed = run_async(|| async {
