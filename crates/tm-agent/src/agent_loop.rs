@@ -29,6 +29,7 @@ use tm_types::{
 use crate::outcome::{
     AgentOutcome, AgentTask, BudgetDimension, PendingApproval, StepRecord, ToolCallRecord,
 };
+use crate::pruning;
 use crate::session::Session;
 use crate::tools::{ToolCall, ToolOutcome, ToolRegistry};
 
@@ -395,7 +396,6 @@ impl AgentLoop {
             extra: BTreeMap::new(),
         };
         let rendered = crate::prompt::render(&task.ticket, &task.context_pack, &fragments);
-        let mut messages = rebuild_messages(&rendered.task, &steps);
 
         loop {
             if steps.len() as u32 >= self.max_steps {
@@ -409,9 +409,26 @@ impl AgentLoop {
                 return Ok(AgentOutcome::BudgetExhausted { steps, exhausted });
             }
 
+            // Rebuilt from `steps` fresh every turn (`SPEC.md` §30.4,
+            // `docs/audit-2026-09-18-fable.md` B-08) rather than carried as a live buffer
+            // mutated in place: that is what lets a superseded tool result (a re-read path, a
+            // re-run query, a read whose file was since edited) drop out of what gets re-sent on
+            // *this* turn even when it became stale earlier in the same `drive` call, not just
+            // across a suspend/resume boundary.
+            let pruning_stats = pruning::working_set(&steps);
+            if pruning_stats.bytes_pruned > 0 {
+                tracing::debug!(
+                    next_step = steps.len() as u32 + 1,
+                    bytes_pruned = pruning_stats.bytes_pruned,
+                    tokens_pruned = pruning_stats.tokens_pruned,
+                    "context working set pruned stale tool results before this turn's request"
+                );
+            }
+            let messages = rebuild_messages(&rendered.task, &steps);
+
             let request = CompletionRequest {
                 system: Some(rendered.system.clone()),
-                messages: messages.clone(),
+                messages,
                 tools: self.tools.tool_defs_for(&effective_authority),
                 max_tokens: MAX_TOKENS_PER_STEP,
                 temperature: Some(0.0),
@@ -573,26 +590,15 @@ impl AgentLoop {
                 }
             }
 
-            messages.push(Message {
-                role: MessageRole::Assistant,
-                content: candidate.content,
-            });
-            let result_blocks = tool_call_records
-                .iter()
-                .map(|tcr| {
-                    let (text, is_error) = tool_result_text(&tcr.resolution);
-                    ContentBlock::ToolResult {
-                        tool_use_id: tcr.tool_use_id.clone(),
-                        content: vec![ContentBlock::Text { text }],
-                        is_error,
-                    }
-                })
-                .collect();
-            messages.push(Message {
-                role: MessageRole::User,
-                content: result_blocks,
-            });
-
+            // No live `messages` buffer to append to: the next loop iteration rebuilds the whole
+            // conversation from `steps` (now including the step pushed below) via
+            // `pruning::working_set`, which is what lets this turn's own tool results become
+            // prunable on a later turn within this same `drive` call, not just after a
+            // suspend/resume. `candidate.content` itself (the raw assistant turn straight off
+            // the wire, unlike the promoted `StepRecord` shape) is intentionally discarded here
+            // rather than folded into `steps` — `assistant_text`/`tool_call_records` already
+            // carry everything `rebuild_messages` needs to reconstruct an equivalent assistant
+            // turn on replay.
             steps.push(StepRecord {
                 index: step_index,
                 served_by,
@@ -650,7 +656,21 @@ fn project_root() -> std::path::PathBuf {
 /// and `steps` alone, so a resumed run never needs a live message buffer carried across a
 /// suspension boundary: everything the provider needs to see is already durable in the
 /// transcript.
-fn rebuild_messages(task_prompt: &str, steps: &[StepRecord]) -> Vec<Message> {
+///
+/// Renders `pruning::working_set(steps)` rather than `steps` directly (`SPEC.md` §30.4,
+/// `docs/audit-2026-09-18-fable.md` B-08): a `Superseded` verdict swaps that call's result for a
+/// short `[superseded by step N]` stub instead of dropping it outright, since the wire format
+/// requires every `ToolResult` to stay paired with the `ToolUse` that requested it — the full
+/// original content is never lost, it just stops being what a *future* turn's request re-sends;
+/// it stays durable wherever `steps` itself came from (the event log, per B-07).
+///
+/// [`AgentLoop::drive`] separately calls `pruning::working_set` again right before this, purely
+/// to log `bytes_pruned`/`tokens_pruned` for the turn's trace line — a second call to a pure,
+/// small (at most [`DEFAULT_MAX_STEPS`] steps) function, traded deliberately for keeping this a
+/// single testable entry point with the exact name/shape `docs/audit-2026-09-18-fable.md` B-08
+/// asks for, rather than threading a working set through as an extra parameter.
+pub(crate) fn rebuild_messages(task_prompt: &str, steps: &[StepRecord]) -> Vec<Message> {
+    let working_set = pruning::working_set(steps);
     let mut messages = vec![Message {
         role: MessageRole::User,
         content: vec![ContentBlock::Text {
@@ -658,7 +678,8 @@ fn rebuild_messages(task_prompt: &str, steps: &[StepRecord]) -> Vec<Message> {
         }],
     }];
 
-    for step in steps {
+    for step_ref in &working_set.steps {
+        let step = step_ref.step;
         let mut assistant_content = Vec::new();
         if let Some(text) = &step.assistant_text {
             assistant_content.push(ContentBlock::Text { text: text.clone() });
@@ -679,8 +700,14 @@ fn rebuild_messages(task_prompt: &str, steps: &[StepRecord]) -> Vec<Message> {
             let result_blocks = step
                 .tool_calls
                 .iter()
-                .map(|tc| {
-                    let (text, is_error) = tool_result_text(&tc.resolution);
+                .zip(&step_ref.tool_call_states)
+                .map(|(tc, state)| {
+                    let (text, is_error) = match state {
+                        pruning::ToolCallState::Full => tool_result_text(&tc.resolution),
+                        pruning::ToolCallState::Superseded { by_step } => {
+                            (format!("[superseded by step {by_step}]"), false)
+                        }
+                    };
                     ContentBlock::ToolResult {
                         tool_use_id: tc.tool_use_id.clone(),
                         content: vec![ContentBlock::Text { text }],
@@ -699,8 +726,10 @@ fn rebuild_messages(task_prompt: &str, steps: &[StepRecord]) -> Vec<Message> {
 }
 
 /// Render one [`crate::outcome::ToolCallResolution`] as the text (and error flag) a provider's
-/// `ContentBlock::ToolResult` should carry.
-fn tool_result_text(resolution: &ToolOutcome) -> (String, bool) {
+/// `ContentBlock::ToolResult` should carry. `pub(crate)` so [`crate::pruning::working_set`] can
+/// reuse it to measure how many bytes a superseded result's full text would have cost, without
+/// duplicating this match.
+pub(crate) fn tool_result_text(resolution: &ToolOutcome) -> (String, bool) {
     match resolution {
         ToolOutcome::Completed { result, .. } => (result.to_string(), false),
         ToolOutcome::Denied { reason } => (format!("denied: {reason}"), true),
@@ -844,6 +873,96 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_messages_stubs_a_superseded_read_but_keeps_its_tool_use_block_paired() {
+        // `docs/audit-2026-09-18-fable.md` B-08 item 3: a second `fs.read` of the same path
+        // supersedes the first, but the wire format still requires every `ToolResult` to pair
+        // with the `ToolUse` that requested it -- so the first call's `ToolUse` block must still
+        // be present (with its original id/name/input), only its *result* content replaced.
+        let steps = vec![
+            StepRecord {
+                index: 1,
+                served_by: "mock/mock".to_string(),
+                assistant_text: None,
+                tool_calls: vec![ToolCallRecord {
+                    tool_use_id: "call-1".to_string(),
+                    tool_name: "fs.read".to_string(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                    resolution: ToolCallResolution::Completed {
+                        result: serde_json::json!({"content": "stale content from three turns ago"}),
+                        artifact: None,
+                    },
+                }],
+                spend: Spend::tokens(10),
+                at: tm_types::Timestamp::from_unix_nanos(0),
+            },
+            StepRecord {
+                index: 2,
+                served_by: "mock/mock".to_string(),
+                assistant_text: None,
+                tool_calls: vec![ToolCallRecord {
+                    tool_use_id: "call-2".to_string(),
+                    tool_name: "fs.read".to_string(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                    resolution: ToolCallResolution::Completed {
+                        result: serde_json::json!({"content": "fresh content"}),
+                        artifact: None,
+                    },
+                }],
+                spend: Spend::tokens(10),
+                at: tm_types::Timestamp::from_unix_nanos(0),
+            },
+        ];
+
+        let messages = rebuild_messages("task", &steps);
+        // task prompt, step 1 assistant+result, step 2 assistant+result.
+        assert_eq!(messages.len(), 5);
+
+        // Step 1's `ToolUse` block is still present and unchanged (messages[1] = step 1's
+        // assistant turn).
+        assert!(matches!(
+            messages[1].content[0],
+            ContentBlock::ToolUse { .. }
+        ));
+        assert_eq!(
+            messages[1].content[0],
+            ContentBlock::ToolUse {
+                id: "call-1".to_string(),
+                name: "fs.read".to_string(),
+                input: serde_json::json!({"path": "a.rs"}),
+            }
+        );
+
+        // Step 1's `ToolResult` (messages[2]) is stubbed, not the real (stale) content.
+        match &messages[2].content[0] {
+            ContentBlock::ToolResult {
+                content, is_error, ..
+            } => {
+                assert!(!is_error);
+                assert_eq!(
+                    *content,
+                    vec![ContentBlock::Text {
+                        text: "[superseded by step 2]".to_string()
+                    }]
+                );
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
+
+        // Step 2's `ToolResult` (messages[4]) is the real, current content.
+        match &messages[4].content[0] {
+            ContentBlock::ToolResult { content, .. } => {
+                assert_eq!(
+                    *content,
+                    vec![ContentBlock::Text {
+                        text: serde_json::json!({"content": "fresh content"}).to_string()
+                    }]
+                );
+            }
+            other => panic!("expected a tool result, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn agent_outcome_steps_and_is_terminal_cover_every_variant() {
         let steps = vec![StepRecord {
             index: 1,
@@ -873,6 +992,76 @@ mod tests {
             detail: "boom".to_string(),
         };
         assert!(failed.is_terminal());
+    }
+
+    #[test]
+    fn agent_outcome_bytes_and_tokens_pruned_reflect_a_superseded_read() {
+        // `docs/audit-2026-09-18-fable.md` B-08 item 5: `AgentOutcome` reports how much the
+        // working set pruned, computed from `steps` via the exact same pure function
+        // `rebuild_messages` renders from (`crate::pruning::working_set`), so the two can never
+        // disagree.
+        let steps = vec![
+            StepRecord {
+                index: 1,
+                served_by: "mock/mock".to_string(),
+                assistant_text: None,
+                tool_calls: vec![ToolCallRecord {
+                    tool_use_id: "call-1".to_string(),
+                    tool_name: "fs.read".to_string(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                    resolution: ToolCallResolution::Completed {
+                        result: serde_json::json!({"content": "x".repeat(500)}),
+                        artifact: None,
+                    },
+                }],
+                spend: Spend::default(),
+                at: tm_types::Timestamp::from_unix_nanos(0),
+            },
+            StepRecord {
+                index: 2,
+                served_by: "mock/mock".to_string(),
+                assistant_text: None,
+                tool_calls: vec![ToolCallRecord {
+                    tool_use_id: "call-2".to_string(),
+                    tool_name: "fs.read".to_string(),
+                    input: serde_json::json!({"path": "a.rs"}),
+                    resolution: ToolCallResolution::Completed {
+                        result: serde_json::json!({"content": "fresh"}),
+                        artifact: None,
+                    },
+                }],
+                spend: Spend::default(),
+                at: tm_types::Timestamp::from_unix_nanos(0),
+            },
+        ];
+        let outcome = AgentOutcome::Failed {
+            steps,
+            class: FailureClass::Other,
+            detail: "stopped for this test".to_string(),
+        };
+
+        assert!(
+            outcome.bytes_pruned() > 400,
+            "expected most of the ~500-byte first read to be pruned, got {}",
+            outcome.bytes_pruned()
+        );
+        assert!(outcome.tokens_pruned() > 0);
+
+        // A run with no superseded results prunes nothing.
+        let clean = AgentOutcome::Failed {
+            steps: vec![StepRecord {
+                index: 1,
+                served_by: "mock/mock".to_string(),
+                assistant_text: Some("just text".to_string()),
+                tool_calls: Vec::new(),
+                spend: Spend::default(),
+                at: tm_types::Timestamp::from_unix_nanos(0),
+            }],
+            class: FailureClass::Other,
+            detail: "stopped for this test".to_string(),
+        };
+        assert_eq!(clean.bytes_pruned(), 0);
+        assert_eq!(clean.tokens_pruned(), 0);
     }
 
     // Presence check only: `TicketId` must be constructible in this module's tests without

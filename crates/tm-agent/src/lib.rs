@@ -31,6 +31,7 @@ pub mod executor;
 pub mod outcome;
 pub mod patch;
 pub mod prompt;
+mod pruning;
 pub mod session;
 pub mod tools;
 

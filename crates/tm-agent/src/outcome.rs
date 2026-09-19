@@ -98,6 +98,37 @@ impl AgentOutcome {
             | AgentOutcome::Failed { steps, .. } => steps,
         }
     }
+
+    /// How many bytes of tool-result content the working set has pruned from this run's
+    /// transcript, relative to re-sending every step's tool output verbatim
+    /// (`docs/audit-2026-09-18-fable.md` B-08, `SPEC.md` §30.4).
+    ///
+    /// Recomputed on demand from [`AgentOutcome::steps`] via the same pure
+    /// `crate::pruning::working_set` that [`crate::agent_loop::rebuild_messages`] renders from,
+    /// rather than cached on a struct field: `working_set` is cheap (a handful of steps, at most
+    /// [`crate::agent_loop::DEFAULT_MAX_STEPS`] of them) and this guarantees the number can never
+    /// drift out of sync with what the loop's last rebuild actually rendered. This is deliberately
+    /// a method on the outcome enum rather than a new field on any one variant: every variant is
+    /// pattern-matched exhaustively (without `..`) somewhere outside this crate
+    /// (`crates/tm-cli/src/agent.rs`'s `drive_turn`), so widening a variant's shape here would be
+    /// a breaking change this track is not scoped to make.
+    ///
+    /// Feeds `SPEC.md` §30.2's rent-accounting ledger (`tm_context::ContextPack::rent_report`) a
+    /// real number for working-set pruning specifically, once a caller wires the two together —
+    /// no such caller exists yet (context-pack rent reporting and the agent loop's outcome are
+    /// still separate reporting paths; connecting them touches `tm-context`/`tm-cli` call sites
+    /// this track does not own), but the number itself is real, not a placeholder: it is exactly
+    /// what [`crate::agent_loop::AgentLoop::drive`] logs via `tracing::debug!` on every turn that
+    /// pruned anything.
+    pub fn bytes_pruned(&self) -> u64 {
+        crate::pruning::working_set(self.steps()).bytes_pruned
+    }
+
+    /// The same saving as [`AgentOutcome::bytes_pruned`], estimated in tokens via
+    /// `tm_context::estimate_tokens_source`.
+    pub fn tokens_pruned(&self) -> u64 {
+        crate::pruning::working_set(self.steps()).tokens_pruned
+    }
 }
 
 /// Which part of a [`tm_types::Budget`] was exhausted.
