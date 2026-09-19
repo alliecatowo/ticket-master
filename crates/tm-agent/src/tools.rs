@@ -761,6 +761,69 @@ impl BuiltinCapability {
         Ok(command_result_json(&result))
     }
 
+    /// As [`BuiltinCapability::run_fixed_git`], but for the one `git.*` tool that is a genuine
+    /// external-in-the-sense-of-`SPEC.md`-§21.5 effect rather than a read: a commit changes
+    /// repository state that a crash-and-resume must not silently double-apply. Wraps the run in
+    /// a `Store::begin_effect`/`EffectGuard::complete` guard (audit B-11) keyed on
+    /// `(ticket, ticket.attempts, "git.commit", deterministic_command_key(argv, cwd))` — the same
+    /// `(argv, cwd)` shape `run_fixed_git`'s own cache key already uses, just computed
+    /// deterministically here instead of the random per-call key `command_key` builds for
+    /// non-cacheable commands (a fresh key every call would defeat the idempotency guard
+    /// entirely).
+    ///
+    /// No `confirm()`-shaped recovery probe exists for `git.commit`: unlike `git push` (mutates a
+    /// remote another process could inspect via `git ls-remote`) or `tm-mirror`'s adapters
+    /// (mutate an external tracker searchable by a marker), a local commit's only source of truth
+    /// is the same repository this call would act on, and `git commit` itself already refuses
+    /// with a clean, harmless error when there is nothing staged to commit — so on a resumed,
+    /// never-completed journal entry the documented, accepted behavior is to re-run (mirroring
+    /// this module's plain `command::run` calls, which have no confirm probe at all) rather than
+    /// invent a guess-shaped check against the same repository the effect itself would touch.
+    /// `git.push` is not dispatched here (or anywhere in this crate): `ToolName` has no `GitPush`
+    /// variant on this branch (only `git.status`/`git.diff`/`git.log`/`git.commit`/`git.branch`/
+    /// `git.worktree` are agent-invocable `git.*` tools today) — the only real `git push` in this
+    /// workspace happens inside `tm-mirror::Tracker` implementations, wrapped separately by
+    /// `tm-cli`'s `mirror_push` call site.
+    fn run_fixed_git_idempotent(
+        &self,
+        argv: &[&str],
+        effect_kind: &str,
+        ctx: &CallContext<'_>,
+        patch_engine: &PatchEngine,
+    ) -> Result<Value> {
+        let argv_owned: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+        let cwd = patch_engine.root().to_string_lossy().into_owned();
+        let canonical_args = deterministic_command_key(&argv_owned, &cwd);
+        let attempt = self
+            .store
+            .view()?
+            .tickets
+            .get(ctx.ticket)
+            .map(|t| t.attempts)
+            .unwrap_or(0);
+        let key = tm_core::EffectKey::compute(ctx.ticket, attempt, effect_kind, &canonical_args);
+        let guard = self.store.begin_effect(
+            key,
+            ctx.ticket.clone(),
+            attempt,
+            effect_kind,
+            ctx.actor.clone(),
+        )?;
+        if guard.already_completed() {
+            return Ok(json!({
+                "skipped_already_completed": true,
+                "receipt_artifact": guard.prior_receipt(),
+            }));
+        }
+        let value = self.run_fixed_git(argv, ctx, patch_engine)?;
+        let receipt = value
+            .get("stdout_artifact")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        guard.complete(&self.store, receipt.as_deref())?;
+        Ok(value)
+    }
+
     /// Execute one already-authorized call. Split out from [`CapabilityProvider::invoke`] so
     /// that method is a thin `PatchEngine`-construction-plus-dispatch wrapper.
     fn execute(
@@ -1066,7 +1129,12 @@ impl BuiltinCapability {
             }
             ToolName::GitCommit => {
                 let message = get_string(input, "message")?;
-                self.run_fixed_git(&["git", "commit", "-m", &message], ctx, patch_engine)
+                self.run_fixed_git_idempotent(
+                    &["git", "commit", "-m", &message],
+                    "git.commit",
+                    ctx,
+                    patch_engine,
+                )
             }
             ToolName::GitBranch => {
                 let name = get_string(input, "name")?;
@@ -2757,6 +2825,103 @@ mod tests {
             ToolOutcome::Completed { result, .. } => assert_eq!(result["exit_code"], 0),
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    // ---- git.commit idempotent-effect wrapping (SPEC.md §21.5, audit B-11) ----------------
+
+    fn effects_rows(h: &Harness, kind: &str) -> Vec<(String, Option<String>)> {
+        let db_path = h.root().join(".tm").join("project.db");
+        let conn = tm_events::schema::open_read_connection(&db_path).expect("read connection");
+        let mut stmt = conn
+            .prepare("SELECT status, receipt_artifact FROM effects WHERE kind = ?1")
+            .expect("prepare");
+        stmt.query_map([kind], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query_map")
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("collect rows")
+    }
+
+    #[tokio::test]
+    async fn git_commit_journals_and_completes_an_effect_with_a_receipt() {
+        let h = Harness::new();
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("git.commit", json!({"message": "add feature"})),
+                &h.ctx(),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Completed { result, .. } => assert_eq!(result["exit_code"], 0),
+            other => panic!("expected Completed, got {other:?}"),
+        }
+
+        let rows = effects_rows(&h, "git.commit");
+        assert_eq!(rows.len(), 1, "exactly one journaled effect");
+        assert_eq!(rows[0].0, "completed");
+        assert!(
+            rows[0].1.is_some(),
+            "receipt_artifact recorded on completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commit_is_idempotent_across_repeated_calls_with_the_same_message() {
+        let h = Harness::new();
+        let commit_call = call("git.commit", json!({"message": "add feature"}));
+
+        let first = h.registry.dispatch(&commit_call, &h.ctx()).await;
+        assert!(matches!(first, ToolOutcome::Completed { .. }));
+        let second = h.registry.dispatch(&commit_call, &h.ctx()).await;
+        match second {
+            ToolOutcome::Completed { result, .. } => {
+                assert_eq!(result["skipped_already_completed"], json!(true));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+
+        // Only one `effects` row -- the identical (ticket, attempt, kind, message) effect was
+        // never re-journaled -- and only one `command.started`/`command.completed` pair, proving
+        // the underlying `git commit` was genuinely not re-run the second time.
+        let rows = effects_rows(&h, "git.commit");
+        assert_eq!(rows.len(), 1);
+
+        let db_path = h.root().join(".tm").join("project.db");
+        let clock: Arc<dyn tm_types::Clock> = Arc::new(FixedClock::epoch());
+        let log = tm_events::EventLog::open_with_clock(&db_path, clock).expect("open log");
+        let events = log.read_from(1, 1024).expect("read_from");
+        let started_count = events
+            .iter()
+            .filter(|e| e.kind == tm_events::EventKind::CommandStarted)
+            .count();
+        assert_eq!(
+            started_count, 1,
+            "the second, already-completed call must not re-run the command"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_commit_with_a_different_message_is_a_distinct_effect() {
+        let h = Harness::new();
+        h.registry
+            .dispatch(
+                &call("git.commit", json!({"message": "first message"})),
+                &h.ctx(),
+            )
+            .await;
+        h.registry
+            .dispatch(
+                &call("git.commit", json!({"message": "second message"})),
+                &h.ctx(),
+            )
+            .await;
+
+        let rows = effects_rows(&h, "git.commit");
+        assert_eq!(
+            rows.len(),
+            2,
+            "a different commit message is a different effect"
+        );
     }
 
     #[tokio::test]
