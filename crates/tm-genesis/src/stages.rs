@@ -248,6 +248,11 @@ impl GenesisState {
 struct GraphSummary {
     tickets: BTreeMap<Ref, TicketId>,
     milestones: BTreeMap<Ref, MilestoneId>,
+    /// The [`crate::compile::CommitOutcome::selected_template`] this graph was compiled with, if
+    /// any. `#[serde(default)]` so a `GraphSummary` persisted before this field existed still
+    /// deserializes (as `None`).
+    #[serde(default)]
+    selected_template: Option<String>,
 }
 
 const META_FIELD_KEY: &str = "genesis_field";
@@ -400,12 +405,19 @@ impl<'a> GenesisDriver<'a> {
                     self.clock,
                     self.ids,
                     actor.clone(),
+                    // No template catalog wired into `GenesisDriver` yet — an empty slice makes
+                    // `compile::select_template` a no-op, so this stage's behavior is unchanged
+                    // from before `compile_with_retry` grew this parameter (`SPEC.md` §27.1's
+                    // template-selection path is additive; wiring an actual catalog in here is
+                    // follow-up work, not part of this change).
+                    &[],
                     &GraphRetryPolicy::default_bounded(),
                 )
                 .await?;
                 let summary = GraphSummary {
                     tickets: outcome.tickets.clone(),
                     milestones: outcome.milestones.clone(),
+                    selected_template: outcome.selected_template.clone(),
                 };
                 let id = self.persist_field(&summary, "graph", actor.clone())?;
                 next_state.graph = Some(id);

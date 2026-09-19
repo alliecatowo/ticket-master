@@ -3347,6 +3347,7 @@ dependencies = [
  "tm-provider",
  "tm-scheduler",
  "tm-server",
+ "tm-templates",
  "tm-tui",
  "tm-types",
  "tokio",
@@ -3504,6 +3505,7 @@ dependencies = [
  "tm-core",
  "tm-events",
  "tm-provider",
+ "tm-templates",
  "tm-types",
  "tokio",
  "toml",
@@ -3604,6 +3606,19 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
+]
+
+[[package]]
+name = "tm-templates"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "tempfile",
+ "tm-context",
+ "tm-events",
+ "tm-types",
+ "toml",
 ]
 
 [[package]]

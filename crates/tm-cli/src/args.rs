@@ -140,6 +140,10 @@ pub enum Command {
     #[command(subcommand)]
     Mirror(MirrorCommand),
 
+    /// Project scaffolding templates: the registry `tm-genesis` selects from by capability tag.
+    #[command(subcommand)]
+    Templates(TemplatesCommand),
+
     /// Serve the project over HTTP/SSE, optionally serving the built web client.
     Serve(ServeArgs),
 
@@ -614,6 +618,24 @@ pub enum DocsCommand {
     /// Regenerate `Generated` docs and open review tickets for `Maintained`/`Human` docs whose
     /// basis changed.
     Reconcile,
+}
+
+/// `tm templates ...`
+#[derive(Debug, Subcommand)]
+pub enum TemplatesCommand {
+    /// List every template declared in the project's `templates.toml` registry, and whether it
+    /// currently resolves (source reachable, checksum pin matches).
+    List,
+    /// Show one template's manifest: version, tags, params, and checksum status.
+    Show(TemplatesShowArgs),
+}
+
+/// `tm templates show`
+#[derive(Debug, Args)]
+pub struct TemplatesShowArgs {
+    /// The template id, as declared in `templates.toml`.
+    #[arg(value_name = "ID")]
+    pub id: String,
 }
 
 /// `tm provider ...`

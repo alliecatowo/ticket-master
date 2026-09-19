@@ -1,0 +1,22 @@
+id = "starter-axum"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+tags = ["rust", "web-api", "axum", "http", "service", "backend"]
+
+[[params]]
+name = "project_name"
+type = "string"
+default = "axum-service"
+description = "Cargo package name for the scaffolded service."
+
+[[params]]
+name = "description"
+type = "string"
+default = "An Axum HTTP service scaffolded by tm-templates."
+description = "One-line crate description, used in Cargo.toml and the crate doc comment."
+
+[[params]]
+name = "port"
+type = "integer"
+default = "8080"
+description = "TCP port the service listens on."
