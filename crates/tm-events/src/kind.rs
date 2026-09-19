@@ -145,6 +145,12 @@ pub enum EventKind {
     /// `ticket.budget_exhausted`
     #[serde(rename = "ticket.budget_exhausted")]
     TicketBudgetExhausted,
+    /// `ticket.budget_handoff` (`SPEC.md` §31.3, `docs/audit-2026-09-18-fable.md` B-10): a
+    /// worker approaching its budget ceiling handed the ticket back clean via
+    /// `Trigger::BudgetHandoff` — distinct from `ticket.budget_exhausted`/`ticket.failed`, this
+    /// is never a failure: it does not enter `Recovery` and does not consume a retry.
+    #[serde(rename = "ticket.budget_handoff")]
+    TicketBudgetHandoff,
     /// `decision.created`
     #[serde(rename = "decision.created")]
     DecisionCreated,
@@ -345,6 +351,7 @@ pub const ALL: &[EventKind] = &[
     EventKind::TicketRetryScheduled,
     EventKind::TicketEscalated,
     EventKind::TicketBudgetExhausted,
+    EventKind::TicketBudgetHandoff,
     EventKind::DecisionCreated,
     EventKind::DecisionSuperseded,
     EventKind::AuthorityGranted,
@@ -434,6 +441,7 @@ impl EventKind {
             EventKind::TicketRetryScheduled => "ticket.retry_scheduled",
             EventKind::TicketEscalated => "ticket.escalated",
             EventKind::TicketBudgetExhausted => "ticket.budget_exhausted",
+            EventKind::TicketBudgetHandoff => "ticket.budget_handoff",
             EventKind::DecisionCreated => "decision.created",
             EventKind::DecisionSuperseded => "decision.superseded",
             EventKind::AuthorityGranted => "authority.granted",
@@ -517,7 +525,8 @@ impl EventKind {
             | EventKind::TicketFailed
             | EventKind::TicketRetryScheduled
             | EventKind::TicketEscalated
-            | EventKind::TicketBudgetExhausted => EventCategory::Ticket,
+            | EventKind::TicketBudgetExhausted
+            | EventKind::TicketBudgetHandoff => EventCategory::Ticket,
             EventKind::DecisionCreated | EventKind::DecisionSuperseded => EventCategory::Decision,
             EventKind::AuthorityGranted
             | EventKind::AuthorityDelegated
@@ -649,6 +658,10 @@ mod tests {
         assert_eq!(EventKind::TicketClosed.category(), EventCategory::Ticket);
         assert_eq!(
             EventKind::TicketBudgetExhausted.category(),
+            EventCategory::Ticket
+        );
+        assert_eq!(
+            EventKind::TicketBudgetHandoff.category(),
             EventCategory::Ticket
         );
     }
@@ -928,7 +941,7 @@ mod tests {
 
     #[test]
     fn all_kinds_sorted_and_complete() {
-        assert_eq!(ALL.len(), 79);
+        assert_eq!(ALL.len(), 80);
         assert_eq!(ALL[0], EventKind::ProjectCreated);
         assert_eq!(ALL[ALL.len() - 1], EventKind::GoalClaimedComplete);
     }
