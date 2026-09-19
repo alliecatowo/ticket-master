@@ -23,9 +23,7 @@ pub async fn serve(
 
     let config = tm_server::state::ServerConfig {
         project_root: project.root.clone(),
-        // TODO(D-003 scope-resolution track): replace with `project.state_dir` once `Project`
-        // gains that field; this hardcodes today's repo-scoped layout.
-        state_dir: project.root.join(".tm"),
+        state_dir: project.state_dir.clone(),
         bind_addr,
         token: None,
         presence_ttl_seconds: 3600,

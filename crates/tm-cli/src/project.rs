@@ -1,10 +1,29 @@
 //! Locating and opening a project, plus the commands that operate before or across a ticket's
 //! lifecycle: `init`, `attach`, `genesis`, `status`, and `doctor`.
 //!
-//! A Ticketmaster project is any directory containing a `.tm/` directory (`.tm/project.db`, the
-//! event log `tm-core::Store` opens over). [`locate`] walks up from a starting directory to find
-//! one, the same convention `git` uses for `.git`. Every other command module in this crate is
-//! handed an already-opened [`Project`] by `main.rs`; this module is where that opening happens.
+//! D-003 splits a project's location into two things a workspace can disagree about:
+//! - `root`: the **workspace** — the git toplevel when the current directory is inside a repo,
+//!   else the canonical current directory. Unchanged meaning for code indexing, `templates.toml`,
+//!   `bench/tasks`, `browser.toml`, the web client dir, and wiki docs.
+//! - `state_dir`: where a project's durable state actually lives — `project.db`, `index.db`,
+//!   `artifacts/`, and every other file that used to be assumed to sit under `<root>/.tm`. In
+//!   **repo scope** that is still `<root>/.tm`; in **global scope** (no `.tm/` has been created
+//!   in the workspace yet) it is `$TM_HOME/projects/<key>/`, entirely outside the workspace.
+//!
+//! The point of the split: bare `tm` in a fresh directory used to silently write a `.tm/`
+//! directory (and, for a git repo, a whole assimilation) into whatever the user happened to be
+//! standing in. [`open_bare`] now creates state under `$TM_HOME` instead and touches nothing in
+//! the workspace; [`open_for_command`] (every explicit subcommand) never creates state at all,
+//! erroring `NotFound` when neither scope has a project yet. [`resolve_scope`] is the one
+//! function every opener funnels through. See `docs/decisions/D-003-project-scope.md` for the
+//! full rationale, the `$TM_HOME` layout, and why promotion (`tm init` adopting a global project
+//! into the repo) is left to the next track rather than built here.
+//!
+//! A repo-scoped Ticketmaster project is any directory containing a `.tm/` directory
+//! (`.tm/project.db`, the event log `tm-core::Store` opens over). [`locate`] walks up from a
+//! starting directory to find one, the same convention `git` uses for `.git`. Every other command
+//! module in this crate is handed an already-opened [`Project`] by `main.rs`; this module is
+//! where that opening happens.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{IsTerminal, Read};
@@ -17,15 +36,32 @@ use tm_types::{
     Clock, CounterIds, IdSource, ParticipantId, SystemClock, TicketId, Timestamp, TmError,
 };
 
-use crate::args::{AttachArgs, DoctorArgs, GenesisArgs, InitArgs, StatusArgs};
+use crate::args::{AttachArgs, DoctorArgs, GenesisArgs, InitArgs, ProjectCommand, StatusArgs};
 use crate::render::{Renderer, Table};
+
+/// Where a project's durable state lives relative to its workspace root (D-003).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum Scope {
+    /// State lives in the workspace's own `.tm/` directory.
+    Repo,
+    /// State lives under `$TM_HOME/projects/<key>/`, outside the workspace, because no
+    /// repo-local project has been created (or promoted) yet.
+    Global,
+}
 
 /// An opened project: the authoritative [`tm_core::Store`] plus the collaborators every command
 /// needs to call into it (clock, id source, project root). Every execution module in this crate
 /// takes `&Project` rather than reopening the store itself.
 pub struct Project {
-    /// The project root directory (the one containing `.tm/`).
+    /// The workspace root: the git toplevel, or the canonical current directory outside a repo.
+    /// Still what code indexing, `templates.toml`, `bench/tasks`, `browser.toml`, the web client
+    /// dir, and wiki docs resolve against (D-003).
     pub root: PathBuf,
+    /// Where this project's durable state lives: `<root>/.tm` in repo scope,
+    /// `$TM_HOME/projects/<key>/` in global scope (D-003).
+    pub state_dir: PathBuf,
+    /// Repo or global — see [`Scope`].
+    pub scope: Scope,
     /// The authoritative store: event log plus materialized state.
     pub store: Arc<tm_core::Store>,
     /// Injected wall clock; `SystemClock` outside tests.
@@ -38,10 +74,47 @@ pub struct Project {
 }
 
 impl Project {
-    /// The code index for this project (`.tm/index.db`), opened on demand by commands that need
-    /// it (`search`, `symbol`, `history`, `doctor`) rather than eagerly here.
+    /// The code index for this project (`<state_dir>/index.db`), opened on demand by commands
+    /// that need it (`search`, `symbol`, `history`, `doctor`) rather than eagerly here.
     pub fn code_intel(&self) -> tm_types::Result<tm_codeintel::CodeIntel> {
-        tm_codeintel::CodeIntel::open(&self.root)
+        tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.root)
+    }
+
+    /// One line describing where this project's state lives, for a human to see up front rather
+    /// than discover by surprise. Printed once by the plain interactive loop
+    /// ([`crate::agent::AgentSession::run_interactive`]) and shown as the TUI's status line
+    /// (`crate::tui::run`), and reused as `tm doctor`'s advisory `"scope"` check detail.
+    pub fn scope_line(&self) -> String {
+        scope_line_for(self.scope, &self.root, &self.state_dir)
+    }
+}
+
+// `Project::for_test` lives in its own `#[cfg(test)]` `impl` block at the very bottom of this
+// file, right next to `mod tests`, deliberately -- not here alongside the block above. xtask's
+// hygiene "no network in tests" check (`check_network_in_tests`) scopes "am I inside test code"
+// with a simple one-way latch: the first `#[cfg(test)]`/`#[test]` line it sees in a file flips it
+// on for every line after, for the rest of the file (it does not track braces/scope). Every real
+// call site in this file that reads `ANTHROPIC_API_KEY` (`resolve_genesis_provider`, well below
+// this point) must stay *before* that latch trips, or the checker misreads ordinary production
+// code as a test reading a real credential. See that function's own docs for why the read itself
+// is legitimate outside tests.
+
+/// Shared text behind [`Project::scope_line`] and `tm status`'s human-rendered scope prefix
+/// ([`render_status_report`]), which only has [`StatusReport`]'s plain `ScopeInfo` fields to work
+/// from, not a `Project`.
+fn scope_line_for(scope: Scope, root: &Path, state_dir: &Path) -> String {
+    match scope {
+        Scope::Repo => format!(
+            "project: {} (repo scope, state in {})",
+            root.display(),
+            state_dir.display()
+        ),
+        Scope::Global => format!(
+            "project: {} — global scope, state kept outside the repo at {} — run 'tm init' to \
+             keep this project in the repo",
+            root.display(),
+            state_dir.display()
+        ),
     }
 }
 
@@ -69,19 +142,21 @@ fn resolve_actor() -> tm_types::Result<ParticipantId> {
     ParticipantId::new(format!("human:{handle}"))
 }
 
-/// Open the project at `root` (as returned by [`locate`]) with the real wall clock and a
-/// restored [`tm_types::CounterIds`], and resolve the local actor identity.
-pub fn open(root: &Path) -> tm_types::Result<Project> {
-    let store = Arc::new(tm_core::Store::open(root)?);
+/// Open the project rooted at `root` with its state at `state_dir`, using the real wall clock and
+/// a restored [`tm_types::CounterIds`], and resolve the local actor identity.
+pub fn open_at(root: &Path, state_dir: &Path, scope: Scope) -> tm_types::Result<Project> {
+    let store = Arc::new(tm_core::Store::open_at(state_dir)?);
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     // `tm_core::Store` exposes no accessor for its internal id source, so this restores an
-    // equivalent one from the same high-water marks `Store::open` itself just read, for the
+    // equivalent one from the same high-water marks `Store::open_at` itself just read, for the
     // collaborators (scheduler, server) that need to mint ids outside a `Store` command.
     let counters = store.view()?.counters.clone();
     let ids: Arc<dyn IdSource> = Arc::new(CounterIds::with_counters(counters, 0));
     let actor = resolve_actor()?;
     Ok(Project {
         root: root.to_path_buf(),
+        state_dir: state_dir.to_path_buf(),
+        scope,
         store,
         clock,
         ids,
@@ -89,39 +164,322 @@ pub fn open(root: &Path) -> tm_types::Result<Project> {
     })
 }
 
-/// Resolve which directory to operate on: `--project`, else [`locate`] from the current
-/// directory.
-pub fn resolve_project_dir(explicit: Option<&Path>) -> tm_types::Result<PathBuf> {
-    match explicit {
-        Some(p) => Ok(p.to_path_buf()),
-        None => locate(&std::env::current_dir()?),
+/// Open the repo-scoped project at `root` (as returned by [`locate`]): a thin shim over
+/// [`open_at`] for the `<root>/.tm` layout every caller assumed before D-003 split `root` from
+/// `state_dir`. Prefer [`open_at`] when the caller already knows the state directory (e.g. the
+/// scope-resolution openers below).
+pub fn open(root: &Path) -> tm_types::Result<Project> {
+    open_at(root, &root.join(".tm"), Scope::Repo)
+}
+
+/// `$TM_HOME`: the `TM_HOME` env var if set and non-empty, else `$HOME/.tm` (the same convention
+/// `tm-browser`'s `managed.rs` already uses for `~/.tm/browsers`). Never reads the wall clock or
+/// the network.
+pub fn tm_home() -> tm_types::Result<PathBuf> {
+    let non_empty = |v: Result<String, std::env::VarError>| v.ok().filter(|s| !s.is_empty());
+    if let Some(explicit) = non_empty(std::env::var("TM_HOME")) {
+        return Ok(PathBuf::from(explicit));
     }
+    dirs::home_dir()
+        .map(|home| home.join(".tm"))
+        .ok_or_else(|| {
+            TmError::invariant("could not determine the user's home directory for TM_HOME")
+        })
+}
+
+/// The workspace root for `cwd`: the git toplevel (`git2::Repository::discover(cwd)`'s workdir)
+/// when `cwd` is inside a non-bare git repository, else the canonical `cwd` itself. Always
+/// canonicalized, so a git-discovered workdir and a plain canonical `cwd` can never disagree
+/// about the same real directory (e.g. macOS's `/var` -> `/private/var` symlink) and therefore
+/// never hash to two different [`global_project_key`]s for what is actually one workspace.
+pub fn workspace_root_for(cwd: &Path) -> tm_types::Result<PathBuf> {
+    if let Ok(repo) = git2::Repository::discover(cwd) {
+        if let Some(workdir) = repo.workdir() {
+            return Ok(workdir.canonicalize()?);
+        }
+        // A bare repository has no workdir to scope a project to; fall through to the plain
+        // canonical-cwd rule below, the same as if `cwd` were not in a git repository at all.
+    }
+    Ok(cwd.canonicalize()?)
+}
+
+/// Map every byte outside `[A-Za-z0-9._-]` (and every `/`) in `root`'s path to `-`, collapse runs
+/// of `-`, strip a leading `/`, and truncate to 100 chars — the sanitization half of
+/// [`global_project_key`], split out so it's directly testable without hashing anything.
+fn sanitize_for_key(root: &Path) -> String {
+    let raw = root.to_string_lossy();
+    let stripped = raw.strip_prefix('/').unwrap_or(&raw);
+    let mut out = String::with_capacity(stripped.len());
+    let mut last_was_dash = false;
+    for c in stripped.chars() {
+        let mapped = if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+            c
+        } else {
+            '-'
+        };
+        if mapped == '-' {
+            if !last_was_dash {
+                out.push('-');
+            }
+            last_was_dash = true;
+        } else {
+            out.push(mapped);
+            last_was_dash = false;
+        }
+    }
+    out.truncate(100);
+    out
+}
+
+/// The global project key for workspace `root`: `sanitize(root) + '-' + <first 8 hex chars of
+/// blake3(canonical root path bytes)>`, e.g. `/Users/allie/Develop/foo` ->
+/// `Users-allie-Develop-foo-3f9a1c2b`. Deterministic and, thanks to the hash suffix, collision-safe
+/// even between two workspaces whose sanitized paths coincide (e.g. paths differing only in
+/// characters the sanitizer maps to the same `-`).
+pub fn global_project_key(root: &Path) -> String {
+    let sanitized = sanitize_for_key(root);
+    let hash = blake3::hash(root.to_string_lossy().as_bytes());
+    let short_hex = &hash.to_hex()[..8];
+    format!("{sanitized}-{short_hex}")
+}
+
+/// `$TM_HOME/projects/<key>/` for workspace `root` — the global-scope state directory
+/// [`resolve_scope`] falls back to when no repo-local `.tm/` exists.
+pub fn global_project_dir(root: &Path) -> tm_types::Result<PathBuf> {
+    Ok(tm_home()?.join("projects").join(global_project_key(root)))
+}
+
+/// The outcome of [`resolve_scope`]: where a workspace's project state lives (or would be
+/// created), and whether it already exists.
+#[derive(Debug, Clone)]
+pub struct Resolved {
+    /// The workspace root (repo toplevel, or canonical cwd outside a repo).
+    pub root: PathBuf,
+    /// Where this workspace's state lives, or would live once created.
+    pub state_dir: PathBuf,
+    /// Repo or global.
+    pub scope: Scope,
+    /// Whether `state_dir` already holds an opened project (`project.db` present). Always `true`
+    /// for repo scope (an explicit `--project` creates-if-absent the same as `tm init` always
+    /// has; a `.tm` found by [`locate`] exists by construction).
+    pub exists: bool,
+}
+
+/// Resolve which workspace to operate on and where its state lives, in one place every opener in
+/// this module funnels through (D-003). Precedence, most to least specific:
+/// 1. `explicit` (`--project P`): repo scope at `P`, `state_dir = P/.tm`. Unchanged from before
+///    D-003 — still creates-if-absent, so `exists` is always `true` here.
+/// 2. [`locate`] finds a `.tm/` above `cwd`: repo scope there. `exists` is always `true` — a
+///    located `.tm/` exists by construction.
+/// 3. A global project already exists for `workspace_root_for(cwd)` under `$TM_HOME`: global
+///    scope, `exists: true`.
+/// 4. Otherwise: global scope, `exists: false` — nothing has ever been created for this
+///    workspace in either scope.
+pub fn resolve_scope(explicit: Option<&Path>, cwd: &Path) -> tm_types::Result<Resolved> {
+    if let Some(p) = explicit {
+        return Ok(Resolved {
+            root: p.to_path_buf(),
+            state_dir: p.join(".tm"),
+            scope: Scope::Repo,
+            exists: true,
+        });
+    }
+    if let Ok(found) = locate(cwd) {
+        return Ok(Resolved {
+            state_dir: found.join(".tm"),
+            root: found,
+            scope: Scope::Repo,
+            exists: true,
+        });
+    }
+    let root = workspace_root_for(cwd)?;
+    let state_dir = global_project_dir(&root)?;
+    let exists = state_dir.join("project.db").is_file();
+    Ok(Resolved {
+        root,
+        state_dir,
+        scope: Scope::Global,
+        exists,
+    })
+}
+
+/// Write `$TM_HOME/projects/<key>/workspace.json`, the marker [`open_bare`] creates exactly once
+/// for a fresh global-scope project. Uses `clock` (never the wall clock directly — hygiene
+/// forbids `SystemTime::now` outside `tm-types`) for `created_at`.
+fn write_workspace_json(state_dir: &Path, root: &Path, clock: &dyn Clock) -> tm_types::Result<()> {
+    let doc = serde_json::json!({
+        "workspace": root.to_string_lossy(),
+        "created_at": clock.now(),
+        "schema": 1,
+    });
+    std::fs::write(
+        state_dir.join("workspace.json"),
+        serde_json::to_vec_pretty(&doc)?,
+    )?;
+    Ok(())
+}
+
+/// Open the project for an explicit subcommand (every arm but bare `tm` in `main.rs::dispatch`):
+/// [`resolve_scope`] against the real current directory, erroring [`TmError::NotFound`] when
+/// neither scope has a project yet rather than creating one — a user who typed a specific
+/// subcommand already knows enough to run `tm init` first, and subcommands never create global
+/// state on their own (only [`open_bare`] does, and only for bare `tm`).
+pub fn open_for_command(explicit: Option<&Path>) -> tm_types::Result<Project> {
+    let cwd = std::env::current_dir()?;
+    let resolved = resolve_scope(explicit, &cwd)?;
+    if !resolved.exists {
+        return Err(TmError::not_found(
+            "project",
+            resolved.root.display().to_string(),
+        ));
+    }
+    open_at(&resolved.root, &resolved.state_dir, resolved.scope)
 }
 
 /// Resolve and open the project for bare `tm`'s entry point (`main.rs::dispatch`'s `None`
-/// command branch): [`resolve_project_dir`] plus [`open`], falling back to [`bootstrap_bare`]
-/// when [`resolve_project_dir`] fails with the one specific condition that means "no project
-/// exists yet" -- `TmError::NotFound` -- so a fresh directory with no `.tm/` anywhere above it
-/// "just works" the way `claude`/`codex` already do, instead of requiring the user to already
-/// know to run `tm init`/`tm attach` first. This can only occur when `explicit` is `None` (an
-/// explicit `--project` always resolves `Ok`, see [`resolve_project_dir`]); any other error kind
-/// (e.g. [`open`]'s own errors for a corrupt `.tm/project.db` or a permissions failure) is never
-/// produced by `resolve_project_dir` in the first place, so it is never caught here -- it
-/// propagates as a real error, matching every explicit subcommand's existing behavior.
+/// command branch): [`resolve_scope`] against the real current directory, opening whatever it
+/// finds (`--project`, a located `.tm/`, or an existing global project) — and, only when
+/// resolution lands on global scope with nothing there yet, creating a fresh global project under
+/// `$TM_HOME` ([`write_workspace_json`]) and printing nothing, rather than touching the workspace
+/// at all. This is the fix D-003 exists for: bare `tm` in a fresh directory used to write a
+/// `.tm/` (and, for a git repo, run a whole assimilation) into whatever the user happened to be
+/// standing in; now it creates state entirely outside the workspace and leaves it untouched.
 ///
-/// Kept out of `main.rs::dispatch` itself so the NotFound-catching decision is directly
-/// unit-testable without also driving the interactive loop or a prompt turn, both real side
-/// effects `dispatch` performs once a project is open -- see this crate's module doc:
-/// `main.rs` stays "thin", decisions like this belong in `tm-cli`'s library modules.
-pub fn open_bare(explicit: Option<&Path>, renderer: &Renderer) -> tm_types::Result<Project> {
-    match resolve_project_dir(explicit) {
-        Ok(project_dir) => open(&project_dir),
-        Err(TmError::NotFound { .. }) => {
-            let dir = std::env::current_dir()?;
-            bootstrap_bare(&dir, renderer)
-        }
-        Err(e) => Err(e),
+/// `renderer` is accepted (matching every other opener's shape, and so a future caller that wants
+/// to print something here doesn't need a signature change) but unused today: creating a global
+/// project is silent by design (D-003), unlike the old bootstrap's one-line "creating a project
+/// here" note.
+///
+/// Kept out of `main.rs::dispatch` itself so this decision is directly unit-testable without also
+/// driving the interactive loop or a prompt turn, both real side effects `dispatch` performs once
+/// a project is open -- see this crate's module doc: `main.rs` stays "thin", decisions like this
+/// belong in `tm-cli`'s library modules.
+pub fn open_bare(explicit: Option<&Path>, _renderer: &Renderer) -> tm_types::Result<Project> {
+    let cwd = std::env::current_dir()?;
+    let resolved = resolve_scope(explicit, &cwd)?;
+    let project = open_at(&resolved.root, &resolved.state_dir, resolved.scope)?;
+    if resolved.scope == Scope::Global && !resolved.exists {
+        write_workspace_json(&resolved.state_dir, &resolved.root, project.clock.as_ref())?;
     }
+    Ok(project)
+}
+
+/// `tm project show|list` (D-003): inspect scope resolution and enumerate global projects.
+/// Neither verb opens or creates a project — `show` calls [`resolve_scope`] directly, `list`
+/// only reads `$TM_HOME/projects/*/workspace.json`.
+pub fn dispatch_project(
+    cmd: &ProjectCommand,
+    explicit: Option<&Path>,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    match cmd {
+        ProjectCommand::Show => project_show(explicit, renderer),
+        ProjectCommand::List => project_list(renderer),
+    }
+}
+
+/// `tm project show`: the resolved scope for the current directory (or `--project`), as JSON
+/// `{kind, workspace, state_dir, exists}` or the equivalent human line. Creates nothing.
+fn project_show(explicit: Option<&Path>, renderer: &Renderer) -> tm_types::Result<()> {
+    let cwd = std::env::current_dir()?;
+    let resolved = resolve_scope(explicit, &cwd)?;
+    let kind = match resolved.scope {
+        Scope::Repo => "repo",
+        Scope::Global => "global",
+    };
+    let json = serde_json::json!({
+        "kind": kind,
+        "workspace": resolved.root,
+        "state_dir": resolved.state_dir,
+        "exists": resolved.exists,
+    });
+    let human = format!(
+        "{} — {}, state in {}",
+        resolved.root.display(),
+        kind,
+        resolved.state_dir.display()
+    );
+    renderer.emit(&json, &human)
+}
+
+/// One row of `tm project list`'s output: one `$TM_HOME/projects/<key>/` entry.
+#[derive(Debug, Clone, Serialize)]
+struct GlobalProjectEntry {
+    /// The directory name under `$TM_HOME/projects/`.
+    key: String,
+    /// `workspace.json`'s `workspace` field: the canonical workspace path this entry is for.
+    workspace: String,
+    /// The event log's current head sequence number, i.e. how many events this project has
+    /// recorded; `0` if the log can't be opened.
+    events: u64,
+    /// A `promoted.json` marker's contents alongside this entry, if one exists — nothing in this
+    /// track ever writes one yet (that's the next track's promotion command), so this is always
+    /// `None` today, but `list` already surfaces the field rather than needing a schema change
+    /// once promotion ships.
+    promoted: Option<serde_json::Value>,
+}
+
+/// `tm project list`: every `$TM_HOME/projects/*/workspace.json` entry.
+fn project_list(renderer: &Renderer) -> tm_types::Result<()> {
+    let home = tm_home()?;
+    let projects_dir = home.join("projects");
+    let mut entries = Vec::new();
+
+    let read_dir = match std::fs::read_dir(&projects_dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return renderer.emit(&entries, "no global projects yet");
+        }
+        Err(e) => return Err(TmError::from(e)),
+    };
+
+    for dir_entry in read_dir {
+        let dir_entry = dir_entry?;
+        if !dir_entry.file_type()?.is_dir() {
+            continue;
+        }
+        let dir = dir_entry.path();
+        let workspace_json = dir.join("workspace.json");
+        let Ok(raw) = std::fs::read_to_string(&workspace_json) else {
+            continue;
+        };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let workspace = doc
+            .get("workspace")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let events = tm_events::EventLog::open(&dir.join("project.db"))
+            .and_then(|log| log.head())
+            .unwrap_or(0);
+        let promoted = std::fs::read_to_string(dir.join("promoted.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str(&raw).ok());
+        entries.push(GlobalProjectEntry {
+            key: dir_entry.file_name().to_string_lossy().to_string(),
+            workspace,
+            events,
+            promoted,
+        });
+    }
+    entries.sort_by(|a, b| a.key.cmp(&b.key));
+
+    let rows = entries
+        .iter()
+        .map(|e| vec![e.key.clone(), e.workspace.clone(), e.events.to_string()])
+        .collect();
+    let human = Table::new(
+        vec![
+            "key".to_string(),
+            "workspace".to_string(),
+            "events".to_string(),
+        ],
+        rows,
+    )
+    .render();
+    renderer.emit(&entries, &human)
 }
 
 /// Create a new project's `.tm/` directory at `dir`, refusing if one already exists there, and
@@ -169,9 +527,11 @@ pub fn attach(args: &AttachArgs, renderer: &Renderer) -> tm_types::Result<()> {
 }
 
 /// Open `root` (an already-created `.tm/` project directory) and assimilate it via
-/// [`tm_genesis::attach::attach_repository`]. The shared body of [`attach`], split out so bare
-/// `tm`'s auto-bootstrap ([`bootstrap_bare`]) can perform the exact same assimilation `tm attach`
-/// does instead of reimplementing it.
+/// [`tm_genesis::attach::attach_repository`]. The shared body of [`attach`].
+///
+/// D-003 note: bare `tm` no longer has an auto-bootstrap that calls this — [`open_bare`] never
+/// assimilates a repository, it only ever opens or silently creates an empty global project.
+/// `tm attach` (this function's only remaining caller) stays repo-level and unchanged.
 fn attach_project(root: &Path) -> tm_types::Result<(Project, tm_genesis::attach::AttachReport)> {
     let project = open(root)?;
     let report = tm_genesis::attach::attach_repository(
@@ -181,50 +541,6 @@ fn attach_project(root: &Path) -> tm_types::Result<(Project, tm_genesis::attach:
         project.actor.clone(),
     )?;
     Ok((project, report))
-}
-
-/// Whether `dir` is an existing git repository with at least one commit -- the bar bare `tm`'s
-/// auto-bootstrap ([`bootstrap_bare`]) uses to decide between assimilating it via
-/// [`attach_project`] and leaving a fresh, empty project the way `tm init` does. Mirrors exactly
-/// what would make [`tm_genesis::attach::attach_repository`]'s underlying
-/// `HistoryIndex::ingest_incremental` fail per its documented "no git repo -> clean error"
-/// contract (no `.git` at all, or a repo whose `HEAD` is still unborn because it has no commits
-/// yet), so this decision never disagrees with what `attach_repository` itself would have done.
-/// Uses `git2::Repository::open` (not `discover`): it only recognizes `dir` itself as a repo
-/// root, not an ancestor directory, the same scope `attach_repository` already operates in.
-fn has_committed_git_history(dir: &Path) -> bool {
-    match git2::Repository::open(dir) {
-        Ok(repo) => repo.head().is_ok(),
-        Err(_) => false,
-    }
-}
-
-/// Bare `tm`'s zero-setup bootstrap, called by [`open_bare`] only when [`resolve_project_dir`]
-/// found no `.tm` anywhere above `dir` -- the one specific condition this recovers from. Any
-/// other failure (a corrupt `.tm/project.db`, a permissions error, and so on) is never routed
-/// here and still surfaces as a real error, since it is raised by [`resolve_project_dir`]/[`open`]
-/// themselves rather than caught and reinterpreted.
-///
-/// Prints one note so a user isn't left wondering later where a `.tm/` directory came from, then
-/// bootstraps a project exactly the way the explicit commands would: [`attach_project`] (the same
-/// assimilation `tm attach` performs) when `dir` is an existing git repository with committed
-/// history worth indexing per [`has_committed_git_history`], or [`create_project_dir`] plus
-/// [`open`] (the same as a fresh `tm init`) otherwise, since there is nothing yet for
-/// `attach_repository` to find in a genuinely empty or history-less directory.
-fn bootstrap_bare(dir: &Path, renderer: &Renderer) -> tm_types::Result<Project> {
-    let display_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    renderer.note(&format!(
-        "No Ticketmaster project here yet — creating one at {}.",
-        display_dir.display()
-    ));
-
-    let root = create_project_dir(dir)?;
-    if has_committed_git_history(dir) {
-        let (project, _report) = attach_project(&root)?;
-        Ok(project)
-    } else {
-        open(&root)
-    }
 }
 
 fn render_attach_report(report: &tm_genesis::attach::AttachReport) -> String {
@@ -494,7 +810,7 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
 /// Open a fresh read handle onto `project`'s event log, independent of the one `project.store`
 /// holds internally (which exposes no read accessor of its own).
 fn open_event_log(project: &Project) -> tm_types::Result<EventLog> {
-    let db_path = project.root.join(".tm").join("project.db");
+    let db_path = project.state_dir.join("project.db");
     EventLog::open_with_clock(&db_path, project.clock.clone())
 }
 
@@ -515,10 +831,26 @@ fn read_all_events(log: &EventLog) -> tm_types::Result<Vec<Event>> {
     Ok(out)
 }
 
+/// `StatusReport`'s scope summary (D-003): plain fields rather than a preformatted string, so
+/// `--json` output stays structured; [`render_status_report`] reconstructs the human-readable
+/// line from these via [`scope_line_for`].
+#[derive(Debug, Clone, Serialize)]
+pub struct ScopeInfo {
+    /// `"repo"` or `"global"`.
+    pub kind: String,
+    /// The workspace root.
+    pub workspace: PathBuf,
+    /// Where this project's state lives.
+    pub state_dir: PathBuf,
+}
+
 /// The "since you left" report: a snapshot a returning human can read in a few seconds and know
 /// exactly what happened and what needs them.
 #[derive(Debug, Clone, Serialize)]
 pub struct StatusReport {
+    /// Where this project's state lives (D-003), so `tm status --json` carries the same scope
+    /// information the human-readable prefix shows.
+    pub scope: ScopeInfo,
     /// Tickets that closed since the report window started.
     pub closed: Vec<String>,
     /// Tickets newly blocked (retry exhausted, cycle budget spent, failure needing a human).
@@ -641,6 +973,15 @@ fn build_status_report(project: &Project, args: &StatusArgs) -> tm_types::Result
     };
 
     let mut report = StatusReport {
+        scope: ScopeInfo {
+            kind: match project.scope {
+                Scope::Repo => "repo",
+                Scope::Global => "global",
+            }
+            .to_string(),
+            workspace: project.root.clone(),
+            state_dir: project.state_dir.clone(),
+        },
         closed: Vec::new(),
         blocked: Vec::new(),
         awaiting_review: Vec::new(),
@@ -753,6 +1094,13 @@ fn build_status_report(project: &Project, args: &StatusArgs) -> tm_types::Result
 }
 
 fn render_status_report(report: &StatusReport) -> String {
+    let scope = if report.scope.kind == "global" {
+        Scope::Global
+    } else {
+        Scope::Repo
+    };
+    let scope_line = scope_line_for(scope, &report.scope.workspace, &report.scope.state_dir);
+
     let sections: Vec<String> = [
         ("Closed", &report.closed),
         ("Blocked", &report.blocked),
@@ -775,9 +1123,9 @@ fn render_status_report(report: &StatusReport) -> String {
     .collect();
 
     if sections.is_empty() {
-        "nothing happened since you left — the project is quiet.".to_string()
+        format!("{scope_line}\n\nnothing happened since you left — the project is quiet.")
     } else {
-        sections.join("\n\n")
+        format!("{scope_line}\n\n{}", sections.join("\n\n"))
     }
 }
 
@@ -1005,6 +1353,14 @@ pub fn doctor(
 ) -> tm_types::Result<DoctorReport> {
     let mut checks = Vec::new();
 
+    // Advisory, always `ok: true` — see the `"providers"`/`"workflow-1x1"` checks below for the
+    // same convention. Purely informational: where this project's state actually lives (D-003).
+    checks.push(DoctorCheck {
+        name: "scope".to_string(),
+        ok: true,
+        detail: project.scope_line(),
+    });
+
     let violations = project.store.check_invariants()?;
     checks.push(DoctorCheck {
         name: "invariants".to_string(),
@@ -1099,6 +1455,31 @@ pub fn doctor(
 }
 
 #[cfg(test)]
+impl Project {
+    /// Test-only constructor for the handful of test modules across this crate that need a real
+    /// `Project` over a store they already opened: fills in repo scope and
+    /// `state_dir = root.join(".tm")` (the shape every one of those tests already assumed before
+    /// D-003 added the `state_dir`/`scope` fields), plus the `human:tester` actor every such test
+    /// already used. Kept as one helper rather than hand-editing every call site.
+    pub(crate) fn for_test(
+        root: &Path,
+        store: Arc<tm_core::Store>,
+        clock: Arc<dyn Clock>,
+        ids: Arc<dyn IdSource>,
+    ) -> Project {
+        Project {
+            root: root.to_path_buf(),
+            state_dir: root.join(".tm"),
+            scope: Scope::Repo,
+            store,
+            clock,
+            ids,
+            actor: ParticipantId::new("human:tester").expect("valid participant id"),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1133,10 +1514,172 @@ mod tests {
     }
 
     #[test]
-    fn resolve_project_dir_prefers_the_explicit_path_over_locate() {
+    fn resolve_scope_prefers_the_explicit_path_over_everything_else() {
         let tmp = tempfile::tempdir().unwrap();
         let explicit = tmp.path().join("wherever-even-without-a-tm-dir");
-        assert_eq!(resolve_project_dir(Some(&explicit)).unwrap(), explicit);
+        let cwd = tmp.path().to_path_buf();
+        let resolved = resolve_scope(Some(&explicit), &cwd).unwrap();
+        assert_eq!(resolved.root, explicit);
+        assert_eq!(resolved.state_dir, explicit.join(".tm"));
+        assert_eq!(resolved.scope, Scope::Repo);
+        assert!(resolved.exists);
+    }
+
+    #[test]
+    fn resolve_scope_prefers_a_located_tm_dir_over_global() {
+        let _guard = ENV_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".tm")).unwrap();
+
+        let resolved = resolve_scope(None, &root).unwrap();
+
+        std::env::remove_var("TM_HOME");
+        assert_eq!(resolved.root, root);
+        assert_eq!(resolved.state_dir, root.join(".tm"));
+        assert_eq!(resolved.scope, Scope::Repo);
+        assert!(resolved.exists);
+    }
+
+    #[test]
+    fn resolve_scope_finds_an_existing_global_project_when_no_tm_dir_is_located() {
+        let _guard = ENV_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().canonicalize().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+
+        let key = global_project_key(&cwd);
+        let state_dir = tm_home.path().join("projects").join(&key);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("project.db"), b"").unwrap();
+
+        let resolved = resolve_scope(None, &cwd).unwrap();
+
+        std::env::remove_var("TM_HOME");
+        assert_eq!(resolved.root, cwd);
+        assert_eq!(resolved.state_dir, state_dir);
+        assert_eq!(resolved.scope, Scope::Global);
+        assert!(resolved.exists);
+    }
+
+    #[test]
+    fn resolve_scope_falls_back_to_a_fresh_global_project_when_nothing_exists() {
+        let _guard = ENV_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().canonicalize().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+
+        let resolved = resolve_scope(None, &cwd).unwrap();
+
+        std::env::remove_var("TM_HOME");
+        assert_eq!(resolved.root, cwd);
+        assert_eq!(resolved.scope, Scope::Global);
+        assert!(!resolved.exists);
+    }
+
+    #[test]
+    fn global_project_key_is_deterministic_and_does_not_collide_for_different_paths() {
+        let a = Path::new("/Users/allie/Develop/foo");
+        let b = Path::new("/Users/allie/Develop/bar");
+        assert_eq!(global_project_key(a), global_project_key(a));
+        assert_ne!(global_project_key(a), global_project_key(b));
+        assert!(global_project_key(a).starts_with("Users-allie-Develop-foo-"));
+    }
+
+    #[test]
+    fn tm_home_prefers_the_env_var_when_set() {
+        let _guard = ENV_GUARD.lock().unwrap();
+        std::env::set_var("TM_HOME", "/tmp/somewhere-fake-for-this-test");
+        let home = tm_home().unwrap();
+        std::env::remove_var("TM_HOME");
+        assert_eq!(home, PathBuf::from("/tmp/somewhere-fake-for-this-test"));
+    }
+
+    #[test]
+    fn tm_home_falls_back_to_home_dot_tm_when_unset() {
+        let _guard = ENV_GUARD.lock().unwrap();
+        std::env::remove_var("TM_HOME");
+        let home = tm_home().unwrap();
+        let expected = dirs::home_dir()
+            .expect("this test environment has a real $HOME")
+            .join(".tm");
+        assert_eq!(home, expected);
+    }
+
+    #[test]
+    fn workspace_root_for_returns_the_canonical_cwd_outside_a_git_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        assert_eq!(workspace_root_for(tmp.path()).unwrap(), canonical);
+    }
+
+    #[test]
+    fn workspace_root_for_returns_the_git_toplevel_from_a_nested_subdirectory() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        let nested = tmp.path().join("a/b");
+        std::fs::create_dir_all(&nested).unwrap();
+        let expected = tmp.path().canonicalize().unwrap();
+        assert_eq!(workspace_root_for(&nested).unwrap(), expected);
+    }
+
+    #[test]
+    fn open_bare_creates_global_state_under_tm_home_never_under_the_invoking_cwd() {
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let _cwd_guard = CWD_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+        std::env::set_current_dir(&canonical).unwrap();
+
+        let project = open_bare(None, &test_renderer()).unwrap();
+
+        std::env::set_current_dir(&original_cwd).unwrap();
+        std::env::remove_var("TM_HOME");
+
+        assert_eq!(
+            std::fs::read_dir(&canonical).unwrap().count(),
+            0,
+            "opening a global project must never write into the workspace"
+        );
+        assert_eq!(project.scope, Scope::Global);
+        assert!(project.state_dir.starts_with(tm_home.path()));
+        assert!(project.state_dir.join("project.db").exists());
+        assert!(project.state_dir.join("workspace.json").exists());
+    }
+
+    #[test]
+    fn open_for_command_errors_not_found_for_a_workspace_with_no_history_in_either_scope() {
+        // `open_for_command` reads the real current directory (unlike `resolve_scope`, which
+        // takes `cwd` explicitly), so this needs both the env guard (`TM_HOME`) and the cwd guard
+        // to run hermetically alongside every other test in this binary.
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let _cwd_guard = CWD_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+        std::env::set_current_dir(&canonical).unwrap();
+
+        let result = open_for_command(None);
+
+        std::env::set_current_dir(&original_cwd).unwrap();
+        std::env::remove_var("TM_HOME");
+
+        // `Project` derives no `Debug` (see `tui.rs`'s own note on why), so this matches by hand
+        // rather than via a `{:?}`-formatting assertion macro.
+        match result {
+            Err(TmError::NotFound { .. }) => {}
+            Err(other) => panic!("expected NotFound, got a different error: {other}"),
+            Ok(_) => panic!("expected NotFound, got an opened project"),
+        }
     }
 
     #[test]
@@ -1259,13 +1802,7 @@ mod tests {
         ));
         let ids: Arc<dyn IdSource> = Arc::new(CounterIds::seeded(1));
         let store = Arc::new(tm_core::Store::open_with(root, clock.clone(), ids.clone()).unwrap());
-        Project {
-            root: root.to_path_buf(),
-            store,
-            clock,
-            ids,
-            actor: ParticipantId::new("human:tester").unwrap(),
-        }
+        Project::for_test(root, store, clock, ids)
     }
 
     #[test]
@@ -1437,65 +1974,14 @@ mod tests {
         assert!(matches!(err, TmError::Invariant(_)));
     }
 
-    #[test]
-    fn bootstrap_bare_creates_a_fresh_empty_project_in_a_directory_with_no_git_history() {
-        let tmp = tempfile::tempdir().unwrap();
-
-        let project = bootstrap_bare(tmp.path(), &test_renderer()).unwrap();
-
-        assert!(tmp.path().join(".tm").is_dir());
-        // A plain `init`-equivalent bootstrap never runs `attach_repository`, so nothing got
-        // indexed and no `T-001` investigation ticket was created.
-        assert!(!tmp.path().join(".tm").join("index.db").exists());
-        assert!(project.store.view().unwrap().tickets.is_empty());
-    }
-
-    #[test]
-    fn bootstrap_bare_treats_an_unborn_git_repo_as_empty_rather_than_erroring() {
-        let tmp = tempfile::tempdir().unwrap();
-        // `git init` with zero commits: a repo exists, but HEAD is unborn, which is exactly the
-        // condition `attach_repository`'s history ingest would fail clean on -- so this must
-        // still be treated as "nothing to assimilate" rather than surfacing that failure.
-        let status = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(tmp.path())
-            .status()
-            .expect("git should run in test environment");
-        assert!(status.success());
-
-        let project = bootstrap_bare(tmp.path(), &test_renderer()).unwrap();
-
-        assert!(tmp.path().join(".tm").is_dir());
-        assert!(project.store.view().unwrap().tickets.is_empty());
-    }
-
-    #[test]
-    fn bootstrap_bare_assimilates_an_existing_git_repository_with_committed_history() {
-        let tmp = tempfile::tempdir().unwrap();
-        init_git_repo(tmp.path());
-        std::fs::write(tmp.path().join("README.md"), "# hi\n").unwrap();
-
-        let project = bootstrap_bare(tmp.path(), &test_renderer()).unwrap();
-
-        assert!(tmp.path().join(".tm").is_dir());
-        // `attach_repository` always creates the `T-001` "understand this codebase"
-        // investigation ticket, so its presence proves the git-history path (not the plain
-        // `init`-equivalent path) is the one that ran.
-        assert_eq!(project.store.view().unwrap().tickets.len(), 1);
-    }
-
-    #[test]
-    fn has_committed_git_history_is_false_for_a_directory_with_no_git_at_all() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(!has_committed_git_history(tmp.path()));
-    }
-
-    #[test]
-    fn has_committed_git_history_is_true_once_a_repo_has_a_commit() {
-        let tmp = tempfile::tempdir().unwrap();
-        init_git_repo(tmp.path());
-        assert!(has_committed_git_history(tmp.path()));
-    }
+    // `bootstrap_bare`/`has_committed_git_history` no longer exist: D-003 removes bare `tm`'s
+    // git-history-assimilation auto-bootstrap entirely. `open_bare` now either opens whatever
+    // `resolve_scope` finds (a `--project`, a located `.tm/`, or an existing global project) or
+    // silently creates an *empty* global project under `$TM_HOME` — it never runs
+    // `attach_repository` and never touches the workspace. See
+    // `open_bare_creates_global_state_under_tm_home_never_under_the_invoking_cwd` above for that
+    // behavior's coverage, and `tests/bare_scope.rs` for the end-to-end (real spawned binary)
+    // version, including the git-repo case that used to assimilate and now simply doesn't.
 
     #[test]
     fn open_bare_opens_the_explicit_project_dir_and_never_bootstraps() {
@@ -1505,34 +1991,16 @@ mod tests {
         let project = open_bare(Some(tmp.path()), &test_renderer()).unwrap();
 
         assert_eq!(project.root, tmp.path());
-    }
-
-    #[test]
-    fn open_bare_bootstraps_when_nothing_is_found_from_the_real_current_directory() {
-        let _guard = CWD_GUARD.lock().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        let canonical = tmp.path().canonicalize().unwrap();
-        let original_cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&canonical).unwrap();
-
-        let result = open_bare(None, &test_renderer());
-
-        std::env::set_current_dir(&original_cwd).unwrap();
-
-        let project = result.unwrap();
-        assert_eq!(project.root, canonical);
-        assert!(canonical.join(".tm").is_dir());
-        // No git history to assimilate in a fresh tempdir: the plain `init`-equivalent path.
-        assert!(project.store.view().unwrap().tickets.is_empty());
+        assert_eq!(project.scope, Scope::Repo);
     }
 
     #[test]
     fn open_bare_propagates_a_real_open_error_for_an_already_found_but_broken_project() {
         let tmp = tempfile::tempdir().unwrap();
-        // A `.tm` directory exists (so `resolve_project_dir` succeeds, never reaching the
-        // NotFound-catching bootstrap path at all) but `project.db` is a directory instead of a
-        // file, so the real `open()` call that follows fails for a reason that has nothing to do
-        // with "no project exists yet" and must not be swallowed or reinterpreted.
+        // An explicit `--project` always resolves `Repo`/`exists: true` (so `resolve_scope`
+        // never routes this through the global-creation path at all), but `project.db` is a
+        // directory instead of a file, so the real `open_at` call that follows fails for a reason
+        // that has nothing to do with "no project exists yet" and must not be swallowed.
         std::fs::create_dir_all(tmp.path().join(".tm").join("project.db")).unwrap();
 
         match open_bare(Some(tmp.path()), &test_renderer()) {

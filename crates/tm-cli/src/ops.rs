@@ -408,7 +408,7 @@ mod templates_tests {
     use std::sync::Arc;
 
     use tempfile::TempDir;
-    use tm_types::{Clock, CounterIds, FixedClock, IdSource, ParticipantId, Timestamp};
+    use tm_types::{Clock, CounterIds, FixedClock, IdSource, Timestamp};
 
     use super::*;
 
@@ -420,13 +420,7 @@ mod templates_tests {
         let store = Arc::new(
             tm_core::Store::open_with(root, clock.clone(), ids.clone()).expect("open store"),
         );
-        Project {
-            root: root.to_path_buf(),
-            store,
-            clock,
-            ids,
-            actor: ParticipantId::new("human:tester").expect("valid participant id"),
-        }
+        Project::for_test(root, store, clock, ids)
     }
 
     fn write_fixture_registry(root: &Path) -> String {
@@ -551,7 +545,7 @@ fn availability_label(availability: tm_provider::Availability) -> &'static str {
 /// across many roles and resolving a local backend's availability costs a real (short-timeout)
 /// network probe.
 pub async fn provider_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
-    let harness_path = project.root.join(".tm").join("harness.toml");
+    let harness_path = project.state_dir.join("harness.toml");
     let harness_content = fs::read_to_string(&harness_path)
         .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
 
@@ -767,7 +761,7 @@ pub fn dispatch_harness(
 /// defaults, command policy, editing policy) as labeled blocks or JSON.
 pub fn harness_show(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let _view = project.store.view()?;
-    let harness_path = project.root.join(".tm").join("harness.toml");
+    let harness_path = project.state_dir.join("harness.toml");
     let harness_content = fs::read_to_string(&harness_path)
         .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
 
@@ -797,7 +791,7 @@ pub fn harness_set(
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
     let _view = project.store.view()?;
-    let harness_path = project.root.join(".tm").join("harness.toml");
+    let harness_path = project.state_dir.join("harness.toml");
     let harness_content = fs::read_to_string(&harness_path)
         .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
 
@@ -925,7 +919,7 @@ pub fn harness_promote(
         )));
     }
 
-    let harness_path = project.root.join(".tm").join("harness.toml");
+    let harness_path = project.state_dir.join("harness.toml");
     let harness_content = fs::read_to_string(&harness_path)
         .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
     let candidate = tm_harness::HarnessConfig::parse(&harness_content)
@@ -1065,7 +1059,7 @@ pub fn harness_promote(
 /// timestamp-derived and sort chronologically — see `bench_run`'s `out_path` default), or `None`
 /// if `.tm/bench/` doesn't exist or has no reports yet.
 fn latest_bench_report(project: &Project) -> Option<std::path::PathBuf> {
-    let dir = project.root.join(".tm").join("bench");
+    let dir = project.state_dir.join("bench");
     let mut candidates: Vec<_> = fs::read_dir(&dir)
         .ok()?
         .filter_map(|e| e.ok())
@@ -1258,7 +1252,7 @@ pub async fn bench_run(
     let report = runner.run_all(&filtered, &provider, epoch)?;
 
     let out_path = args.out.clone().unwrap_or_else(|| {
-        project.root.join(".tm").join("bench").join(format!(
+        project.state_dir.join("bench").join(format!(
             "{}.json",
             report.generated_at.to_rfc3339().replace(':', "-")
         ))
@@ -1362,7 +1356,7 @@ pub fn mirror_link(
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
     let _view = project.store.view()?;
-    let mirror_path = project.root.join(".tm").join("mirror.toml");
+    let mirror_path = project.state_dir.join("mirror.toml");
 
     let (adapter_kind, credential_var) = match args.adapter.to_lowercase().as_str() {
         "github" => (tm_mirror::AdapterKind::GitHub, "GITHUB_TOKEN"),
@@ -1543,7 +1537,7 @@ fn build_tracker(
 /// [`tm_mirror::Tracker::confirm`] probe first, so a lost receipt does not necessarily cost a
 /// duplicate external write.
 pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
-    let mirror_path = project.root.join(".tm").join("mirror.toml");
+    let mirror_path = project.state_dir.join("mirror.toml");
     if !mirror_path.is_file() {
         if renderer.is_json() {
             renderer.emit(
@@ -1680,7 +1674,7 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
 /// each tracker for changes since [`tm_types::Timestamp::EPOCH`] rather than incrementally since
 /// the last pull — the same documented B-05 schema limitation `mirror_push` notes for push.
 pub async fn mirror_pull(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
-    let mirror_path = project.root.join(".tm").join("mirror.toml");
+    let mirror_path = project.state_dir.join("mirror.toml");
     if !mirror_path.is_file() {
         if renderer.is_json() {
             renderer.emit(
@@ -1853,7 +1847,7 @@ pub async fn events_tail(
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
-    let db_path = project.root.join(".tm").join("project.db");
+    let db_path = project.state_dir.join("project.db");
     let log = tm_events::EventLog::open(&db_path)?;
     let head = log.head()?;
     let from = args.from.unwrap_or(head);
@@ -1872,7 +1866,7 @@ pub fn events_show(
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
-    let db_path = project.root.join(".tm").join("project.db");
+    let db_path = project.state_dir.join("project.db");
     let log = tm_events::EventLog::open(&db_path)?;
     let events = log.read_range(args.seq, args.seq)?;
 
@@ -1914,7 +1908,7 @@ pub fn events_replay(
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
-    let db_path = project.root.join(".tm").join("project.db");
+    let db_path = project.state_dir.join("project.db");
     let log = tm_events::EventLog::open(&db_path)?;
     let head = log.head()?;
     let to = args.to.unwrap_or(head);
@@ -1946,7 +1940,7 @@ pub fn events_replay(
 /// `EventLog::verify_chain()`; render `ChainReport` (`is_valid`, first broken link if any) and
 /// return a non-zero-mapping error when invalid.
 pub fn events_verify(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
-    let db_path = project.root.join(".tm").join("project.db");
+    let db_path = project.state_dir.join("project.db");
     let log = tm_events::EventLog::open(&db_path)?;
     let report = log.verify_chain()?;
 
@@ -1983,7 +1977,7 @@ pub fn events_verify(project: &Project, renderer: &Renderer) -> tm_types::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tm_types::{Authority, Budget, Clock, CounterIds, IdSource, ParticipantId, Timestamp};
+    use tm_types::{Authority, Budget, Clock, CounterIds, IdSource, Timestamp};
 
     fn test_project(root: &std::path::Path) -> Project {
         std::fs::create_dir_all(root.join(".tm")).unwrap();
@@ -1992,13 +1986,7 @@ mod tests {
         ));
         let ids: Arc<dyn IdSource> = Arc::new(CounterIds::seeded(1));
         let store = Arc::new(tm_core::Store::open_with(root, clock.clone(), ids.clone()).unwrap());
-        Project {
-            root: root.to_path_buf(),
-            store,
-            clock,
-            ids,
-            actor: ParticipantId::new("human:tester").unwrap(),
-        }
+        Project::for_test(root, store, clock, ids)
     }
 
     fn test_renderer() -> Renderer {

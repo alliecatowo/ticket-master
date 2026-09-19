@@ -45,18 +45,20 @@ fn install_tracing() {
 
 /// Route a parsed [`Cli`] to its execution module.
 ///
-/// When `cli.command` is `None`, open the project (via [`project::open_bare`], which
-/// auto-bootstraps one when `--project` was not given and none exists yet anywhere above the
-/// current directory -- bare `tm` must "just work" in a fresh directory the same way
-/// `claude`/`codex` do, not require the user to already know to run `tm init`/`tm attach` first)
-/// and either run one prompt to completion (`--prompt`), open the ratatui TUI (a real tty, per
-/// [`tui::should_launch`] — D-002: "a mode of the existing binary, entered on the bare-`tm` TTY
-/// path"), or fall back to the plain interactive agent loop (`--plain`, `--json`, `--quiet`,
-/// `TERM=dumb`, or stdout/stdin not a tty). When `cli.command` is `Some`, delegate to the
-/// matching execution module -- every one of those still requires an already-open project and
-/// errors precisely as before when none exists, since a user who typed a specific subcommand
-/// already knows enough to run `tm init` first. `Init` is the only explicit command that doesn't
-/// need an already-open project.
+/// When `cli.command` is `None`, open the project via [`project::open_bare`] (D-003:
+/// [`project::resolve_scope`] against the real current directory, silently creating an empty
+/// project under `$TM_HOME` — never in the workspace, never by assimilating a git repo — the one
+/// time it resolves to global scope with nothing there yet) and either run one prompt to
+/// completion (`--prompt`), open the ratatui TUI (a real tty, per [`tui::should_launch`] — D-002:
+/// "a mode of the existing binary, entered on the bare-`tm` TTY path"), or fall back to the plain
+/// interactive agent loop (`--plain`, `--json`, `--quiet`, `TERM=dumb`, or stdout/stdin not a
+/// tty). When `cli.command` is `Some`, delegate to the matching execution module -- every one of
+/// those (via [`project::open_for_command`]) still requires an already-open project in either
+/// scope and errors `NotFound` precisely as before when none exists, since a user who typed a
+/// specific subcommand already knows enough to run `tm init` first; subcommands never create
+/// state on their own. `Init` and `Project` are the only commands that don't need an
+/// already-open project (`Project::Show` reads scope resolution directly; `Project::List` reads
+/// `$TM_HOME` directly).
 async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
     match cli.command {
         None => {
@@ -79,13 +81,11 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
         Some(Command::Attach(args)) => project::attach(&args, renderer),
         Some(Command::Genesis(args)) => project::genesis(&args, renderer),
         Some(Command::Status(args)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             project::status(&opened, &args, renderer)
         }
         Some(Command::Doctor(args)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             let report = project::doctor(&opened, &args, renderer)?;
             if report.all_ok() {
                 Ok(())
@@ -96,114 +96,95 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
             }
         }
         Some(Command::Ticket(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             tickets::dispatch_ticket(&cmd, &opened, renderer)
         }
         Some(Command::Dep(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             tickets::dispatch_dep(&cmd, &opened, renderer)
         }
         Some(Command::Milestone(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             tickets::dispatch_milestone(&cmd, &opened, renderer)
         }
         Some(Command::Decision(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             tickets::dispatch_decision(&cmd, &opened, renderer)
         }
         Some(Command::Sched(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             sched::dispatch_sched(&cmd, &opened, renderer)
         }
         Some(Command::Lease(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             sched::dispatch_lease(&cmd, &opened, renderer)
         }
         Some(Command::Run(args)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             sched::run_ticket(&args, &opened, renderer).await
         }
         Some(Command::Search(args)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             search::search(&args, &opened, renderer)
         }
         Some(Command::Symbol(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             search::dispatch_symbol(&cmd, &opened, renderer)
         }
         Some(Command::History(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             search::dispatch_history(&cmd, &opened, renderer)
         }
         Some(Command::Docs(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             ops::dispatch_docs(&cmd, &opened, renderer)
         }
         Some(Command::Provider(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             ops::dispatch_provider(&cmd, &opened, renderer).await
         }
         Some(Command::Auth(args)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let _opened = project::open(&project_dir)?;
+            let _opened = project::open_for_command(cli.global.project.as_deref())?;
             auth::auth(&args, renderer).await
         }
         Some(Command::Harness(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             ops::dispatch_harness(&cmd, &opened, renderer)
         }
         Some(Command::Bench(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             ops::dispatch_bench(&cmd, &opened, renderer).await
         }
         Some(Command::Workflow(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             workflow::dispatch_workflow(&cmd, &opened, renderer)
         }
         Some(Command::Mirror(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             ops::dispatch_mirror(&cmd, &opened, renderer).await
         }
         Some(Command::Templates(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             ops::dispatch_templates(&cmd, &opened, renderer)
         }
         Some(Command::Serve(args)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             serve::serve(&args, &opened, renderer).await
         }
         Some(Command::Events(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             ops::dispatch_events(&cmd, &opened, renderer).await
         }
         Some(Command::Browser(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             drive::dispatch_browser(&cmd, &opened, renderer).await
         }
         Some(Command::Computer(cmd)) => {
-            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
-            let opened = project::open(&project_dir)?;
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
             drive::dispatch_computer(&cmd, &opened, renderer).await
+        }
+        Some(Command::Project(cmd)) => {
+            project::dispatch_project(&cmd, cli.global.project.as_deref(), renderer)
         }
     }
 }
@@ -211,6 +192,13 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `TM_HOME` is process-global; serialize every test that touches it so it can't race a
+    /// sibling test in this binary reading or changing it concurrently. A `tokio::sync::Mutex`,
+    /// not `std::sync::Mutex`: the guard is held across `dispatch(..).await` below, and holding a
+    /// std mutex guard across an await point is a real bug (it can block the executor thread),
+    /// not just a clippy nit.
+    static ENV_GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn tracing_installs_without_panic() {
@@ -250,21 +238,28 @@ mod tests {
 
     // `dispatch_bare_agent_no_project_error` and `dispatch_prompt_no_project_error` used to
     // assert that bare `tm`/`tm --prompt` (`command: None`) errored when no project existed yet.
-    // That was exactly the UX bug this auto-bootstrap fixes, so both assertions are gone.
-    // `dispatch`'s `None` branch now delegates the whole resolve-or-bootstrap decision to
-    // `project::open_bare`, which is covered directly and hermetically (no real cwd, no stdin, no
-    // provider) by `project::tests::open_bare_*` in `src/project.rs`. Proving the fix by driving
-    // `dispatch` itself in-process for the bare (no `--prompt`) arm isn't safe on top of that:
-    // past the bootstrap it falls into `session.run_interactive()`, which blocks reading real
-    // stdin, and this test binary doesn't control that the way a spawned subprocess with piped,
-    // explicitly-closed stdin can. That end-to-end path (including the plain loop actually being
-    // reached, and the git-history-assimilation decision) is covered by
-    // `tests/bare_bootstrap.rs`'s `bare_tm_bootstraps_a_project_in_a_genuinely_empty_directory`
-    // and `bare_tm_assimilates_an_existing_git_repository_with_commits`, which spawn the real
-    // compiled `tm` binary the same way `tests/tui_launch.rs` already does.
+    // D-003 replaced that error with a silent global-scope bootstrap, so both assertions are
+    // gone. `dispatch`'s `None` branch now delegates entirely to `project::open_bare`, which is
+    // covered directly and hermetically (no real cwd, no stdin, no provider) by
+    // `project::tests::open_bare_*` in `src/project.rs`. Proving the fix by driving `dispatch`
+    // itself in-process for the bare (no `--prompt`) arm isn't safe on top of that: past the
+    // open it falls into `session.run_interactive()`, which blocks reading real stdin, and this
+    // test binary doesn't control that the way a spawned subprocess with piped, explicitly-closed
+    // stdin can. That end-to-end path (including the plain loop actually being reached, and that
+    // bare `tm` genuinely never assimilates a git repo anymore) is covered by
+    // `tests/bare_scope.rs`, which spawns the real compiled `tm` binary the same way
+    // `tests/tui_launch.rs` already does.
 
     #[tokio::test]
     async fn dispatch_ticket_subcommand_no_project_error() {
+        // D-003: with no `--project` and no located `.tm/`, `open_for_command` falls back to
+        // checking `$TM_HOME` for an existing global project before erroring `NotFound` — so this
+        // needs a real, empty `TM_HOME` of its own rather than whatever the real developer
+        // running this test happens to have at `~/.tm`.
+        let _guard = ENV_GUARD.lock().await;
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+
         let renderer = Renderer::from_flags(false, false, true);
         let cli = Cli {
             global: tm_cli::args::GlobalOpts {
@@ -285,6 +280,7 @@ mod tests {
         };
 
         let result = dispatch(cli, &renderer).await;
+        std::env::remove_var("TM_HOME");
         match result {
             Err(tm_types::TmError::NotFound { .. }) => (),
             other => panic!(
@@ -296,6 +292,10 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_search_subcommand_no_project_error() {
+        let _guard = ENV_GUARD.lock().await;
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+
         let renderer = Renderer::from_flags(false, false, true);
         let cli = Cli {
             global: tm_cli::args::GlobalOpts {
@@ -314,6 +314,7 @@ mod tests {
         };
 
         let result = dispatch(cli, &renderer).await;
+        std::env::remove_var("TM_HOME");
         match result {
             Err(tm_types::TmError::NotFound { .. }) => (),
             other => panic!(

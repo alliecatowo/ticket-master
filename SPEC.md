@@ -827,11 +827,16 @@ tm mirror link|push|pull|status
 tm serve [--addr]
 tm events tail|show|replay|verify
 tm doctor                          # invariants + hash chain + index health
+tm project show|list               # D-003: resolved scope, and every global project under $TM_HOME
 ```
 
 Output: human-readable by default, `--json` everywhere (stable schemas, snapshot-tested),
 `--quiet`, `--no-color`. Exit codes: 0 ok, 1 domain failure, 2 usage error, 3 authority denied,
 4 budget exhausted, 5 invariant violation.
+
+A project's workspace (`root`) and its durable state (`state_dir`) are two different paths that
+can disagree — bare `tm` outside any existing project keeps its state under `$TM_HOME` instead of
+writing into the workspace; see `docs/decisions/D-003-project-scope.md`.
 
 ---
 

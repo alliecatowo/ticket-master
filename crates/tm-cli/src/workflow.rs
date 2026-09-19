@@ -19,7 +19,7 @@ use crate::render::{Renderer, Table};
 
 /// The directory `.tm/workflows/*.toml` definitions live under.
 fn workflows_dir(project: &Project) -> PathBuf {
-    project.root.join(".tm").join("workflows")
+    project.state_dir.join("workflows")
 }
 
 /// Every `.tm/workflows/*.toml` file's stem (the name `tm workflow show|run` takes), sorted.

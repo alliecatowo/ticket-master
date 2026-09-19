@@ -26,6 +26,7 @@ use crate::project::Project;
 struct ProjectContextPackSource {
     store: Arc<Store>,
     root: PathBuf,
+    state_dir: PathBuf,
 }
 
 impl ContextPackSource for ProjectContextPackSource {
@@ -35,7 +36,7 @@ impl ContextPackSource for ProjectContextPackSource {
             .tickets
             .get(ticket)
             .ok_or_else(|| tm_types::TmError::not_found("ticket", ticket))?;
-        let ci = tm_codeintel::CodeIntel::open(&self.root)?;
+        let ci = tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.root)?;
         let pack = tm_context::pack::compile(
             ticket_state,
             &view,
@@ -161,6 +162,7 @@ pub fn build_dispatcher(
     let context: Arc<dyn ContextPackSource> = Arc::new(ProjectContextPackSource {
         store: project.store.clone(),
         root: project.root.clone(),
+        state_dir: project.state_dir.clone(),
     });
 
     Ok(Arc::new(ExecutorDispatcher::new(

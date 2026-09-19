@@ -432,7 +432,7 @@ fn event_to_summary(event: &tm_scheduler::SchedulerLoopEvent) -> EventSummary {
 
 /// Get the path to the pause flag file.
 fn pause_flag_path(project: &Project) -> PathBuf {
-    project.root.join(".tm").join("sched.paused")
+    project.state_dir.join("sched.paused")
 }
 
 /// Check whether the scheduler is paused.

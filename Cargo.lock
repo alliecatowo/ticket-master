@@ -3359,6 +3359,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "axum",
+ "blake3",
  "clap",
  "crossterm 0.29.0",
  "dirs",

@@ -16,7 +16,7 @@ use tm_agent::outcome::{
     ToolCallResolution,
 };
 use tm_agent::{AgentLoop, ToolRegistry};
-use tm_codeintel::{CodeIntel, SignalWeights};
+use tm_codeintel::SignalWeights;
 use tm_context::{
     compile, CommandCache, CommandExecutor, CommandResult, CommandSpec, ExecutionOutcome,
     TokenBudget,
@@ -148,6 +148,11 @@ impl AgentSession {
         let stdin = io::stdin();
         let mut lines = stdin.lock();
         let mut stdout = io::stdout();
+
+        // D-003: one line, once, before the first prompt, so a human sees up front whether this
+        // session is writing into the repo or a global scope elsewhere — not something to
+        // discover by surprise later.
+        self.renderer.note(&self.project.scope_line());
 
         loop {
             self.renderer.note("");
@@ -299,7 +304,10 @@ impl AgentSession {
         on_event(TurnEvent::TicketResolved(Box::new(ticket.clone())));
 
         let view = self.project.store.view()?;
-        let ci = CodeIntel::open(&self.project.root)?;
+        // D-003: goes through `Project::code_intel` (`CodeIntel::open_at(state_dir, root)`)
+        // rather than `CodeIntel::open(root)` — the exact fix that stops this hot path (every
+        // turn) from writing an index into the workspace when the project is global-scoped.
+        let ci = self.project.code_intel()?;
         let budget = TokenBudget::even(8_000);
         let context_pack = compile(
             &ticket,
@@ -774,13 +782,12 @@ mod tests {
 
     fn open_test_project(dir: &Path) -> Project {
         let store = Arc::new(tm_core::Store::open(dir).expect("open store"));
-        Project {
-            root: dir.to_path_buf(),
+        Project::for_test(
+            dir,
             store,
-            clock: Arc::new(FixedClock::epoch()),
-            ids: Arc::new(CounterIds::new()),
-            actor: ParticipantId::new("human:tester").expect("valid participant id"),
-        }
+            Arc::new(FixedClock::epoch()),
+            Arc::new(CounterIds::new()),
+        )
     }
 
     fn new_session(dir: &Path) -> AgentSession {
