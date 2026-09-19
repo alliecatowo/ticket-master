@@ -36,6 +36,7 @@ fn cargo_authority() -> Authority {
             enabled: true,
             allow: PatternSet::parse(["cargo*"]).expect("valid shell pattern"),
             deny: PatternSet::empty(),
+            pty: false,
         },
         ..Authority::none()
     }

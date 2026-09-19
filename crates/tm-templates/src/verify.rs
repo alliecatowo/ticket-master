@@ -260,6 +260,7 @@ mod tests {
                 enabled: true,
                 allow: PatternSet::parse(["true*", "false*", "echo*"]).expect("valid patterns"),
                 deny: PatternSet::empty(),
+                pty: false,
             },
             ..Authority::none()
         }
