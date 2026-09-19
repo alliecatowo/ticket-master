@@ -98,6 +98,32 @@ pub fn resolve_project_dir(explicit: Option<&Path>) -> tm_types::Result<PathBuf>
     }
 }
 
+/// Resolve and open the project for bare `tm`'s entry point (`main.rs::dispatch`'s `None`
+/// command branch): [`resolve_project_dir`] plus [`open`], falling back to [`bootstrap_bare`]
+/// when [`resolve_project_dir`] fails with the one specific condition that means "no project
+/// exists yet" -- `TmError::NotFound` -- so a fresh directory with no `.tm/` anywhere above it
+/// "just works" the way `claude`/`codex` already do, instead of requiring the user to already
+/// know to run `tm init`/`tm attach` first. This can only occur when `explicit` is `None` (an
+/// explicit `--project` always resolves `Ok`, see [`resolve_project_dir`]); any other error kind
+/// (e.g. [`open`]'s own errors for a corrupt `.tm/project.db` or a permissions failure) is never
+/// produced by `resolve_project_dir` in the first place, so it is never caught here -- it
+/// propagates as a real error, matching every explicit subcommand's existing behavior.
+///
+/// Kept out of `main.rs::dispatch` itself so the NotFound-catching decision is directly
+/// unit-testable without also driving the interactive loop or a prompt turn, both real side
+/// effects `dispatch` performs once a project is open -- see this crate's module doc:
+/// `main.rs` stays "thin", decisions like this belong in `tm-cli`'s library modules.
+pub fn open_bare(explicit: Option<&Path>, renderer: &Renderer) -> tm_types::Result<Project> {
+    match resolve_project_dir(explicit) {
+        Ok(project_dir) => open(&project_dir),
+        Err(TmError::NotFound { .. }) => {
+            let dir = std::env::current_dir()?;
+            bootstrap_bare(&dir, renderer)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Create a new project's `.tm/` directory at `dir`, refusing if one already exists there, and
 /// return the canonicalized root. Shared by [`init`] and [`attach`] (which creates one first
 /// when assimilating a repository with no project yet).
@@ -137,15 +163,68 @@ pub fn attach(args: &AttachArgs, renderer: &Renderer) -> tm_types::Result<()> {
     } else {
         create_project_dir(&dir)?
     };
-    let project = open(&root)?;
+    let (_project, report) = attach_project(&root)?;
+    let human = render_attach_report(&report);
+    renderer.emit(&report, &human)
+}
+
+/// Open `root` (an already-created `.tm/` project directory) and assimilate it via
+/// [`tm_genesis::attach::attach_repository`]. The shared body of [`attach`], split out so bare
+/// `tm`'s auto-bootstrap ([`bootstrap_bare`]) can perform the exact same assimilation `tm attach`
+/// does instead of reimplementing it.
+fn attach_project(root: &Path) -> tm_types::Result<(Project, tm_genesis::attach::AttachReport)> {
+    let project = open(root)?;
     let report = tm_genesis::attach::attach_repository(
-        &root,
+        root,
         project.store.as_ref(),
         project.clock.as_ref(),
         project.actor.clone(),
     )?;
-    let human = render_attach_report(&report);
-    renderer.emit(&report, &human)
+    Ok((project, report))
+}
+
+/// Whether `dir` is an existing git repository with at least one commit -- the bar bare `tm`'s
+/// auto-bootstrap ([`bootstrap_bare`]) uses to decide between assimilating it via
+/// [`attach_project`] and leaving a fresh, empty project the way `tm init` does. Mirrors exactly
+/// what would make [`tm_genesis::attach::attach_repository`]'s underlying
+/// `HistoryIndex::ingest_incremental` fail per its documented "no git repo -> clean error"
+/// contract (no `.git` at all, or a repo whose `HEAD` is still unborn because it has no commits
+/// yet), so this decision never disagrees with what `attach_repository` itself would have done.
+/// Uses `git2::Repository::open` (not `discover`): it only recognizes `dir` itself as a repo
+/// root, not an ancestor directory, the same scope `attach_repository` already operates in.
+fn has_committed_git_history(dir: &Path) -> bool {
+    match git2::Repository::open(dir) {
+        Ok(repo) => repo.head().is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Bare `tm`'s zero-setup bootstrap, called by [`open_bare`] only when [`resolve_project_dir`]
+/// found no `.tm` anywhere above `dir` -- the one specific condition this recovers from. Any
+/// other failure (a corrupt `.tm/project.db`, a permissions error, and so on) is never routed
+/// here and still surfaces as a real error, since it is raised by [`resolve_project_dir`]/[`open`]
+/// themselves rather than caught and reinterpreted.
+///
+/// Prints one note so a user isn't left wondering later where a `.tm/` directory came from, then
+/// bootstraps a project exactly the way the explicit commands would: [`attach_project`] (the same
+/// assimilation `tm attach` performs) when `dir` is an existing git repository with committed
+/// history worth indexing per [`has_committed_git_history`], or [`create_project_dir`] plus
+/// [`open`] (the same as a fresh `tm init`) otherwise, since there is nothing yet for
+/// `attach_repository` to find in a genuinely empty or history-less directory.
+fn bootstrap_bare(dir: &Path, renderer: &Renderer) -> tm_types::Result<Project> {
+    let display_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    renderer.note(&format!(
+        "No Ticketmaster project here yet — creating one at {}.",
+        display_dir.display()
+    ));
+
+    let root = create_project_dir(dir)?;
+    if has_committed_git_history(dir) {
+        let (project, _report) = attach_project(&root)?;
+        Ok(project)
+    } else {
+        open(&root)
+    }
 }
 
 fn render_attach_report(report: &tm_genesis::attach::AttachReport) -> String {
@@ -992,6 +1071,11 @@ mod tests {
     /// `TM_ACTOR`/`USER` are process-global; serialize every test that touches them.
     static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// The real process current directory is also process-global; serialize every test that
+    /// changes it (rather than passing an explicit path) so it can't race a sibling test reading
+    /// or changing it concurrently.
+    static CWD_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn test_renderer() -> Renderer {
         Renderer::new(true, true, true, false)
     }
@@ -1317,5 +1401,113 @@ mod tests {
         let err =
             run_async(|| async { Err::<(), TmError>(TmError::invariant("boom")) }).unwrap_err();
         assert!(matches!(err, TmError::Invariant(_)));
+    }
+
+    #[test]
+    fn bootstrap_bare_creates_a_fresh_empty_project_in_a_directory_with_no_git_history() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let project = bootstrap_bare(tmp.path(), &test_renderer()).unwrap();
+
+        assert!(tmp.path().join(".tm").is_dir());
+        // A plain `init`-equivalent bootstrap never runs `attach_repository`, so nothing got
+        // indexed and no `T-001` investigation ticket was created.
+        assert!(!tmp.path().join(".tm").join("index.db").exists());
+        assert!(project.store.view().unwrap().tickets.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_bare_treats_an_unborn_git_repo_as_empty_rather_than_erroring() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `git init` with zero commits: a repo exists, but HEAD is unborn, which is exactly the
+        // condition `attach_repository`'s history ingest would fail clean on -- so this must
+        // still be treated as "nothing to assimilate" rather than surfacing that failure.
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(tmp.path())
+            .status()
+            .expect("git should run in test environment");
+        assert!(status.success());
+
+        let project = bootstrap_bare(tmp.path(), &test_renderer()).unwrap();
+
+        assert!(tmp.path().join(".tm").is_dir());
+        assert!(project.store.view().unwrap().tickets.is_empty());
+    }
+
+    #[test]
+    fn bootstrap_bare_assimilates_an_existing_git_repository_with_committed_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        std::fs::write(tmp.path().join("README.md"), "# hi\n").unwrap();
+
+        let project = bootstrap_bare(tmp.path(), &test_renderer()).unwrap();
+
+        assert!(tmp.path().join(".tm").is_dir());
+        // `attach_repository` always creates the `T-001` "understand this codebase"
+        // investigation ticket, so its presence proves the git-history path (not the plain
+        // `init`-equivalent path) is the one that ran.
+        assert_eq!(project.store.view().unwrap().tickets.len(), 1);
+    }
+
+    #[test]
+    fn has_committed_git_history_is_false_for_a_directory_with_no_git_at_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!has_committed_git_history(tmp.path()));
+    }
+
+    #[test]
+    fn has_committed_git_history_is_true_once_a_repo_has_a_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        assert!(has_committed_git_history(tmp.path()));
+    }
+
+    #[test]
+    fn open_bare_opens_the_explicit_project_dir_and_never_bootstraps() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".tm")).unwrap();
+
+        let project = open_bare(Some(tmp.path()), &test_renderer()).unwrap();
+
+        assert_eq!(project.root, tmp.path());
+    }
+
+    #[test]
+    fn open_bare_bootstraps_when_nothing_is_found_from_the_real_current_directory() {
+        let _guard = CWD_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&canonical).unwrap();
+
+        let result = open_bare(None, &test_renderer());
+
+        std::env::set_current_dir(&original_cwd).unwrap();
+
+        let project = result.unwrap();
+        assert_eq!(project.root, canonical);
+        assert!(canonical.join(".tm").is_dir());
+        // No git history to assimilate in a fresh tempdir: the plain `init`-equivalent path.
+        assert!(project.store.view().unwrap().tickets.is_empty());
+    }
+
+    #[test]
+    fn open_bare_propagates_a_real_open_error_for_an_already_found_but_broken_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A `.tm` directory exists (so `resolve_project_dir` succeeds, never reaching the
+        // NotFound-catching bootstrap path at all) but `project.db` is a directory instead of a
+        // file, so the real `open()` call that follows fails for a reason that has nothing to do
+        // with "no project exists yet" and must not be swallowed or reinterpreted.
+        std::fs::create_dir_all(tmp.path().join(".tm").join("project.db")).unwrap();
+
+        match open_bare(Some(tmp.path()), &test_renderer()) {
+            Err(TmError::NotFound { .. }) => panic!(
+                "a `.tm` directory that exists but fails to open must surface its real error, \
+                 not be reinterpreted as \"no project exists yet\""
+            ),
+            Err(_) => (),
+            Ok(_) => panic!("opening project.db as a directory should not succeed"),
+        }
     }
 }

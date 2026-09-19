@@ -31,6 +31,11 @@ tm-tui = { workspace = true }
 tm-browser = { path = "../tm-browser" }
 tm-computer = { path = "../tm-computer" }
 
+# Already pulled in transitively via tm-codeintel; used directly here (bare-`tm` auto-bootstrap in
+# project.rs) to decide whether a directory is an existing git repository with committed history
+# worth assimilating via `attach`, versus a genuinely empty one to `init` instead.
+git2 = { workspace = true }
+
 axum = { workspace = true }
 tower-http = { workspace = true, features = ["fs"] }
 clap = { workspace = true }
