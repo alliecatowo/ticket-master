@@ -137,6 +137,12 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::str::FromStr;
+    use std::sync::Mutex;
+
+    /// Serializes the two tests below that mutate `TM_SERVER_TOKEN` — `std::env` is
+    /// process-global and `cargo test` runs in parallel by default, so without this they race
+    /// (mirrors `tm_provider::providers::serverless::tests::ENV_LOCK`'s convention).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn loopback_v4_not_required_auth() {
@@ -183,6 +189,7 @@ mod tests {
 
     #[test]
     fn resolve_token_falls_back_to_env() {
+        let _guard = ENV_LOCK.lock().expect("lock poisoned");
         std::env::set_var("TM_SERVER_TOKEN", "from_env");
         let result = resolve_token(None);
         assert_eq!(result, Some("from_env".to_owned()));
@@ -191,6 +198,7 @@ mod tests {
 
     #[test]
     fn resolve_token_env_not_set_returns_none() {
+        let _guard = ENV_LOCK.lock().expect("lock poisoned");
         std::env::remove_var("TM_SERVER_TOKEN");
         let result = resolve_token(None);
         assert_eq!(result, None);
