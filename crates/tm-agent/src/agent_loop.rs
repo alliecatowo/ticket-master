@@ -45,6 +45,27 @@ const TICKET_SUBMIT: &str = "ticket.submit";
 /// non-terminating tool-call loop even when budget alone hasn't tripped yet.
 pub const DEFAULT_MAX_STEPS: u32 = 64;
 
+/// Upper bound on the total number of events recorded against one ticket's subject before
+/// [`AgentLoop::drive`] force-stops with [`AgentOutcome::Failed`] (`FailureClass::Other`),
+/// regardless of `tm_core::CycleBudget`/[`AgentLoop::max_steps`] state — the project-wide "dumb
+/// global backstop" `docs/audit-2026-09-18-fable.md` B-09 asks for, mirroring `SPEC.md` §21.5's
+/// own "dumb global backstop" phrase for idempotent effects. `tm_scheduler::policy::
+/// SchedulingPolicy::max_events_per_ticket` names the same ceiling for a caller that constructs
+/// both a scheduling policy and an [`AgentLoop`] together and wants them to agree (no `Cargo.toml`
+/// dependency runs from this crate to `tm-scheduler`, so nothing here reads that field directly;
+/// a caller that has both threads it in via [`AgentLoop::with_max_events_per_ticket`]).
+///
+/// Arithmetic behind the default: one step of this loop appends at least a `provider.selected`
+/// event and a `usage.recorded` event against the ticket's subject, plus a `goal.reoriented`
+/// event once a goal exists, plus whatever a dispatched tool call itself appends (a
+/// `command.started`/`command.completed` pair, an `effect.journaled`/`completed`, ...) — call it
+/// 3-6 ticket-subject events per step. A full [`DEFAULT_MAX_STEPS`] (64) run is therefore on the
+/// order of 200-400 events even when it never trips this at all; the default below is an order of
+/// magnitude above that so it only trips on genuine runaway accumulation (e.g. across many
+/// resumes of the same ticket, or a pathological caller with `max_steps` set far above the
+/// default), never on ordinary single-run work.
+pub const DEFAULT_MAX_EVENTS_PER_TICKET: u32 = 5000;
+
 /// Upper bound on generated tokens per provider call.
 const MAX_TOKENS_PER_STEP: u32 = 4096;
 
@@ -78,6 +99,9 @@ pub struct AgentLoop {
     role: Role,
     actor: ParticipantId,
     max_steps: u32,
+    /// The [`DEFAULT_MAX_EVENTS_PER_TICKET`]-shaped backstop this loop enforces; see that
+    /// constant's doc comment.
+    max_events_per_ticket: u32,
     /// Durable home for everything this loop produces (`docs/audit-2026-09-18-fable.md` B-07):
     /// session bracketing, usage debiting/history, provider routing events and approval
     /// events. Every write through this handle goes through [`tm_core::Store::append`] or one
@@ -118,6 +142,7 @@ impl AgentLoop {
             role,
             actor,
             max_steps: DEFAULT_MAX_STEPS,
+            max_events_per_ticket: DEFAULT_MAX_EVENTS_PER_TICKET,
             store,
         }
     }
@@ -126,6 +151,15 @@ impl AgentLoop {
     /// [`AgentOutcome::Failed`] quickly).
     pub fn with_max_steps(mut self, max_steps: u32) -> Self {
         self.max_steps = max_steps;
+        self
+    }
+
+    /// Override the default per-ticket event backstop (see [`DEFAULT_MAX_EVENTS_PER_TICKET`]) —
+    /// mainly for tests that want to force it to trip quickly, or a caller that has derived a
+    /// project-specific ceiling (e.g. from `tm_scheduler::policy::SchedulingPolicy::
+    /// max_events_per_ticket`).
+    pub fn with_max_events_per_ticket(mut self, max_events_per_ticket: u32) -> Self {
+        self.max_events_per_ticket = max_events_per_ticket;
         self
     }
 
@@ -202,6 +236,17 @@ impl AgentLoop {
         };
 
         let resolution = if approved {
+            // `goal.claimed_complete` before dispatch, not after (`SPEC.md` §29,
+            // `docs/audit-2026-09-18-fable.md` B-09) — see `drive`'s matching call site for the
+            // full rationale: the claim records the loop's belief at the moment it decided to
+            // submit, independent of whether the dispatch below actually succeeds.
+            if pending.tool_name == TICKET_SUBMIT {
+                self.store.claim_goal_complete(
+                    &task.ticket,
+                    submit_summary(&pending.input),
+                    self.actor.clone(),
+                )?;
+            }
             let ctx = CallContext {
                 authority: &effective_authority,
                 ticket: &task.ticket,
@@ -371,6 +416,59 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Seed `task.ticket`'s durable goal from its own `objective` field, if no goal has ever been
+    /// set for it (`SPEC.md` §29, `docs/audit-2026-09-18-fable.md` B-09's "step 0").
+    ///
+    /// Best-effort, not infrastructure-fatal: a store read failure or a ticket that doesn't exist
+    /// in the store at all (many of this module's own tests construct an [`AgentTask`] against a
+    /// ticket id without ever creating it in `self.store` — deliberately, since they only care
+    /// about the loop's provider/tool-dispatch behavior) is treated as "nothing to seed a goal
+    /// from" rather than propagated, so this call can sit unconditionally at the top of every
+    /// [`AgentLoop::drive`] call without becoming a new way for an existing, unrelated test to
+    /// fail.
+    fn ensure_goal_set(&self, task: &AgentTask) -> Result<()> {
+        if self.store.goal_state(&task.ticket)?.is_some() {
+            return Ok(());
+        }
+        let Ok(view) = self.store.view() else {
+            return Ok(());
+        };
+        let Some(ticket) = view.tickets.get(&task.ticket) else {
+            return Ok(());
+        };
+        self.store
+            .set_goal(&task.ticket, ticket.objective.clone(), self.actor.clone())?;
+        Ok(())
+    }
+
+    /// Re-orientation (`SPEC.md` §29): re-read `task.ticket`'s current goal state from the store
+    /// and, if one exists, durably record that this step re-grounded against it via
+    /// `goal.reoriented`. A ticket with no goal set yet (e.g. `ensure_goal_set` found nothing to
+    /// seed from) has nothing to reorient against, so this is a no-op rather than an error.
+    fn reorient_goal(&self, task: &AgentTask, at_step: u32) -> Result<()> {
+        if self.store.goal_state(&task.ticket)?.is_none() {
+            return Ok(());
+        }
+        self.store
+            .reorient_goal(&task.ticket, at_step, self.actor.clone())?;
+        Ok(())
+    }
+
+    /// The project-wide event backstop (see [`DEFAULT_MAX_EVENTS_PER_TICKET`]): `Some(detail)`
+    /// once `task.ticket`'s total recorded event count has reached [`AgentLoop::
+    /// max_events_per_ticket`], naming the exact counts in the returned detail string for
+    /// [`AgentOutcome::Failed::detail`]; `None` while there is still room.
+    fn event_backstop_tripped(&self, task: &AgentTask) -> Result<Option<String>> {
+        let count = self.store.event_count_for(&Id::from(task.ticket.clone()))?;
+        if count >= u64::from(self.max_events_per_ticket) {
+            return Ok(Some(format!(
+                "event backstop tripped: {count} events already recorded against {} (ceiling {})",
+                task.ticket, self.max_events_per_ticket
+            )));
+        }
+        Ok(None)
+    }
+
     /// Drive the step loop starting from `steps` already recorded (empty for a fresh
     /// [`AgentLoop::run`], non-empty when continuing after [`AgentLoop::resume`] processed a
     /// pending call). The conversation sent to the provider is rebuilt from `task` and `steps`
@@ -397,6 +495,14 @@ impl AgentLoop {
         };
         let rendered = crate::prompt::render(&task.ticket, &task.context_pack, &fragments);
 
+        // Step 0 (`SPEC.md` §29, `docs/audit-2026-09-18-fable.md` B-09): seed the durable goal
+        // from the ticket's own `objective` if this ticket has never had one set. Keyed off
+        // durable store state (`goal_state(..).is_none()`), not `steps.is_empty()`, so this is
+        // correctly a no-op on every `drive` call after the first — including every call reached
+        // via `AgentLoop::resume` — rather than re-seeding (and clobbering step progress) on
+        // every resumption.
+        self.ensure_goal_set(task)?;
+
         loop {
             if steps.len() as u32 >= self.max_steps {
                 return Ok(AgentOutcome::Failed {
@@ -408,6 +514,26 @@ impl AgentLoop {
             if let Some(exhausted) = first_exhausted_dimension(&effective_budget) {
                 return Ok(AgentOutcome::BudgetExhausted { steps, exhausted });
             }
+            if let Some(detail) = self.event_backstop_tripped(task)? {
+                return Ok(AgentOutcome::Failed {
+                    steps,
+                    class: FailureClass::Other,
+                    detail,
+                });
+            }
+
+            // Re-orientation (`SPEC.md` §29): re-read the current goal state from the store at
+            // the start of every step, rather than trusting only this loop's own in-memory
+            // `steps` — the mechanism that keeps a long run on target across turns and across a
+            // suspend/resume boundary, per that section's "re-orientation is explicit". A
+            // `goal.reoriented` event durably records that this happened. Feeding the read-back
+            // state into the provider request itself (so the *model* also re-grounds, not just
+            // the loop) is future work out of this item's scope — every existing scripted test in
+            // this module predicts `AgentLoop::drive`'s request byte-for-byte via
+            // `expected_request`/`expected_request_after`, which know nothing about goal state,
+            // so widening what `system`/`messages` carry here would need those helpers rebuilt in
+            // lockstep rather than being a narrow addition.
+            self.reorient_goal(task, steps.len() as u32 + 1)?;
 
             // Rebuilt from `steps` fresh every turn (`SPEC.md` §30.4,
             // `docs/audit-2026-09-18-fable.md` B-08) rather than carried as a live buffer
@@ -549,6 +675,22 @@ impl AgentLoop {
                     }
                 }
 
+                // `goal.claimed_complete` before dispatch, not after (`SPEC.md` §29,
+                // `docs/audit-2026-09-18-fable.md` B-09): the loop is about to *attempt* a
+                // submission, which is the moment it believes the goal is met — recording the
+                // claim here, ahead of `self.tools.dispatch` actually calling through to
+                // `Store::submit` (never `Store::verify`; `SPEC.md` §0/§4.3's verification
+                // separation means a worker never marks its own work verified), means the claim
+                // stands even if the submission attempt itself then fails (e.g. empty evidence),
+                // which is honest: a claim is a claim, independent of whether it was accepted.
+                if name == TICKET_SUBMIT {
+                    self.store.claim_goal_complete(
+                        &task.ticket,
+                        submit_summary(input),
+                        self.actor.clone(),
+                    )?;
+                }
+
                 let call = ToolCall {
                     id: id.clone(),
                     name: name.clone(),
@@ -637,11 +779,7 @@ impl AgentLoop {
         );
         session.transcript = steps.to_vec();
         let promotion = session.promote();
-        let summary = submit_input
-            .get("summary")
-            .and_then(|v| v.as_str())
-            .unwrap_or("submitted")
-            .to_string();
+        let summary = submit_summary(submit_input);
         crate::outcome::EvidenceBundle {
             ticket: task.ticket.clone(),
             artifacts: promotion.artifacts,
@@ -649,6 +787,18 @@ impl AgentLoop {
             summary,
         }
     }
+}
+
+/// Pull the human-readable summary out of a `ticket.submit` tool call's own arguments, the same
+/// extraction [`AgentLoop::build_evidence`] performs — shared so the `goal.claimed_complete`
+/// call sites in [`AgentLoop::drive`]/[`AgentLoop::resume`] record the same text a successful
+/// dispatch would also attach as evidence.
+fn submit_summary(input: &serde_json::Value) -> String {
+    input
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("submitted")
+        .to_string()
 }
 
 /// The project root threaded through [`tm_types::CallContext::root`] — a `PatchEngine` applies
@@ -1672,5 +1822,306 @@ mod tests {
             outcome.bytes_pruned() > 0,
             "turn 1's stale fs.stat result should count toward AgentOutcome::bytes_pruned"
         );
+    }
+
+    // ---- goal loop (SPEC.md §29, docs/audit-2026-09-18-fable.md B-09) ----
+
+    #[tokio::test]
+    async fn drive_sets_the_goal_on_step_0_and_reorients_on_a_later_step() {
+        let h = LiveHarness::new();
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+        let task = h.task();
+
+        // Before the run: no goal exists yet.
+        assert!(h.store.goal_state(&h.ticket).expect("goal_state").is_none());
+
+        let stat_input = serde_json::json!({"path": "nonexistent-b09-fixture.rs"});
+        let root = project_root();
+        let effective_authority = agent_loop.authority().intersect(&task.authority);
+        let ctx = CallContext {
+            authority: &effective_authority,
+            ticket: &task.ticket,
+            session: &task.session,
+            actor: &h.actor,
+            clock: h.clock.as_ref(),
+            ids: h.ids.as_ref(),
+            root: &root,
+        };
+
+        // Turn 1: a harmless read, so the run continues to a second (later) step.
+        let turn1_request = expected_request(&agent_loop, &task);
+        let turn1_completion = tool_call_completion(
+            model.clone(),
+            &h.clock,
+            "call-1",
+            "fs.stat",
+            stat_input.clone(),
+        );
+        provider.script_response(&turn1_request, turn1_completion.clone());
+        let resolution1 = agent_loop
+            .tools()
+            .dispatch(
+                &ToolCall {
+                    id: "call-1".to_string(),
+                    name: "fs.stat".to_string(),
+                    input: stat_input.clone(),
+                },
+                &ctx,
+            )
+            .await;
+        let step1 = StepRecord {
+            index: 1,
+            served_by: model.to_string(),
+            assistant_text: None,
+            tool_calls: vec![ToolCallRecord {
+                tool_use_id: "call-1".to_string(),
+                tool_name: "fs.stat".to_string(),
+                input: stat_input.clone(),
+                resolution: resolution1,
+            }],
+            spend: step_spend_of(&turn1_completion),
+            at: h.clock.now(),
+        };
+
+        // Turn 2 (the "later step"): a plain text reply ends the run as `Failed`.
+        let turn2_request =
+            expected_request_after(&agent_loop, &task, std::slice::from_ref(&step1));
+        provider.script_response(
+            &turn2_request,
+            text_only_completion(model.clone(), &h.clock),
+        );
+
+        let outcome = agent_loop.run(task).await.expect("run completes");
+        assert!(
+            matches!(outcome, AgentOutcome::Failed { .. }),
+            "expected a Failed (text-only turn 2) outcome, not an infra error \
+             (an infra/provider error here means an earlier turn's request didn't match what \
+             was scripted): {outcome:?}"
+        );
+        assert_eq!(outcome.steps().len(), 2, "both turns should be recorded");
+
+        // Step 0: the goal was seeded from the ticket's own objective (`LiveHarness::new`'s
+        // "test objective"), exactly once.
+        let events = h.all_events();
+        let set = find_events(&events, EventKind::GoalSet);
+        assert_eq!(set.len(), 1, "goal.set must be recorded exactly once");
+        assert_eq!(set[0].payload.as_goal_set().unwrap().text, "test objective");
+
+        let state = h
+            .store
+            .goal_state(&h.ticket)
+            .expect("goal_state")
+            .expect("goal exists after the run");
+        assert_eq!(state.text, "test objective");
+
+        // Re-orientation: every step re-read the goal against durable state, including the
+        // later (second) step, each durably recorded via `goal.reoriented`.
+        let reoriented = find_events(&events, EventKind::GoalReoriented);
+        let at_steps: Vec<u32> = reoriented
+            .iter()
+            .map(|e| e.payload.as_goal_reoriented().unwrap().at_step)
+            .collect();
+        assert_eq!(
+            at_steps,
+            vec![1, 2],
+            "the loop must reorient at the start of every step, including the later, second one"
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_terminates_via_the_event_backstop_rather_than_spinning_forever() {
+        // A pathological case: the model calls the same harmless read tool forever and never
+        // submits. With `max_steps` set far above anything this test could ever reach, only the
+        // `max_events_per_ticket` backstop can end this run -- proving the backstop is a real,
+        // independent bound, not just a restatement of the step limit.
+        let h = LiveHarness::new();
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+        provider.script_default_response(tool_call_completion(
+            model.clone(),
+            &h.clock,
+            "call",
+            "fs.stat",
+            serde_json::json!({"path": "nonexistent-backstop-fixture.rs"}),
+        ));
+
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        )
+        .with_max_steps(1_000_000)
+        .with_max_events_per_ticket(10);
+
+        let outcome = agent_loop.run(h.task()).await.expect("run completes");
+        match outcome {
+            AgentOutcome::Failed {
+                steps,
+                class,
+                detail,
+            } => {
+                assert_eq!(class, FailureClass::Other);
+                assert!(
+                    detail.contains("event backstop tripped"),
+                    "detail should name the backstop, got: {detail}"
+                );
+                assert!(
+                    (steps.len() as u32) < 1_000_000,
+                    "the run must have stopped long before the step limit ever bound it: {} steps",
+                    steps.len()
+                );
+            }
+            other => panic!("expected Failed via the event backstop, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn goal_claimed_complete_is_recorded_before_submit_and_never_routes_through_verify() {
+        let h = LiveHarness::new();
+        // Drive the ticket to `Running`, the state `Store::submit` requires -- the same
+        // activate/acquire_lease/WorkStarted sequence `tm-e2e`'s `common::close_ticket` helper
+        // uses, reproduced here since that helper lives in a different crate's integration-test
+        // module tm-agent's own unit tests cannot reach.
+        h.store
+            .activate(&h.ticket, h.actor.clone())
+            .expect("activate");
+        h.store
+            .acquire_lease(
+                &h.ticket,
+                h.actor.clone(),
+                Authority::none(),
+                vec![],
+                60,
+                h.actor.clone(),
+            )
+            .expect("acquire_lease");
+        h.store
+            .transition(&h.ticket, tm_core::Trigger::WorkStarted, h.actor.clone())
+            .expect("work started");
+
+        let evidence_events = h
+            .store
+            .store_artifact(
+                tm_core::ArtifactKind::Patch,
+                "text/plain".to_string(),
+                b"diff --git a/x b/x\n".to_vec(),
+                serde_json::json!({}),
+                None,
+                h.actor.clone(),
+            )
+            .expect("store_artifact");
+        let evidence_id = evidence_events[0]
+            .payload
+            .as_artifact_created()
+            .expect("artifact.created payload")
+            .artifact
+            .clone();
+
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+        let task = h.task();
+        let request = expected_request(&agent_loop, &task);
+        let submit_input = serde_json::json!({
+            "summary": "goal met",
+            "evidence": [evidence_id.as_str()],
+        });
+        provider.script_response(
+            &request,
+            tool_call_completion(
+                model.clone(),
+                &h.clock,
+                "call-1",
+                "ticket.submit",
+                submit_input,
+            ),
+        );
+
+        let outcome = agent_loop.run(task).await.expect("run completes");
+        assert!(
+            matches!(outcome, AgentOutcome::Submitted { .. }),
+            "expected Submitted, got {outcome:?}"
+        );
+
+        let events = h.all_events();
+
+        let claimed = find_events(&events, EventKind::GoalClaimedComplete);
+        assert_eq!(
+            claimed.len(),
+            1,
+            "goal.claimed_complete must be recorded exactly once"
+        );
+        assert_eq!(
+            claimed[0]
+                .payload
+                .as_goal_claimed_complete()
+                .unwrap()
+                .summary,
+            "goal met"
+        );
+        assert!(
+            h.store
+                .goal_state(&h.ticket)
+                .expect("goal_state")
+                .expect("goal exists")
+                .claimed_complete
+        );
+
+        // Routes to `Store::submit`, never `Store::verify` (`SPEC.md` §0/§4.3's verification
+        // separation): `ticket.submitted` was recorded, and no `ticket.verified`/
+        // `ticket.verification_failed` event exists anywhere in this run's log -- this loop
+        // never calls `Store::verify` at all, and this asserts the observable consequence of
+        // that from outside the loop's own source.
+        assert_eq!(find_events(&events, EventKind::TicketSubmitted).len(), 1);
+        assert!(find_events(&events, EventKind::TicketVerified).is_empty());
+        assert!(find_events(&events, EventKind::TicketVerificationFailed).is_empty());
     }
 }
