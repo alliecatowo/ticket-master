@@ -21,3 +21,4 @@ regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+git2 = { workspace = true }

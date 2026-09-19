@@ -1,0 +1,20 @@
+[package]
+name = "tm-wiki"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The project wiki (SPEC.md §26): assembles generated pages from Store::view(), CodeIntel and git history, writes them under docs/wiki/*.md as DocRecords routed through tm-docs's staleness/human-mode machinery."
+
+[dependencies]
+tm-types = { workspace = true }
+tm-core = { workspace = true }
+tm-codeintel = { workspace = true }
+tm-docs = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+blake3 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+git2 = { workspace = true }

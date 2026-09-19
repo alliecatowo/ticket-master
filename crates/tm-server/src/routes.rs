@@ -45,6 +45,7 @@ use crate::approvals::{ApprovalDecision, ApprovalRequest, ApprovalStatus};
 use crate::presence::{path_leases, PathLeaseSummary, PresenceEntry};
 use crate::sse::sse_handler;
 use crate::state::{AppState, ServerError};
+use crate::wiki::{get_wiki_page, list_wiki_pages};
 
 /// Build the full axum router: every handler in `SPEC.md` §14, bound to `state`.
 ///
@@ -83,6 +84,8 @@ pub fn router(state: AppState) -> Router {
         .route("/providers", get(get_providers))
         .route("/harness", get(get_harness))
         .route("/metrics", get(get_metrics))
+        .route("/wiki", get(list_wiki_pages))
+        .route("/wiki/{*path}", get(get_wiki_page))
         .with_state(state)
 }
 
@@ -1676,5 +1679,65 @@ mod tests {
     async fn schema_endpoint_returns_a_document_with_definitions() {
         let Json(schema) = get_schema().await;
         assert!(schema["definitions"]["TicketId"].is_object());
+    }
+
+    #[tokio::test]
+    async fn wiki_page_is_served_as_rendered_html_with_a_ticket_link() {
+        let (dir, state) = test_state();
+        std::fs::create_dir_all(dir.path().join("docs/wiki")).expect("mkdir");
+        std::fs::write(
+            dir.path().join("docs/wiki/glossary.md"),
+            "+++\n[doc]\nid = \"wiki/glossary\"\nmode = \"generated\"\nderived_from = []\n+++\n\n# Glossary\n\nSee T-1 for an example.\n",
+        )
+        .expect("write page");
+
+        let html = crate::wiki::get_wiki_page(State(state), Path("glossary".to_string()))
+            .await
+            .expect("page renders")
+            .into_response();
+        let body = axum::body::to_bytes(html.into_body(), usize::MAX)
+            .await
+            .expect("collect body");
+        let rendered = String::from_utf8(body.to_vec()).expect("utf8");
+
+        assert!(rendered.contains("<h1>Glossary</h1>"));
+        assert!(rendered.contains("<a href=\"/tickets/T-1\">T-1</a>"));
+        // The front-matter block itself must not leak into the rendered page.
+        assert!(!rendered.contains("[doc]"));
+    }
+
+    #[tokio::test]
+    async fn wiki_page_missing_on_disk_is_not_found() {
+        let (_dir, state) = test_state();
+        let result =
+            crate::wiki::get_wiki_page(State(state), Path("does-not-exist".to_string())).await;
+        assert!(matches!(
+            result,
+            Err(ServerError::Domain(tm_types::TmError::NotFound { .. }))
+        ));
+    }
+
+    #[tokio::test]
+    async fn wiki_index_lists_pages_under_docs_wiki() {
+        let (dir, state) = test_state();
+        std::fs::create_dir_all(dir.path().join("docs/wiki/architecture")).expect("mkdir");
+        std::fs::write(dir.path().join("docs/wiki/glossary.md"), "# Glossary\n").expect("write");
+        std::fs::write(
+            dir.path().join("docs/wiki/architecture/tm-core.md"),
+            "# Architecture\n",
+        )
+        .expect("write");
+
+        let html = crate::wiki::list_wiki_pages(State(state))
+            .await
+            .expect("index renders")
+            .into_response();
+        let body = axum::body::to_bytes(html.into_body(), usize::MAX)
+            .await
+            .expect("collect body");
+        let rendered = String::from_utf8(body.to_vec()).expect("utf8");
+
+        assert!(rendered.contains("href=\"/wiki/glossary\""));
+        assert!(rendered.contains("href=\"/wiki/architecture/tm-core\""));
     }
 }

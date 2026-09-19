@@ -338,7 +338,16 @@ pub fn build_dependencies(ticket: &Ticket, view: &ProjectView) -> RawSection {
     }
 }
 
-/// Section 5: hybrid retrieval results for the ticket's objective.
+/// True when `path` is a wiki page under `docs/wiki/` (`SPEC.md` §26). [`build_retrieval`]
+/// excludes hits under this prefix and [`build_wiki`] keeps only them, so the same
+/// `search_hybrid` call's fused ranking feeds two disjoint sections instead of billing the same
+/// content twice against the token budget.
+pub fn is_wiki_path(path: &str) -> bool {
+    path.starts_with("docs/wiki/")
+}
+
+/// Section 4: hybrid retrieval results for the ticket's objective (code and non-wiki text; see
+/// [`is_wiki_path`] and [`build_wiki`] for why `docs/wiki/` hits are excluded here).
 ///
 /// Renders hybrid search results for the ticket's objective, seeded with claimed paths.
 pub fn build_retrieval(
@@ -363,7 +372,7 @@ pub fn build_retrieval(
     let mut body_lines = Vec::new();
     let mut provenance = Vec::new();
 
-    for hit in hits {
+    for hit in hits.into_iter().filter(|h| !is_wiki_path(&h.path)) {
         let line_range = match (hit.line_start, hit.line_end) {
             (Some(start), Some(end)) => format!("{}-{}", start, end),
             (Some(start), None) => start.to_string(),
@@ -393,6 +402,46 @@ pub fn build_retrieval(
     })
 }
 
+/// Section 5: wiki pages (`SPEC.md` §26) matching the objective, ranked alongside code in the
+/// exact same hybrid retrieval fusion [`build_retrieval`] draws from — the same `search_hybrid`
+/// call, filtered to [`is_wiki_path`] hits instead of everything else. So a worker's context pack
+/// can cite a compiled wiki page as source material rather than only raw code/history
+/// (`SPEC.md` §26.4).
+pub fn build_wiki(ticket: &Ticket, ci: &CodeIntel, weights: SignalWeights) -> Result<RawSection> {
+    let paths = claimed_paths(ticket);
+    let query = Query {
+        text: ticket.objective.clone(),
+        seed_symbols: Vec::new(),
+        seed_paths: paths.clone(),
+    };
+
+    let ctx = RetrievalContext {
+        claimed_paths: paths,
+        recently_edited: Vec::new(),
+    };
+
+    let hits = ci.search_hybrid(&query, &ctx, weights)?;
+
+    let mut body_lines = Vec::new();
+    let mut provenance = Vec::new();
+
+    for hit in hits.into_iter().filter(|h| is_wiki_path(&h.path)) {
+        body_lines.push(format!("{}: {}", hit.path, hit.snippet));
+        provenance.push(ProvenanceRef {
+            locator: hit.path.clone(),
+            detail: "wiki page".to_string(),
+        });
+    }
+
+    let body = body_lines.join("\n");
+
+    Ok(RawSection {
+        kind: SectionKind::Wiki,
+        title: "Wiki".to_string(),
+        body,
+        provenance,
+    })
+}
 /// Section 6: symbol outlines for the ticket's claimed paths.
 ///
 /// Renders symbol outlines for each claimed path, indented by depth.
@@ -914,5 +963,77 @@ mod tests {
             .body
             .contains("coder.fast (anthropic/claude): ~$0.0200/call"));
         assert!(section.body.contains("call(s) remain affordable"));
+    }
+
+    // ---- build_wiki (SPEC.md §26, docs/audit-2026-09-18-fable.md B-14) ----------------------
+
+    #[test]
+    fn is_wiki_path_matches_only_docs_wiki_prefix() {
+        assert!(is_wiki_path("docs/wiki/architecture/tm-core.md"));
+        assert!(!is_wiki_path("docs/backlog.md"));
+        assert!(!is_wiki_path("crates/tm-core/src/lib.rs"));
+    }
+
+    /// Init a git repo with one empty commit, matching `tm-codeintel`'s own test convention
+    /// (`CodeIntel::update_incremental` always runs a history ingest, which needs a valid HEAD).
+    fn init_git_repo(path: &std::path::Path) {
+        let repo = git2::Repository::init(path).expect("git init");
+        let sig = git2::Signature::new("Test", "test@example.com", &git2::Time::new(0, 0))
+            .expect("signature");
+        let tree_id = repo
+            .index()
+            .expect("repo index")
+            .write_tree()
+            .expect("write tree");
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .expect("initial commit");
+    }
+
+    #[test]
+    fn build_wiki_and_build_retrieval_partition_the_same_hybrid_search() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        init_git_repo(dir.path());
+
+        std::fs::create_dir_all(dir.path().join("docs/wiki")).unwrap();
+        std::fs::write(
+            dir.path().join("docs/wiki/glossary.md"),
+            "# Glossary\n\nwidget: a small reusable component.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("widget.rs"),
+            "// widget implementation\nfn widget() {}\n",
+        )
+        .unwrap();
+
+        let ci = CodeIntel::open(dir.path()).expect("open index");
+        ci.update_incremental(&tm_types::FixedClock::epoch())
+            .expect("index the fixture files");
+
+        let ticket = minimal_ticket("T-1", "widget");
+        let weights = SignalWeights::default();
+
+        let retrieval = build_retrieval(&ticket, &ci, weights).expect("build_retrieval");
+        let wiki = build_wiki(&ticket, &ci, weights).expect("build_wiki");
+
+        // Every hit `build_wiki` admits is a wiki page; every hit `build_retrieval` admits is
+        // not — the same `search_hybrid` call, disjointly partitioned, so no content is billed
+        // against the token budget twice.
+        for prov in &wiki.provenance {
+            assert!(
+                is_wiki_path(&prov.locator),
+                "{} should be a wiki path",
+                prov.locator
+            );
+        }
+        for prov in &retrieval.provenance {
+            assert!(
+                !is_wiki_path(&prov.locator),
+                "{} should not be a wiki path",
+                prov.locator
+            );
+        }
+        assert_eq!(wiki.kind, SectionKind::Wiki);
     }
 }
