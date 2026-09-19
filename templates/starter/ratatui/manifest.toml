@@ -1,0 +1,16 @@
+id = "starter-ratatui"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+tags = ["rust", "tui", "ratatui", "cli", "terminal"]
+
+[[params]]
+name = "project_name"
+type = "string"
+default = "ratatui-app"
+description = "Cargo package name for the scaffolded TUI."
+
+[[params]]
+name = "description"
+type = "string"
+default = "A Ratatui terminal UI scaffolded by tm-templates."
+description = "One-line crate description, used in Cargo.toml and the crate doc comment."

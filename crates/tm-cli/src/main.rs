@@ -170,6 +170,11 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
             let opened = project::open(&project_dir)?;
             ops::dispatch_mirror(&cmd, &opened, renderer).await
         }
+        Some(Command::Templates(cmd)) => {
+            let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
+            let opened = project::open(&project_dir)?;
+            ops::dispatch_templates(&cmd, &opened, renderer)
+        }
         Some(Command::Serve(args)) => {
             let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
             let opened = project::open(&project_dir)?;

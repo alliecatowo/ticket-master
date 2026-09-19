@@ -24,6 +24,7 @@ use tm_core::ticket::{
     RetryPolicy as TicketRetryPolicy, Ticket, TicketKind, TicketState, VerificationPolicy,
 };
 use tm_core::{ProjectView, Store};
+use tm_templates::TemplateManifest;
 use tm_types::{
     ArtifactId, Authority, Budget, Clock, IdSource, MilestoneId, ParticipantId, Predicate,
     Result as TmResult, TicketId, Timestamp, TmError,
@@ -119,6 +120,14 @@ pub struct GraphCompilation {
     /// Which attempt this is, starting at `1`. Fed back into the prompt on retry along with the
     /// prior attempt's [`Violation`]s.
     pub attempt: u32,
+    /// The id of the [`tm_templates::TemplateManifest`] [`select_template`] picked for this
+    /// proposal's spec, if any (`SPEC.md` §27.1: "the graph compiler selects a template and
+    /// parameterizes it rather than emitting tickets to invent one"). `None` whenever
+    /// [`compile_with_retry`] is called with an empty template catalog — which is every existing
+    /// caller today — so this field is purely additive and never changes graph-compilation
+    /// behavior on its own; nothing in [`validate_graph`] or [`commit_graph`] reads it.
+    #[serde(default)]
+    pub selected_template: Option<String>,
 }
 
 /// Why compiling or committing a graph proposal failed.
@@ -314,9 +323,74 @@ pub async fn propose_graph(
         milestones: payload.milestones,
         authority_domains: payload.authority_domains,
         attempt,
+        // `propose_graph` never sees a template catalog — [`compile_with_retry`] fills this in,
+        // via [`select_template`], after this call returns.
+        selected_template: None,
     };
     check_dangling_refs(&proposal)?;
     Ok(proposal)
+}
+
+/// Select the best-matching template for `spec` by capability tag, if any — the additive path
+/// `SPEC.md` §27.1 describes: "when the spec calls for a documentation site or a terminal UI,
+/// the graph compiler selects a template and parameterizes it rather than emitting tickets to
+/// invent one." Purely mechanical (never asked of a model): scans `spec`'s prose (architecture,
+/// technology choices, interfaces, requirements) for each template's [`TemplateManifest::tags`]
+/// as case-insensitive substrings, and returns the template with the most tag hits. Returns
+/// `None` when `templates` is empty or no template's tags appear anywhere in `spec`'s prose —
+/// this is what makes the template path optional rather than a replacement for graph compilation:
+/// [`compile_with_retry`] with an empty (or non-matching) catalog behaves exactly as it did
+/// before this function existed.
+pub fn select_template<'a>(
+    spec: &Specification,
+    templates: &'a [TemplateManifest],
+) -> Option<&'a TemplateManifest> {
+    if templates.is_empty() {
+        return None;
+    }
+    let haystack = spec_prose(spec).to_lowercase();
+    templates
+        .iter()
+        .map(|t| (t, tag_hits(&haystack, t)))
+        .filter(|(_, hits)| *hits > 0)
+        .max_by_key(|(_, hits)| *hits)
+        .map(|(t, _)| t)
+}
+
+/// Every bit of prose in `spec` a stack name might plausibly appear in, concatenated with spaces.
+fn spec_prose(spec: &Specification) -> String {
+    let mut text = String::new();
+    text.push_str(&spec.architecture);
+    text.push(' ');
+    for choice in &spec.technology_choices {
+        text.push_str(&choice.area);
+        text.push(' ');
+        text.push_str(&choice.choice);
+        text.push(' ');
+        text.push_str(&choice.rationale);
+        text.push(' ');
+    }
+    for interface in &spec.interfaces {
+        text.push_str(&interface.name);
+        text.push(' ');
+        text.push_str(&interface.description);
+        text.push(' ');
+    }
+    for requirement in &spec.requirements {
+        text.push_str(&requirement.text);
+        text.push(' ');
+    }
+    text
+}
+
+/// How many of `template`'s tags appear (case-insensitively) in `haystack_lower`, which must
+/// already be lowercased.
+fn tag_hits(haystack_lower: &str, template: &TemplateManifest) -> usize {
+    template
+        .tags
+        .iter()
+        .filter(|tag| haystack_lower.contains(&tag.to_lowercase()))
+        .count()
 }
 
 /// A placeholder [`TicketId`] for `index`, used only within [`validate_graph`]'s scratch
@@ -426,6 +500,10 @@ pub struct CommitOutcome {
     pub tickets: BTreeMap<Ref, TicketId>,
     /// Real milestone ids, keyed by the [`Ref`] they were proposed under.
     pub milestones: BTreeMap<Ref, MilestoneId>,
+    /// The committed proposal's [`GraphCompilation::selected_template`], carried forward
+    /// unchanged so a caller doesn't need to hold onto the proposal separately just to learn
+    /// which template (if any) was picked.
+    pub selected_template: Option<String>,
 }
 
 /// A parent-before-child creation order for every ticket in `proposal`, or
@@ -615,6 +693,7 @@ pub fn commit_graph(
         events,
         tickets,
         milestones,
+        selected_template: proposal.selected_template.clone(),
     })
 }
 
@@ -637,6 +716,10 @@ impl RetryPolicy {
 /// `policy.max_attempts`. On exhaustion, records a `tm_core::Decision` requiring human input
 /// (via `Store::record_decision`) rather than looping forever, and returns
 /// [`CompilationError::Exhausted`].
+///
+/// `templates` is [`select_template`]'s catalog: an empty slice (every caller as of this
+/// writing) makes template selection a no-op and leaves this function's behavior identical to
+/// before that parameter existed — see [`GraphCompilation::selected_template`]'s doc comment.
 #[allow(clippy::too_many_arguments)]
 pub async fn compile_with_retry(
     spec: &Specification,
@@ -645,13 +728,15 @@ pub async fn compile_with_retry(
     clock: &dyn Clock,
     ids: &dyn IdSource,
     actor: ParticipantId,
+    templates: &[TemplateManifest],
     policy: &RetryPolicy,
 ) -> TmResult<CommitOutcome> {
     let mut prior_violations: Vec<Violation> = Vec::new();
     let mut last_violations: Vec<Violation> = Vec::new();
 
     for attempt in 1..=policy.max_attempts {
-        let proposal = propose_graph(spec, &prior_violations, attempt, provider).await?;
+        let mut proposal = propose_graph(spec, &prior_violations, attempt, provider).await?;
+        proposal.selected_template = select_template(spec, templates).map(|t| t.id.clone());
         let violations = validate_graph(&proposal, &store.view()?);
         if violations.is_empty() {
             return commit_graph(store, &proposal, actor.clone());
@@ -710,7 +795,7 @@ mod tests {
     };
     use tm_types::{CounterIds, FixedClock, Role, Tolerance};
 
-    use crate::spec::{MilestoneOutline, ReleaseDefinition, Requirement};
+    use crate::spec::{MilestoneOutline, ReleaseDefinition, Requirement, TechnologyChoice};
 
     fn executor() -> ExecutorRequirements {
         ExecutorRequirements {
@@ -756,6 +841,7 @@ mod tests {
             milestones: vec![],
             authority_domains: vec![],
             attempt: 1,
+            selected_template: None,
         }
     }
 
@@ -1002,6 +1088,87 @@ mod tests {
         assert_eq!(t.state, TicketState::Cancelled);
     }
 
+    // -- select_template ----------------------------------------------------------------------
+
+    fn ratatui_template() -> TemplateManifest {
+        TemplateManifest {
+            id: "starter-ratatui".to_string(),
+            version: "0.1.0".to_string(),
+            license: None,
+            tags: vec![
+                "rust".to_string(),
+                "tui".to_string(),
+                "ratatui".to_string(),
+                "cli".to_string(),
+            ],
+            params: vec![],
+            checksum: String::new(),
+        }
+    }
+
+    fn axum_template() -> TemplateManifest {
+        TemplateManifest {
+            id: "starter-axum".to_string(),
+            version: "0.1.0".to_string(),
+            license: None,
+            tags: vec![
+                "rust".to_string(),
+                "web-api".to_string(),
+                "axum".to_string(),
+                "service".to_string(),
+            ],
+            params: vec![],
+            checksum: String::new(),
+        }
+    }
+
+    #[test]
+    fn select_template_picks_the_template_named_by_the_spec() {
+        let spec = Specification {
+            architecture: "A single-binary Ratatui TUI for browsing local files.".to_string(),
+            technology_choices: vec![TechnologyChoice {
+                area: "ui".to_string(),
+                choice: "Ratatui".to_string(),
+                rationale: "immediate-mode terminal rendering".to_string(),
+            }],
+            ..spec_fixture()
+        };
+        let templates = vec![axum_template(), ratatui_template()];
+        let selected = select_template(&spec, &templates).expect("a template matches");
+        assert_eq!(selected.id, "starter-ratatui");
+    }
+
+    #[test]
+    fn select_template_is_case_insensitive_and_prefers_more_tag_hits() {
+        let spec = Specification {
+            architecture: "An AXUM web-api service exposing a REST interface over Rust."
+                .to_string(),
+            ..spec_fixture()
+        };
+        let templates = vec![ratatui_template(), axum_template()];
+        let selected = select_template(&spec, &templates).expect("a template matches");
+        assert_eq!(selected.id, "starter-axum");
+    }
+
+    #[test]
+    fn select_template_returns_none_when_no_tag_matches() {
+        let spec = Specification {
+            architecture: "A COBOL mainframe batch job.".to_string(),
+            ..spec_fixture()
+        };
+        let templates = vec![ratatui_template(), axum_template()];
+        assert!(select_template(&spec, &templates).is_none());
+    }
+
+    #[test]
+    fn select_template_returns_none_for_an_empty_catalog() {
+        let spec = Specification {
+            architecture: "A Ratatui TUI.".to_string(),
+            ..spec_fixture()
+        };
+        assert!(select_template(&spec, &[]).is_none());
+    }
+
     // -- propose_graph -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -1100,6 +1267,7 @@ mod tests {
             clock.as_ref(),
             ids.as_ref(),
             ParticipantId::system(),
+            &[],
             &RetryPolicy::default_bounded(),
         )
         .await
@@ -1152,6 +1320,7 @@ mod tests {
             clock.as_ref(),
             ids.as_ref(),
             ParticipantId::system(),
+            &[],
             &RetryPolicy::default_bounded(),
         )
         .await
@@ -1190,6 +1359,7 @@ mod tests {
             clock.as_ref(),
             ids.as_ref(),
             ParticipantId::system(),
+            &[],
             &policy,
         )
         .await

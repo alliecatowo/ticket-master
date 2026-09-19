@@ -26,6 +26,7 @@ tm-genesis = { workspace = true }
 tm-mirror = { workspace = true }
 tm-server = { workspace = true }
 tm-tui = { workspace = true }
+tm-templates = { workspace = true }
 # Not yet promoted to [workspace.dependencies] in the root manifest; pathed directly so this
 # crate does not require editing the workspace root.
 tm-browser = { path = "../tm-browser" }

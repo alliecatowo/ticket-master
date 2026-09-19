@@ -1,5 +1,5 @@
-//! The `docs`, `provider`, `harness`, `bench`, `mirror`, and `events` command groups: project
-//! operations that sit beside the ticket graph rather than inside it.
+//! The `docs`, `provider`, `harness`, `bench`, `mirror`, `templates`, and `events` command
+//! groups: project operations that sit beside the ticket graph rather than inside it.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -8,7 +8,8 @@ use std::sync::Arc;
 use crate::args::{
     BenchCommand, BenchCompareArgs, BenchRunArgs, DocsCommand, EventsCommand, EventsReplayArgs,
     EventsShowArgs, EventsTailArgs, HarnessCommand, HarnessPromoteArgs, HarnessSetArgs,
-    MirrorCommand, MirrorLinkArgs, ProviderCommand, ProviderTestArgs,
+    MirrorCommand, MirrorLinkArgs, ProviderCommand, ProviderTestArgs, TemplatesCommand,
+    TemplatesShowArgs,
 };
 use crate::project::Project;
 use crate::render::{Renderer, Table};
@@ -247,6 +248,270 @@ pub fn docs_reconcile(project: &Project, renderer: &Renderer) -> tm_types::Resul
         renderer.note(&format!("Opened {} reconciliation ticket(s)", opened.len()));
     }
     Ok(())
+}
+
+/// Dispatch one [`TemplatesCommand`].
+///
+/// # IMPL
+/// Match `cmd` to `templates_list`/`templates_show`. Thin: this only surfaces `tm-templates`'
+/// registry, it adds no logic of its own (mirrors `tm harness`/`tm bench`'s shape).
+pub fn dispatch_templates(
+    cmd: &TemplatesCommand,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    match cmd {
+        TemplatesCommand::List => templates_list(project, renderer),
+        TemplatesCommand::Show(args) => templates_show(args, project, renderer),
+    }
+}
+
+/// The project's `templates.toml` and the directory `path` sources in it resolve relative to —
+/// both the project root, mirroring `tm-docs`' `docs/.tmdocs.toml` convention: a project that
+/// has not declared any templates gets an empty registry back, not an error.
+fn templates_registry_path(project: &Project) -> std::path::PathBuf {
+    project.root.join("templates.toml")
+}
+
+/// `tm templates list`
+///
+/// # IMPL
+/// Load `<project root>/templates.toml` via [`tm_templates::TemplateRegistry::load`], resolve
+/// every declared entry via [`tm_templates::TemplateRegistry::resolve_all`], and render each
+/// entry's id, pinned version, and resolve status (`ok` or the error) as a table or JSON. A
+/// resolution failure (drift, an unfetchable git/registry source, a missing directory) is shown
+/// inline rather than silently dropping the entry from the list.
+pub fn templates_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
+    let registry_path = templates_registry_path(project);
+    let registry = tm_templates::TemplateRegistry::load(&registry_path)?;
+    let resolved = registry.resolve_all(&project.root);
+
+    if renderer.is_json() {
+        let templates: Vec<_> = registry
+            .entries
+            .iter()
+            .zip(resolved.iter())
+            .map(|(entry, (_, result))| {
+                serde_json::json!({
+                    "id": entry.id,
+                    "version": entry.version,
+                    "status": match result {
+                        Ok(_) => "ok".to_string(),
+                        Err(e) => format!("error: {e}"),
+                    },
+                })
+            })
+            .collect();
+        renderer.emit(&serde_json::json!({"templates": templates}), "")?;
+    } else if registry.entries.is_empty() {
+        renderer.note(&format!(
+            "No templates declared in {}",
+            registry_path.display()
+        ));
+    } else {
+        let mut rows = Vec::new();
+        for (entry, (_, result)) in registry.entries.iter().zip(resolved.iter()) {
+            let status = match result {
+                Ok(_) => "ok".to_string(),
+                Err(e) => format!("error: {e}"),
+            };
+            rows.push(vec![entry.id.clone(), entry.version.clone(), status]);
+        }
+        let table = Table::new(
+            vec![
+                "Id".to_string(),
+                "Version".to_string(),
+                "Status".to_string(),
+            ],
+            rows,
+        );
+        renderer.emit(&(), &table.render())?;
+    }
+    Ok(())
+}
+
+/// `tm templates show <id>`
+///
+/// # IMPL
+/// Resolve `args.id` via [`tm_templates::TemplateRegistry::resolve`] (surfacing
+/// [`tm_types::TmError::NotFound`] for an undeclared id, or a resolve failure such as checksum
+/// drift, unchanged) and render its manifest: version, license, tags, and params.
+pub fn templates_show(
+    args: &TemplatesShowArgs,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let registry_path = templates_registry_path(project);
+    let registry = tm_templates::TemplateRegistry::load(&registry_path)?;
+    let template = registry.resolve(&args.id, &project.root)?;
+    let manifest = &template.manifest;
+
+    if renderer.is_json() {
+        renderer.emit(
+            &serde_json::json!({
+                "id": manifest.id,
+                "version": manifest.version,
+                "license": manifest.license,
+                "tags": manifest.tags,
+                "checksum": manifest.checksum,
+                "params": manifest.params.iter().map(|p| serde_json::json!({
+                    "name": p.name,
+                    "type": format!("{:?}", p.param_type),
+                    "default": p.default,
+                    "description": p.description,
+                })).collect::<Vec<_>>(),
+            }),
+            "",
+        )?;
+    } else {
+        renderer.note(&format!("{} v{}", manifest.id, manifest.version));
+        if let Some(license) = &manifest.license {
+            renderer.note(&format!("license: {license}"));
+        }
+        renderer.note(&format!("tags: {}", manifest.tags.join(", ")));
+        renderer.note(&format!("checksum: {}", manifest.checksum));
+        if manifest.params.is_empty() {
+            renderer.note("params: none");
+        } else {
+            let rows = manifest
+                .params
+                .iter()
+                .map(|p| {
+                    vec![
+                        p.name.clone(),
+                        format!("{:?}", p.param_type),
+                        p.default
+                            .clone()
+                            .unwrap_or_else(|| "(required)".to_string()),
+                        p.description.clone(),
+                    ]
+                })
+                .collect();
+            let table = Table::new(
+                vec![
+                    "Param".to_string(),
+                    "Type".to_string(),
+                    "Default".to_string(),
+                    "Description".to_string(),
+                ],
+                rows,
+            );
+            renderer.emit(&(), &table.render())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod templates_tests {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use tempfile::TempDir;
+    use tm_types::{Clock, CounterIds, FixedClock, IdSource, ParticipantId, Timestamp};
+
+    use super::*;
+
+    fn open_test_project(root: &Path) -> Project {
+        std::fs::create_dir_all(root.join(".tm")).expect("mkdir .tm");
+        let clock: Arc<dyn Clock> =
+            Arc::new(FixedClock::new(Timestamp::from_unix_seconds(1_000_000)));
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::seeded(1));
+        let store = Arc::new(
+            tm_core::Store::open_with(root, clock.clone(), ids.clone()).expect("open store"),
+        );
+        Project {
+            root: root.to_path_buf(),
+            store,
+            clock,
+            ids,
+            actor: ParticipantId::new("human:tester").expect("valid participant id"),
+        }
+    }
+
+    fn write_fixture_registry(root: &Path) -> String {
+        std::fs::create_dir_all(root.join("t/files")).expect("mkdir");
+        std::fs::write(
+            root.join("t/manifest.toml"),
+            "id = \"t\"\nversion = \"0.1.0\"\ntags = [\"rust\"]\n",
+        )
+        .expect("write manifest");
+        std::fs::write(root.join("t/files/lib.rs"), "// nothing\n").expect("write file");
+        let checksum = tm_templates::manifest::checksum_dir(&root.join("t")).expect("checksum");
+        std::fs::write(
+            root.join("templates.toml"),
+            format!(
+                "[[template]]\nid = \"t\"\nversion = \"0.1.0\"\nchecksum = \"{checksum}\"\n\n\
+                 [template.source]\nkind = \"path\"\npath = \"t\"\n"
+            ),
+        )
+        .expect("write registry");
+        checksum
+    }
+
+    #[test]
+    fn templates_list_with_no_registry_file_is_empty_not_an_error() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = open_test_project(dir.path());
+        let renderer = Renderer::from_flags(true, true, true);
+        templates_list(&project, &renderer).expect("lists an empty registry cleanly");
+    }
+
+    #[test]
+    fn templates_list_and_show_surface_a_real_registry() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = open_test_project(dir.path());
+        write_fixture_registry(dir.path());
+
+        let renderer = Renderer::from_flags(true, true, true);
+        templates_list(&project, &renderer).expect("lists the registered template");
+        templates_show(
+            &TemplatesShowArgs {
+                id: "t".to_string(),
+            },
+            &project,
+            &renderer,
+        )
+        .expect("shows the registered template's manifest");
+    }
+
+    #[test]
+    fn templates_show_unknown_id_is_not_found() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = open_test_project(dir.path());
+        write_fixture_registry(dir.path());
+        let renderer = Renderer::from_flags(true, true, true);
+
+        let err = templates_show(
+            &TemplatesShowArgs {
+                id: "nope".to_string(),
+            },
+            &project,
+            &renderer,
+        )
+        .unwrap_err();
+        assert!(matches!(err, tm_types::TmError::NotFound { .. }));
+    }
+
+    #[test]
+    fn templates_show_reports_checksum_drift() {
+        let dir = TempDir::new().expect("tempdir");
+        let project = open_test_project(dir.path());
+        write_fixture_registry(dir.path());
+        // Drift the on-disk template after the registry pinned it.
+        std::fs::write(dir.path().join("t/files/lib.rs"), "// changed\n").expect("rewrite file");
+
+        let renderer = Renderer::from_flags(true, true, true);
+        let err = templates_show(
+            &TemplatesShowArgs {
+                id: "t".to_string(),
+            },
+            &project,
+            &renderer,
+        )
+        .unwrap_err();
+        assert!(matches!(err, tm_types::TmError::Conflict(_)));
+    }
 }
 
 /// Dispatch one [`ProviderCommand`].

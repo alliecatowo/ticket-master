@@ -1,0 +1,15 @@
+# Commands that prove this scaffold actually works, run through tm-templates' `verify::run`
+# (which itself runs through `tm_context::command::run`, the same gated path every other shell
+# command in this codebase goes through). `--offline` is deliberate: applying and verifying a
+# template must never require network access (a scaffolded project's crates are expected to
+# already be warm in the local cargo registry cache from ordinary development).
+
+[[check]]
+name = "build"
+argv = ["cargo", "build", "--offline", "-j", "2"]
+env_allowlist = ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "TMPDIR"]
+
+[[check]]
+name = "test"
+argv = ["cargo", "test", "--offline", "-j", "2"]
+env_allowlist = ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "TMPDIR"]

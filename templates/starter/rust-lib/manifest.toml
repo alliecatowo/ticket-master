@@ -1,0 +1,16 @@
+id = "starter-rust-lib"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+tags = ["rust", "library", "lib", "crate"]
+
+[[params]]
+name = "project_name"
+type = "string"
+default = "rust-lib"
+description = "Cargo package name for the scaffolded library."
+
+[[params]]
+name = "description"
+type = "string"
+default = "A Rust library crate scaffolded by tm-templates."
+description = "One-line crate description, used in Cargo.toml and the crate doc comment."

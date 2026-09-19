@@ -13,6 +13,7 @@ tm-events = { workspace = true }
 tm-provider = { workspace = true }
 tm-codeintel = { workspace = true }
 tm-context = { workspace = true }
+tm-templates = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
