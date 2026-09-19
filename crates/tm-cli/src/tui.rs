@@ -241,7 +241,13 @@ impl App {
     ///
     /// `ticket` is `changed`'s own id: the ticket whose state just moved is also the one whose
     /// goal (`SPEC.md` §29) is worth showing — `Store::goal_state` failing or finding nothing set
-    /// yet is not an error here either, it just means no goal line renders this frame.
+    /// yet is not an error here either, it just means no goal line renders this frame. An empty
+    /// `text` is filtered out the same way: `tm_core::materialize`'s `goal.step_added`/
+    /// `goal.reoriented`/`goal.claimed_complete` arms can (defensibly, per their own doc
+    /// comments) leave a `goals` row with `text = ""` if the log somehow ever saw one of those
+    /// before a `goal.set` — real `AgentLoop` usage never produces that ordering, but a bare
+    /// `Goal: ` line with nothing after it would be a visible artifact of that edge case if it
+    /// ever did happen, so it renders as "no goal" instead.
     fn refresh_dashboard(&mut self, ticket: &tm_types::TicketId) {
         if let Ok(view) = self.project.store.view() {
             let goal = self
@@ -250,7 +256,8 @@ impl App {
                 .goal_state(ticket)
                 .ok()
                 .flatten()
-                .map(|g| g.text);
+                .map(|g| g.text)
+                .filter(|text| !text.is_empty());
             self.home.set_dashboard(build_dashboard(&view, goal));
         }
     }

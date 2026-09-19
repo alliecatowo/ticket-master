@@ -443,15 +443,22 @@ impl AgentLoop {
 
     /// Re-orientation (`SPEC.md` §29): re-read `task.ticket`'s current goal state from the store
     /// and, if one exists, durably record that this step re-grounded against it via
-    /// `goal.reoriented`. A ticket with no goal set yet (e.g. `ensure_goal_set` found nothing to
-    /// seed from) has nothing to reorient against, so this is a no-op rather than an error.
-    fn reorient_goal(&self, task: &AgentTask, at_step: u32) -> Result<()> {
-        if self.store.goal_state(&task.ticket)?.is_none() {
-            return Ok(());
-        }
+    /// `goal.reoriented`, returning the state that was read. A ticket with no goal set yet (e.g.
+    /// `ensure_goal_set` found nothing to seed from) has nothing to reorient against, so this is
+    /// a no-op rather than an error.
+    ///
+    /// The returned state is not fed into the provider request today — `drive`'s call site logs
+    /// it instead (see that call site's own comment for why widening what the request carries is
+    /// out of this item's scope) — but a real caller a future item builds (e.g. a
+    /// `SectionKind::Goal` in the context pack) has a typed value to work from rather than needing
+    /// to re-derive this same read.
+    fn reorient_goal(&self, task: &AgentTask, at_step: u32) -> Result<Option<tm_core::GoalState>> {
+        let Some(state) = self.store.goal_state(&task.ticket)? else {
+            return Ok(None);
+        };
         self.store
             .reorient_goal(&task.ticket, at_step, self.actor.clone())?;
-        Ok(())
+        Ok(Some(state))
     }
 
     /// The project-wide event backstop (see [`DEFAULT_MAX_EVENTS_PER_TICKET`]): `Some(detail)`
@@ -533,7 +540,17 @@ impl AgentLoop {
             // `expected_request`/`expected_request_after`, which know nothing about goal state,
             // so widening what `system`/`messages` carry here would need those helpers rebuilt in
             // lockstep rather than being a narrow addition.
-            self.reorient_goal(task, steps.len() as u32 + 1)?;
+            if let Some(goal) = self.reorient_goal(task, steps.len() as u32 + 1)? {
+                let done = goal.steps.iter().filter(|s| s.done).count();
+                tracing::debug!(
+                    step = steps.len() as u32 + 1,
+                    goal = %goal.text,
+                    steps_done = done,
+                    steps_total = goal.steps.len(),
+                    claimed_complete = goal.claimed_complete,
+                    "reoriented against durable goal state"
+                );
+            }
 
             // Rebuilt from `steps` fresh every turn (`SPEC.md` §30.4,
             // `docs/audit-2026-09-18-fable.md` B-08) rather than carried as a live buffer
