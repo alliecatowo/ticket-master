@@ -83,6 +83,35 @@ pub enum Action {
     /// `Authority.computer.clipboard`. Same M-16 caveat as [`Action::ComputerInput`]: default
     /// oversight is supposed to put this behind approval, but there is no oversight loader yet.
     ComputerClipboard,
+    /// Spawn an interactive process inside a pseudo-terminal (`SPEC.md` §22.2/§22.4,
+    /// `docs/audit-2026-09-18-fable.md` B-16). Gated by `Authority.shell` exactly like
+    /// [`Action::RunCommand`] — SPEC §22.4: "`pty.spawn` is governed by the same
+    /// `shell.allow`/`shell.deny` patterns as `RunCommand`" — a pty session can run arbitrary
+    /// commands just as `shell.run` can, so this is a distinct variant only so `tm-pty`'s
+    /// `pty.spawn` tool has its own class string (`pty.spawn`, not `shell.run`) for oversight
+    /// and event attribution, not because the gate itself differs.
+    PtySpawn {
+        /// argv, not a shell string, matching [`Action::RunCommand`].
+        command: Vec<String>,
+    },
+    /// Synthesize input (text or a key chord) into an already-spawned `tm-pty` session
+    /// (`SPEC.md` §22.4). A *distinct* action class from [`Action::PtySpawn`]/
+    /// [`Action::RunCommand`], per SPEC §22.4's own reasoning: "an agent that can synthesize
+    /// keystrokes into a live interactive process can answer a destructive confirmation
+    /// prompt" — a materially larger attack surface than one bounded, argv-checked command, so
+    /// it needs its own approval class and its own authority grant
+    /// ([`crate::authority::ShellAuthority::pty`]) rather than riding along on `shell.enabled`.
+    PtySend,
+    /// Observe or manage an already-spawned `tm-pty` session without injecting input:
+    /// `pty.screen`, `pty.diff`, `pty.resize`, `pty.wait_exit`. Gated by `Authority.shell.enabled`
+    /// alone — these tools take only a session id, not a command, so unlike
+    /// [`Action::PtySpawn`] there is no argv for `to_action` to check (it is a pure function of
+    /// `(tool, input)` with no session state to recover the command that was originally
+    /// spawned), and unlike [`Action::PtySend`] they inject no new input into the child. SPEC
+    /// §22.4 does not name a class for these explicitly; this is the nearest-existing-bucket
+    /// choice, same convention as `tm-computer`'s window-management tools joining
+    /// `ComputerInput`.
+    PtyControl,
 }
 
 /// Git operations, ordered by blast radius.
@@ -154,6 +183,9 @@ impl Action {
             Action::ComputerInput => "computer.input".into(),
             Action::ComputerCapture => "computer.capture".into(),
             Action::ComputerClipboard => "computer.clipboard".into(),
+            Action::PtySpawn { .. } => "pty.spawn".into(),
+            Action::PtySend => "pty.send".into(),
+            Action::PtyControl => "pty.control".into(),
         }
     }
 }
@@ -243,6 +275,9 @@ impl Oversight {
     /// that can write files inside a scoped path"), but nothing in this workspace loads
     /// `oversight.toml` or calls [`Oversight::review`] at a real effect boundary yet
     /// (`docs/audit-2026-09-18-fable.md` M-16) — this policy is exercised only by tests today.
+    /// `pty.send` joins them per the same reasoning, restated for a pty by `SPEC.md` §22.4: an
+    /// agent that can synthesize keystrokes into a live interactive process can answer a
+    /// destructive confirmation prompt.
     pub fn conservative() -> Self {
         Oversight {
             approval_required: [
@@ -253,6 +288,7 @@ impl Oversight {
                 "tickets.reopen",
                 "computer.input",
                 "computer.clipboard",
+                "pty.send",
             ]
             .into_iter()
             .map(String::from)
@@ -327,6 +363,28 @@ mod tests {
         assert_eq!(Action::ComputerInput.class(), "computer.input");
         assert_eq!(Action::ComputerCapture.class(), "computer.capture");
         assert_eq!(Action::ComputerClipboard.class(), "computer.clipboard");
+        assert_eq!(
+            Action::PtySpawn {
+                command: vec!["bash".into()]
+            }
+            .class(),
+            "pty.spawn"
+        );
+        assert_eq!(Action::PtySend.class(), "pty.send");
+        assert_eq!(Action::PtyControl.class(), "pty.control");
+    }
+
+    #[test]
+    fn conservative_oversight_escalates_pty_send() {
+        let o = Oversight::conservative();
+        assert!(matches!(
+            o.review(&Action::PtySend, Decision::Allow),
+            Decision::NeedsApproval(_)
+        ));
+        assert_eq!(
+            o.review(&Action::PtyControl, Decision::Allow),
+            Decision::Allow
+        );
     }
 
     #[test]

@@ -312,6 +312,7 @@ mod tests {
                 enabled: true,
                 allow: PatternSet::parse(["cargo test*"]).unwrap(),
                 deny: PatternSet::empty(),
+                pty: false,
             },
             git: GitAuthority::default(),
             ..Authority::none()
