@@ -105,7 +105,7 @@ impl<'a> From<&'a tm_core::decision::Decision> for DecisionView<'a> {
 }
 
 /// Re-parse an event's [`tm_types::Id`] subject as a [`TicketId`], when it looks like one.
-fn event_ticket_id(subject: &tm_types::Id) -> Option<TicketId> {
+pub(crate) fn event_ticket_id(subject: &tm_types::Id) -> Option<TicketId> {
     (subject.kind() == Some(tm_types::IdKind::Ticket))
         .then(|| TicketId::new(subject.as_str()).ok())
         .flatten()
@@ -155,7 +155,7 @@ fn parse_resource_claims(patterns: &[String]) -> tm_types::Result<Vec<ResourceCl
 
 /// The executor requirements a freshly-created ticket gets when the caller specified none:
 /// a fast coder, no human required, willing to degrade at most one capability tier.
-fn default_executor_requirements() -> ExecutorRequirements {
+pub(crate) fn default_executor_requirements() -> ExecutorRequirements {
     ExecutorRequirements {
         role: Role::CoderFast,
         human_required: false,
@@ -165,7 +165,7 @@ fn default_executor_requirements() -> ExecutorRequirements {
 
 /// The retry policy a freshly-created ticket gets when the caller specified none: three
 /// attempts, five-second base delay, doubling backoff, capped at five minutes.
-fn default_retry_policy() -> RetryPolicy {
+pub(crate) fn default_retry_policy() -> RetryPolicy {
     RetryPolicy {
         max_attempts: 3,
         base_delay_seconds: 5,

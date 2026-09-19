@@ -207,12 +207,22 @@ impl EpochRegistry {
             )));
         }
 
-        let decision = gate.evaluate(
-            self.current().benchmark.as_ref(),
-            benchmark
-                .as_ref()
-                .expect("benchmark required when gate is consulted"),
-        );
+        // `benchmark` is `None` here only when `gate.require_benchmark_gain` is false (the
+        // `None`+`true` combination already returned above), in which case
+        // `PromotionGate::evaluate` returns `Approved` without reading `candidate` at all — so a
+        // placeholder report is never actually inspected. Reaching for it via `.expect(..)`
+        // instead would panic on exactly that reachable, gate-permitted call shape (a real
+        // caller promoting with `require_benchmark_gain: false` and no benchmark to hand), which
+        // is what this local `unwrap_or_default` avoids.
+        let placeholder_benchmark;
+        let candidate_benchmark = match benchmark.as_ref() {
+            Some(b) => b,
+            None => {
+                placeholder_benchmark = BenchmarkReport::default();
+                &placeholder_benchmark
+            }
+        };
+        let decision = gate.evaluate(self.current().benchmark.as_ref(), candidate_benchmark);
 
         match decision {
             PromotionDecision::Approved => {
@@ -417,6 +427,38 @@ mod tests {
 
         let resolved = registry.resolve(&pin).expect("pin should still resolve");
         assert_eq!(resolved.number, 0);
+    }
+
+    #[test]
+    fn epoch_registry_promote_with_lenient_gate_and_no_benchmark_does_not_panic() {
+        // Regression test: `promote`'s early "no benchmark supplied" rejection only fires when
+        // `gate.require_benchmark_gain` is true. A lenient gate (`false`) with `benchmark: None`
+        // used to reach an `.expect("benchmark required when gate is consulted")` on the `None`
+        // and panic, even though `PromotionGate::evaluate` never reads its `candidate` argument
+        // when the gate is lenient. A caller promoting with no benchmark to hand (e.g. `tm
+        // harness promote --force` with none found on disk) must not crash.
+        let clock = FixedClock::epoch();
+        let mut genesis = test_genesis_epoch(&clock);
+        genesis.number = 0;
+        let mut registry = EpochRegistry::new(genesis);
+
+        let gate = PromotionGate {
+            require_benchmark_gain: false,
+            min_gain: 0.0,
+        };
+        let candidate = test_harness_config();
+
+        let outcome = registry
+            .promote(candidate, clock.now(), ParticipantId::system(), None, &gate)
+            .expect("promotion attempt should return outcome, not panic");
+
+        match outcome {
+            PromotionOutcome::Promoted(epoch) => {
+                assert_eq!(epoch.number, 1);
+                assert!(epoch.benchmark.is_none());
+            }
+            _ => panic!("expected promotion under a lenient gate"),
+        }
     }
 
     #[test]
