@@ -49,7 +49,8 @@ expression: "&proposal"
         "shell": {
           "enabled": false,
           "allow": [],
-          "deny": []
+          "deny": [],
+          "pty": false
         },
         "computer": {
           "input": false,
@@ -148,7 +149,8 @@ expression: "&proposal"
         "shell": {
           "enabled": false,
           "allow": [],
-          "deny": []
+          "deny": [],
+          "pty": false
         },
         "computer": {
           "input": false,
@@ -213,5 +215,6 @@ expression: "&proposal"
   ],
   "milestones": [],
   "authority_domains": [],
-  "attempt": 1
+  "attempt": 1,
+  "selected_template": null
 }

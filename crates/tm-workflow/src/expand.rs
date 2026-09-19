@@ -211,6 +211,7 @@ pub fn expand(
         milestones: vec![],
         authority_domains: vec![],
         attempt: 1,
+        selected_template: None,
     })
 }
 
