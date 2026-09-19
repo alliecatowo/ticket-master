@@ -75,6 +75,10 @@ pub struct MockProvider {
     default_latency: Duration,
     embed_dim: usize,
     call_log: Mutex<Vec<CompletionRequest>>,
+    /// The fallback [`Script`] served when a request's hash matches nothing in `scripts` — see
+    /// [`MockProvider::script_default_response`]. `None` (the default) preserves this type's
+    /// original behavior exactly: an unscripted request fails with [`ProviderError::Unscripted`].
+    default: Mutex<Option<Script>>,
 }
 
 impl MockProvider {
@@ -90,6 +94,7 @@ impl MockProvider {
             default_latency: Duration::from_millis(0),
             embed_dim: 8,
             call_log: Mutex::new(Vec::new()),
+            default: Mutex::new(None),
         }
     }
 
@@ -112,6 +117,19 @@ impl MockProvider {
         self.scripts
             .lock()
             .insert(hash_request(req), Script::Exhausted { retry_after });
+    }
+
+    /// Script the response served for *any* request that does not match a hash-keyed script
+    /// from [`MockProvider::script_response`]/[`MockProvider::script_failure`]/
+    /// [`MockProvider::script_exhausted`].
+    ///
+    /// For a caller that cannot compute the exact [`CompletionRequest`] a request-under-test
+    /// will build (e.g. an out-of-process integration test driving a compiled binary, which has
+    /// no way to reproduce that binary's internal prompt rendering to get an exact hash match),
+    /// this is the only way to get a deterministic, network-free reply at all. Overwrites any
+    /// previously scripted default.
+    pub fn script_default_response(&self, completion: Completion) {
+        *self.default.lock() = Some(Script::Respond(completion));
     }
 
     /// Set the latency reported for unscripted-latency responses (scripted `Completion::latency`
@@ -193,20 +211,37 @@ impl Provider for MockProvider {
         self.call_log.lock().push(req.clone());
 
         let hash = hash_request(&req);
-        let mut scripts = self.scripts.lock();
-
-        match scripts.get_mut(&hash) {
-            Some(Script::Respond(completion)) => Ok(completion.clone()),
-            Some(Script::Fail(failure)) => {
-                let error = failure.error.clone();
-                if let Some(times) = &mut failure.times {
-                    *times -= 1;
-                    if *times == 0 {
-                        scripts.remove(&hash);
+        {
+            let mut scripts = self.scripts.lock();
+            match scripts.get_mut(&hash) {
+                Some(Script::Respond(completion)) => return Ok(completion.clone()),
+                Some(Script::Fail(failure)) => {
+                    let error = failure.error.clone();
+                    if let Some(times) = &mut failure.times {
+                        *times -= 1;
+                        if *times == 0 {
+                            scripts.remove(&hash);
+                        }
                     }
+                    return Err(error);
                 }
-                Err(error)
+                Some(Script::Exhausted { retry_after }) => {
+                    return Err(ProviderError::RateLimited {
+                        message: "mock quota exhausted".into(),
+                        retry_after: Some(*retry_after),
+                    })
+                }
+                None => {}
             }
+        }
+
+        // No exact-hash script matched: fall back to whatever `script_default_response` set, if
+        // anything, before finally giving up as unscripted. The default never expires (unlike a
+        // `Script::Fail`'s `times`) — it exists precisely for a caller that cannot script by
+        // exact hash at all, so there is no notion of it being "used up".
+        match self.default.lock().as_ref() {
+            Some(Script::Respond(completion)) => Ok(completion.clone()),
+            Some(Script::Fail(failure)) => Err(failure.error.clone()),
             Some(Script::Exhausted { retry_after }) => Err(ProviderError::RateLimited {
                 message: "mock quota exhausted".into(),
                 retry_after: Some(*retry_after),
@@ -472,6 +507,72 @@ mod tests {
         let result = provider.complete(req.clone()).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ProviderError::Unscripted(_)));
+    }
+
+    #[tokio::test]
+    async fn complete_falls_back_to_the_default_response_when_no_hash_matches() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let default_completion = Completion {
+            model: ModelId::new("test", "model"),
+            candidates: vec![Candidate {
+                content: vec![ContentBlock::Text {
+                    text: "default reply".to_string(),
+                }],
+                stop_reason: StopReason::EndTurn,
+            }],
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: Duration::from_millis(0),
+            received_at: tm_types::Timestamp::EPOCH,
+        };
+        provider.script_default_response(default_completion.clone());
+
+        // Two different requests: an exact-hash script was never registered for either, so both
+        // fall through to the same default — the whole point for a caller that cannot predict
+        // the exact request shape.
+        let mut other_req = make_test_request();
+        other_req.max_tokens = 9999;
+
+        let result1 = provider.complete(make_test_request()).await;
+        let result2 = provider.complete(other_req).await;
+        assert_eq!(result1.unwrap(), default_completion);
+        assert_eq!(result2.unwrap(), default_completion);
+    }
+
+    #[tokio::test]
+    async fn complete_prefers_an_exact_hash_script_over_the_default() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        let req = make_test_request();
+        let specific = provider.deterministic_completion(&req);
+        provider.script_response(&req, specific.clone());
+        provider.script_default_response(Completion {
+            model: ModelId::new("test", "model"),
+            candidates: vec![Candidate {
+                content: vec![ContentBlock::Text {
+                    text: "default reply".to_string(),
+                }],
+                stop_reason: StopReason::EndTurn,
+            }],
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: Duration::from_millis(0),
+            received_at: tm_types::Timestamp::EPOCH,
+        });
+
+        let result = provider.complete(req).await.unwrap();
+        assert_eq!(result, specific);
     }
 
     #[tokio::test]

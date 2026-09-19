@@ -15,16 +15,20 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use tm_tui::component::{Component, ComponentId, ComponentParent, FrameContext};
-use tm_tui::event::{Event, InputEvent, KeyBinding, KeyChord, Propagation};
-use tm_tui::runtime::{Runtime, RuntimeError};
+use tm_tui::event::{AppMessage, Event, InputEvent, KeyBinding, KeyChord, Propagation};
+use tm_tui::runtime::{MessageSender, Runtime, RuntimeError};
 use tm_tui::screens::dashboard::Dashboard;
+use tm_tui::screens::home::Home;
 use tm_tui::theme::Theme;
 use tm_tui::widgets_data::list::List;
 use tm_tui::widgets_data::table::{Column, Table};
-use tokio::sync::Notify;
+use tm_types::SessionId;
+use tokio::sync::{Mutex, Notify};
 
+use crate::agent::{self, AgentSession};
 use crate::args::GlobalOpts;
 use crate::project::Project;
+use crate::render::Renderer;
 
 /// Whether a bare `tm` invocation (`cli.command.is_none()`, `cli.prompt.is_none()`) should open
 /// the ratatui TUI ([`run`]) rather than [`crate::agent::AgentSession::run_interactive`].
@@ -54,8 +58,13 @@ pub fn should_launch(global: &GlobalOpts) -> bool {
     std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
 }
 
-/// Open a dashboard over `project`'s current state and drive it until the human quits or a
+/// Open the home screen over `project`'s current state and drive it until the human quits or a
 /// termination signal arrives.
+///
+/// The chat input the home screen wires in (D-002's "you should be able to just code without
+/// looking at tickets") drives the exact same turn-running logic (`crate::agent`'s
+/// `AgentSession::run_turn_streaming`) the plain `tm`/`tm -p` loop uses — see [`App::spawn_turn`]
+/// for how a submitted prompt gets from a key event to a running [`tm_agent::agent_loop::AgentLoop`].
 pub async fn run(project: Arc<Project>) -> tm_types::Result<()> {
     let view = project
         .store
@@ -63,14 +72,32 @@ pub async fn run(project: Arc<Project>) -> tm_types::Result<()> {
         .map_err(|e| tm_types::TmError::storage(e.to_string()))?;
     let dashboard = build_dashboard(&view);
 
-    let (mut runtime, _messages) = Runtime::start(project.clock.clone(), Theme::dark())
+    let (mut runtime, sender) = Runtime::start(project.clock.clone(), Theme::dark())
         .await
         .map_err(runtime_error)?;
-    // Held for the runtime's whole lifetime: a background task (none exist yet for the dashboard
-    // alone, but any future streaming source needs one) sends through this. Dropping it early
-    // would close `Runtime`'s message channel and turn `messages.recv()` into an immediate
-    // `RuntimeError::ChannelClosed` on the very first event-loop iteration.
-    let mut app = App::new(dashboard, runtime.shutdown_handle());
+
+    // `--quiet`/`--no-color`: the TUI never renders through `Renderer` (its own widgets own
+    // presentation), so these flags are inert here, but `AgentSession::new` still needs some
+    // `Renderer` to construct — see `App::spawn_turn`, which drives this session through
+    // `run_turn_streaming` directly rather than through `AgentSession::run_turn`, the one method
+    // that would actually read it.
+    let agent_session = AgentSession::new(project.clone(), Renderer::from_flags(false, true, true));
+    let session_id = agent_session.session_id().clone();
+    let agent_session = Arc::new(Mutex::new(agent_session));
+
+    let home = Home::new(ComponentId::new("tm.home"), dashboard, session_id.clone());
+    // Held for the runtime's whole lifetime: `App::spawn_turn` clones this into each background
+    // turn it spawns. Dropping it early would close `Runtime`'s message channel and turn
+    // `messages.recv()` into an immediate `RuntimeError::ChannelClosed` on the very next
+    // event-loop iteration.
+    let mut app = App::new(
+        project,
+        home,
+        runtime.shutdown_handle(),
+        agent_session,
+        sender,
+        session_id,
+    );
 
     runtime.run(&mut app).await.map_err(runtime_error)
 }
@@ -120,24 +147,73 @@ fn build_dashboard(view: &tm_core::ProjectView) -> Dashboard {
     Dashboard::new(ComponentId::new("tm.dashboard"), tickets, sessions)
 }
 
-/// This crate's root component: wraps `tm-tui`'s [`Dashboard`] and adds the one thing every
+/// This crate's root component: wraps `tm-tui`'s [`Home`] screen and adds the two things every
 /// screen needs that no individual screen should own itself — a quit keybinding that ends
-/// [`Runtime::run`]'s event loop the same way a termination signal does.
-#[derive(Debug)]
+/// [`Runtime::run`]'s event loop the same way a termination signal does, and the domain-aware
+/// wiring `Home` deliberately can't own itself (`tm-tui` has no `tm_core`/`tm_agent` dependency —
+/// see `tm_tui::screens::home`'s module docs): reading a fresh `tm_core::ProjectView` when a
+/// ticket changes, and actually running a turn when the chat input is submitted.
 struct App {
     id: ComponentId,
-    dashboard: Dashboard,
+    /// The open project, read fresh on every `AppMessage::TicketChanged` so the dashboard
+    /// reflects the scratch ticket a submitted prompt just created (or any other change) without
+    /// the human needing to do anything to see it — D-002's "internal state ... a glance, not
+    /// forced".
+    project: Arc<Project>,
+    home: Home,
     /// Notified on `q`/`ctrl-c`, mirroring `Runtime`'s own `SIGTERM`/`SIGHUP` shutdown path
     /// (`runtime.rs`'s `install_signal_handlers`) rather than inventing a second exit mechanism.
     shutdown: Arc<Notify>,
+    /// The one `AgentSession` this TUI process drives every submitted prompt through — the exact
+    /// same type (and, via `run_turn_streaming`, the exact same turn-running logic) `tm`/`tm -p`
+    /// drive via `AgentSession::run_turn`. Behind a `tokio::sync::Mutex` (not a plain field)
+    /// because [`App::spawn_turn`] runs a turn on a background task so the event loop stays
+    /// responsive while it runs; the mutex also means a second submission mid-turn simply waits
+    /// for the lock rather than running concurrently against the same session state — belt and
+    /// suspenders alongside `Home`'s own `turn_running` gate, which is what actually stops a
+    /// second submission from being accepted in the first place.
+    agent_session: Arc<Mutex<AgentSession>>,
+    /// Cloned into every spawned turn so it can push `AppMessage`s back into this runtime's event
+    /// loop as the turn progresses.
+    sender: MessageSender,
+    /// `self.agent_session`'s session id, cached here (rather than re-locking the mutex) so
+    /// `spawn_turn` can stamp every `AppMessage::StreamChunk` it sends without an `.await`.
+    session_id: SessionId,
+}
+
+// Manual, not `#[derive(Debug)]`: `Component: std::fmt::Debug` requires *some* impl, but neither
+// `project::Project` nor `agent::AgentSession` derives `Debug` themselves (an open `tm_core::Store`
+// handle and a live session are not meaningfully "printable" state), so this reports just the
+// fields a debugger actually cares about — shape and identity, not a dump of everything reachable
+// through two more `Arc`s.
+impl std::fmt::Debug for App {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("App")
+            .field("id", &self.id)
+            .field("home", &self.home)
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
 }
 
 impl App {
-    fn new(dashboard: Dashboard, shutdown: Arc<Notify>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        project: Arc<Project>,
+        home: Home,
+        shutdown: Arc<Notify>,
+        agent_session: Arc<Mutex<AgentSession>>,
+        sender: MessageSender,
+        session_id: SessionId,
+    ) -> Self {
         App {
             id: ComponentId::new("tm.app"),
-            dashboard,
+            project,
+            home,
             shutdown,
+            agent_session,
+            sender,
+            session_id,
         }
     }
 
@@ -146,6 +222,104 @@ impl App {
     fn is_quit(key: &crossterm::event::KeyEvent) -> bool {
         key.code == KeyCode::Char('q')
             || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+    }
+
+    /// Re-read `self.project`'s store and hand `self.home` a freshly built dashboard — the
+    /// `AppMessage::TicketChanged` handler's whole job. A read failure is swallowed (the previous
+    /// dashboard just stays on screen one more frame) rather than tearing down the TUI over a
+    /// transient store error; `tm-cli`'s other commands already treat a `view()` failure as fatal
+    /// where that is the right call, which driving a live UI is not.
+    fn refresh_dashboard(&mut self) {
+        if let Ok(view) = self.project.store.view() {
+            self.home.set_dashboard(build_dashboard(&view));
+        }
+    }
+
+    /// Run `prompt` as a turn on a background task, translating [`agent::TurnEvent`]s and the
+    /// final [`tm_agent::outcome::AgentOutcome`] into [`AppMessage`]s as they happen, so
+    /// [`Runtime::run`]'s event loop keeps redrawing (scrolling the stream pane, honouring quit)
+    /// while the turn is in flight rather than blocking on it.
+    ///
+    /// Calls [`AgentSession::run_turn_streaming`] directly — the same shared method
+    /// `AgentSession::run_turn` (the plain `tm`/`tm -p` loop) calls — rather than
+    /// `AgentSession::run_turn` itself, since that method's own rendering goes through
+    /// `Renderer::note`/`error` (plain stdout), not this runtime's message channel.
+    ///
+    /// Approval handling is deliberately minimal for this first TUI turn driver: an
+    /// `AwaitingApproval` suspension is always auto-denied (`Ok(false)`), and a note explaining
+    /// why is streamed into the pane instead. Prompting for approval the way the plain loop does
+    /// (a blocking stdin read via `prompt_approval_decision`) would race the same real terminal
+    /// input this runtime's own `crossterm::event::EventStream` reads from — precisely the
+    /// stdin-contention failure mode `runtime.rs`'s `Runtime::start` doc comment already found
+    /// and fixed once for the capability probe; deliberately not reintroducing an instance of it
+    /// here. A real interactive approval UI (a modal, a dedicated keybinding) is future work.
+    fn spawn_turn(&self, prompt: String) {
+        let agent_session = Arc::clone(&self.agent_session);
+        let sender = self.sender.clone();
+        let session_id = self.session_id.clone();
+
+        tokio::spawn(async move {
+            let mut session = agent_session.lock().await;
+
+            let mut steps_sent = 0usize;
+            let mut resolved_ticket: Option<tm_types::TicketId> = None;
+
+            let send_chunk = |sender: &MessageSender, text: String| {
+                if !text.is_empty() {
+                    sender.send(AppMessage::StreamChunk {
+                        session: session_id.clone(),
+                        text,
+                        final_chunk: false,
+                    });
+                }
+            };
+
+            let outcome = session
+                .run_turn_streaming(
+                    &prompt,
+                    |event| match event {
+                        agent::TurnEvent::TicketResolved(ticket) => {
+                            resolved_ticket = Some(ticket.id.clone());
+                            sender.send(AppMessage::TicketChanged {
+                                id: ticket.id.clone(),
+                            });
+                        }
+                        agent::TurnEvent::Steps(steps) => {
+                            for step in steps.iter().skip(steps_sent) {
+                                send_chunk(&sender, format!("{}\n", agent::format_step(step)));
+                            }
+                            steps_sent = steps.len();
+                        }
+                        agent::TurnEvent::AwaitingApproval(pending) => {
+                            send_chunk(
+                                &sender,
+                                format!(
+                                    "{}\n(auto-denied: the TUI does not support interactive \
+                                     approval yet)\n",
+                                    agent::format_pending_approval(&pending)
+                                ),
+                            );
+                        }
+                    },
+                    |_pending| Ok(false),
+                )
+                .await;
+
+            let summary = match &outcome {
+                Ok(outcome) => agent::format_outcome_summary(outcome),
+                Err(e) => format!("turn failed to run: {e}"),
+            };
+            sender.send(AppMessage::StreamChunk {
+                session: session_id,
+                text: format!("{summary}\n"),
+                final_chunk: true,
+            });
+            // The ticket's own state may have moved (e.g. a submitted turn transitions it), so
+            // the dashboard is refreshed again now, not just once at resolution time.
+            if let Some(id) = resolved_ticket {
+                sender.send(AppMessage::TicketChanged { id });
+            }
+        });
     }
 }
 
@@ -160,7 +334,7 @@ impl Component for App {
         buf: &mut ratatui_core::buffer::Buffer,
         ctx: &FrameContext<'_>,
     ) {
-        self.dashboard.render(area, buf, ctx);
+        self.home.render(area, buf, ctx);
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &FrameContext<'_>) -> Propagation {
@@ -181,17 +355,30 @@ impl Component for App {
                 return Propagation::Consumed;
             }
         }
-        self.dashboard.handle_event(event, ctx)
+
+        // Domain-aware (needs `tm_core::ProjectView`, which `tm-tui` deliberately never depends
+        // on): handled here rather than forwarded into `self.home`, which only ever sees the
+        // already-built `Dashboard` this hands it via `refresh_dashboard`.
+        if let Event::App(AppMessage::TicketChanged { .. }) = event {
+            self.refresh_dashboard();
+            return Propagation::Consumed;
+        }
+
+        let propagation = self.home.handle_event(event, ctx);
+        if let Some(prompt) = self.home.take_submission() {
+            self.spawn_turn(prompt);
+        }
+        propagation
     }
 
     fn keybindings(&self, ctx: &FrameContext<'_>) -> Vec<KeyBinding> {
         let mut bindings = vec![KeyBinding::new(KeyChord::plain(KeyCode::Char('q')), "quit")];
-        bindings.extend(self.dashboard.keybindings(ctx));
+        bindings.extend(self.home.keybindings(ctx));
         bindings
     }
 
     fn focusable_children(&self) -> Vec<ComponentId> {
-        self.dashboard.focusable_children()
+        self.home.focusable_children()
     }
 }
 
@@ -200,7 +387,7 @@ impl ComponentParent for App {
         if id == self.id {
             Some(self)
         } else {
-            self.dashboard.resolve(id)
+            self.home.resolve(id)
         }
     }
 
@@ -208,7 +395,7 @@ impl ComponentParent for App {
         if id == self.id {
             Some(self)
         } else {
-            self.dashboard.resolve_mut(id)
+            self.home.resolve_mut(id)
         }
     }
 }

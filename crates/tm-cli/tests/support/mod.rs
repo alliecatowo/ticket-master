@@ -16,11 +16,22 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, PtyPair, PtySize};
 
 /// A real terminal session driving a spawned `tm` child process.
 pub struct Pty {
+    /// Never read directly (the reader/writer halves taken from it in `spawn` are what this type
+    /// actually uses) but held for the whole `Pty`'s lifetime regardless: dropping `PtyPair`
+    /// closes its master/slave file descriptors, which would tear down the pty out from under
+    /// the still-running child.
+    #[allow(dead_code)]
     pair: PtyPair,
     child: Box<dyn Child + Send + Sync>,
     output: Arc<Mutex<Vec<u8>>>,
     consumed: usize,
     parser: vt100::Parser,
+    /// Taken once, in `spawn`, and reused by every [`Pty::write`] call: `portable_pty`'s
+    /// `MasterPty::take_writer` hands over ownership of the writer handle and cannot be called a
+    /// second time (it errors "cannot take writer more than once"), so a test that types more
+    /// than once — a prompt, then Enter, then a quit key, as a real chat interaction does — needs
+    /// this cached rather than re-taken per call.
+    writer: Box<dyn Write + Send>,
 }
 
 impl Pty {
@@ -66,12 +77,18 @@ impl Pty {
             }
         });
 
+        let writer = pair
+            .master
+            .take_writer()
+            .map_err(|e| std::io::Error::other(format!("taking the pty writer: {e}")))?;
+
         Ok(Pty {
             pair,
             child,
             output,
             consumed: 0,
             parser: vt100::Parser::new(rows, cols, 0),
+            writer,
         })
     }
 
@@ -96,15 +113,12 @@ impl Pty {
             .collect()
     }
 
-    /// Write `input` to the child's terminal, as if typed.
+    /// Write `input` to the child's terminal, as if typed. Safe to call more than once per
+    /// `Pty` (see the `writer` field's docs) — a real interactive session types more than one
+    /// thing.
     pub fn write(&mut self, input: &[u8]) -> std::io::Result<()> {
-        let mut writer = self
-            .pair
-            .master
-            .take_writer()
-            .map_err(|e| std::io::Error::other(format!("taking the pty writer: {e}")))?;
-        writer.write_all(input)?;
-        writer.flush()
+        self.writer.write_all(input)?;
+        self.writer.flush()
     }
 
     /// Wait for the child to exit, returning whether it exited successfully.

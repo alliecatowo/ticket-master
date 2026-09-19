@@ -13,10 +13,13 @@
 
 /// The command palette overlay: fuzzy-searchable actions and navigation.
 pub mod command_palette;
-/// The home screen: an overview of tickets and active sessions.
+/// The ticket/session overview: a ticket table on the left, a session list on the right.
 pub mod dashboard;
 /// The diff viewer screen, browsing changed files and their diffs.
 pub mod diff_viewer;
+/// The default screen bare `tm` opens into: the chat input, the running turn's live output, and
+/// the dashboard alongside it.
+pub mod home;
 /// A single agent/session's live streaming output.
 pub mod session_stream;
 /// A single ticket's full detail view.

@@ -57,6 +57,34 @@ fn default_retry_policy() -> RetryPolicy {
     }
 }
 
+/// One thing that happened while [`AgentSession::run_turn_streaming`] ran a turn, for a caller
+/// to reflect without owning [`AgentLoop`] itself. Deliberately small and independent of
+/// `tm-tui`'s own `tm_tui::event::AppMessage` (this crate is where `tm_agent`/`tm_core` types
+/// are available at all; `tm-tui` stays domain-agnostic per that enum's own module docs) — the
+/// TUI's turn driver (`tui.rs`) translates each variant into an `AppMessage` at its own
+/// boundary.
+pub(crate) enum TurnEvent {
+    /// The ticket this turn resolved to (scratch-created or reused), before any step runs — this
+    /// is the "internal state" a caller can show a human immediately, before the model has said
+    /// anything.
+    // Boxed: `Ticket` is a few hundred bytes and this enum's other variants are much smaller
+    // (`Steps`/`AwaitingApproval` are heap-indirect already via `Vec`/their own fields), so an
+    // unboxed `Ticket` here would size every `TurnEvent` — including the common `Steps` case —
+    // to the largest variant's footprint (`clippy::large_enum_variant`).
+    TicketResolved(Box<Ticket>),
+    /// The cumulative steps of the run so far (assistant text plus tool calls), exactly as
+    /// [`AgentOutcome::steps`] reports them at each point this fires: once after the whole turn
+    /// completes with no approval needed, or once per suspend/resume round trip when one is.
+    /// `AgentLoop::run`/`resume` only ever return once a turn is fully driven to a terminal or
+    /// suspended state — there is no lower-latency, per-provider-call hook to stream from
+    /// without a deeper change to `AgentLoop` itself (see `tui.rs` for how the TUI renders each
+    /// of these steps individually despite that).
+    Steps(Vec<StepRecord>),
+    /// A tool call is awaiting approval. Fires once per suspension, immediately before the
+    /// `approve` callback passed to `run_turn_streaming` is asked to decide it.
+    AwaitingApproval(PendingApproval),
+}
+
 /// The bare-`tm` interactive agent session: one readline loop, one [`tm_agent::agent_loop::AgentLoop`]
 /// reused across turns so its prompt cache carries over, and a running notion of which ticket
 /// (if any) the conversation is currently attached to.
@@ -102,6 +130,15 @@ impl AgentSession {
         }
         self.attached_ticket = Some(ticket);
         Ok(())
+    }
+
+    /// The identity every tool call and evidence artifact this session's turns are attributed
+    /// to. Exposed (read-only) so a caller driving this session from outside the plain readline
+    /// loop — the TUI's turn driver, in `tm-cli`'s `tui.rs` — can match its own streamed output
+    /// against the right session, e.g. `tm_tui::event::AppMessage::StreamChunk`'s `session`
+    /// field.
+    pub fn session_id(&self) -> &SessionId {
+        &self.session
     }
 
     /// Run the interactive readline loop until the human exits (`/exit`, ctrl-d, ctrl-c is
@@ -207,11 +244,59 @@ impl AgentSession {
     }
 
     /// Run one conversational turn: resolve or create the [`tm_agent::outcome::AgentTask`] this
-    /// turn executes against, drive [`tm_agent::agent_loop::AgentLoop::run`], and reflect its
-    /// [`tm_agent::outcome::AgentOutcome`] back to the human.
+    /// turn executes against, drive [`tm_agent::agent_loop::AgentLoop::run`], and print its
+    /// progress and [`tm_agent::outcome::AgentOutcome`] to `self.renderer` exactly as this loop
+    /// always has.
+    ///
+    /// This is now a thin translation over [`AgentSession::run_turn_streaming`] — the shared
+    /// turn-running logic (ticket resolution, context compilation, fabric/tool-registry/
+    /// capability wiring, running the loop, approval suspend/resume) the TUI's turn driver
+    /// (`tm-cli`'s `tui.rs`) also calls, so the two front ends can never drift apart on how a
+    /// turn is actually executed. Every `self.renderer.note`/`error` call below reproduces this
+    /// method's pre-refactor output byte for byte: `--plain`/piped-stdin behavior is unchanged.
     #[allow(dead_code)]
     async fn run_turn(&mut self, prompt: &str) -> tm_types::Result<()> {
+        let renderer = self.renderer;
+        let outcome = self
+            .run_turn_streaming(
+                prompt,
+                |event| match event {
+                    // Ticket resolution prints nothing in the plain loop today; the TUI is the
+                    // first caller that needs to react to it (refreshing its ticket pane).
+                    TurnEvent::TicketResolved(_) => {}
+                    TurnEvent::Steps(steps) => renderer.note(&format_steps(&steps)),
+                    TurnEvent::AwaitingApproval(pending) => {
+                        renderer.note(&format_pending_approval(&pending))
+                    }
+                },
+                |_pending| prompt_approval_decision(),
+            )
+            .await?;
+        self.renderer.note(&format_outcome_summary(&outcome));
+        Ok(())
+    }
+
+    /// The shared turn-running logic [`AgentSession::run_turn`] (the plain/`-p` loop) and the
+    /// TUI's turn driver both call: resolve-or-create the scratch ticket, compile a context
+    /// pack, build the fabric/tool registry (including the browser/computer capability wiring),
+    /// construct and run [`AgentLoop`], and drive its approval suspend/resume loop to a terminal
+    /// [`AgentOutcome`]. `on_event` is called synchronously as progress happens; `approve`
+    /// decides any `AwaitingApproval` suspension (`Ok(true)` to approve, `Ok(false)` to deny,
+    /// `Err` to abort the turn entirely — matching `prompt_approval_decision`'s own contract).
+    ///
+    /// # Errors
+    /// Returns `Err` for an infrastructure failure (ticket resolution, context compilation,
+    /// fabric construction, or `approve` itself erroring) — never for an in-band agent failure,
+    /// which is represented as `Ok(AgentOutcome::Failed { .. })` (or the matching variant), the
+    /// same contract [`AgentLoop::run`] documents.
+    pub(crate) async fn run_turn_streaming(
+        &mut self,
+        prompt: &str,
+        mut on_event: impl FnMut(TurnEvent),
+        mut approve: impl FnMut(&PendingApproval) -> tm_types::Result<bool>,
+    ) -> tm_types::Result<AgentOutcome> {
         let ticket = self.resolve_ticket(prompt)?;
+        on_event(TurnEvent::TicketResolved(Box::new(ticket.clone())));
 
         let view = self.project.store.view()?;
         let ci = CodeIntel::open(&self.project.root)?;
@@ -282,10 +367,12 @@ impl AgentSession {
             session: self.session.clone(),
         };
 
-        let result = self.drive_turn(&mut agent_loop, task).await;
+        let result = self
+            .drive_turn_streaming(&mut agent_loop, task, &mut on_event, &mut approve)
+            .await;
 
-        // Torn down on every path (success or `?` propagation inside `drive_turn`), not just
-        // the happy one — see this method's doc comment.
+        // Torn down on every path (success or `?` propagation inside `drive_turn_streaming`),
+        // not just the happy one — see this method's doc comment.
         if let Some(browser) = &browser_handle {
             if let Err(e) = browser.close_all().await {
                 tracing::warn!(error = %e, "failed to close one or more browser sessions after this turn");
@@ -298,34 +385,35 @@ impl AgentSession {
         result
     }
 
-    /// The approval-suspend/resume loop `run_turn` drives, split out so `run_turn` can tear down
-    /// this turn's browser/computer sessions after this returns regardless of how it returns
-    /// (`?` inside this method propagates from *this* method, not from `run_turn`, which is the
-    /// point of the split).
-    async fn drive_turn(
+    /// The approval-suspend/resume loop [`AgentSession::run_turn_streaming`] drives, split out
+    /// so its caller can tear down this turn's browser/computer sessions after this returns
+    /// regardless of how it returns (`?` inside this method propagates from *this* method, not
+    /// from `run_turn_streaming`, which is the point of the split — unchanged from this method's
+    /// pre-refactor shape as `drive_turn`, only its rendering replaced with `on_event`/`approve`
+    /// callbacks).
+    async fn drive_turn_streaming(
         &mut self,
         agent_loop: &mut AgentLoop,
         task: AgentTask,
-    ) -> tm_types::Result<()> {
+        on_event: &mut impl FnMut(TurnEvent),
+        approve: &mut impl FnMut(&PendingApproval) -> tm_types::Result<bool>,
+    ) -> tm_types::Result<AgentOutcome> {
         let mut outcome = agent_loop.run(task.clone()).await?;
         loop {
-            self.renderer.note(&format_steps(outcome.steps()));
+            on_event(TurnEvent::Steps(outcome.steps().to_vec()));
             match outcome {
                 AgentOutcome::AwaitingApproval {
                     steps,
                     pending_call,
                 } => {
-                    self.renderer.note(&format_pending_approval(&pending_call));
-                    let approved = prompt_approval_decision()?;
+                    on_event(TurnEvent::AwaitingApproval(pending_call.clone()));
+                    let approved = approve(&pending_call)?;
                     outcome = agent_loop
                         .resume(task.clone(), steps, pending_call, approved)
                         .await?;
                     continue;
                 }
-                other => {
-                    self.renderer.note(&format_outcome_summary(&other));
-                    return Ok(());
-                }
+                other => return Ok(other),
             }
         }
     }
@@ -400,15 +488,68 @@ fn read_line<R: BufRead>(reader: &mut R, buf: &mut String) -> tm_types::Result<u
     reader.read_line(buf).map_err(TmError::from)
 }
 
+/// The env var that switches [`build_fabric`] from a real `AnthropicProvider` to a deterministic
+/// `MockProvider`, for an integration test that drives the *compiled* `tm` binary end to end
+/// (spawned in a pty) without a network call or a real API key — e.g.
+/// `crates/tm-cli/tests/tui_turn.rs`, which types a prompt into the TUI's chat input and asserts
+/// on the resulting ticket/output. Out-of-process tests have no way to inject a Rust closure or
+/// a pre-built `Fabric` into the child, so this is the one runtime hook that lets them exercise
+/// the real turn-running path without hitting the network; nothing outside this module reads it,
+/// and it has no effect unless a test explicitly sets it.
+const TEST_MOCK_PROVIDER_ENV: &str = "TM_TEST_MOCK_PROVIDER";
+
 /// Build the fabric this session issues completions through: a single real Anthropic provider
-/// bound to [`AGENT_MODEL`], registered against the workspace's default role table.
+/// bound to [`AGENT_MODEL`], registered against the workspace's default role table — or, when
+/// [`TEST_MOCK_PROVIDER_ENV`] is set, a deterministic mock (see that constant's docs).
 pub(crate) fn build_fabric(clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric>> {
+    if std::env::var_os(TEST_MOCK_PROVIDER_ENV).is_some() {
+        return Ok(Arc::new(build_mock_fabric(clock)));
+    }
     let table = RoleTable::default_table();
     let fabric = Fabric::new(table, clock.clone());
     let provider = AnthropicProvider::from_env(ModelId::new("anthropic", AGENT_MODEL), clock)
         .map_err(|e| TmError::Provider(e.to_string()))?;
     fabric.register_provider(Arc::new(provider));
     Ok(Arc::new(fabric))
+}
+
+/// The [`TEST_MOCK_PROVIDER_ENV`] fabric: a `mock`/`m1` candidate for [`AGENT_ROLE`] backed by
+/// [`tm_provider::MockProvider`], scripted with a single default (any-request) text-only reply
+/// so a turn always completes deterministically as `AgentOutcome::Failed { detail: "model ended
+/// turn without submitting", .. }` after exactly one step — enough for a test to observe a real
+/// ticket getting created and real step output reaching the screen, without needing to predict
+/// the exact `CompletionRequest` `AgentLoop::drive` builds (which depends on the rendered system
+/// prompt/context pack) the way an in-process `MockProvider::script_response` test would.
+fn build_mock_fabric(clock: Arc<dyn Clock>) -> Fabric {
+    let table = RoleTable::parse(
+        "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+    )
+    .expect("this crate's own static mock role table always parses");
+    let fabric = Fabric::new(table, clock.clone());
+    let model = ModelId::new("mock", "m1");
+    let received_at = clock.now();
+    let provider = tm_provider::MockProvider::new("mock", model.clone(), clock);
+    provider.script_default_response(tm_provider::Completion {
+        model,
+        candidates: vec![tm_provider::Candidate {
+            content: vec![tm_provider::ContentBlock::Text {
+                text: "mock provider: this is a scripted reply for TM_TEST_MOCK_PROVIDER, not a \
+                       real model turn."
+                    .to_string(),
+            }],
+            stop_reason: tm_provider::StopReason::EndTurn,
+        }],
+        usage: tm_provider::Usage {
+            input_tokens: 10,
+            output_tokens: 10,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        },
+        latency: std::time::Duration::from_millis(0),
+        received_at,
+    });
+    fabric.register_provider(Arc::new(provider));
+    fabric
 }
 
 /// Create a fresh scratch ticket for a turn that arrives with no attached ticket: an
@@ -447,7 +588,7 @@ fn create_scratch_ticket(
 }
 
 /// Render every step's assistant text and tool calls, in order.
-fn format_steps(steps: &[StepRecord]) -> String {
+pub(crate) fn format_steps(steps: &[StepRecord]) -> String {
     let mut out = Vec::new();
     for step in steps {
         out.push(format_step(step));
@@ -456,7 +597,7 @@ fn format_steps(steps: &[StepRecord]) -> String {
 }
 
 /// Render one step: the model's text (if any) plus one line per tool call.
-fn format_step(step: &StepRecord) -> String {
+pub(crate) fn format_step(step: &StepRecord) -> String {
     let mut lines = Vec::new();
     if let Some(text) = &step.assistant_text {
         lines.push(text.clone());
@@ -468,7 +609,7 @@ fn format_step(step: &StepRecord) -> String {
 }
 
 /// Render one resolved tool call as a single summary line.
-fn format_tool_call(call: &ToolCallRecord) -> String {
+pub(crate) fn format_tool_call(call: &ToolCallRecord) -> String {
     match &call.resolution {
         ToolCallResolution::Completed { .. } => format!("  * {} -> ok", call.tool_name),
         ToolCallResolution::Denied { reason } => {
@@ -481,7 +622,7 @@ fn format_tool_call(call: &ToolCallRecord) -> String {
 }
 
 /// Render a terminal (non-`AwaitingApproval`) outcome's one-line summary.
-fn format_outcome_summary(outcome: &AgentOutcome) -> String {
+pub(crate) fn format_outcome_summary(outcome: &AgentOutcome) -> String {
     match outcome {
         AgentOutcome::Submitted { evidence, .. } => format!("submitted: {}", evidence.summary),
         AgentOutcome::BudgetExhausted { exhausted, .. } => {
@@ -495,7 +636,7 @@ fn format_outcome_summary(outcome: &AgentOutcome) -> String {
 }
 
 /// Render a pending approval request for the human to read before deciding.
-fn format_pending_approval(pending: &PendingApproval) -> String {
+pub(crate) fn format_pending_approval(pending: &PendingApproval) -> String {
     format!(
         "approval requested: {} - {}",
         pending.tool_name, pending.reason
@@ -503,7 +644,7 @@ fn format_pending_approval(pending: &PendingApproval) -> String {
 }
 
 /// Which budget dimension tripped, as a lowercase word.
-fn format_budget_dimension(dim: BudgetDimension) -> &'static str {
+pub(crate) fn format_budget_dimension(dim: BudgetDimension) -> &'static str {
     match dim {
         BudgetDimension::Tokens => "tokens",
         BudgetDimension::Dollars => "dollars",
