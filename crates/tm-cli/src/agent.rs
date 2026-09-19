@@ -219,21 +219,22 @@ impl AgentSession {
         let context_pack = compile(&ticket, &view, &ci, budget, SignalWeights::default(), &[])?;
 
         let fabric = build_fabric(self.project.clock.clone())?;
-        let tools = ToolRegistry::standard();
         let command_cache: Arc<dyn CommandCache + Send + Sync> =
             Arc::new(MemoryCommandCache::new(self.project.ids.clone()));
         let command_executor: Arc<dyn CommandExecutor + Send + Sync> =
             Arc::new(ProcessCommandExecutor);
+        let tools = ToolRegistry::standard(
+            Arc::new(ci),
+            self.project.store.clone(),
+            command_cache,
+            command_executor,
+        );
 
         let mut agent_loop = AgentLoop::new(
             fabric,
             tools,
             Authority::root(),
             Budget::unlimited(),
-            Arc::new(ci),
-            self.project.store.clone(),
-            command_cache,
-            command_executor,
             self.project.clock.clone(),
             self.project.ids.clone(),
             AGENT_ROLE,

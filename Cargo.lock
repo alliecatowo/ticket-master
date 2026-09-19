@@ -3628,6 +3628,7 @@ dependencies = [
 name = "tm-types"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "blake3",
  "globset",
  "parking_lot",

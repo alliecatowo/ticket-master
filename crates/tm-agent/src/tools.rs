@@ -1,12 +1,21 @@
-//! The [`ToolRegistry`]: every tool from `SPEC.md` §11, its JSON schema, the
-//! [`tm_types::Action`] it maps to for authority gating, its cost class, and its dispatch into
-//! `tm-codeintel`, `tm-context`, `tm-core` or [`crate::patch::PatchEngine`].
+//! [`ToolRegistry`]: the authority-gated, provider-based tool surface an
+//! [`crate::agent_loop::AgentLoop`] dispatches through.
 //!
-//! Dispatch never trusts the model: every call is mapped to an `Action` and checked against
-//! `Authority::permits` *before* it touches any of those crates, a denial comes back as a
-//! structured [`ToolOutcome::Denied`] result rather than an error the loop has to special-case,
-//! and results are bounded — anything past [`MAX_INLINE_RESULT_BYTES`] is stored as an artifact
-//! and referenced by id rather than inlined into the transcript.
+//! Per `docs/audit-2026-09-18-fable.md` A-01, tools are no longer a single hand-written literal
+//! `Vec`; they are contributed by however many [`tm_types::CapabilityProvider`]s a binary
+//! assembles (today: just [`BuiltinCapability`], migrating `SPEC.md` §11's fixed 39-tool
+//! catalog — `search.*`, `symbol.*`, `history.*`, `fs.*`, `edit.*`, `shell.run`, `git.*`,
+//! `ticket.*`, `decision.record`, `artifact.store`, `evidence.attach` — onto the same trait a
+//! future `tm-browser`/`tm-computer`/`tm-pty`/MCP-client provider will implement, without
+//! special-casing the builtin set). [`ToolRegistry`] itself stays generic: it holds whatever
+//! providers it was built with, indexes their tools once, and dispatches by name.
+//!
+//! Dispatch never trusts the model: every call is mapped to a [`tm_types::Action`] via
+//! [`tm_types::CapabilityProvider::to_action`] and checked against `Authority::permits` *before*
+//! it reaches [`tm_types::CapabilityProvider::invoke`]; a denial comes back as a structured
+//! [`ToolOutcome::Denied`] result rather than an error the loop has to special-case, and results
+//! are bounded — anything past [`MAX_INLINE_RESULT_BYTES`] is stored as an artifact and
+//! referenced by id rather than inlined into the transcript.
 //!
 //! # Gaps in the closed `Action`/`TicketAuthority` vocabulary
 //!
@@ -28,6 +37,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -43,8 +53,9 @@ use tm_core::{
     VerificationPolicy,
 };
 use tm_types::{
-    Action, ArtifactId, Authority, Budget, Clock, GitOp, IdSource, ParticipantId, Predicate,
-    Result, Role, SessionId, TicketId, TicketOp, TmError, Tolerance,
+    Action, ArtifactId, Authority, AuthorityRequirement, Budget, CallContext, CapabilityProvider,
+    CostClass, Decision, GitOp, ParticipantId, Predicate, Result, Role, TicketId, TicketOp,
+    TmError, Tolerance, ToolSchema,
 };
 
 use crate::patch::{Edit, PatchEngine};
@@ -55,8 +66,12 @@ pub const MAX_INLINE_RESULT_BYTES: usize = 8 * 1024;
 
 /// One tool name from `SPEC.md` §11's fixed catalog. Variant names mirror the spec's dotted
 /// tool names (`Search*` = `search.*`, etc.) so [`ToolName::as_str`] round-trips exactly.
+///
+/// This enum, and the whole builtin dispatch table below, is private to [`BuiltinCapability`] —
+/// nothing outside this module needs a closed enum of builtin tool names any more; a caller only
+/// ever sees the dotted wire name on a [`tm_types::ToolSchema`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ToolName {
+pub(crate) enum ToolName {
     /// `search.semantic`
     SearchSemantic,
     /// `search.exact`
@@ -139,7 +154,7 @@ pub enum ToolName {
 
 impl ToolName {
     /// Every tool name, in `SPEC.md` §11's declared order.
-    pub const ALL: &'static [ToolName] = &[
+    pub(crate) const ALL: &'static [ToolName] = &[
         ToolName::SearchSemantic,
         ToolName::SearchExact,
         ToolName::SearchRegex,
@@ -182,7 +197,7 @@ impl ToolName {
     ];
 
     /// The dotted wire name, e.g. `"search.semantic"`.
-    pub fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             ToolName::SearchSemantic => "search.semantic",
             ToolName::SearchExact => "search.exact",
@@ -227,137 +242,90 @@ impl ToolName {
     }
 
     /// Parse a dotted wire name back into a [`ToolName`].
-    pub fn parse(name: &str) -> Option<ToolName> {
+    pub(crate) fn parse(name: &str) -> Option<ToolName> {
         ToolName::ALL.iter().copied().find(|t| t.as_str() == name)
     }
 }
 
-/// A coarse cost tier, used by [`crate::agent_loop::AgentLoop`] to charge
-/// [`tm_types::Budget`] spend for a tool call before it dispatches (provider calls are metered
-/// by `tm_provider::Usage`; tool calls need their own estimate since most never touch a
-/// provider).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum CostClass {
-    /// Pure in-memory read, effectively free (`fs.stat`, `symbol.outline`, ...).
-    Free,
-    /// A bounded local read or index query (`fs.read`, `search.exact`, ...).
-    Cheap,
-    /// A recomputation over the codebase or a subprocess (`search.semantic`, `build.run`, ...).
-    Moderate,
-    /// A write, a shell command with side effects, or anything that mutates project state.
-    Mutating,
-    /// Suspends the loop for external (human) input.
-    Blocking,
-}
+/// The structural, argument-independent [`AuthorityRequirement`] each builtin tool is advertised
+/// under (`SPEC.md` §30.1: "A ticket whose authority disallows shell does not receive shell tool
+/// definitions ... no schema in the context at all").
+///
+/// A direct port of the admit-by-authority filter that landed pre-audit as
+/// `ToolSpec::required_by`'s match arms — unchanged in behavior, relocated onto
+/// [`tm_types::ToolSchema::requires`]'s shape. See [`ToolSchema`]'s doc comment (in
+/// `tm-types::capability`) for why this is per-tool rather than only the provider-wide
+/// [`CapabilityProvider::requires`].
+fn requirement_for(name: ToolName) -> AuthorityRequirement {
+    use AuthorityRequirement::{Git, RepoRead, RepoWrite, Shell, Ticket};
+    match name {
+        // Read-scoped: search, symbol and history lookups, and read-shaped fs tools all
+        // dispatch through `Action::ReadPath`.
+        ToolName::SearchSemantic
+        | ToolName::SearchExact
+        | ToolName::SearchRegex
+        | ToolName::SearchHybrid
+        | ToolName::SymbolDefinition
+        | ToolName::SymbolReferences
+        | ToolName::SymbolCallers
+        | ToolName::SymbolCallees
+        | ToolName::SymbolOutline
+        | ToolName::SymbolRenamePreview
+        | ToolName::HistoryWhy
+        | ToolName::HistorySearch
+        | ToolName::HistoryDeleted
+        | ToolName::FsRead
+        | ToolName::FsReadRange
+        | ToolName::FsList
+        | ToolName::FsStat => RepoRead,
 
-/// One registered tool: its schema, gating and cost metadata.
-pub struct ToolSpec {
-    /// This tool's name.
-    pub name: ToolName,
-    /// Shown to the model to decide when to call this tool.
-    pub description: &'static str,
-    /// JSON Schema for this tool's input.
-    pub input_schema: serde_json::Value,
-    /// This tool's cost tier.
-    pub cost: CostClass,
-    /// Map a call's parsed input to the [`Action`] `Authority::permits` is checked against.
-    ///
-    /// A function pointer (not a closure) so every mapping is a pure, inspectable, unit-testable
-    /// function of the call's arguments alone — it never reaches into ambient state.
-    pub to_action: fn(&serde_json::Value) -> Result<Action>,
-}
+        // Write/edit/patch: dispatch through `Action::WritePath`.
+        ToolName::EditApplyPatch
+        | ToolName::EditWriteFile
+        | ToolName::EditCreateFile
+        | ToolName::EditDeleteFile => RepoWrite,
 
-impl ToolSpec {
-    /// Whether `authority` could possibly permit *any* call to this tool, admitting it into a
-    /// request's tool surface or not (`SPEC.md` §30.1: "A ticket whose authority disallows
-    /// shell does not receive shell tool definitions — not a disabled tool ... no schema in the
-    /// context at all").
-    ///
-    /// This is a **structural, argument-independent** approximation of [`Authority::permits`]:
-    /// at listing time there is no call input yet (a tool's `to_action` needs real arguments,
-    /// e.g. a path, that don't exist until the model actually calls it), so this classifies each
-    /// [`ToolName`] statically by the slice of `authority` it could ever exercise, rather than
-    /// simulating a call. [`ToolRegistry::dispatch`]'s `Authority::permits` check is what
-    /// actually enforces the boundary per call; this function only decides what's worth
-    /// advertising, and is deliberately permissive within a tool's structural bucket (e.g. any
-    /// nonempty `repository.write` pattern admits every write-shaped tool, even one whose
-    /// specific call later gets denied for touching a path outside that pattern).
-    pub fn required_by(&self, authority: &Authority) -> bool {
-        match self.name {
-            // Read-scoped: search, symbol and history lookups, and read-shaped fs tools all
-            // dispatch through `Action::ReadPath`.
-            ToolName::SearchSemantic
-            | ToolName::SearchExact
-            | ToolName::SearchRegex
-            | ToolName::SearchHybrid
-            | ToolName::SymbolDefinition
-            | ToolName::SymbolReferences
-            | ToolName::SymbolCallers
-            | ToolName::SymbolCallees
-            | ToolName::SymbolOutline
-            | ToolName::SymbolRenamePreview
-            | ToolName::HistoryWhy
-            | ToolName::HistorySearch
-            | ToolName::HistoryDeleted
-            | ToolName::FsRead
-            | ToolName::FsReadRange
-            | ToolName::FsList
-            | ToolName::FsStat => !authority.repository.read.is_empty(),
+        // shell.run-shaped: `shell.run`/`shell.query_output`/`test.run`/`build.run` map through
+        // `action_run_argv`, and `git.status`/`git.diff`/`git.log` map through their own
+        // `action_git_*` helpers — but all of them produce `Action::RunCommand`, not
+        // `Action::Git`, so they're gated by shell authority here too (see the module doc
+        // comment on the `git.worktree`/`GitOp::Branch` gap for the same pattern applied to a
+        // different action). They belong in this bucket, not the git one below.
+        ToolName::ShellRun
+        | ToolName::ShellQueryOutput
+        | ToolName::GitStatus
+        | ToolName::GitDiff
+        | ToolName::GitLog
+        | ToolName::TestRun
+        | ToolName::BuildRun => Shell,
 
-            // Write/edit/patch: dispatch through `Action::WritePath`.
-            ToolName::EditApplyPatch
-            | ToolName::EditWriteFile
-            | ToolName::EditCreateFile
-            | ToolName::EditDeleteFile => !authority.repository.write.is_empty(),
+        // Per-op git: `git.commit` maps to `Action::Git { op: Commit }`.
+        ToolName::GitCommit => Git(GitOp::Commit),
+        // `git.branch` and `git.worktree` both map to `Action::Git { op: Branch }` (see the
+        // module doc comment: `git.worktree` has no dedicated `GitOp`).
+        ToolName::GitBranch | ToolName::GitWorktree => Git(GitOp::Branch),
 
-            // shell.run-shaped: `shell.run`/`shell.query_output`/`test.run`/`build.run` map
-            // through `action_run_argv`, and `git.status`/`git.diff`/`git.log` map through their
-            // own `action_git_*` helpers — but all of them produce `Action::RunCommand`, not
-            // `Action::Git`, so they're gated by shell authority at dispatch time too (see the
-            // module doc comment on the `git.worktree`/`GitOp::Branch` gap for the same pattern
-            // applied to a different action). They belong in this bucket, not the git one below.
-            ToolName::ShellRun
-            | ToolName::ShellQueryOutput
-            | ToolName::GitStatus
-            | ToolName::GitDiff
-            | ToolName::GitLog
-            | ToolName::TestRun
-            | ToolName::BuildRun => authority.shell.enabled && !authority.shell.allow.is_empty(),
-
-            // Per-op git: `git.commit` maps to `Action::Git { op: Commit }`.
-            ToolName::GitCommit => authority.git.commit,
-            // `git.branch` and `git.worktree` both map to `Action::Git { op: Branch }` (see the
-            // module doc comment: `git.worktree` has no dedicated `GitOp`).
-            ToolName::GitBranch | ToolName::GitWorktree => authority.git.branch,
-
-            // Per-op ticket powers.
-            ToolName::TicketCreateChild => authority.tickets.create_children,
-            // `ticket.delegate` and `ask.human` both map to `Action::Ticket { op: Delegate }`
-            // (see `action_ask_human`'s doc comment: asking a human hands off control the same
-            // way delegating a child ticket does).
-            ToolName::TicketDelegate | ToolName::AskHuman => authority.tickets.delegate_children,
-            // `ticket.submit`, `ticket.comment`, `decision.record`, `artifact.store` and
-            // `evidence.attach` are all gated under `TicketOp::ModifySibling` at dispatch time
-            // (see the module doc comment on the closed `Action`/`TicketOp` vocabulary); mirror
-            // that same grouping here rather than inventing a finer split dispatch doesn't
-            // actually enforce.
-            ToolName::TicketSubmit
-            | ToolName::TicketComment
-            | ToolName::DecisionRecord
-            | ToolName::ArtifactStore
-            | ToolName::EvidenceAttach => authority.tickets.modify_siblings,
-        }
+        // Per-op ticket powers.
+        ToolName::TicketCreateChild => Ticket(TicketOp::CreateChild),
+        // `ticket.delegate` and `ask.human` both map to `Action::Ticket { op: Delegate }` (both
+        // hand authority to a different actor).
+        ToolName::TicketDelegate | ToolName::AskHuman => Ticket(TicketOp::Delegate),
+        // `ticket.submit`, `ticket.comment`, `decision.record`, `artifact.store` and
+        // `evidence.attach` are all gated under `TicketOp::ModifySibling` at dispatch time (see
+        // the module doc comment on the closed `Action`/`TicketOp` vocabulary); mirror that same
+        // grouping here rather than inventing a finer split dispatch doesn't actually enforce.
+        ToolName::TicketSubmit
+        | ToolName::TicketComment
+        | ToolName::DecisionRecord
+        | ToolName::ArtifactStore
+        | ToolName::EvidenceAttach => Ticket(TicketOp::ModifySibling),
     }
 }
 
-/// The full catalog of tools an [`crate::agent_loop::AgentLoop`] offers a provider.
-pub struct ToolRegistry {
-    specs: BTreeMap<ToolName, ToolSpec>,
-}
-
 // ---------------------------------------------------------------------------------------------
-// Action mappings. Kept as small, named, captureless functions so `ToolSpec::to_action` can
-// hold plain function pointers, per the field's own doc comment.
+// Action mappings. Kept as small, named, captureless functions — [`BuiltinCapability::to_action`]
+// matches on the parsed [`ToolName`] and calls straight through to one of these, the same
+// grouping the old per-tool `ToolSpec::to_action` function-pointer field used.
 // ---------------------------------------------------------------------------------------------
 
 fn action_read_repo(_input: &Value) -> Result<Action> {
@@ -595,9 +563,9 @@ fn default_retry_policy() -> RetryPolicy {
 /// Deterministic command-cache key from `argv` and `cwd` alone.
 ///
 /// The real key formula (`tm_context::fingerprint::cache_key`) also folds in a repository
-/// dirty-state fingerprint via an injected `GitInspector`, but [`ToolContext`] carries no such
-/// inspector — only a [`CommandCache`]/[`CommandExecutor`] pair. Keying on `argv`/`cwd` alone
-/// means a cacheable call is only reused across identical invocations, never invalidated by an
+/// dirty-state fingerprint via an injected `GitInspector`, but [`CallContext`] carries no such
+/// inspector — only what [`BuiltinCapability`] itself owns. Keying on `argv`/`cwd` alone means a
+/// cacheable call is only reused across identical invocations, never invalidated by an
 /// intervening repository change; callers that need that invalidation should mark their call
 /// non-cacheable.
 fn deterministic_command_key(argv: &[String], cwd: &str) -> String {
@@ -648,1089 +616,6 @@ fn query_answer_json(answer: QueryAnswer) -> Value {
     }
 }
 
-impl ToolRegistry {
-    /// Build the standard registry: one [`ToolSpec`] per [`ToolName::ALL`] entry, per
-    /// `SPEC.md` §11.
-    pub fn standard() -> Self {
-        let entries: Vec<ToolSpec> = vec![
-            ToolSpec {
-                name: ToolName::SearchSemantic,
-                description: "Semantic vector search over the project's code index.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "limit": {"type": "integer"}
-                    },
-                    "required": ["query"]
-                }),
-                cost: CostClass::Moderate,
-                to_action: action_read_repo,
-            },
-            ToolSpec {
-                name: ToolName::SearchExact,
-                description: "Literal substring search over the working tree.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"query": {"type": "string"}},
-                    "required": ["query"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_repo,
-            },
-            ToolSpec {
-                name: ToolName::SearchRegex,
-                description: "Regular-expression search over the working tree.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"pattern": {"type": "string"}},
-                    "required": ["pattern"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_repo,
-            },
-            ToolSpec {
-                name: ToolName::SearchHybrid,
-                description: "Fused hybrid search across semantic, lexical, symbol, path and history signals.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "query": {"type": "string"},
-                        "seed_paths": {"type": "array", "items": {"type": "string"}},
-                        "seed_symbols": {"type": "array", "items": {"type": "integer"}}
-                    },
-                    "required": ["query"]
-                }),
-                cost: CostClass::Moderate,
-                to_action: action_read_repo,
-            },
-            ToolSpec {
-                name: ToolName::SymbolDefinition,
-                description: "Find the symbol defining `name` as seen from `from_path`.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string"},
-                        "from_path": {"type": "string"}
-                    },
-                    "required": ["name", "from_path"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_from_path_field,
-            },
-            ToolSpec {
-                name: ToolName::SymbolReferences,
-                description: "Every reference site to a symbol id.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"symbol_id": {"type": "integer"}},
-                    "required": ["symbol_id"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_repo,
-            },
-            ToolSpec {
-                name: ToolName::SymbolCallers,
-                description: "Every symbol that calls a symbol id.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"symbol_id": {"type": "integer"}},
-                    "required": ["symbol_id"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_repo,
-            },
-            ToolSpec {
-                name: ToolName::SymbolCallees,
-                description: "Every symbol a symbol id calls.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"symbol_id": {"type": "integer"}},
-                    "required": ["symbol_id"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_repo,
-            },
-            ToolSpec {
-                name: ToolName::SymbolOutline,
-                description: "A rendered outline of a file's top-level symbols.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"]
-                }),
-                cost: CostClass::Free,
-                to_action: action_read_path_field,
-            },
-            ToolSpec {
-                name: ToolName::SymbolRenamePreview,
-                description: "Preview the edits a rename of a symbol id to `new_name` would make.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "symbol_id": {"type": "integer"},
-                        "new_name": {"type": "string"}
-                    },
-                    "required": ["symbol_id", "new_name"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_repo,
-            },
-            ToolSpec {
-                name: ToolName::HistoryWhy,
-                description: "Git history: why a line range looks the way it does.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "line_start": {"type": "integer"},
-                        "line_end": {"type": "integer"}
-                    },
-                    "required": ["path", "line_start", "line_end"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_path_field,
-            },
-            ToolSpec {
-                name: ToolName::HistorySearch,
-                description: "Search commit messages and diffs.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"query": {"type": "string"}},
-                    "required": ["query"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_repo,
-            },
-            ToolSpec {
-                name: ToolName::HistoryDeleted,
-                description: "Find implementations matching a query that were deleted and never reintroduced.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"query": {"type": "string"}},
-                    "required": ["query"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_repo,
-            },
-            ToolSpec {
-                name: ToolName::FsRead,
-                description: "Read a repository-relative file's full text content.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_path_field,
-            },
-            ToolSpec {
-                name: ToolName::FsReadRange,
-                description: "Read a byte range `[byte_start, byte_end)` of a file.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "byte_start": {"type": "integer"},
-                        "byte_end": {"type": "integer"}
-                    },
-                    "required": ["path", "byte_start", "byte_end"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_path_field,
-            },
-            ToolSpec {
-                name: ToolName::FsList,
-                description: "List a repository-relative directory's entries.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_read_path_field,
-            },
-            ToolSpec {
-                name: ToolName::FsStat,
-                description: "Metadata (existence, size, kind) for a repository-relative path.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"]
-                }),
-                cost: CostClass::Free,
-                to_action: action_read_path_field,
-            },
-            ToolSpec {
-                name: ToolName::EditApplyPatch,
-                description: "Apply one or more byte-range replacements to a file, conflict-checked.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "edits": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "byte_start": {"type": "integer"},
-                                    "byte_end": {"type": "integer"},
-                                    "replacement": {"type": "string"}
-                                },
-                                "required": ["byte_start", "byte_end", "replacement"]
-                            }
-                        },
-                        "expected_hash": {"type": ["string", "null"]}
-                    },
-                    "required": ["path", "edits"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_write_path_field,
-            },
-            ToolSpec {
-                name: ToolName::EditWriteFile,
-                description: "Overwrite a file's entire content, conflict-checked.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "content": {"type": "string"},
-                        "expected_hash": {"type": ["string", "null"]}
-                    },
-                    "required": ["path", "content"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_write_path_field,
-            },
-            ToolSpec {
-                name: ToolName::EditCreateFile,
-                description: "Create a new file; fails as a conflict if the path already exists.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "content": {"type": "string"}
-                    },
-                    "required": ["path", "content"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_write_path_field,
-            },
-            ToolSpec {
-                name: ToolName::EditDeleteFile,
-                description: "Delete a file, conflict-checked against its last-observed content hash.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "expected_hash": {"type": ["string", "null"]}
-                    },
-                    "required": ["path"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_write_path_field,
-            },
-            ToolSpec {
-                name: ToolName::ShellRun,
-                description: "Run a command (argv, never a shell string).",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "argv": {"type": "array", "items": {"type": "string"}},
-                        "cwd": {"type": "string"},
-                        "cacheable": {"type": "boolean"}
-                    },
-                    "required": ["argv"]
-                }),
-                cost: CostClass::Moderate,
-                to_action: action_run_argv,
-            },
-            ToolSpec {
-                name: ToolName::ShellQueryOutput,
-                description: "Answer a head/tail/grep/range/json query against a previously run command's stored output, without re-running it.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "argv": {"type": "array", "items": {"type": "string"}},
-                        "cwd": {"type": "string"},
-                        "cacheable": {"type": "boolean"},
-                        "stream": {"type": "string", "enum": ["stdout", "stderr"]},
-                        "query_type": {"type": "string", "enum": ["head", "tail", "grep", "range", "json"]},
-                        "n": {"type": "integer"},
-                        "pattern": {"type": "string"},
-                        "start": {"type": "integer"},
-                        "end": {"type": "integer"},
-                        "pointer": {"type": "string"}
-                    },
-                    "required": ["argv", "stream", "query_type"]
-                }),
-                cost: CostClass::Cheap,
-                to_action: action_run_argv,
-            },
-            ToolSpec {
-                name: ToolName::GitStatus,
-                description: "`git status`.",
-                input_schema: json!({"type": "object", "properties": {}}),
-                cost: CostClass::Cheap,
-                to_action: action_git_status,
-            },
-            ToolSpec {
-                name: ToolName::GitDiff,
-                description: "`git diff`.",
-                input_schema: json!({"type": "object", "properties": {}}),
-                cost: CostClass::Cheap,
-                to_action: action_git_diff,
-            },
-            ToolSpec {
-                name: ToolName::GitLog,
-                description: "`git log`.",
-                input_schema: json!({"type": "object", "properties": {}}),
-                cost: CostClass::Cheap,
-                to_action: action_git_log,
-            },
-            ToolSpec {
-                name: ToolName::GitCommit,
-                description: "Create a commit.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"message": {"type": "string"}},
-                    "required": ["message"]
-                }),
-                cost: CostClass::Moderate,
-                to_action: action_git_commit,
-            },
-            ToolSpec {
-                name: ToolName::GitBranch,
-                description: "Create or switch a branch.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"name": {"type": "string"}},
-                    "required": ["name"]
-                }),
-                cost: CostClass::Moderate,
-                to_action: action_git_branch,
-            },
-            ToolSpec {
-                name: ToolName::GitWorktree,
-                description: "Add a git worktree.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "branch": {"type": "string"}
-                    },
-                    "required": ["path", "branch"]
-                }),
-                cost: CostClass::Moderate,
-                to_action: action_git_branch,
-            },
-            ToolSpec {
-                name: ToolName::TestRun,
-                description: "Run the project's test suite (argv, never a shell string).",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "argv": {"type": "array", "items": {"type": "string"}},
-                        "cwd": {"type": "string"},
-                        "cacheable": {"type": "boolean"}
-                    },
-                    "required": ["argv"]
-                }),
-                cost: CostClass::Moderate,
-                to_action: action_run_argv,
-            },
-            ToolSpec {
-                name: ToolName::BuildRun,
-                description: "Run the project's build (argv, never a shell string).",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "argv": {"type": "array", "items": {"type": "string"}},
-                        "cwd": {"type": "string"},
-                        "cacheable": {"type": "boolean"}
-                    },
-                    "required": ["argv"]
-                }),
-                cost: CostClass::Moderate,
-                to_action: action_run_argv,
-            },
-            ToolSpec {
-                name: ToolName::TicketCreateChild,
-                description: "Create a child of the current ticket.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "kind": {"type": "string"},
-                        "objective": {"type": "string"},
-                        "authority": {"type": "object"},
-                        "budget": {"type": "object"},
-                        "success": {"type": "array"},
-                        "context_refs": {"type": "array"},
-                        "priority": {"type": "integer"}
-                    },
-                    "required": ["kind", "objective", "authority"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_ticket_create_child,
-            },
-            ToolSpec {
-                name: ToolName::TicketDelegate,
-                description: "Delegate a child ticket to another executor.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "child": {"type": "string"},
-                        "delegate": {"type": "string"}
-                    },
-                    "required": ["child", "delegate"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_ticket_delegate,
-            },
-            ToolSpec {
-                name: ToolName::TicketSubmit,
-                description: "Submit work on the current ticket, carrying evidence artifacts.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "summary": {"type": "string"},
-                        "evidence": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["summary", "evidence"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_ticket_modify,
-            },
-            ToolSpec {
-                name: ToolName::TicketComment,
-                description: "Leave a comment on a ticket (defaults to the current ticket).",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "ticket": {"type": "string"},
-                        "body": {"type": "string"}
-                    },
-                    "required": ["body"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_ticket_modify,
-            },
-            ToolSpec {
-                name: ToolName::DecisionRecord,
-                description: "Record a decision.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "subject": {"type": "string"},
-                        "decision": {"type": "string"},
-                        "reason": {"type": "string"},
-                        "evidence": {"type": "array", "items": {"type": "string"}},
-                        "affected_tickets": {"type": "array", "items": {"type": "string"}},
-                        "affected_paths": {"type": "array", "items": {"type": "string"}}
-                    },
-                    "required": ["subject", "decision", "reason"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_ticket_modify,
-            },
-            ToolSpec {
-                name: ToolName::ArtifactStore,
-                description: "Store bytes (as UTF-8 text) as a new artifact.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "kind": {"type": "string"},
-                        "media_type": {"type": "string"},
-                        "content": {"type": "string"},
-                        "meta": {"type": "object"},
-                        "ticket": {"type": "string"}
-                    },
-                    "required": ["kind", "media_type", "content"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_ticket_modify,
-            },
-            ToolSpec {
-                name: ToolName::EvidenceAttach,
-                description: "Attach an existing artifact to a ticket as evidence.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "ticket": {"type": "string"},
-                        "kind": {"type": "string"},
-                        "artifact": {"type": "string"},
-                        "summary": {"type": "string"}
-                    },
-                    "required": ["kind", "artifact", "summary"]
-                }),
-                cost: CostClass::Mutating,
-                to_action: action_ticket_modify,
-            },
-            ToolSpec {
-                name: ToolName::AskHuman,
-                description: "Suspend and ask a human a question.",
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {"question": {"type": "string"}},
-                    "required": ["question"]
-                }),
-                cost: CostClass::Blocking,
-                to_action: action_ask_human,
-            },
-        ];
-
-        let specs = entries.into_iter().map(|s| (s.name, s)).collect();
-        ToolRegistry { specs }
-    }
-
-    /// Look up a tool by its dotted wire name.
-    pub fn get(&self, name: &str) -> Option<&ToolSpec> {
-        ToolName::parse(name).and_then(|t| self.specs.get(&t))
-    }
-
-    /// Every registered spec, in [`ToolName::ALL`] order.
-    pub fn specs(&self) -> impl Iterator<Item = &ToolSpec> {
-        self.specs.values()
-    }
-
-    /// Render every registered tool as a `tm_provider::ToolDef`, for
-    /// `tm_provider::CompletionRequest::tools`.
-    pub fn tool_defs(&self) -> Vec<tm_provider::ToolDef> {
-        self.specs
-            .values()
-            .map(|spec| tm_provider::ToolDef {
-                name: spec.name.as_str().to_string(),
-                description: spec.description.to_string(),
-                input_schema: spec.input_schema.clone(),
-            })
-            .collect()
-    }
-
-    /// [`ToolRegistry::tool_defs`], admitted by authority rather than availability
-    /// (`SPEC.md` §30.1): only specs whose [`ToolSpec::required_by`] holds for `authority` are
-    /// rendered, so a tool a ticket's authority structurally cannot exercise never appears in
-    /// the request's tool surface at all — not merely a disabled tool that would answer
-    /// `Authority::permits` with a denial at dispatch time.
-    pub fn tool_defs_for(&self, authority: &Authority) -> Vec<tm_provider::ToolDef> {
-        self.specs
-            .values()
-            .filter(|spec| spec.required_by(authority))
-            .map(|spec| tm_provider::ToolDef {
-                name: spec.name.as_str().to_string(),
-                description: spec.description.to_string(),
-                input_schema: spec.input_schema.clone(),
-            })
-            .collect()
-    }
-
-    /// The per-tool byte/token cost of exactly the tool surface [`ToolRegistry::tool_defs_for`]
-    /// would send for `authority` (`SPEC.md` §30.2): the ecosystem-survey cost the section opens
-    /// with — a dozen connected MCP servers' worth of schemas paid on every turn — made
-    /// attributable as a line item, the same way [`tm_context::ContextPack`]'s sections are.
-    pub fn tool_surface_cost_for(&self, authority: &Authority) -> Vec<tm_context::ToolSurfaceCost> {
-        self.specs
-            .values()
-            .filter(|spec| spec.required_by(authority))
-            .map(|spec| {
-                tm_context::ToolSurfaceCost::compute(
-                    spec.name.as_str(),
-                    spec.description,
-                    &spec.input_schema,
-                )
-            })
-            .collect()
-    }
-
-    /// Dispatch one model-issued call: resolve its tool, map to an [`Action`], check `authority`,
-    /// and — if permitted — execute against `ctx`.
-    ///
-    /// Never returns `Err`: an unknown tool name, a malformed input, an authority denial, or a
-    /// dispatch-time failure are all represented as a variant of [`ToolOutcome`] so the caller
-    /// always has a tool result to hand back to the model.
-    pub fn dispatch(&self, call: &ToolCall, ctx: &mut ToolContext<'_>) -> ToolOutcome {
-        let Some(tool) = ToolName::parse(&call.name) else {
-            return ToolOutcome::Errored {
-                detail: format!("unknown tool `{}`", call.name),
-            };
-        };
-        let Some(spec) = self.specs.get(&tool) else {
-            return ToolOutcome::Errored {
-                detail: format!("no registered spec for `{}`", tool.as_str()),
-            };
-        };
-        let action = match (spec.to_action)(&call.input) {
-            Ok(action) => action,
-            Err(e) => {
-                return ToolOutcome::Errored {
-                    detail: e.to_string(),
-                }
-            }
-        };
-        match ctx.authority.permits(&action) {
-            tm_types::Decision::Allow => {}
-            tm_types::Decision::Deny(reason) => return ToolOutcome::Denied { reason },
-            tm_types::Decision::NeedsApproval(reason) => {
-                return ToolOutcome::Errored {
-                    detail: format!(
-                        "internal error: dispatch reached with an action needing approval ({reason}); \
-                         the caller must suspend via AgentOutcome::AwaitingApproval before calling dispatch again"
-                    ),
-                };
-            }
-        }
-        match execute(tool, &call.input, ctx) {
-            Ok(value) => match bound_result(value, ctx) {
-                Ok((result, artifact)) => ToolOutcome::Completed { result, artifact },
-                Err(e) => ToolOutcome::Errored {
-                    detail: e.to_string(),
-                },
-            },
-            Err(e) => ToolOutcome::Errored {
-                detail: e.to_string(),
-            },
-        }
-    }
-}
-
-/// Execute one already-authorized call. Split out from `dispatch` so the authority check above
-/// is the only path into this function.
-fn execute(tool: ToolName, input: &Value, ctx: &ToolContext<'_>) -> Result<Value> {
-    match tool {
-        ToolName::SearchSemantic => {
-            let query = get_str(input, "query")?;
-            let top_k = get_u64_or(input, "limit", 20) as usize;
-            let opts = SemanticSearchOptions {
-                top_k,
-                ..SemanticSearchOptions::default()
-            };
-            let hits = ctx.ci.search_semantic(query, opts)?;
-            Ok(json!(hits
-                .iter()
-                .map(|h| json!({
-                    "path": h.path, "line_start": h.line_start, "line_end": h.line_end,
-                    "score": h.score, "text": h.text,
-                }))
-                .collect::<Vec<_>>()))
-        }
-        ToolName::SearchExact => {
-            let needle = get_str(input, "query")?;
-            let result = ctx.ci.search_exact(needle)?;
-            Ok(json!({
-                "truncated": result.truncated,
-                "hits": result.hits.iter().map(|h| json!({
-                    "path": h.path, "line": h.line, "col": h.col, "line_text": h.line_text,
-                })).collect::<Vec<_>>(),
-            }))
-        }
-        ToolName::SearchRegex => {
-            let pattern = get_str(input, "pattern")?;
-            let result = ctx.ci.search_regex(pattern)?;
-            Ok(json!({
-                "truncated": result.truncated,
-                "hits": result.hits.iter().map(|h| json!({
-                    "path": h.path, "line": h.line, "col": h.col, "line_text": h.line_text,
-                })).collect::<Vec<_>>(),
-            }))
-        }
-        ToolName::SearchHybrid => {
-            let text = get_string(input, "query")?;
-            let seed_paths = get_string_vec_or_empty(input, "seed_paths");
-            let seed_symbols: Vec<u64> = input
-                .get("seed_symbols")
-                .and_then(Value::as_array)
-                .map(|a| a.iter().filter_map(Value::as_u64).collect())
-                .unwrap_or_default();
-            let query = Query {
-                text,
-                seed_symbols,
-                seed_paths,
-            };
-            let retrieval_ctx = RetrievalContext {
-                claimed_paths: Vec::new(),
-                recently_edited: Vec::new(),
-            };
-            let hits = ctx
-                .ci
-                .search_hybrid(&query, &retrieval_ctx, SignalWeights::default())?;
-            Ok(json!(hits
-                .iter()
-                .map(|h| json!({
-                    "path": h.path, "line_start": h.line_start, "line_end": h.line_end,
-                    "snippet": h.snippet, "fused_score": h.fused_score,
-                }))
-                .collect::<Vec<_>>()))
-        }
-        ToolName::SymbolDefinition => {
-            let name = get_str(input, "name")?;
-            let from_path = get_str(input, "from_path")?;
-            let def = ctx.ci.definition(name, from_path)?;
-            Ok(json!(def.as_ref().map(symbol_json)))
-        }
-        ToolName::SymbolReferences => {
-            let symbol_id = get_u64(input, "symbol_id")?;
-            let index = ctx.ci.symbol_index()?;
-            let refs = index.references(symbol_id);
-            Ok(json!(refs
-                .iter()
-                .map(|r| reference_json(r))
-                .collect::<Vec<_>>()))
-        }
-        ToolName::SymbolCallers => {
-            let symbol_id = get_u64(input, "symbol_id")?;
-            let index = ctx.ci.symbol_index()?;
-            let callers = index.callers(symbol_id);
-            Ok(json!(callers
-                .iter()
-                .map(|s| symbol_json(s))
-                .collect::<Vec<_>>()))
-        }
-        ToolName::SymbolCallees => {
-            let symbol_id = get_u64(input, "symbol_id")?;
-            let index = ctx.ci.symbol_index()?;
-            let callees = index.callees(symbol_id);
-            Ok(json!(callees
-                .iter()
-                .map(|s| symbol_json(s))
-                .collect::<Vec<_>>()))
-        }
-        ToolName::SymbolOutline => {
-            let path = get_str(input, "path")?;
-            let outline = ctx.ci.outline(path)?;
-            Ok(json!(outline
-                .iter()
-                .map(
-                    |e| json!({"symbol_id": e.symbol_id, "depth": e.depth, "rendered": e.rendered})
-                )
-                .collect::<Vec<_>>()))
-        }
-        ToolName::SymbolRenamePreview => {
-            let symbol_id = get_u64(input, "symbol_id")?;
-            let new_name = get_str(input, "new_name")?;
-            let index = ctx.ci.symbol_index()?;
-            let patch = index.rename_preview(symbol_id, new_name)?;
-            Ok(json!({
-                "edits": patch.edits.iter().map(|e| json!({
-                    "path": e.path, "byte_start": e.byte_start, "byte_end": e.byte_end,
-                    "replacement": e.replacement,
-                })).collect::<Vec<_>>(),
-                "skipped_ambiguous": patch.skipped_ambiguous.iter().map(reference_json).collect::<Vec<_>>(),
-            }))
-        }
-        ToolName::HistoryWhy => {
-            let path = get_str(input, "path")?;
-            let line_start = get_u32(input, "line_start")?;
-            let line_end = get_u32(input, "line_end")?;
-            let answer = ctx.ci.history_why(path, line_start, line_end)?;
-            Ok(json!({
-                "path": answer.path, "line_start": answer.line_start, "line_end": answer.line_end,
-                "commits": answer.commits.iter().map(commit_json).collect::<Vec<_>>(),
-            }))
-        }
-        ToolName::HistorySearch => {
-            let query = get_str(input, "query")?;
-            let hits = ctx.ci.history_search(query)?;
-            Ok(json!(hits
-                .iter()
-                .map(|h| json!({
-                    "commit": commit_json(&h.commit), "path": h.path, "snippet": h.snippet,
-                }))
-                .collect::<Vec<_>>()))
-        }
-        ToolName::HistoryDeleted => {
-            let query = get_str(input, "query")?;
-            let hits = ctx.ci.history_deleted(query)?;
-            Ok(json!(hits
-                .iter()
-                .map(|h| json!({
-                    "path": h.path, "commit": commit_json(&h.commit), "removed_text": h.removed_text,
-                }))
-                .collect::<Vec<_>>()))
-        }
-        ToolName::FsRead => {
-            let path = get_str(input, "path")?;
-            let full = resolve_repo_path(ctx.patch_engine.root(), path)?;
-            let content = std::fs::read_to_string(&full)?;
-            Ok(json!({"path": path, "content": content}))
-        }
-        ToolName::FsReadRange => {
-            let path = get_str(input, "path")?;
-            let byte_start = get_usize(input, "byte_start")?;
-            let byte_end = get_usize(input, "byte_end")?;
-            let full = resolve_repo_path(ctx.patch_engine.root(), path)?;
-            let bytes = std::fs::read(&full)?;
-            if byte_start > byte_end || byte_end > bytes.len() {
-                return Err(TmError::parse(format!(
-                    "invalid range [{byte_start}, {byte_end}) for {path} of length {}",
-                    bytes.len()
-                )));
-            }
-            let slice = String::from_utf8_lossy(&bytes[byte_start..byte_end]).into_owned();
-            Ok(
-                json!({"path": path, "byte_start": byte_start, "byte_end": byte_end, "content": slice}),
-            )
-        }
-        ToolName::FsList => {
-            let path = get_str(input, "path")?;
-            let full = resolve_repo_path(ctx.patch_engine.root(), path)?;
-            let mut entries = Vec::new();
-            for entry in std::fs::read_dir(&full)? {
-                let entry = entry?;
-                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                entries.push(json!({
-                    "name": entry.file_name().to_string_lossy().into_owned(),
-                    "is_dir": is_dir,
-                }));
-            }
-            Ok(json!({"path": path, "entries": entries}))
-        }
-        ToolName::FsStat => {
-            let path = get_str(input, "path")?;
-            let full = resolve_repo_path(ctx.patch_engine.root(), path)?;
-            match std::fs::metadata(&full) {
-                Ok(meta) => Ok(json!({
-                    "path": path, "exists": true, "is_dir": meta.is_dir(), "len": meta.len(),
-                })),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    Ok(json!({"path": path, "exists": false}))
-                }
-                Err(e) => Err(TmError::from(e)),
-            }
-        }
-        ToolName::EditApplyPatch => {
-            let path = get_string(input, "path")?;
-            let mut expected_hash = get_opt_string(input, "expected_hash");
-            let edits = input
-                .get("edits")
-                .and_then(Value::as_array)
-                .ok_or_else(|| missing("edits"))?;
-            let mut applied = Vec::new();
-            for e in edits {
-                let byte_start =
-                    e.get("byte_start")
-                        .and_then(Value::as_u64)
-                        .ok_or_else(|| missing("byte_start"))? as usize;
-                let byte_end = e
-                    .get("byte_end")
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| missing("byte_end"))? as usize;
-                let replacement = e
-                    .get("replacement")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| missing("replacement"))?
-                    .to_string();
-                let edit = Edit::RangeReplace {
-                    path: path.clone(),
-                    byte_start,
-                    byte_end,
-                    replacement,
-                    expected_hash: expected_hash.clone(),
-                };
-                match ctx.patch_engine.apply(&edit) {
-                    Ok(patch) => {
-                        expected_hash = patch.hash_after.clone();
-                        applied.push(json!({"applied": true, "patch": patch_json(&patch)}));
-                    }
-                    Err(e) => {
-                        applied.push(json!({"applied": false, "error": e.to_string()}));
-                        break;
-                    }
-                }
-            }
-            Ok(json!({"path": path, "edits": applied}))
-        }
-        ToolName::EditWriteFile => {
-            let path = get_string(input, "path")?;
-            let content = get_string(input, "content")?;
-            let expected_hash = get_opt_string(input, "expected_hash");
-            let edit = Edit::Write {
-                path,
-                content,
-                expected_hash,
-            };
-            Ok(patch_outcome_json(ctx.patch_engine.apply(&edit)))
-        }
-        ToolName::EditCreateFile => {
-            let path = get_string(input, "path")?;
-            let content = get_string(input, "content")?;
-            let edit = Edit::Create { path, content };
-            Ok(patch_outcome_json(ctx.patch_engine.apply(&edit)))
-        }
-        ToolName::EditDeleteFile => {
-            let path = get_string(input, "path")?;
-            let expected_hash = get_opt_string(input, "expected_hash");
-            let edit = Edit::Delete {
-                path,
-                expected_hash,
-            };
-            Ok(patch_outcome_json(ctx.patch_engine.apply(&edit)))
-        }
-        ToolName::ShellRun => run_shell_like(input, ctx),
-        ToolName::TestRun => run_shell_like(input, ctx),
-        ToolName::BuildRun => run_shell_like(input, ctx),
-        ToolName::ShellQueryOutput => {
-            let argv = get_string_vec(input, "argv")?;
-            let cwd = resolve_cwd(ctx.patch_engine.root(), input);
-            let cacheable = get_bool_or(input, "cacheable", false);
-            let key = command_key(ctx, &argv, &cwd, cacheable);
-            let Some(result) = ctx.command_cache.get(&key)? else {
-                return Ok(json!({"found": false}));
-            };
-            let stream = match get_str(input, "stream")? {
-                "stdout" => ArtifactStream::Stdout,
-                "stderr" => ArtifactStream::Stderr,
-                other => return Err(TmError::parse(format!("unknown stream `{other}`"))),
-            };
-            let query = parse_command_query(input)?;
-            let answer = result.query(stream, ctx.command_cache, query)?;
-            Ok(query_answer_json(answer))
-        }
-        ToolName::GitStatus => run_fixed_git(&["git", "status"], ctx),
-        ToolName::GitDiff => run_fixed_git(&["git", "diff"], ctx),
-        ToolName::GitLog => run_fixed_git(&["git", "log", "--oneline", "-n", "50"], ctx),
-        ToolName::GitCommit => {
-            let message = get_string(input, "message")?;
-            run_fixed_git(&["git", "commit", "-m", &message], ctx)
-        }
-        ToolName::GitBranch => {
-            let name = get_string(input, "name")?;
-            run_fixed_git(&["git", "checkout", "-B", &name], ctx)
-        }
-        ToolName::GitWorktree => {
-            let path = get_string(input, "path")?;
-            let branch = get_string(input, "branch")?;
-            run_fixed_git(&["git", "worktree", "add", &path, &branch], ctx)
-        }
-        ToolName::TicketCreateChild => {
-            let parsed: CreateChildInput = serde_json::from_value(input.clone())?;
-            let events = ctx.store.create_ticket(
-                parsed.kind,
-                parsed.objective,
-                Some(ctx.ticket.clone()),
-                None,
-                parsed.authority,
-                Vec::new(),
-                default_executor_requirements(),
-                parsed.context_refs,
-                parsed.success,
-                VerificationPolicy::Single,
-                parsed.budget,
-                default_retry_policy(),
-                parsed.priority,
-                ctx.actor.clone(),
-            )?;
-            let child = events
-                .iter()
-                .find_map(|e| e.payload.as_ticket_created().map(|p| p.ticket.clone()));
-            Ok(json!({"child": child.map(|t| t.into_string())}))
-        }
-        ToolName::TicketDelegate => {
-            let child: TicketId = get_str(input, "child")?.parse()?;
-            let delegate: ParticipantId = get_str(input, "delegate")?.parse()?;
-            let events = ctx.store.update_ticket(
-                &child,
-                json!({"delegated_to": delegate.as_str()}),
-                ctx.actor.clone(),
-            )?;
-            Ok(
-                json!({"child": child.as_str(), "delegate": delegate.as_str(), "events": events.len()}),
-            )
-        }
-        ToolName::TicketSubmit => {
-            let summary = get_string(input, "summary")?;
-            let evidence: Vec<ArtifactId> = get_string_vec(input, "evidence")?
-                .into_iter()
-                .map(|s| s.parse::<ArtifactId>())
-                .collect::<Result<Vec<ArtifactId>>>()?;
-            let events = ctx
-                .store
-                .submit(ctx.ticket, summary, evidence, ctx.actor.clone())?;
-            Ok(json!({"ticket": ctx.ticket.as_str(), "events": events.len()}))
-        }
-        ToolName::TicketComment => {
-            let target: TicketId = match get_opt_string(input, "ticket") {
-                Some(s) => s.parse()?,
-                None => ctx.ticket.clone(),
-            };
-            let body = get_string(input, "body")?;
-            let events = ctx.store.update_ticket(
-                &target,
-                json!({"comment": {"author": ctx.actor.as_str(), "body": body}}),
-                ctx.actor.clone(),
-            )?;
-            Ok(json!({"ticket": target.as_str(), "events": events.len()}))
-        }
-        ToolName::DecisionRecord => {
-            let subject = get_string(input, "subject")?;
-            let decision = get_string(input, "decision")?;
-            let reason = get_string(input, "reason")?;
-            let evidence: Vec<ArtifactId> = get_string_vec_or_empty(input, "evidence")
-                .into_iter()
-                .map(|s| s.parse::<ArtifactId>())
-                .collect::<Result<Vec<ArtifactId>>>()?;
-            let affected_tickets: Vec<TicketId> =
-                get_string_vec_or_empty(input, "affected_tickets")
-                    .into_iter()
-                    .map(|s| s.parse::<TicketId>())
-                    .collect::<Result<Vec<TicketId>>>()?;
-            let affected_paths = get_string_vec_or_empty(input, "affected_paths");
-            let events = ctx.store.record_decision(
-                subject,
-                decision,
-                reason,
-                evidence,
-                affected_tickets,
-                affected_paths,
-                ctx.actor.clone(),
-            )?;
-            let decision_id = events
-                .iter()
-                .find_map(|e| e.payload.as_decision_created().map(|p| p.decision.clone()));
-            Ok(json!({"decision": decision_id.map(|d| d.into_string())}))
-        }
-        ToolName::ArtifactStore => {
-            let kind: ArtifactKind =
-                serde_json::from_value(Value::String(get_string(input, "kind")?))?;
-            let media_type = get_string(input, "media_type")?;
-            let content = get_string(input, "content")?;
-            let meta = input.get("meta").cloned().unwrap_or_else(|| json!({}));
-            let ticket = match get_opt_string(input, "ticket") {
-                Some(s) => Some(s.parse()?),
-                None => Some(ctx.ticket.clone()),
-            };
-            let events = ctx.store.store_artifact(
-                kind,
-                media_type,
-                content.into_bytes(),
-                meta,
-                ticket,
-                ctx.actor.clone(),
-            )?;
-            let artifact = events
-                .iter()
-                .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone()));
-            Ok(json!({"artifact": artifact.map(|a| a.into_string())}))
-        }
-        ToolName::EvidenceAttach => {
-            let target: TicketId = match get_opt_string(input, "ticket") {
-                Some(s) => s.parse()?,
-                None => ctx.ticket.clone(),
-            };
-            let kind: EvidenceKind =
-                serde_json::from_value(Value::String(get_string(input, "kind")?))?;
-            let artifact: ArtifactId = get_str(input, "artifact")?.parse()?;
-            let summary = get_string(input, "summary")?;
-            let events =
-                ctx.store
-                    .attach_evidence(&target, kind, &artifact, summary, ctx.actor.clone())?;
-            Ok(json!({"ticket": target.as_str(), "events": events.len()}))
-        }
-        ToolName::AskHuman => {
-            let question = get_string(input, "question")?;
-            Ok(json!({"asked": true, "question": question}))
-        }
-    }
-}
-
 fn commit_json(c: &tm_codeintel::history::CommitSummary) -> Value {
     json!({"sha": c.sha, "author": c.author, "authored_at": c.authored_at, "message": c.message})
 }
@@ -1758,7 +643,9 @@ fn patch_outcome_json(outcome: crate::patch::PatchOutcome) -> Value {
     }
 }
 
-fn command_key(ctx: &ToolContext<'_>, argv: &[String], cwd: &str, cacheable: bool) -> String {
+/// A command-cache key for one call: deterministic from `argv`/`cwd` when `cacheable`, otherwise
+/// unique per call so it is never served from — or pollutes — the cache.
+fn command_key(ctx: &CallContext<'_>, argv: &[String], cwd: &str, cacheable: bool) -> String {
     if cacheable {
         deterministic_command_key(argv, cwd)
     } else {
@@ -1770,58 +657,1392 @@ fn command_key(ctx: &ToolContext<'_>, argv: &[String], cwd: &str, cacheable: boo
     }
 }
 
-fn run_shell_like(input: &Value, ctx: &ToolContext<'_>) -> Result<Value> {
-    let argv = get_string_vec(input, "argv")?;
-    let cwd = resolve_cwd(ctx.patch_engine.root(), input);
-    let cacheable = get_bool_or(input, "cacheable", false);
-    let key = command_key(ctx, &argv, &cwd, cacheable);
-    let spec = CommandSpec {
-        argv,
-        cwd,
-        env_allowlist: Vec::new(),
-        declared_inputs: Vec::new(),
-        cacheable,
-        ticket: Some(ctx.ticket.clone()),
-        session: Some(ctx.session.clone()),
-    };
-    // `command::run`'s own `command.started`/`command.completed` event drafts are dropped here:
-    // `Store` exposes no generic "append arbitrary event drafts" entry point, only the typed
-    // commands above, so there is nowhere in `tm-core`'s finished public API to commit them.
-    let (result, _drafts) = command::run(
-        &spec,
-        &key,
-        ctx.command_cache,
-        ctx.authority,
-        ctx.command_executor,
-        ctx.clock,
-        ctx.actor,
-    )?;
-    Ok(command_result_json(&result))
+/// The builtin tool set migrated onto [`CapabilityProvider`] (`docs/audit-2026-09-18-fable.md`
+/// A-01): `SPEC.md` §11's fixed 39-tool catalog — `search.*`, `symbol.*`, `history.*`, `fs.*`,
+/// `edit.*`, `shell.run`/`test.run`/`build.run`, `git.*`, `ticket.*`, `decision.record`,
+/// `artifact.store`, `evidence.attach`, `ask.human` — dispatching into `tm-codeintel`,
+/// `tm-context`, `tm-core` or [`crate::patch::PatchEngine`] exactly as it did as a hand-written
+/// `Vec` before this migration. Registered as the sole provider by [`ToolRegistry::standard`];
+/// not special-cased by [`ToolRegistry`] itself, which only ever sees it through the trait — the
+/// seam a future `tm-browser`/`tm-computer` provider slots into the same way.
+pub struct BuiltinCapability {
+    ci: Arc<CodeIntel>,
+    store: Arc<Store>,
+    command_cache: Arc<dyn CommandCache + Send + Sync>,
+    command_executor: Arc<dyn CommandExecutor + Send + Sync>,
 }
 
-fn run_fixed_git(argv: &[&str], ctx: &ToolContext<'_>) -> Result<Value> {
-    let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
-    let cwd = ctx.patch_engine.root().to_string_lossy().into_owned();
-    let key = command_key(ctx, &argv, &cwd, false);
-    let spec = CommandSpec {
-        argv,
-        cwd,
-        env_allowlist: Vec::new(),
-        declared_inputs: Vec::new(),
-        cacheable: false,
-        ticket: Some(ctx.ticket.clone()),
-        session: Some(ctx.session.clone()),
-    };
-    let (result, _drafts) = command::run(
-        &spec,
-        &key,
-        ctx.command_cache,
-        ctx.authority,
-        ctx.command_executor,
-        ctx.clock,
-        ctx.actor,
+impl BuiltinCapability {
+    /// Build the builtin capability over already-open project infrastructure.
+    pub fn new(
+        ci: Arc<CodeIntel>,
+        store: Arc<Store>,
+        command_cache: Arc<dyn CommandCache + Send + Sync>,
+        command_executor: Arc<dyn CommandExecutor + Send + Sync>,
+    ) -> Self {
+        BuiltinCapability {
+            ci,
+            store,
+            command_cache,
+            command_executor,
+        }
+    }
+
+    fn run_shell_like(
+        &self,
+        input: &Value,
+        ctx: &CallContext<'_>,
+        patch_engine: &PatchEngine,
+    ) -> Result<Value> {
+        let argv = get_string_vec(input, "argv")?;
+        let cwd = resolve_cwd(patch_engine.root(), input);
+        let cacheable = get_bool_or(input, "cacheable", false);
+        let key = command_key(ctx, &argv, &cwd, cacheable);
+        let spec = CommandSpec {
+            argv,
+            cwd,
+            env_allowlist: Vec::new(),
+            declared_inputs: Vec::new(),
+            cacheable,
+            ticket: Some(ctx.ticket.clone()),
+            session: Some(ctx.session.clone()),
+        };
+        // `command::run`'s own `command.started`/`command.completed` event drafts are dropped
+        // here: `Store` exposes no generic "append arbitrary event drafts" entry point, only the
+        // typed commands used elsewhere in this impl, so there is nowhere in `tm-core`'s
+        // finished public API to commit them.
+        let (result, _drafts) = command::run(
+            &spec,
+            &key,
+            self.command_cache.as_ref(),
+            ctx.authority,
+            self.command_executor.as_ref(),
+            ctx.clock,
+            ctx.actor,
+        )?;
+        Ok(command_result_json(&result))
+    }
+
+    fn run_fixed_git(
+        &self,
+        argv: &[&str],
+        ctx: &CallContext<'_>,
+        patch_engine: &PatchEngine,
+    ) -> Result<Value> {
+        let argv: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
+        let cwd = patch_engine.root().to_string_lossy().into_owned();
+        let key = command_key(ctx, &argv, &cwd, false);
+        let spec = CommandSpec {
+            argv,
+            cwd,
+            env_allowlist: Vec::new(),
+            declared_inputs: Vec::new(),
+            cacheable: false,
+            ticket: Some(ctx.ticket.clone()),
+            session: Some(ctx.session.clone()),
+        };
+        let (result, _drafts) = command::run(
+            &spec,
+            &key,
+            self.command_cache.as_ref(),
+            ctx.authority,
+            self.command_executor.as_ref(),
+            ctx.clock,
+            ctx.actor,
+        )?;
+        Ok(command_result_json(&result))
+    }
+
+    /// Execute one already-authorized call. Split out from [`CapabilityProvider::invoke`] so
+    /// that method is a thin `PatchEngine`-construction-plus-dispatch wrapper.
+    fn execute(
+        &self,
+        tool: ToolName,
+        input: &Value,
+        ctx: &CallContext<'_>,
+        patch_engine: &PatchEngine,
+    ) -> Result<Value> {
+        match tool {
+            ToolName::SearchSemantic => {
+                let query = get_str(input, "query")?;
+                let top_k = get_u64_or(input, "limit", 20) as usize;
+                let opts = SemanticSearchOptions {
+                    top_k,
+                    ..SemanticSearchOptions::default()
+                };
+                let hits = self.ci.search_semantic(query, opts)?;
+                Ok(json!(hits
+                    .iter()
+                    .map(|h| json!({
+                        "path": h.path, "line_start": h.line_start, "line_end": h.line_end,
+                        "score": h.score, "text": h.text,
+                    }))
+                    .collect::<Vec<_>>()))
+            }
+            ToolName::SearchExact => {
+                let needle = get_str(input, "query")?;
+                let result = self.ci.search_exact(needle)?;
+                Ok(json!({
+                    "truncated": result.truncated,
+                    "hits": result.hits.iter().map(|h| json!({
+                        "path": h.path, "line": h.line, "col": h.col, "line_text": h.line_text,
+                    })).collect::<Vec<_>>(),
+                }))
+            }
+            ToolName::SearchRegex => {
+                let pattern = get_str(input, "pattern")?;
+                let result = self.ci.search_regex(pattern)?;
+                Ok(json!({
+                    "truncated": result.truncated,
+                    "hits": result.hits.iter().map(|h| json!({
+                        "path": h.path, "line": h.line, "col": h.col, "line_text": h.line_text,
+                    })).collect::<Vec<_>>(),
+                }))
+            }
+            ToolName::SearchHybrid => {
+                let text = get_string(input, "query")?;
+                let seed_paths = get_string_vec_or_empty(input, "seed_paths");
+                let seed_symbols: Vec<u64> = input
+                    .get("seed_symbols")
+                    .and_then(Value::as_array)
+                    .map(|a| a.iter().filter_map(Value::as_u64).collect())
+                    .unwrap_or_default();
+                let query = Query {
+                    text,
+                    seed_symbols,
+                    seed_paths,
+                };
+                let retrieval_ctx = RetrievalContext {
+                    claimed_paths: Vec::new(),
+                    recently_edited: Vec::new(),
+                };
+                let hits =
+                    self.ci
+                        .search_hybrid(&query, &retrieval_ctx, SignalWeights::default())?;
+                Ok(json!(hits
+                    .iter()
+                    .map(|h| json!({
+                        "path": h.path, "line_start": h.line_start, "line_end": h.line_end,
+                        "snippet": h.snippet, "fused_score": h.fused_score,
+                    }))
+                    .collect::<Vec<_>>()))
+            }
+            ToolName::SymbolDefinition => {
+                let name = get_str(input, "name")?;
+                let from_path = get_str(input, "from_path")?;
+                let def = self.ci.definition(name, from_path)?;
+                Ok(json!(def.as_ref().map(symbol_json)))
+            }
+            ToolName::SymbolReferences => {
+                let symbol_id = get_u64(input, "symbol_id")?;
+                let index = self.ci.symbol_index()?;
+                let refs = index.references(symbol_id);
+                Ok(json!(refs
+                    .iter()
+                    .map(|r| reference_json(r))
+                    .collect::<Vec<_>>()))
+            }
+            ToolName::SymbolCallers => {
+                let symbol_id = get_u64(input, "symbol_id")?;
+                let index = self.ci.symbol_index()?;
+                let callers = index.callers(symbol_id);
+                Ok(json!(callers
+                    .iter()
+                    .map(|s| symbol_json(s))
+                    .collect::<Vec<_>>()))
+            }
+            ToolName::SymbolCallees => {
+                let symbol_id = get_u64(input, "symbol_id")?;
+                let index = self.ci.symbol_index()?;
+                let callees = index.callees(symbol_id);
+                Ok(json!(callees
+                    .iter()
+                    .map(|s| symbol_json(s))
+                    .collect::<Vec<_>>()))
+            }
+            ToolName::SymbolOutline => {
+                let path = get_str(input, "path")?;
+                let outline = self.ci.outline(path)?;
+                Ok(json!(outline
+                    .iter()
+                    .map(
+                        |e| json!({"symbol_id": e.symbol_id, "depth": e.depth, "rendered": e.rendered})
+                    )
+                    .collect::<Vec<_>>()))
+            }
+            ToolName::SymbolRenamePreview => {
+                let symbol_id = get_u64(input, "symbol_id")?;
+                let new_name = get_str(input, "new_name")?;
+                let index = self.ci.symbol_index()?;
+                let patch = index.rename_preview(symbol_id, new_name)?;
+                Ok(json!({
+                    "edits": patch.edits.iter().map(|e| json!({
+                        "path": e.path, "byte_start": e.byte_start, "byte_end": e.byte_end,
+                        "replacement": e.replacement,
+                    })).collect::<Vec<_>>(),
+                    "skipped_ambiguous": patch.skipped_ambiguous.iter().map(reference_json).collect::<Vec<_>>(),
+                }))
+            }
+            ToolName::HistoryWhy => {
+                let path = get_str(input, "path")?;
+                let line_start = get_u32(input, "line_start")?;
+                let line_end = get_u32(input, "line_end")?;
+                let answer = self.ci.history_why(path, line_start, line_end)?;
+                Ok(json!({
+                    "path": answer.path, "line_start": answer.line_start, "line_end": answer.line_end,
+                    "commits": answer.commits.iter().map(commit_json).collect::<Vec<_>>(),
+                }))
+            }
+            ToolName::HistorySearch => {
+                let query = get_str(input, "query")?;
+                let hits = self.ci.history_search(query)?;
+                Ok(json!(hits
+                    .iter()
+                    .map(|h| json!({
+                        "commit": commit_json(&h.commit), "path": h.path, "snippet": h.snippet,
+                    }))
+                    .collect::<Vec<_>>()))
+            }
+            ToolName::HistoryDeleted => {
+                let query = get_str(input, "query")?;
+                let hits = self.ci.history_deleted(query)?;
+                Ok(json!(hits
+                    .iter()
+                    .map(|h| json!({
+                        "path": h.path, "commit": commit_json(&h.commit), "removed_text": h.removed_text,
+                    }))
+                    .collect::<Vec<_>>()))
+            }
+            ToolName::FsRead => {
+                let path = get_str(input, "path")?;
+                let full = resolve_repo_path(patch_engine.root(), path)?;
+                let content = std::fs::read_to_string(&full)?;
+                Ok(json!({"path": path, "content": content}))
+            }
+            ToolName::FsReadRange => {
+                let path = get_str(input, "path")?;
+                let byte_start = get_usize(input, "byte_start")?;
+                let byte_end = get_usize(input, "byte_end")?;
+                let full = resolve_repo_path(patch_engine.root(), path)?;
+                let bytes = std::fs::read(&full)?;
+                if byte_start > byte_end || byte_end > bytes.len() {
+                    return Err(TmError::parse(format!(
+                        "invalid range [{byte_start}, {byte_end}) for {path} of length {}",
+                        bytes.len()
+                    )));
+                }
+                let slice = String::from_utf8_lossy(&bytes[byte_start..byte_end]).into_owned();
+                Ok(
+                    json!({"path": path, "byte_start": byte_start, "byte_end": byte_end, "content": slice}),
+                )
+            }
+            ToolName::FsList => {
+                let path = get_str(input, "path")?;
+                let full = resolve_repo_path(patch_engine.root(), path)?;
+                let mut entries = Vec::new();
+                for entry in std::fs::read_dir(&full)? {
+                    let entry = entry?;
+                    let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    entries.push(json!({
+                        "name": entry.file_name().to_string_lossy().into_owned(),
+                        "is_dir": is_dir,
+                    }));
+                }
+                Ok(json!({"path": path, "entries": entries}))
+            }
+            ToolName::FsStat => {
+                let path = get_str(input, "path")?;
+                let full = resolve_repo_path(patch_engine.root(), path)?;
+                match std::fs::metadata(&full) {
+                    Ok(meta) => Ok(json!({
+                        "path": path, "exists": true, "is_dir": meta.is_dir(), "len": meta.len(),
+                    })),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(json!({"path": path, "exists": false}))
+                    }
+                    Err(e) => Err(TmError::from(e)),
+                }
+            }
+            ToolName::EditApplyPatch => {
+                let path = get_string(input, "path")?;
+                let mut expected_hash = get_opt_string(input, "expected_hash");
+                let edits = input
+                    .get("edits")
+                    .and_then(Value::as_array)
+                    .ok_or_else(|| missing("edits"))?;
+                let mut applied = Vec::new();
+                for e in edits {
+                    let byte_start =
+                        e.get("byte_start")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| missing("byte_start"))? as usize;
+                    let byte_end =
+                        e.get("byte_end")
+                            .and_then(Value::as_u64)
+                            .ok_or_else(|| missing("byte_end"))? as usize;
+                    let replacement = e
+                        .get("replacement")
+                        .and_then(Value::as_str)
+                        .ok_or_else(|| missing("replacement"))?
+                        .to_string();
+                    let edit = Edit::RangeReplace {
+                        path: path.clone(),
+                        byte_start,
+                        byte_end,
+                        replacement,
+                        expected_hash: expected_hash.clone(),
+                    };
+                    match patch_engine.apply(&edit) {
+                        Ok(patch) => {
+                            expected_hash = patch.hash_after.clone();
+                            applied.push(json!({"applied": true, "patch": patch_json(&patch)}));
+                        }
+                        Err(e) => {
+                            applied.push(json!({"applied": false, "error": e.to_string()}));
+                            break;
+                        }
+                    }
+                }
+                Ok(json!({"path": path, "edits": applied}))
+            }
+            ToolName::EditWriteFile => {
+                let path = get_string(input, "path")?;
+                let content = get_string(input, "content")?;
+                let expected_hash = get_opt_string(input, "expected_hash");
+                let edit = Edit::Write {
+                    path,
+                    content,
+                    expected_hash,
+                };
+                Ok(patch_outcome_json(patch_engine.apply(&edit)))
+            }
+            ToolName::EditCreateFile => {
+                let path = get_string(input, "path")?;
+                let content = get_string(input, "content")?;
+                let edit = Edit::Create { path, content };
+                Ok(patch_outcome_json(patch_engine.apply(&edit)))
+            }
+            ToolName::EditDeleteFile => {
+                let path = get_string(input, "path")?;
+                let expected_hash = get_opt_string(input, "expected_hash");
+                let edit = Edit::Delete {
+                    path,
+                    expected_hash,
+                };
+                Ok(patch_outcome_json(patch_engine.apply(&edit)))
+            }
+            ToolName::ShellRun => self.run_shell_like(input, ctx, patch_engine),
+            ToolName::TestRun => self.run_shell_like(input, ctx, patch_engine),
+            ToolName::BuildRun => self.run_shell_like(input, ctx, patch_engine),
+            ToolName::ShellQueryOutput => {
+                let argv = get_string_vec(input, "argv")?;
+                let cwd = resolve_cwd(patch_engine.root(), input);
+                let cacheable = get_bool_or(input, "cacheable", false);
+                let key = command_key(ctx, &argv, &cwd, cacheable);
+                let Some(result) = self.command_cache.get(&key)? else {
+                    return Ok(json!({"found": false}));
+                };
+                let stream = match get_str(input, "stream")? {
+                    "stdout" => ArtifactStream::Stdout,
+                    "stderr" => ArtifactStream::Stderr,
+                    other => return Err(TmError::parse(format!("unknown stream `{other}`"))),
+                };
+                let query = parse_command_query(input)?;
+                let answer = result.query(stream, self.command_cache.as_ref(), query)?;
+                Ok(query_answer_json(answer))
+            }
+            ToolName::GitStatus => self.run_fixed_git(&["git", "status"], ctx, patch_engine),
+            ToolName::GitDiff => self.run_fixed_git(&["git", "diff"], ctx, patch_engine),
+            ToolName::GitLog => {
+                self.run_fixed_git(&["git", "log", "--oneline", "-n", "50"], ctx, patch_engine)
+            }
+            ToolName::GitCommit => {
+                let message = get_string(input, "message")?;
+                self.run_fixed_git(&["git", "commit", "-m", &message], ctx, patch_engine)
+            }
+            ToolName::GitBranch => {
+                let name = get_string(input, "name")?;
+                self.run_fixed_git(&["git", "checkout", "-B", &name], ctx, patch_engine)
+            }
+            ToolName::GitWorktree => {
+                let path = get_string(input, "path")?;
+                let branch = get_string(input, "branch")?;
+                self.run_fixed_git(
+                    &["git", "worktree", "add", &path, &branch],
+                    ctx,
+                    patch_engine,
+                )
+            }
+            ToolName::TicketCreateChild => {
+                let parsed: CreateChildInput = serde_json::from_value(input.clone())?;
+                let events = self.store.create_ticket(
+                    parsed.kind,
+                    parsed.objective,
+                    Some(ctx.ticket.clone()),
+                    None,
+                    parsed.authority,
+                    Vec::new(),
+                    default_executor_requirements(),
+                    parsed.context_refs,
+                    parsed.success,
+                    VerificationPolicy::Single,
+                    parsed.budget,
+                    default_retry_policy(),
+                    parsed.priority,
+                    ctx.actor.clone(),
+                )?;
+                let child = events
+                    .iter()
+                    .find_map(|e| e.payload.as_ticket_created().map(|p| p.ticket.clone()));
+                Ok(json!({"child": child.map(|t| t.into_string())}))
+            }
+            ToolName::TicketDelegate => {
+                let child: TicketId = get_str(input, "child")?.parse()?;
+                let delegate: ParticipantId = get_str(input, "delegate")?.parse()?;
+                let events = self.store.update_ticket(
+                    &child,
+                    json!({"delegated_to": delegate.as_str()}),
+                    ctx.actor.clone(),
+                )?;
+                Ok(
+                    json!({"child": child.as_str(), "delegate": delegate.as_str(), "events": events.len()}),
+                )
+            }
+            ToolName::TicketSubmit => {
+                let summary = get_string(input, "summary")?;
+                let evidence: Vec<ArtifactId> = get_string_vec(input, "evidence")?
+                    .into_iter()
+                    .map(|s| s.parse::<ArtifactId>())
+                    .collect::<Result<Vec<ArtifactId>>>()?;
+                let events = self
+                    .store
+                    .submit(ctx.ticket, summary, evidence, ctx.actor.clone())?;
+                Ok(json!({"ticket": ctx.ticket.as_str(), "events": events.len()}))
+            }
+            ToolName::TicketComment => {
+                let target: TicketId = match get_opt_string(input, "ticket") {
+                    Some(s) => s.parse()?,
+                    None => ctx.ticket.clone(),
+                };
+                let body = get_string(input, "body")?;
+                let events = self.store.update_ticket(
+                    &target,
+                    json!({"comment": {"author": ctx.actor.as_str(), "body": body}}),
+                    ctx.actor.clone(),
+                )?;
+                Ok(json!({"ticket": target.as_str(), "events": events.len()}))
+            }
+            ToolName::DecisionRecord => {
+                let subject = get_string(input, "subject")?;
+                let decision = get_string(input, "decision")?;
+                let reason = get_string(input, "reason")?;
+                let evidence: Vec<ArtifactId> = get_string_vec_or_empty(input, "evidence")
+                    .into_iter()
+                    .map(|s| s.parse::<ArtifactId>())
+                    .collect::<Result<Vec<ArtifactId>>>()?;
+                let affected_tickets: Vec<TicketId> =
+                    get_string_vec_or_empty(input, "affected_tickets")
+                        .into_iter()
+                        .map(|s| s.parse::<TicketId>())
+                        .collect::<Result<Vec<TicketId>>>()?;
+                let affected_paths = get_string_vec_or_empty(input, "affected_paths");
+                let events = self.store.record_decision(
+                    subject,
+                    decision,
+                    reason,
+                    evidence,
+                    affected_tickets,
+                    affected_paths,
+                    ctx.actor.clone(),
+                )?;
+                let decision_id = events
+                    .iter()
+                    .find_map(|e| e.payload.as_decision_created().map(|p| p.decision.clone()));
+                Ok(json!({"decision": decision_id.map(|d| d.into_string())}))
+            }
+            ToolName::ArtifactStore => {
+                let kind: ArtifactKind =
+                    serde_json::from_value(Value::String(get_string(input, "kind")?))?;
+                let media_type = get_string(input, "media_type")?;
+                let content = get_string(input, "content")?;
+                let meta = input.get("meta").cloned().unwrap_or_else(|| json!({}));
+                let ticket = match get_opt_string(input, "ticket") {
+                    Some(s) => Some(s.parse()?),
+                    None => Some(ctx.ticket.clone()),
+                };
+                let events = self.store.store_artifact(
+                    kind,
+                    media_type,
+                    content.into_bytes(),
+                    meta,
+                    ticket,
+                    ctx.actor.clone(),
+                )?;
+                let artifact = events
+                    .iter()
+                    .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone()));
+                Ok(json!({"artifact": artifact.map(|a| a.into_string())}))
+            }
+            ToolName::EvidenceAttach => {
+                let target: TicketId = match get_opt_string(input, "ticket") {
+                    Some(s) => s.parse()?,
+                    None => ctx.ticket.clone(),
+                };
+                let kind: EvidenceKind =
+                    serde_json::from_value(Value::String(get_string(input, "kind")?))?;
+                let artifact: ArtifactId = get_str(input, "artifact")?.parse()?;
+                let summary = get_string(input, "summary")?;
+                let events = self.store.attach_evidence(
+                    &target,
+                    kind,
+                    &artifact,
+                    summary,
+                    ctx.actor.clone(),
+                )?;
+                Ok(json!({"ticket": target.as_str(), "events": events.len()}))
+            }
+            ToolName::AskHuman => {
+                let question = get_string(input, "question")?;
+                Ok(json!({"asked": true, "question": question}))
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CapabilityProvider for BuiltinCapability {
+    fn id(&self) -> &str {
+        "builtin"
+    }
+
+    fn tools(&self) -> Vec<ToolSchema> {
+        vec![
+            ToolSchema {
+                name: ToolName::SearchSemantic.as_str(),
+                description: "Semantic vector search over the project's code index.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"}
+                    },
+                    "required": ["query"]
+                }),
+                cost: CostClass::Moderate,
+                requires: requirement_for(ToolName::SearchSemantic),
+            },
+            ToolSchema {
+                name: ToolName::SearchExact.as_str(),
+                description: "Literal substring search over the working tree.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::SearchExact),
+            },
+            ToolSchema {
+                name: ToolName::SearchRegex.as_str(),
+                description: "Regular-expression search over the working tree.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"pattern": {"type": "string"}},
+                    "required": ["pattern"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::SearchRegex),
+            },
+            ToolSchema {
+                name: ToolName::SearchHybrid.as_str(),
+                description: "Fused hybrid search across semantic, lexical, symbol, path and history signals.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "seed_paths": {"type": "array", "items": {"type": "string"}},
+                        "seed_symbols": {"type": "array", "items": {"type": "integer"}}
+                    },
+                    "required": ["query"]
+                }),
+                cost: CostClass::Moderate,
+                requires: requirement_for(ToolName::SearchHybrid),
+            },
+            ToolSchema {
+                name: ToolName::SymbolDefinition.as_str(),
+                description: "Find the symbol defining `name` as seen from `from_path`.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "from_path": {"type": "string"}
+                    },
+                    "required": ["name", "from_path"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::SymbolDefinition),
+            },
+            ToolSchema {
+                name: ToolName::SymbolReferences.as_str(),
+                description: "Every reference site to a symbol id.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"symbol_id": {"type": "integer"}},
+                    "required": ["symbol_id"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::SymbolReferences),
+            },
+            ToolSchema {
+                name: ToolName::SymbolCallers.as_str(),
+                description: "Every symbol that calls a symbol id.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"symbol_id": {"type": "integer"}},
+                    "required": ["symbol_id"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::SymbolCallers),
+            },
+            ToolSchema {
+                name: ToolName::SymbolCallees.as_str(),
+                description: "Every symbol a symbol id calls.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"symbol_id": {"type": "integer"}},
+                    "required": ["symbol_id"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::SymbolCallees),
+            },
+            ToolSchema {
+                name: ToolName::SymbolOutline.as_str(),
+                description: "A rendered outline of a file's top-level symbols.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }),
+                cost: CostClass::Free,
+                requires: requirement_for(ToolName::SymbolOutline),
+            },
+            ToolSchema {
+                name: ToolName::SymbolRenamePreview.as_str(),
+                description: "Preview the edits a rename of a symbol id to `new_name` would make.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "symbol_id": {"type": "integer"},
+                        "new_name": {"type": "string"}
+                    },
+                    "required": ["symbol_id", "new_name"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::SymbolRenamePreview),
+            },
+            ToolSchema {
+                name: ToolName::HistoryWhy.as_str(),
+                description: "Git history: why a line range looks the way it does.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "line_start": {"type": "integer"},
+                        "line_end": {"type": "integer"}
+                    },
+                    "required": ["path", "line_start", "line_end"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::HistoryWhy),
+            },
+            ToolSchema {
+                name: ToolName::HistorySearch.as_str(),
+                description: "Search commit messages and diffs.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::HistorySearch),
+            },
+            ToolSchema {
+                name: ToolName::HistoryDeleted.as_str(),
+                description: "Find implementations matching a query that were deleted and never reintroduced.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::HistoryDeleted),
+            },
+            ToolSchema {
+                name: ToolName::FsRead.as_str(),
+                description: "Read a repository-relative file's full text content.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::FsRead),
+            },
+            ToolSchema {
+                name: ToolName::FsReadRange.as_str(),
+                description: "Read a byte range `[byte_start, byte_end)` of a file.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "byte_start": {"type": "integer"},
+                        "byte_end": {"type": "integer"}
+                    },
+                    "required": ["path", "byte_start", "byte_end"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::FsReadRange),
+            },
+            ToolSchema {
+                name: ToolName::FsList.as_str(),
+                description: "List a repository-relative directory's entries.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::FsList),
+            },
+            ToolSchema {
+                name: ToolName::FsStat.as_str(),
+                description: "Metadata (existence, size, kind) for a repository-relative path.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }),
+                cost: CostClass::Free,
+                requires: requirement_for(ToolName::FsStat),
+            },
+            ToolSchema {
+                name: ToolName::EditApplyPatch.as_str(),
+                description: "Apply one or more byte-range replacements to a file, conflict-checked.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "edits": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "byte_start": {"type": "integer"},
+                                    "byte_end": {"type": "integer"},
+                                    "replacement": {"type": "string"}
+                                },
+                                "required": ["byte_start", "byte_end", "replacement"]
+                            }
+                        },
+                        "expected_hash": {"type": ["string", "null"]}
+                    },
+                    "required": ["path", "edits"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::EditApplyPatch),
+            },
+            ToolSchema {
+                name: ToolName::EditWriteFile.as_str(),
+                description: "Overwrite a file's entire content, conflict-checked.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "expected_hash": {"type": ["string", "null"]}
+                    },
+                    "required": ["path", "content"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::EditWriteFile),
+            },
+            ToolSchema {
+                name: ToolName::EditCreateFile.as_str(),
+                description: "Create a new file; fails as a conflict if the path already exists.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"}
+                    },
+                    "required": ["path", "content"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::EditCreateFile),
+            },
+            ToolSchema {
+                name: ToolName::EditDeleteFile.as_str(),
+                description: "Delete a file, conflict-checked against its last-observed content hash.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "expected_hash": {"type": ["string", "null"]}
+                    },
+                    "required": ["path"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::EditDeleteFile),
+            },
+            ToolSchema {
+                name: ToolName::ShellRun.as_str(),
+                description: "Run a command (argv, never a shell string).",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "cwd": {"type": "string"},
+                        "cacheable": {"type": "boolean"}
+                    },
+                    "required": ["argv"]
+                }),
+                cost: CostClass::Moderate,
+                requires: requirement_for(ToolName::ShellRun),
+            },
+            ToolSchema {
+                name: ToolName::ShellQueryOutput.as_str(),
+                description: "Answer a head/tail/grep/range/json query against a previously run command's stored output, without re-running it.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "cwd": {"type": "string"},
+                        "cacheable": {"type": "boolean"},
+                        "stream": {"type": "string", "enum": ["stdout", "stderr"]},
+                        "query_type": {"type": "string", "enum": ["head", "tail", "grep", "range", "json"]},
+                        "n": {"type": "integer"},
+                        "pattern": {"type": "string"},
+                        "start": {"type": "integer"},
+                        "end": {"type": "integer"},
+                        "pointer": {"type": "string"}
+                    },
+                    "required": ["argv", "stream", "query_type"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::ShellQueryOutput),
+            },
+            ToolSchema {
+                name: ToolName::GitStatus.as_str(),
+                description: "`git status`.",
+                input_schema: json!({"type": "object", "properties": {}}),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::GitStatus),
+            },
+            ToolSchema {
+                name: ToolName::GitDiff.as_str(),
+                description: "`git diff`.",
+                input_schema: json!({"type": "object", "properties": {}}),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::GitDiff),
+            },
+            ToolSchema {
+                name: ToolName::GitLog.as_str(),
+                description: "`git log`.",
+                input_schema: json!({"type": "object", "properties": {}}),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::GitLog),
+            },
+            ToolSchema {
+                name: ToolName::GitCommit.as_str(),
+                description: "Create a commit.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"message": {"type": "string"}},
+                    "required": ["message"]
+                }),
+                cost: CostClass::Moderate,
+                requires: requirement_for(ToolName::GitCommit),
+            },
+            ToolSchema {
+                name: ToolName::GitBranch.as_str(),
+                description: "Create or switch a branch.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"]
+                }),
+                cost: CostClass::Moderate,
+                requires: requirement_for(ToolName::GitBranch),
+            },
+            ToolSchema {
+                name: ToolName::GitWorktree.as_str(),
+                description: "Add a git worktree.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "branch": {"type": "string"}
+                    },
+                    "required": ["path", "branch"]
+                }),
+                cost: CostClass::Moderate,
+                requires: requirement_for(ToolName::GitWorktree),
+            },
+            ToolSchema {
+                name: ToolName::TestRun.as_str(),
+                description: "Run the project's test suite (argv, never a shell string).",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "cwd": {"type": "string"},
+                        "cacheable": {"type": "boolean"}
+                    },
+                    "required": ["argv"]
+                }),
+                cost: CostClass::Moderate,
+                requires: requirement_for(ToolName::TestRun),
+            },
+            ToolSchema {
+                name: ToolName::BuildRun.as_str(),
+                description: "Run the project's build (argv, never a shell string).",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "cwd": {"type": "string"},
+                        "cacheable": {"type": "boolean"}
+                    },
+                    "required": ["argv"]
+                }),
+                cost: CostClass::Moderate,
+                requires: requirement_for(ToolName::BuildRun),
+            },
+            ToolSchema {
+                name: ToolName::TicketCreateChild.as_str(),
+                description: "Create a child of the current ticket.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "objective": {"type": "string"},
+                        "authority": {"type": "object"},
+                        "budget": {"type": "object"},
+                        "success": {"type": "array"},
+                        "context_refs": {"type": "array"},
+                        "priority": {"type": "integer"}
+                    },
+                    "required": ["kind", "objective", "authority"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::TicketCreateChild),
+            },
+            ToolSchema {
+                name: ToolName::TicketDelegate.as_str(),
+                description: "Delegate a child ticket to another executor.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "child": {"type": "string"},
+                        "delegate": {"type": "string"}
+                    },
+                    "required": ["child", "delegate"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::TicketDelegate),
+            },
+            ToolSchema {
+                name: ToolName::TicketSubmit.as_str(),
+                description: "Submit work on the current ticket, carrying evidence artifacts.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "evidence": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["summary", "evidence"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::TicketSubmit),
+            },
+            ToolSchema {
+                name: ToolName::TicketComment.as_str(),
+                description: "Leave a comment on a ticket (defaults to the current ticket).",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "ticket": {"type": "string"},
+                        "body": {"type": "string"}
+                    },
+                    "required": ["body"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::TicketComment),
+            },
+            ToolSchema {
+                name: ToolName::DecisionRecord.as_str(),
+                description: "Record a decision.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string"},
+                        "decision": {"type": "string"},
+                        "reason": {"type": "string"},
+                        "evidence": {"type": "array", "items": {"type": "string"}},
+                        "affected_tickets": {"type": "array", "items": {"type": "string"}},
+                        "affected_paths": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": ["subject", "decision", "reason"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::DecisionRecord),
+            },
+            ToolSchema {
+                name: ToolName::ArtifactStore.as_str(),
+                description: "Store bytes (as UTF-8 text) as a new artifact.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string"},
+                        "media_type": {"type": "string"},
+                        "content": {"type": "string"},
+                        "meta": {"type": "object"},
+                        "ticket": {"type": "string"}
+                    },
+                    "required": ["kind", "media_type", "content"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::ArtifactStore),
+            },
+            ToolSchema {
+                name: ToolName::EvidenceAttach.as_str(),
+                description: "Attach an existing artifact to a ticket as evidence.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "ticket": {"type": "string"},
+                        "kind": {"type": "string"},
+                        "artifact": {"type": "string"},
+                        "summary": {"type": "string"}
+                    },
+                    "required": ["kind", "artifact", "summary"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::EvidenceAttach),
+            },
+            ToolSchema {
+                name: ToolName::AskHuman.as_str(),
+                description: "Suspend and ask a human a question.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"question": {"type": "string"}},
+                    "required": ["question"]
+                }),
+                cost: CostClass::Blocking,
+                requires: requirement_for(ToolName::AskHuman),
+            },
+        ]
+    }
+
+    fn to_action(&self, tool: &str, input: &Value) -> Result<Action> {
+        let Some(name) = ToolName::parse(tool) else {
+            return Err(TmError::parse(format!("unknown tool `{tool}`")));
+        };
+        match name {
+            ToolName::SearchSemantic
+            | ToolName::SearchExact
+            | ToolName::SearchRegex
+            | ToolName::SearchHybrid
+            | ToolName::SymbolReferences
+            | ToolName::SymbolCallers
+            | ToolName::SymbolCallees
+            | ToolName::SymbolRenamePreview
+            | ToolName::HistorySearch
+            | ToolName::HistoryDeleted => action_read_repo(input),
+            ToolName::SymbolDefinition => action_read_from_path_field(input),
+            ToolName::SymbolOutline
+            | ToolName::HistoryWhy
+            | ToolName::FsRead
+            | ToolName::FsReadRange
+            | ToolName::FsList
+            | ToolName::FsStat => action_read_path_field(input),
+            ToolName::EditApplyPatch
+            | ToolName::EditWriteFile
+            | ToolName::EditCreateFile
+            | ToolName::EditDeleteFile => action_write_path_field(input),
+            ToolName::ShellRun
+            | ToolName::ShellQueryOutput
+            | ToolName::TestRun
+            | ToolName::BuildRun => action_run_argv(input),
+            ToolName::GitStatus => action_git_status(input),
+            ToolName::GitDiff => action_git_diff(input),
+            ToolName::GitLog => action_git_log(input),
+            ToolName::GitCommit => action_git_commit(input),
+            ToolName::GitBranch | ToolName::GitWorktree => action_git_branch(input),
+            ToolName::TicketCreateChild => action_ticket_create_child(input),
+            ToolName::TicketDelegate => action_ticket_delegate(input),
+            ToolName::TicketSubmit
+            | ToolName::TicketComment
+            | ToolName::DecisionRecord
+            | ToolName::ArtifactStore
+            | ToolName::EvidenceAttach => action_ticket_modify(input),
+            ToolName::AskHuman => action_ask_human(input),
+        }
+    }
+
+    fn requires(&self) -> AuthorityRequirement {
+        // The builtin capability has no single coarse precondition of its own: its 39 tools
+        // span nearly every `AuthorityRequirement` bucket, and each tool's own
+        // `ToolSchema::requires` (see `requirement_for`) already carries the real gate. See
+        // `ToolSchema`'s doc comment in `tm-types::capability` for why both checks exist.
+        AuthorityRequirement::Always
+    }
+
+    async fn invoke(&self, tool: &str, input: Value, ctx: &CallContext<'_>) -> Result<Value> {
+        let Some(name) = ToolName::parse(tool) else {
+            return Err(TmError::parse(format!("unknown tool `{tool}`")));
+        };
+        let patch_engine = PatchEngine::new(ctx.root.to_path_buf(), ctx.authority.clone());
+        self.execute(name, &input, ctx, &patch_engine)
+    }
+}
+
+/// If `value`'s serialized size is at or under [`MAX_INLINE_RESULT_BYTES`], return it unchanged
+/// with no artifact; otherwise store the full value as an artifact via `store` and return a
+/// truncated preview referencing it.
+///
+/// A registry-wide policy applied to every provider's result in [`ToolRegistry::dispatch`]
+/// (rather than something each [`CapabilityProvider::invoke`] does for itself): the
+/// transcript-size budget this bounds is a property of the dispatch loop, not of any one
+/// capability, so [`ToolRegistry`] — not [`BuiltinCapability`] — owns the `Store` handle this
+/// needs.
+fn bound_result(
+    value: Value,
+    store: &Store,
+    ticket: &TicketId,
+    actor: &ParticipantId,
+) -> Result<(Value, Option<ArtifactId>)> {
+    let bytes = serde_json::to_vec(&value)?;
+    if bytes.len() <= MAX_INLINE_RESULT_BYTES {
+        return Ok((value, None));
+    }
+    let events = store.store_artifact(
+        ArtifactKind::Report,
+        "application/json".to_string(),
+        bytes.clone(),
+        json!({"tool_result": true}),
+        Some(ticket.clone()),
+        actor.clone(),
     )?;
-    Ok(command_result_json(&result))
+    let artifact = events
+        .iter()
+        .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone()))
+        .ok_or_else(|| TmError::invariant("store_artifact did not emit artifact.created"))?;
+    let preview_len = MAX_INLINE_RESULT_BYTES.min(bytes.len());
+    let preview = String::from_utf8_lossy(&bytes[..preview_len]).into_owned();
+    let preview_json = json!({
+        "truncated": true,
+        "artifact": artifact.as_str(),
+        "preview": preview,
+    });
+    Ok((preview_json, Some(artifact)))
+}
+
+fn tool_def(schema: &ToolSchema) -> tm_provider::ToolDef {
+    tm_provider::ToolDef {
+        name: schema.name.to_string(),
+        description: schema.description.to_string(),
+        input_schema: schema.input_schema.clone(),
+    }
+}
+
+/// The full catalog of tools an [`crate::agent_loop::AgentLoop`] offers a provider: whatever
+/// [`CapabilityProvider`]s a binary assembled, indexed once by wire name.
+///
+/// `docs/audit-2026-09-18-fable.md` A-01: this is deliberately generic over however many
+/// providers are registered — [`ToolRegistry::standard`] registers just [`BuiltinCapability`]
+/// today, but nothing here special-cases it; a binary that also wants `tm-browser`/
+/// `tm-computer`/... calls [`ToolRegistry::new`] with a longer `providers` list instead, with no
+/// change to this struct or its methods.
+pub struct ToolRegistry {
+    providers: Vec<Arc<dyn CapabilityProvider>>,
+    /// Every tool, in provider-registration order and then each provider's own
+    /// [`CapabilityProvider::tools`] order — *not* alphabetical, so the tool surface sent to a
+    /// model stays byte-stable across calls the way the old hardcoded `Vec`'s order did.
+    entries: Vec<(usize, ToolSchema)>,
+    /// Wire name -> index into `entries`.
+    index: BTreeMap<&'static str, usize>,
+    /// See [`bound_result`]'s doc comment for why this lives on the registry rather than on any
+    /// one provider.
+    store: Arc<Store>,
+}
+
+impl ToolRegistry {
+    /// Build a registry over `providers`, indexing every tool they contribute once. Later
+    /// providers' tools shadow earlier ones' in the wire-name index on a collision (none of the
+    /// providers registered today collide).
+    pub fn new(providers: Vec<Arc<dyn CapabilityProvider>>, store: Arc<Store>) -> Self {
+        let mut entries = Vec::new();
+        let mut index = BTreeMap::new();
+        for (provider_idx, provider) in providers.iter().enumerate() {
+            for schema in provider.tools() {
+                index.insert(schema.name, entries.len());
+                entries.push((provider_idx, schema));
+            }
+        }
+        ToolRegistry {
+            providers,
+            entries,
+            index,
+            store,
+        }
+    }
+
+    /// The standard single-provider registry: [`BuiltinCapability`] alone (`SPEC.md` §11's 39
+    /// tools), over already-open project infrastructure. A binary that also wants
+    /// `tm-browser`/`tm-computer`/`tm-pty`/an MCP client calls [`ToolRegistry::new`] directly
+    /// with a longer provider list instead — deliberately not done here; see
+    /// `docs/audit-2026-09-18-fable.md` A-01/B-02.
+    pub fn standard(
+        ci: Arc<CodeIntel>,
+        store: Arc<Store>,
+        command_cache: Arc<dyn CommandCache + Send + Sync>,
+        command_executor: Arc<dyn CommandExecutor + Send + Sync>,
+    ) -> Self {
+        let builtin: Arc<dyn CapabilityProvider> = Arc::new(BuiltinCapability::new(
+            ci,
+            store.clone(),
+            command_cache,
+            command_executor,
+        ));
+        ToolRegistry::new(vec![builtin], store)
+    }
+
+    /// Look up a tool by its dotted wire name.
+    pub fn get(&self, name: &str) -> Option<&ToolSchema> {
+        self.index.get(name).map(|&i| &self.entries[i].1)
+    }
+
+    /// Every registered schema, in registration order.
+    pub fn specs(&self) -> impl Iterator<Item = &ToolSchema> {
+        self.entries.iter().map(|(_, schema)| schema)
+    }
+
+    /// Render every registered tool as a `tm_provider::ToolDef`, for
+    /// `tm_provider::CompletionRequest::tools`.
+    pub fn tool_defs(&self) -> Vec<tm_provider::ToolDef> {
+        self.entries
+            .iter()
+            .map(|(_, schema)| tool_def(schema))
+            .collect()
+    }
+
+    /// Schemas admitted for `authority`, in registration order: a tool is admitted only when
+    /// both its provider's [`CapabilityProvider::requires`] and its own
+    /// [`tm_types::ToolSchema::requires`] structurally admit `authority` (`SPEC.md` §30.1). See
+    /// `tm-types::capability::ToolSchema`'s doc comment for why both checks exist.
+    fn admitted<'a>(
+        &'a self,
+        authority: &'a Authority,
+    ) -> impl Iterator<Item = &'a ToolSchema> + 'a {
+        self.entries
+            .iter()
+            .filter_map(move |(provider_idx, schema)| {
+                let provider = &self.providers[*provider_idx];
+                if provider.requires().admits(authority) && schema.requires.admits(authority) {
+                    Some(schema)
+                } else {
+                    None
+                }
+            })
+    }
+
+    /// [`ToolRegistry::tool_defs`], admitted by authority rather than availability
+    /// (`SPEC.md` §30.1): only schemas [`ToolRegistry::admitted`] passes are rendered, so a tool
+    /// a ticket's authority structurally cannot exercise never appears in the request's tool
+    /// surface at all — not merely a disabled tool that would answer `Authority::permits` with a
+    /// denial at dispatch time.
+    pub fn tool_defs_for(&self, authority: &Authority) -> Vec<tm_provider::ToolDef> {
+        self.admitted(authority).map(tool_def).collect()
+    }
+
+    /// The per-tool byte/token cost of exactly the tool surface [`ToolRegistry::tool_defs_for`]
+    /// would send for `authority` (`SPEC.md` §30.2): the ecosystem-survey cost the section opens
+    /// with — a dozen connected MCP servers' worth of schemas paid on every turn — made
+    /// attributable as a line item, the same way [`tm_context::ContextPack`]'s sections are.
+    pub fn tool_surface_cost_for(&self, authority: &Authority) -> Vec<tm_context::ToolSurfaceCost> {
+        self.admitted(authority)
+            .map(|schema| {
+                tm_context::ToolSurfaceCost::compute(
+                    schema.name,
+                    schema.description,
+                    &schema.input_schema,
+                )
+            })
+            .collect()
+    }
+
+    /// Map a call's input to the [`Action`] `Authority::permits` gates it on, without executing
+    /// it — the seam [`crate::agent_loop::AgentLoop`] uses to pre-check a pending call for
+    /// `Decision::NeedsApproval` before it ever reaches [`ToolRegistry::dispatch`]. An unknown
+    /// tool name is `Err`, never a panic or a silently skipped check — callers that want "skip
+    /// on unknown" (as the pre-check does) get that for free from `if let Ok(..) = ...`.
+    pub fn to_action(&self, name: &str, input: &Value) -> Result<Action> {
+        let &idx = self
+            .index
+            .get(name)
+            .ok_or_else(|| TmError::parse(format!("unknown tool `{name}`")))?;
+        let (provider_idx, schema) = &self.entries[idx];
+        self.providers[*provider_idx].to_action(schema.name, input)
+    }
+
+    /// Dispatch one model-issued call: resolve its provider, map to an [`Action`], check
+    /// `ctx.authority`, and — if permitted — execute against `ctx`.
+    ///
+    /// Never returns `Err`: an unknown tool name, a malformed input, an authority denial, or a
+    /// dispatch-time failure are all represented as a variant of [`ToolOutcome`] so the caller
+    /// always has a tool result to hand back to the model.
+    pub async fn dispatch(&self, call: &ToolCall, ctx: &CallContext<'_>) -> ToolOutcome {
+        let Some(&idx) = self.index.get(call.name.as_str()) else {
+            return ToolOutcome::Errored {
+                detail: format!("unknown tool `{}`", call.name),
+            };
+        };
+        let (provider_idx, schema) = &self.entries[idx];
+        let provider = &self.providers[*provider_idx];
+
+        let action = match provider.to_action(schema.name, &call.input) {
+            Ok(action) => action,
+            Err(e) => {
+                return ToolOutcome::Errored {
+                    detail: e.to_string(),
+                }
+            }
+        };
+        match ctx.authority.permits(&action) {
+            Decision::Allow => {}
+            Decision::Deny(reason) => return ToolOutcome::Denied { reason },
+            Decision::NeedsApproval(reason) => {
+                return ToolOutcome::Errored {
+                    detail: format!(
+                        "internal error: dispatch reached with an action needing approval ({reason}); \
+                         the caller must suspend via AgentOutcome::AwaitingApproval before calling dispatch again"
+                    ),
+                };
+            }
+        }
+        match provider.invoke(schema.name, call.input.clone(), ctx).await {
+            Ok(value) => match bound_result(value, self.store.as_ref(), ctx.ticket, ctx.actor) {
+                Ok((result, artifact)) => ToolOutcome::Completed { result, artifact },
+                Err(e) => ToolOutcome::Errored {
+                    detail: e.to_string(),
+                },
+            },
+            Err(e) => ToolOutcome::Errored {
+                detail: e.to_string(),
+            },
+        }
+    }
 }
 
 /// One model-issued tool call, translated from a `tm_provider::ContentBlock::ToolUse`.
@@ -1839,72 +2060,12 @@ pub struct ToolCall {
 /// [`crate::outcome::StepRecord`].
 pub type ToolOutcome = crate::outcome::ToolCallResolution;
 
-/// Everything [`ToolRegistry::dispatch`] needs to actually execute a call, borrowed for the
-/// duration of one dispatch.
-pub struct ToolContext<'a> {
-    /// The authority every call is checked against.
-    pub authority: &'a Authority,
-    /// Code intelligence facade for `search.*`/`symbol.*`/`history.*` tools.
-    pub ci: &'a CodeIntel,
-    /// Project state store for `ticket.*`/`decision.record`/`artifact.store`/`evidence.attach`.
-    pub store: &'a Store,
-    /// Patch engine for `edit.*` tools.
-    pub patch_engine: &'a PatchEngine,
-    /// Command result cache for `shell.*`/`test.run`/`build.run`/read-only `git.*` tools.
-    pub command_cache: &'a dyn CommandCache,
-    /// Command executor for the same command-shaped tools.
-    pub command_executor: &'a dyn CommandExecutor,
-    /// Injected clock; dispatch never reads the wall clock directly.
-    pub clock: &'a dyn Clock,
-    /// Injected id source; dispatch never mints ids itself.
-    pub ids: &'a dyn IdSource,
-    /// The ticket this dispatch happens on behalf of.
-    pub ticket: &'a TicketId,
-    /// The session this dispatch happens inside.
-    pub session: &'a SessionId,
-    /// Who/what is issuing this call, for event/evidence attribution.
-    pub actor: &'a ParticipantId,
-}
-
-/// Bound a raw tool result: if `value`'s serialized size is at or under
-/// [`MAX_INLINE_RESULT_BYTES`], return it unchanged with no artifact; otherwise store the full
-/// value as an artifact via `ctx.store` and return a truncated preview referencing it.
-fn bound_result(
-    value: serde_json::Value,
-    ctx: &mut ToolContext<'_>,
-) -> Result<(serde_json::Value, Option<ArtifactId>)> {
-    let bytes = serde_json::to_vec(&value)?;
-    if bytes.len() <= MAX_INLINE_RESULT_BYTES {
-        return Ok((value, None));
-    }
-    let events = ctx.store.store_artifact(
-        ArtifactKind::Report,
-        "application/json".to_string(),
-        bytes.clone(),
-        json!({"tool_result": true}),
-        Some(ctx.ticket.clone()),
-        ctx.actor.clone(),
-    )?;
-    let artifact = events
-        .iter()
-        .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone()))
-        .ok_or_else(|| TmError::invariant("store_artifact did not emit artifact.created"))?;
-    let preview_len = MAX_INLINE_RESULT_BYTES.min(bytes.len());
-    let preview = String::from_utf8_lossy(&bytes[..preview_len]).into_owned();
-    let preview_json = json!({
-        "truncated": true,
-        "artifact": artifact.as_str(),
-        "preview": preview,
-    });
-    Ok((preview_json, Some(artifact)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
-    use tm_types::{FixedClock, PatternSet, TestIds, Timestamp};
+    use tm_types::{FixedClock, PatternSet, SessionId, TestIds, Timestamp};
 
     struct FakeCache {
         results: Mutex<BTreeMap<String, command::CommandResult>>,
@@ -1987,13 +2148,9 @@ mod tests {
     }
 
     struct Harness {
-        _dir: TempDir,
+        dir: TempDir,
         authority: Authority,
-        ci: CodeIntel,
-        store: Store,
-        patch_engine: PatchEngine,
-        cache: FakeCache,
-        executor: FakeExecutor,
+        registry: ToolRegistry,
         clock: FixedClock,
         ids: TestIds,
         ticket: TicketId,
@@ -2005,14 +2162,15 @@ mod tests {
         fn new() -> Self {
             let dir = TempDir::new().expect("tempdir");
             let authority = Authority::root();
-            let ci = CodeIntel::open(dir.path()).expect("codeintel");
-            let store = Store::open_with(
-                dir.path(),
-                Arc::new(FixedClock::epoch()),
-                Arc::new(TestIds::new()),
-            )
-            .expect("store");
-            let patch_engine = PatchEngine::new(dir.path().to_path_buf(), authority.clone());
+            let ci = Arc::new(CodeIntel::open(dir.path()).expect("codeintel"));
+            let store = Arc::new(
+                Store::open_with(
+                    dir.path(),
+                    Arc::new(FixedClock::epoch()),
+                    Arc::new(TestIds::new()),
+                )
+                .expect("store"),
+            );
             let actor: ParticipantId = "agent:test/worker".parse().unwrap();
             let events = store
                 .create_ticket(
@@ -2036,14 +2194,13 @@ mod tests {
                 .iter()
                 .find_map(|e| e.payload.as_ticket_created().map(|p| p.ticket.clone()))
                 .expect("ticket.created payload");
+            let command_cache: Arc<dyn CommandCache + Send + Sync> = Arc::new(FakeCache::new());
+            let command_executor: Arc<dyn CommandExecutor + Send + Sync> = Arc::new(FakeExecutor);
+            let registry = ToolRegistry::standard(ci, store, command_cache, command_executor);
             Harness {
-                _dir: dir,
+                dir,
                 authority,
-                ci,
-                store,
-                patch_engine,
-                cache: FakeCache::new(),
-                executor: FakeExecutor,
+                registry,
                 clock: FixedClock::epoch(),
                 ids: TestIds::new(),
                 ticket,
@@ -2052,19 +2209,19 @@ mod tests {
             }
         }
 
-        fn ctx(&self) -> ToolContext<'_> {
-            ToolContext {
+        fn root(&self) -> &Path {
+            self.dir.path()
+        }
+
+        fn ctx(&self) -> CallContext<'_> {
+            CallContext {
                 authority: &self.authority,
-                ci: &self.ci,
-                store: &self.store,
-                patch_engine: &self.patch_engine,
-                command_cache: &self.cache,
-                command_executor: &self.executor,
-                clock: &self.clock,
-                ids: &self.ids,
                 ticket: &self.ticket,
                 session: &self.session,
                 actor: &self.actor,
+                clock: &self.clock,
+                ids: &self.ids,
+                root: self.dir.path(),
             }
         }
     }
@@ -2091,18 +2248,28 @@ mod tests {
 
     #[test]
     fn standard_registers_every_tool_name_exactly_once() {
-        let registry = ToolRegistry::standard();
-        let names: Vec<ToolName> = registry.specs().map(|s| s.name).collect();
+        let h = Harness::new();
+        let names: Vec<&str> = h.registry.specs().map(|s| s.name).collect();
         assert_eq!(names.len(), ToolName::ALL.len());
         for t in ToolName::ALL {
-            assert!(registry.get(t.as_str()).is_some());
+            assert!(
+                h.registry.get(t.as_str()).is_some(),
+                "missing {}",
+                t.as_str()
+            );
         }
+        let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            names.len(),
+            "a tool name was registered twice"
+        );
     }
 
     #[test]
     fn tool_defs_carries_every_schema_through() {
-        let registry = ToolRegistry::standard();
-        let defs = registry.tool_defs();
+        let h = Harness::new();
+        let defs = h.registry.tool_defs();
         assert_eq!(defs.len(), ToolName::ALL.len());
         assert!(defs.iter().any(|d| d.name == "fs.read"));
     }
@@ -2117,8 +2284,8 @@ mod tests {
 
     #[test]
     fn tool_defs_for_root_authority_admits_every_tool() {
-        let registry = ToolRegistry::standard();
-        let defs = registry.tool_defs_for(&Authority::root());
+        let h = Harness::new();
+        let defs = h.registry.tool_defs_for(&Authority::root());
         assert_eq!(defs.len(), ToolName::ALL.len());
         for t in ToolName::ALL {
             assert!(
@@ -2131,10 +2298,9 @@ mod tests {
 
     #[test]
     fn tool_defs_for_shell_disabled_omits_every_shell_shaped_tool_entirely() {
-        let mut authority = Authority::root();
-        authority.shell.enabled = false;
-        let registry = ToolRegistry::standard();
-        let defs = registry.tool_defs_for(&authority);
+        let mut h = Harness::new();
+        h.authority.shell.enabled = false;
+        let defs = h.registry.tool_defs_for(&h.authority);
         let names = def_names(&defs);
 
         for absent in [
@@ -2175,9 +2341,9 @@ mod tests {
         disabled.network.arbitrary = false;
         disabled.network.allowlist.clear();
 
-        let registry = ToolRegistry::standard();
-        let with_network = registry.tool_defs_for(&enabled);
-        let without_network = registry.tool_defs_for(&disabled);
+        let h = Harness::new();
+        let with_network = h.registry.tool_defs_for(&enabled);
+        let without_network = h.registry.tool_defs_for(&disabled);
 
         assert_eq!(with_network.len(), without_network.len());
         assert_eq!(def_names(&with_network), def_names(&without_network));
@@ -2185,10 +2351,9 @@ mod tests {
 
     #[test]
     fn tool_defs_for_write_disabled_omits_every_write_shaped_tool_entirely() {
-        let mut authority = Authority::root();
-        authority.repository.write = PatternSet::empty();
-        let registry = ToolRegistry::standard();
-        let defs = registry.tool_defs_for(&authority);
+        let mut h = Harness::new();
+        h.authority.repository.write = PatternSet::empty();
+        let defs = h.registry.tool_defs_for(&h.authority);
         let names = def_names(&defs);
 
         for absent in [
@@ -2209,10 +2374,9 @@ mod tests {
 
     #[test]
     fn tool_defs_for_read_disabled_omits_every_read_shaped_tool_entirely() {
-        let mut authority = Authority::root();
-        authority.repository.read = PatternSet::empty();
-        let registry = ToolRegistry::standard();
-        let defs = registry.tool_defs_for(&authority);
+        let mut h = Harness::new();
+        h.authority.repository.read = PatternSet::empty();
+        let defs = h.registry.tool_defs_for(&h.authority);
         let names = def_names(&defs);
 
         assert!(!names.contains(&"fs.read"));
@@ -2224,8 +2388,8 @@ mod tests {
 
     #[test]
     fn tool_defs_for_none_authority_admits_nothing() {
-        let registry = ToolRegistry::standard();
-        let defs = registry.tool_defs_for(&Authority::none());
+        let h = Harness::new();
+        let defs = h.registry.tool_defs_for(&Authority::none());
         assert!(
             defs.is_empty(),
             "no-authority should admit zero tools, got {:?}",
@@ -2233,25 +2397,27 @@ mod tests {
         );
     }
 
-    #[test]
-    fn filter_is_an_economy_optimization_not_a_replacement_for_dispatch_time_enforcement() {
+    #[tokio::test]
+    async fn filter_is_an_economy_optimization_not_a_replacement_for_dispatch_time_enforcement() {
         // A tool can be admitted into the surface (its structural precondition holds) while a
         // *specific* call still gets denied by `Authority::permits` at dispatch time — the
         // filter narrows what's offered, it does not widen what's allowed.
         let mut h = Harness::new();
         h.authority.repository.read = PatternSet::parse(["src/**"]).unwrap();
-        let registry = ToolRegistry::standard();
 
-        let defs = registry.tool_defs_for(&h.authority);
+        let defs = h.registry.tool_defs_for(&h.authority);
         assert!(
             def_names(&defs).contains(&"fs.read"),
             "fs.read should be admitted: repository.read is nonempty"
         );
 
-        let outcome = registry.dispatch(
-            &call("fs.read", json!({"path": "other/secret.txt"})),
-            &mut h.ctx(),
-        );
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("fs.read", json!({"path": "other/secret.txt"})),
+                &h.ctx(),
+            )
+            .await;
         assert!(
             matches!(outcome, ToolOutcome::Denied { .. }),
             "a path outside the authority's read scope must still be denied at dispatch, \
@@ -2265,10 +2431,10 @@ mod tests {
 
     #[test]
     fn tool_surface_cost_for_mirrors_tool_defs_for_and_is_nonzero() {
-        let registry = ToolRegistry::standard();
+        let h = Harness::new();
         let authority = Authority::root();
-        let defs = registry.tool_defs_for(&authority);
-        let costs = registry.tool_surface_cost_for(&authority);
+        let defs = h.registry.tool_defs_for(&authority);
+        let costs = h.registry.tool_surface_cost_for(&authority);
 
         assert_eq!(costs.len(), defs.len());
         let cost_names: std::collections::BTreeSet<&str> =
@@ -2296,8 +2462,9 @@ mod tests {
 
     #[test]
     fn tool_surface_cost_for_shrinks_when_the_tool_surface_shrinks() {
-        let registry = ToolRegistry::standard();
-        let root_cost: usize = registry
+        let h = Harness::new();
+        let root_cost: usize = h
+            .registry
             .tool_surface_cost_for(&Authority::root())
             .iter()
             .map(|c| c.bytes)
@@ -2306,7 +2473,8 @@ mod tests {
         let mut scoped = Authority::root();
         scoped.shell.enabled = false;
         scoped.repository.write = PatternSet::empty();
-        let scoped_cost: usize = registry
+        let scoped_cost: usize = h
+            .registry
             .tool_surface_cost_for(&scoped)
             .iter()
             .map(|c| c.bytes)
@@ -2318,55 +2486,63 @@ mod tests {
         );
     }
 
-    #[test]
-    fn dispatch_reports_unknown_tool_as_errored_not_panic() {
+    #[tokio::test]
+    async fn dispatch_reports_unknown_tool_as_errored_not_panic() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(&call("nope.nope", json!({})), &mut h.ctx());
+        let outcome = h
+            .registry
+            .dispatch(&call("nope.nope", json!({})), &h.ctx())
+            .await;
         assert!(matches!(outcome, ToolOutcome::Errored { .. }));
     }
 
-    #[test]
-    fn dispatch_reports_malformed_input_as_errored() {
+    #[tokio::test]
+    async fn dispatch_reports_malformed_input_as_errored() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(&call("fs.read", json!({})), &mut h.ctx());
+        let outcome = h
+            .registry
+            .dispatch(&call("fs.read", json!({})), &h.ctx())
+            .await;
         assert!(matches!(outcome, ToolOutcome::Errored { .. }));
     }
 
-    #[test]
-    fn dispatch_denies_a_read_outside_authority_scope() {
+    #[tokio::test]
+    async fn dispatch_denies_a_read_outside_authority_scope() {
         let mut h = Harness::new();
         h.authority.repository.read = PatternSet::empty();
-        let registry = ToolRegistry::standard();
-        let outcome =
-            registry.dispatch(&call("fs.read", json!({"path": "hello.py"})), &mut h.ctx());
+        let outcome = h
+            .registry
+            .dispatch(&call("fs.read", json!({"path": "hello.py"})), &h.ctx())
+            .await;
         assert!(matches!(outcome, ToolOutcome::Denied { .. }));
     }
 
-    #[test]
-    fn a_denial_never_touches_the_filesystem() {
+    #[tokio::test]
+    async fn a_denial_never_touches_the_filesystem() {
         let mut h = Harness::new();
         h.authority.repository.write = PatternSet::empty();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(
-            &call(
-                "edit.create_file",
-                json!({"path": "new.txt", "content": "hi"}),
-            ),
-            &mut h.ctx(),
-        );
+        let outcome = h
+            .registry
+            .dispatch(
+                &call(
+                    "edit.create_file",
+                    json!({"path": "new.txt", "content": "hi"}),
+                ),
+                &h.ctx(),
+            )
+            .await;
         assert!(matches!(outcome, ToolOutcome::Denied { .. }));
-        assert!(!h.patch_engine.root().join("new.txt").exists());
+        assert!(!h.root().join("new.txt").exists());
     }
 
-    #[test]
-    fn fs_read_round_trips_written_content() {
+    #[tokio::test]
+    async fn fs_read_round_trips_written_content() {
         let h = Harness::new();
-        std::fs::write(h.patch_engine.root().join("hello.txt"), "hi there").unwrap();
-        let registry = ToolRegistry::standard();
-        let outcome =
-            registry.dispatch(&call("fs.read", json!({"path": "hello.txt"})), &mut h.ctx());
+        std::fs::write(h.root().join("hello.txt"), "hi there").unwrap();
+        let outcome = h
+            .registry
+            .dispatch(&call("fs.read", json!({"path": "hello.txt"})), &h.ctx())
+            .await;
         match outcome {
             ToolOutcome::Completed { result, artifact } => {
                 assert_eq!(result["content"], "hi there");
@@ -2376,83 +2552,86 @@ mod tests {
         }
     }
 
-    #[test]
-    fn fs_read_rejects_a_path_escaping_the_root() {
+    #[tokio::test]
+    async fn fs_read_rejects_a_path_escaping_the_root() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(
-            &call("fs.read", json!({"path": "../outside.txt"})),
-            &mut h.ctx(),
-        );
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("fs.read", json!({"path": "../outside.txt"})),
+                &h.ctx(),
+            )
+            .await;
         assert!(matches!(outcome, ToolOutcome::Errored { .. }));
     }
 
-    #[test]
-    fn fs_stat_reports_absence_without_erroring() {
+    #[tokio::test]
+    async fn fs_stat_reports_absence_without_erroring() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(
-            &call("fs.stat", json!({"path": "missing.txt"})),
-            &mut h.ctx(),
-        );
+        let outcome = h
+            .registry
+            .dispatch(&call("fs.stat", json!({"path": "missing.txt"})), &h.ctx())
+            .await;
         match outcome {
             ToolOutcome::Completed { result, .. } => assert_eq!(result["exists"], false),
             other => panic!("expected Completed, got {other:?}"),
         }
     }
 
-    #[test]
-    fn edit_create_file_then_write_file_round_trips() {
+    #[tokio::test]
+    async fn edit_create_file_then_write_file_round_trips() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
-        let created = registry.dispatch(
-            &call(
-                "edit.create_file",
-                json!({"path": "a.txt", "content": "one"}),
-            ),
-            &mut h.ctx(),
-        );
+        let created = h
+            .registry
+            .dispatch(
+                &call(
+                    "edit.create_file",
+                    json!({"path": "a.txt", "content": "one"}),
+                ),
+                &h.ctx(),
+            )
+            .await;
         let ToolOutcome::Completed { result, .. } = created else {
             panic!("expected Completed");
         };
         assert_eq!(result["applied"], true);
         assert_eq!(
-            std::fs::read_to_string(h.patch_engine.root().join("a.txt")).unwrap(),
+            std::fs::read_to_string(h.root().join("a.txt")).unwrap(),
             "one"
         );
     }
 
-    #[test]
-    fn edit_write_file_conflict_is_completed_not_errored() {
+    #[tokio::test]
+    async fn edit_write_file_conflict_is_completed_not_errored() {
         let h = Harness::new();
-        std::fs::write(h.patch_engine.root().join("a.txt"), "one").unwrap();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(
-            &call(
-                "edit.write_file",
-                json!({"path": "a.txt", "content": "two", "expected_hash": "deadbeef"}),
-            ),
-            &mut h.ctx(),
-        );
+        std::fs::write(h.root().join("a.txt"), "one").unwrap();
+        let outcome = h
+            .registry
+            .dispatch(
+                &call(
+                    "edit.write_file",
+                    json!({"path": "a.txt", "content": "two", "expected_hash": "deadbeef"}),
+                ),
+                &h.ctx(),
+            )
+            .await;
         match outcome {
             ToolOutcome::Completed { result, .. } => assert_eq!(result["applied"], false),
             other => panic!("expected Completed(applied=false), got {other:?}"),
         }
     }
 
-    #[test]
-    fn search_exact_finds_a_written_literal() {
+    #[tokio::test]
+    async fn search_exact_finds_a_written_literal() {
         let h = Harness::new();
-        std::fs::write(
-            h.patch_engine.root().join("m.py"),
-            "def unique_marker(): pass\n",
-        )
-        .unwrap();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(
-            &call("search.exact", json!({"query": "unique_marker"})),
-            &mut h.ctx(),
-        );
+        std::fs::write(h.root().join("m.py"), "def unique_marker(): pass\n").unwrap();
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("search.exact", json!({"query": "unique_marker"})),
+                &h.ctx(),
+            )
+            .await;
         match outcome {
             ToolOutcome::Completed { result, .. } => {
                 assert_eq!(result["hits"].as_array().unwrap().len(), 1);
@@ -2461,114 +2640,130 @@ mod tests {
         }
     }
 
-    #[test]
-    fn symbol_outline_of_an_unindexed_file_is_empty() {
+    #[tokio::test]
+    async fn symbol_outline_of_an_unindexed_file_is_empty() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(
-            &call("symbol.outline", json!({"path": "nope.rs"})),
-            &mut h.ctx(),
-        );
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("symbol.outline", json!({"path": "nope.rs"})),
+                &h.ctx(),
+            )
+            .await;
         match outcome {
             ToolOutcome::Completed { result, .. } => assert!(result.as_array().unwrap().is_empty()),
             other => panic!("expected Completed, got {other:?}"),
         }
     }
 
-    #[test]
-    fn shell_run_executes_via_the_injected_executor() {
+    #[tokio::test]
+    async fn shell_run_executes_via_the_injected_executor() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(
-            &call(
-                "shell.run",
-                json!({"argv": ["echo", "hi"], "cacheable": true}),
-            ),
-            &mut h.ctx(),
-        );
+        let outcome = h
+            .registry
+            .dispatch(
+                &call(
+                    "shell.run",
+                    json!({"argv": ["echo", "hi"], "cacheable": true}),
+                ),
+                &h.ctx(),
+            )
+            .await;
         match outcome {
             ToolOutcome::Completed { result, .. } => assert_eq!(result["exit_code"], 0),
             other => panic!("expected Completed, got {other:?}"),
         }
     }
 
-    #[test]
-    fn shell_run_is_denied_without_shell_authority() {
+    #[tokio::test]
+    async fn shell_run_is_denied_without_shell_authority() {
         let mut h = Harness::new();
         h.authority.shell.enabled = false;
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(
-            &call("shell.run", json!({"argv": ["echo", "hi"]})),
-            &mut h.ctx(),
-        );
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("shell.run", json!({"argv": ["echo", "hi"]})),
+                &h.ctx(),
+            )
+            .await;
         assert!(matches!(outcome, ToolOutcome::Denied { .. }));
     }
 
-    #[test]
-    fn shell_query_output_reports_not_found_before_any_run() {
+    #[tokio::test]
+    async fn shell_query_output_reports_not_found_before_any_run() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(
-            &call(
-                "shell.query_output",
-                json!({"argv": ["echo", "hi"], "cacheable": true, "stream": "stdout", "query_type": "head", "n": 1}),
-            ),
-            &mut h.ctx(),
-        );
+        let outcome = h
+            .registry
+            .dispatch(
+                &call(
+                    "shell.query_output",
+                    json!({"argv": ["echo", "hi"], "cacheable": true, "stream": "stdout", "query_type": "head", "n": 1}),
+                ),
+                &h.ctx(),
+            )
+            .await;
         match outcome {
             ToolOutcome::Completed { result, .. } => assert_eq!(result["found"], false),
             other => panic!("expected Completed, got {other:?}"),
         }
     }
 
-    #[test]
-    fn shell_query_output_reads_back_a_cached_runs_stdout() {
+    #[tokio::test]
+    async fn shell_query_output_reads_back_a_cached_runs_stdout() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
-        registry.dispatch(
-            &call(
-                "shell.run",
-                json!({"argv": ["echo", "hi"], "cacheable": true}),
-            ),
-            &mut h.ctx(),
-        );
-        let outcome = registry.dispatch(
-            &call(
-                "shell.query_output",
-                json!({"argv": ["echo", "hi"], "cacheable": true, "stream": "stdout", "query_type": "head", "n": 1}),
-            ),
-            &mut h.ctx(),
-        );
+        h.registry
+            .dispatch(
+                &call(
+                    "shell.run",
+                    json!({"argv": ["echo", "hi"], "cacheable": true}),
+                ),
+                &h.ctx(),
+            )
+            .await;
+        let outcome = h
+            .registry
+            .dispatch(
+                &call(
+                    "shell.query_output",
+                    json!({"argv": ["echo", "hi"], "cacheable": true, "stream": "stdout", "query_type": "head", "n": 1}),
+                ),
+                &h.ctx(),
+            )
+            .await;
         match outcome {
             ToolOutcome::Completed { result, .. } => assert_eq!(result["found"], true),
             other => panic!("expected Completed, got {other:?}"),
         }
     }
 
-    #[test]
-    fn ticket_create_child_is_denied_without_create_children_authority() {
+    #[tokio::test]
+    async fn ticket_create_child_is_denied_without_create_children_authority() {
         let mut h = Harness::new();
         h.authority.tickets.create_children = false;
-        let registry = ToolRegistry::standard();
         let input = json!({
             "kind": "work",
             "objective": "do a thing",
             "authority": Authority::default(),
         });
-        let outcome = registry.dispatch(&call("ticket.create_child", input), &mut h.ctx());
+        let outcome = h
+            .registry
+            .dispatch(&call("ticket.create_child", input), &h.ctx())
+            .await;
         assert!(matches!(outcome, ToolOutcome::Denied { .. }));
     }
 
-    #[test]
-    fn ticket_create_child_succeeds_with_authority() {
+    #[tokio::test]
+    async fn ticket_create_child_succeeds_with_authority() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
         let input = json!({
             "kind": "work",
             "objective": "do a thing",
             "authority": Authority::default(),
         });
-        let outcome = registry.dispatch(&call("ticket.create_child", input), &mut h.ctx());
+        let outcome = h
+            .registry
+            .dispatch(&call("ticket.create_child", input), &h.ctx())
+            .await;
         match outcome {
             ToolOutcome::Completed { result, .. } => assert!(result["child"].is_string()),
             other => panic!("expected Completed, got {other:?}"),
@@ -2587,31 +2782,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ask_human_is_completed_when_delegate_authority_is_held() {
+    #[tokio::test]
+    async fn ask_human_is_completed_when_delegate_authority_is_held() {
         let h = Harness::new();
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(&call("ask.human", json!({"question": "?"})), &mut h.ctx());
+        let outcome = h
+            .registry
+            .dispatch(&call("ask.human", json!({"question": "?"})), &h.ctx())
+            .await;
         match outcome {
             ToolOutcome::Completed { result, .. } => assert_eq!(result["question"], "?"),
             other => panic!("expected Completed, got {other:?}"),
         }
     }
 
-    #[test]
-    fn ask_human_is_denied_without_delegate_authority() {
+    #[tokio::test]
+    async fn ask_human_is_denied_without_delegate_authority() {
         let mut h = Harness::new();
         h.authority.tickets.delegate_children = false;
-        let registry = ToolRegistry::standard();
-        let outcome = registry.dispatch(&call("ask.human", json!({"question": "?"})), &mut h.ctx());
+        let outcome = h
+            .registry
+            .dispatch(&call("ask.human", json!({"question": "?"})), &h.ctx())
+            .await;
         assert!(matches!(outcome, ToolOutcome::Denied { .. }));
     }
 
     #[test]
     fn bound_result_inlines_a_small_value() {
         let h = Harness::new();
-        let mut ctx = h.ctx();
-        let (result, artifact) = bound_result(json!({"ok": true}), &mut ctx).unwrap();
+        let ctx = h.ctx();
+        let (result, artifact) = bound_result(
+            json!({"ok": true}),
+            h.registry.store.as_ref(),
+            ctx.ticket,
+            ctx.actor,
+        )
+        .unwrap();
         assert_eq!(result, json!({"ok": true}));
         assert!(artifact.is_none());
     }
@@ -2619,9 +2824,15 @@ mod tests {
     #[test]
     fn bound_result_spills_a_large_value_to_an_artifact() {
         let h = Harness::new();
-        let mut ctx = h.ctx();
+        let ctx = h.ctx();
         let big = "x".repeat(MAX_INLINE_RESULT_BYTES + 1);
-        let (result, artifact) = bound_result(json!({"text": big}), &mut ctx).unwrap();
+        let (result, artifact) = bound_result(
+            json!({"text": big}),
+            h.registry.store.as_ref(),
+            ctx.ticket,
+            ctx.actor,
+        )
+        .unwrap();
         assert!(artifact.is_some());
         assert_eq!(result["truncated"], true);
         assert!(result["artifact"].is_string());
