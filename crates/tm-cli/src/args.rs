@@ -796,8 +796,9 @@ pub struct BrowserOpenArgs {
     /// The URL to navigate to.
     #[arg(value_name = "URL")]
     pub url: String,
-    /// Run without a visible browser window (the default; browser sessions are headless
-    /// unless the discovered browser refuses headless launch).
+    /// Run without a visible browser window. Currently a no-op: the `managed` provider
+    /// (§19.1a) always launches headless, and there is no provider yet that can honor a
+    /// headed request, so this flag is accepted but ignored rather than silently degraded.
     #[arg(long)]
     pub headless: bool,
 }

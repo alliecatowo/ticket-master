@@ -1,6 +1,13 @@
-//! `BrowserSession`: the agent-facing surface over a launched browser process — open/close,
+//! `BrowserSession`: the agent-facing surface over a provider-acquired browser — open/close,
 //! tabs, navigation, ref-addressed actions, eval, waiting, console/network logs, cookies,
 //! screenshots and PDF export.
+//!
+//! A session never launches a browser process itself: it asks a
+//! [`crate::provider::BrowserProvider`] to [`crate::provider::BrowserProvider::acquire`] a
+//! [`crate::provider::BrowserEndpoint`] (a CDP websocket URL) and connects to that, per
+//! `SPEC.md` §19.1a. That keeps the provider — the thing that actually owns process spawning,
+//! downloads, or a remote connection — the only place that knows how the browser it handed back
+//! came to exist.
 //!
 //! Every capability listed in `SPEC.md` §19.3 lives here as one method. Oversized outputs
 //! (full-page screenshots, long network/console logs, PDFs) are written through an
@@ -10,24 +17,18 @@
 //! [`crate::authority::SessionTrace`] as it happens.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tm_types::{ArtifactId, Authority, Clock, IdSource, Result, SessionId, TmError};
-use tokio::io::AsyncBufReadExt;
+use tm_types::{ArtifactId, Authority, Clock, Result, SessionId, TmError};
 use tokio::sync::broadcast;
 
 use crate::authority::{ActionKind, NavigationGuard, SessionTrace, TraceEvent};
 use crate::cdp::{CdpClient, CdpEvent};
-use crate::discover::{self, DiscoveredBrowser, LaunchConfig};
+use crate::provider::{BrowserEndpoint, BrowserProvider};
 use crate::snapshot::{AxRef, Snapshot};
-
-/// How long [`BrowserSession::launch`] waits for the browser to print its DevTools websocket
-/// URL before giving up.
-const LAUNCH_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long [`BrowserSession::navigate`] waits for `Page.loadEventFired` before giving up.
 const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -138,28 +139,28 @@ pub struct StorageState {
     pub local_storage: Vec<(String, String)>,
 }
 
-/// Configuration a [`BrowserSession`] is launched with.
+/// Configuration a [`BrowserSession`] is launched with. Acquisition-related settings (which
+/// provider, which capabilities the session needs, extra launch flags) live on
+/// [`crate::provider::SessionRequest`] instead, since those are the provider's concern, not
+/// this session's.
 pub struct BrowserSessionConfig {
-    /// The browser executable to launch.
-    pub browser: DiscoveredBrowser,
     /// The authority to gate navigation and downloads against.
     pub authority: Authority,
     /// Command outputs (screenshots, PDFs, logs) at or above this size become artifacts
     /// instead of inline bytes.
     pub artifact_threshold_bytes: usize,
-    /// Extra Chromium flags beyond the fixed headless/port/profile set.
-    pub extra_launch_args: Vec<String>,
 }
 
-/// A live headless browser session: one launched browser process, its CDP connection, its open
-/// tabs, and the [`SessionTrace`] recording everything it has done.
+/// A live headless browser session: one provider-acquired [`BrowserEndpoint`], its CDP
+/// connection, its open tabs, and the [`SessionTrace`] recording everything it has done.
 ///
-/// Not `Clone`: a session owns a real OS process and websocket connection.
+/// Not `Clone`: a session owns a live websocket connection and, transitively through its
+/// provider, whatever process or remote resource backs it.
 pub struct BrowserSession {
     id: SessionId,
     config: BrowserSessionConfig,
-    process: tokio::process::Child,
-    profile_dir: PathBuf,
+    endpoint: BrowserEndpoint,
+    provider: Arc<dyn BrowserProvider>,
     cdp: CdpClient,
     active_tab: Option<TabId>,
     /// The attached CDP session id for each tab this session has opened or switched to.
@@ -174,14 +175,6 @@ pub struct BrowserSession {
     sink: Arc<dyn ArtifactSink>,
     clock: Arc<dyn Clock>,
     trace: SessionTrace,
-}
-
-/// Parse the `ws://...` DevTools URL out of a line of Chrome's startup stderr, e.g.
-/// `DevTools listening on ws://127.0.0.1:9222/devtools/browser/<uuid>`.
-fn parse_devtools_ws_url(line: &str) -> Option<String> {
-    line.split_once("DevTools listening on ")
-        .map(|(_, rest)| rest.trim().to_string())
-        .filter(|url| url.starts_with("ws://") || url.starts_with("wss://"))
 }
 
 /// Check `url` against `authority`'s navigation grant, recording a
@@ -374,74 +367,49 @@ struct PendingRequest {
 }
 
 impl BrowserSession {
-    /// Launch a fresh browser process from `config` and connect to it over CDP.
+    /// Wrap an already-acquired `endpoint` in a live CDP connection.
+    ///
+    /// Acquisition is a separate step, deliberately not performed here: picking a provider and
+    /// resolving fallback order (e.g. [`crate::provider::ProviderRegistry::acquire`]) is a
+    /// routing decision a caller makes once, whereas a session simply connects to whatever
+    /// endpoint that decision produced. Folding `acquire` into `launch` would make it easy to
+    /// accidentally acquire two browsers for one session (once via a registry to pick a
+    /// provider, again here) — keeping them separate makes `endpoint` the one obviously-correct
+    /// source of truth for what got acquired. `provider` is retained only to
+    /// [`BrowserProvider::release`] `endpoint` again in [`BrowserSession::close`].
     ///
     /// # Errors
-    /// A storage-layer [`tm_types::TmError`] when the process fails to start, when its
-    /// DevTools websocket URL cannot be discovered within a bounded startup deadline, or when
-    /// the initial CDP handshake fails.
+    /// A [`tm_types::TmError`] when the initial CDP handshake against `endpoint.ws_url` fails —
+    /// in which case `endpoint` is released back to `provider` before the error is returned, so
+    /// a session that never came alive does not leak whatever the provider acquired for it
+    /// (§19.1b: "a crashed agent cannot leave a browser running forever" applies just as much
+    /// to a session that never finished starting up).
     pub async fn launch(
+        provider: Arc<dyn BrowserProvider>,
+        endpoint: BrowserEndpoint,
         config: BrowserSessionConfig,
         sink: Arc<dyn ArtifactSink>,
         clock: Arc<dyn Clock>,
-        ids: Arc<dyn IdSource>,
         session_id: SessionId,
     ) -> Result<Self> {
-        let profile_dir = discover::ephemeral_profile_dir(ids.as_ref())?;
-        let launch_config = LaunchConfig {
-            browser: config.browser.clone(),
-            profile_dir: profile_dir.clone(),
-            extra_args: config.extra_launch_args.clone(),
-        };
-        let argv = discover::build_argv(&launch_config);
-
-        let mut command = tokio::process::Command::new(&config.browser.path);
-        command
-            .args(&argv)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped());
-        let mut process = command
-            .spawn()
-            .map_err(|e| TmError::Io(format!("failed to spawn browser process: {e}")))?;
-
-        let stderr = process
-            .stderr
-            .take()
-            .ok_or_else(|| TmError::invariant("piped browser stderr was not captured"))?;
-        let mut lines = tokio::io::BufReader::new(stderr).lines();
-
-        let ws_url = tokio::time::timeout(LAUNCH_TIMEOUT, async {
-            loop {
-                match lines.next_line().await {
-                    Ok(Some(line)) => {
-                        if let Some(url) = parse_devtools_ws_url(&line) {
-                            return Some(url);
-                        }
-                    }
-                    Ok(None) | Err(_) => return None,
+        let cdp = match CdpClient::connect(&endpoint.ws_url).await {
+            Ok(cdp) => cdp,
+            Err(e) => {
+                if let Err(release_err) = provider.release(&endpoint).await {
+                    tracing::warn!(
+                        error = %release_err,
+                        "failed to release the browser endpoint after a failed CDP handshake",
+                    );
                 }
+                return Err(e.into());
             }
-        })
-        .await
-        .map_err(|_| {
-            TmError::Provider(
-                "timed out waiting for the browser to print its DevTools websocket URL".into(),
-            )
-        })?
-        .ok_or_else(|| {
-            TmError::Provider(
-                "browser process exited before printing its DevTools websocket URL".into(),
-            )
-        })?;
-
-        let cdp = CdpClient::connect(&ws_url).await?;
+        };
 
         Ok(BrowserSession {
             id: session_id.clone(),
             config,
-            process,
-            profile_dir,
+            endpoint,
+            provider,
             cdp,
             active_tab: None,
             tab_sessions: HashMap::new(),
@@ -464,28 +432,19 @@ impl BrowserSession {
         &self.trace
     }
 
-    /// Close every tab, disconnect CDP, and terminate the browser process.
+    /// Close every tab, disconnect CDP, and release this session's [`BrowserEndpoint`] back to
+    /// the provider that issued it — per §19.1b, "the session dies with the lease".
     ///
     /// # Errors
     /// Best-effort: a failure tearing down CDP is logged (via `tracing`) rather than aborting
-    /// process termination, since a session that cannot be cleanly closed must not leak an OS
-    /// process either way.
-    pub async fn close(mut self) -> Result<()> {
+    /// release, since a session that cannot be cleanly closed must not leak whatever the
+    /// provider owns either way.
+    pub async fn close(self) -> Result<()> {
         if let Err(e) = self.cdp.close().await {
             tracing::warn!(error = %e, "failed to cleanly close the CDP connection");
         }
-        if let Err(e) = self.process.kill().await {
-            tracing::warn!(error = %e, "failed to kill the browser process");
-        }
-        if let Err(e) = self.process.wait().await {
-            tracing::warn!(error = %e, "failed waiting for the browser process to exit");
-        }
-        if let Err(e) = std::fs::remove_dir_all(&self.profile_dir) {
-            tracing::warn!(
-                error = %e,
-                path = %self.profile_dir.display(),
-                "failed to remove the browser profile directory",
-            );
+        if let Err(e) = self.provider.release(&self.endpoint).await {
+            tracing::warn!(error = %e, "failed to release the browser session with its provider");
         }
         Ok(())
     }
@@ -1261,23 +1220,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_devtools_ws_url_out_of_a_startup_line() {
-        let line = "DevTools listening on ws://127.0.0.1:9222/devtools/browser/abc-123";
-        assert_eq!(
-            parse_devtools_ws_url(line).as_deref(),
-            Some("ws://127.0.0.1:9222/devtools/browser/abc-123")
-        );
-    }
-
-    #[test]
-    fn ignores_unrelated_stderr_lines() {
-        assert_eq!(
-            parse_devtools_ws_url("[1234:5678] some other log line"),
-            None
-        );
-    }
-
-    #[test]
     fn small_bytes_are_routed_inline() {
         let sink = FakeSink::new();
         let out = route_artifact(&sink, vec![1, 2, 3], "image/png", 10).expect("routes inline");
@@ -1490,5 +1432,74 @@ mod tests {
     fn session_ids_this_crate_constructs_are_tagged_as_sessions() {
         let id = SessionId::new("S-1").unwrap();
         assert_eq!(tm_types::Id::from(id).kind(), Some(IdKind::Session));
+    }
+
+    /// A [`BrowserProvider`] fixture that always "acquires" an endpoint whose `ws_url` no CDP
+    /// server is listening on, so [`BrowserSession::launch`]'s handshake reliably fails —
+    /// exercising the release-on-failure path without a real browser.
+    struct UnreachableProvider {
+        release_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl UnreachableProvider {
+        fn new() -> Self {
+            UnreachableProvider {
+                release_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BrowserProvider for UnreachableProvider {
+        fn id(&self) -> &str {
+            "unreachable-fixture"
+        }
+
+        fn capabilities(&self) -> crate::provider::BrowserCapabilities {
+            crate::provider::BrowserCapabilities::default()
+        }
+
+        async fn acquire(&self, _req: &crate::provider::SessionRequest) -> Result<BrowserEndpoint> {
+            Ok(BrowserEndpoint {
+                provider_id: self.id().to_string(),
+                endpoint_id: "E-unreachable".to_string(),
+                // Port 0 is never a listening CDP server; connecting to it fails immediately
+                // rather than hanging, which keeps this test fast.
+                ws_url: "ws://127.0.0.1:0/devtools/browser/does-not-exist".to_string(),
+                browser_version: None,
+            })
+        }
+
+        async fn release(&self, _endpoint: &BrowserEndpoint) -> Result<()> {
+            self.release_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_releases_the_endpoint_when_the_cdp_handshake_fails() {
+        let provider = Arc::new(UnreachableProvider::new());
+        let endpoint = provider
+            .acquire(&crate::provider::SessionRequest::default())
+            .await
+            .unwrap();
+        let config = BrowserSessionConfig {
+            authority: Authority::default(),
+            artifact_threshold_bytes: 1024,
+        };
+        let session_id = SessionId::new("S-1").unwrap();
+
+        let result = BrowserSession::launch(
+            provider.clone(),
+            endpoint,
+            config,
+            Arc::new(FakeSink::new()),
+            Arc::new(FixedClock::epoch()),
+            session_id,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(provider.release_calls.load(Ordering::SeqCst), 1);
     }
 }
