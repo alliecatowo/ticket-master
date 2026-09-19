@@ -28,7 +28,9 @@ pub use anthropic::AnthropicProvider;
 pub use fabric::{Fabric, Provider, ProviderRecord};
 pub use mock::MockProvider;
 pub use providers::registry::Registry;
-pub use providers::{Capabilities, EnvVarRequirement, ProviderInfo};
+pub use providers::{
+    Availability, Capabilities, EnvVarRequirement, LocalProbe, ProviderInfo, LOCAL_PROVIDER_IDS,
+};
 pub use role_config::{RoleCandidate, RoleConfigError, RoleTable};
 pub use route::{route, Need, RouteDecision};
 pub use state::{

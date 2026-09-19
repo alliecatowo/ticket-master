@@ -256,10 +256,23 @@ pub async fn dispatch_provider(
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
     match cmd {
-        ProviderCommand::List => provider_list(project, renderer),
-        ProviderCommand::Detect => provider_detect(renderer),
+        ProviderCommand::List => provider_list(project, renderer).await,
+        ProviderCommand::Detect => provider_detect(renderer).await,
         ProviderCommand::Status => provider_status(project, renderer),
         ProviderCommand::Test(args) => provider_test(args, project, renderer).await,
+    }
+}
+
+/// Human/JSON label for [`tm_provider::Availability`], shared by [`provider_list`] and
+/// [`provider_detect`] so both commands describe the same three states the same way: `"ready"`
+/// (safe to route traffic to right now), `"unreachable"` (configured, but a reachability probe
+/// found nothing listening — today only reachable for the three local backends), or
+/// `"not-configured"` (no required env var set).
+fn availability_label(availability: tm_provider::Availability) -> &'static str {
+    match availability {
+        tm_provider::Availability::NotConfigured => "not-configured",
+        tm_provider::Availability::ConfiguredButUnreachable => "unreachable",
+        tm_provider::Availability::Ready => "ready",
     }
 }
 
@@ -267,14 +280,37 @@ pub async fn dispatch_provider(
 ///
 /// # IMPL
 /// Load the project's `tm_provider::role_config::RoleTable` from `harness.toml`; render each
-/// role's configured `RoleCandidate`s (provider, model, priority) as a table or JSON.
-pub fn provider_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
+/// role's configured `RoleCandidate`s (provider, model, priority) as a table or JSON, alongside
+/// each candidate's [`tm_provider::Availability`] (see [`availability_label`]) — resolved once
+/// per *distinct* provider slug the table references, not once per row, since a slug can repeat
+/// across many roles and resolving a local backend's availability costs a real (short-timeout)
+/// network probe.
+pub async fn provider_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let harness_path = project.root.join(".tm").join("harness.toml");
     let harness_content = fs::read_to_string(&harness_path)
         .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
 
     let role_table = tm_provider::RoleTable::parse(&harness_content)
         .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?;
+
+    let known = tm_provider::Registry::known_providers();
+    let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::SystemClock);
+    let mut availability_by_slug: BTreeMap<String, tm_provider::Availability> = BTreeMap::new();
+    for role in Role::ALL {
+        for candidate in role_table.candidates_for(role) {
+            if availability_by_slug.contains_key(&candidate.provider) {
+                continue;
+            }
+            let availability = match known.iter().find(|info| info.id == candidate.provider) {
+                Some(info) => tm_provider::Registry::availability(info, clock.clone()).await,
+                // A slug harness.toml names that this build of the crate doesn't recognize at
+                // all: report it as unconfigured rather than panicking or silently dropping the
+                // row.
+                None => tm_provider::Availability::NotConfigured,
+            };
+            availability_by_slug.insert(candidate.provider.clone(), availability);
+        }
+    }
 
     if renderer.is_json() {
         let mut roles = Vec::new();
@@ -285,6 +321,7 @@ pub fn provider_list(project: &Project, renderer: &Renderer) -> tm_types::Result
                     "provider": candidate.provider,
                     "model": candidate.model,
                     "concurrency": candidate.max_concurrency,
+                    "availability": availability_label(availability_by_slug[&candidate.provider]),
                 }));
             }
         }
@@ -298,6 +335,7 @@ pub fn provider_list(project: &Project, renderer: &Renderer) -> tm_types::Result
                     candidate.provider.to_string(),
                     candidate.model.to_string(),
                     candidate.max_concurrency.to_string(),
+                    availability_label(availability_by_slug[&candidate.provider]).to_string(),
                 ]);
             }
         }
@@ -307,6 +345,7 @@ pub fn provider_list(project: &Project, renderer: &Renderer) -> tm_types::Result
                 "Provider".to_string(),
                 "Model".to_string(),
                 "Concurrency".to_string(),
+                "Availability".to_string(),
             ],
             rows,
         );
@@ -317,22 +356,36 @@ pub fn provider_list(project: &Project, renderer: &Renderer) -> tm_types::Result
 
 /// `tm provider detect`
 ///
-/// Inspects the environment via `tm_provider::Registry::known_providers` and reports, per known
-/// backend, its slug, display name, whether it is currently configured, and its static
-/// capabilities — never any env var's value, only which *names* [`tm_provider::ProviderInfo`]
-/// declares and whether each is set. No key material is ever read out of the environment here:
-/// [`tm_provider::ProviderInfo::is_configured`] only calls `std::env::var(..).is_ok()`.
-pub fn provider_detect(renderer: &Renderer) -> tm_types::Result<()> {
+/// Inspects the environment (and, for the three zero-signup local backends, makes a short-timeout
+/// reachability probe — see [`tm_provider::Registry::availability`]) and reports, per known
+/// backend, its slug, display name, [`tm_provider::Availability`], and static capabilities —
+/// never any env var's value, only which *names* [`tm_provider::ProviderInfo`] declares and
+/// whether each is set. No key material is ever read out of the environment here:
+/// [`tm_provider::ProviderInfo::is_configured`] only calls `std::env::var(..).is_ok()`, and the
+/// reachability probe sends no credentials at all (the three local backends need none).
+pub async fn provider_detect(renderer: &Renderer) -> tm_types::Result<()> {
     let known = tm_provider::Registry::known_providers();
+    let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::SystemClock);
+    let mut with_availability = Vec::with_capacity(known.len());
+    for info in &known {
+        let availability = tm_provider::Registry::availability(info, clock.clone()).await;
+        with_availability.push((info, availability));
+    }
 
     if renderer.is_json() {
-        let rows: Vec<_> = known
+        let rows: Vec<_> = with_availability
             .iter()
-            .map(|info| {
+            .map(|(info, availability)| {
                 serde_json::json!({
                     "id": info.id,
                     "display_name": info.display_name,
-                    "configured": info.is_configured(),
+                    // Renamed from a plain `"configured"` deliberately: for the three local
+                    // backends this is `true` even with nothing listening (their env vars are
+                    // all optional), so a name that could be misread as "usable" would
+                    // reintroduce the exact lie `"availability"` exists to correct. This is
+                    // env-var presence only -- see `"availability"` for the honest answer.
+                    "env_vars_present": info.is_configured(),
+                    "availability": availability_label(*availability),
                     "env_vars": info.env_vars.iter().map(|v| serde_json::json!({
                         "name": v.name,
                         "required": v.required,
@@ -351,15 +404,11 @@ pub fn provider_detect(renderer: &Renderer) -> tm_types::Result<()> {
         renderer.emit(&rows, "")?;
     } else {
         let mut rows = Vec::new();
-        for info in &known {
+        for (info, availability) in &with_availability {
             rows.push(vec![
                 info.id.to_string(),
                 info.display_name.to_string(),
-                if info.is_configured() {
-                    "yes".to_string()
-                } else {
-                    "no".to_string()
-                },
+                availability_label(*availability).to_string(),
                 info.env_vars
                     .iter()
                     .filter(|v| v.required)
@@ -372,7 +421,7 @@ pub fn provider_detect(renderer: &Renderer) -> tm_types::Result<()> {
             vec![
                 "Id".to_string(),
                 "Name".to_string(),
-                "Configured".to_string(),
+                "Availability".to_string(),
                 "Required env".to_string(),
             ],
             rows,
