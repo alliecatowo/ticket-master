@@ -368,6 +368,44 @@ impl AgentLoop {
         }
     }
 
+    /// Whether `effective_budget` can still afford `estimated_cost` in every dimension it
+    /// tracks (`SPEC.md` §31.2 "refuse to start what it cannot finish",
+    /// `docs/audit-2026-09-18-fable.md` B-10). A conservative admission check, not a prediction
+    /// of the provider's actual bill: [`AgentLoop::drive`] calls this before every
+    /// `fabric.execute`, and `false` means attempting the call would almost certainly overspend,
+    /// not merely that it might — see [`first_unaffordable_dimension`], which this delegates to.
+    fn can_afford(&self, effective_budget: &Budget, estimated_cost: Spend) -> bool {
+        first_unaffordable_dimension(effective_budget, estimated_cost).is_none()
+    }
+
+    /// Hand `task.ticket` off cleanly via [`tm_core::Store::budget_handoff`] and report
+    /// [`AgentOutcome::BudgetExhausted`] (`SPEC.md` §31.3, `docs/audit-2026-09-18-fable.md`
+    /// B-10) — the shared tail of both places [`AgentLoop::drive`] discovers it cannot proceed on
+    /// budget: reactively (a dimension already at zero) and proactively (`AgentLoop::can_afford`
+    /// says the next call would overrun one). A store-side failure here is logged, not
+    /// propagated: the loop still owes its caller a terminal `AgentOutcome`, and a worker that
+    /// merely lost a race with the store's own bookkeeping (e.g. `Store::record_usage`'s
+    /// reactive handoff already ran for the same reason) must not fail the whole run over it —
+    /// the ticket's lease still expires on its own if nothing else clears it.
+    fn budget_handoff_outcome(
+        &self,
+        task: &AgentTask,
+        steps: Vec<StepRecord>,
+        exhausted: BudgetDimension,
+    ) -> Result<AgentOutcome> {
+        if let Err(e) =
+            self.store
+                .budget_handoff(&task.ticket, format!("{exhausted:?}"), self.actor.clone())
+        {
+            tracing::warn!(
+                ticket = %task.ticket,
+                error = %e,
+                "budget handoff failed; the ticket's lease will still expire on its own"
+            );
+        }
+        Ok(AgentOutcome::BudgetExhausted { steps, exhausted })
+    }
+
     /// Translate every [`FabricRecord`] the most recent [`tm_provider::fabric::Fabric::execute`]
     /// call produced into the matching already-closed `provider.*` [`tm_events::EventKind`]
     /// (`docs/audit-2026-09-18-fable.md` B-07) and append them together. `FabricRecord::Degraded`
@@ -519,7 +557,7 @@ impl AgentLoop {
                 });
             }
             if let Some(exhausted) = first_exhausted_dimension(&effective_budget) {
-                return Ok(AgentOutcome::BudgetExhausted { steps, exhausted });
+                return self.budget_handoff_outcome(task, steps, exhausted);
             }
             if let Some(detail) = self.event_backstop_tripped(task)? {
                 return Ok(AgentOutcome::Failed {
@@ -568,6 +606,23 @@ impl AgentLoop {
                 );
             }
             let messages = rebuild_messages(&rendered.task, &steps);
+
+            // Refuse to start an effect this loop cannot afford to finish (`SPEC.md` §31.2,
+            // `docs/audit-2026-09-18-fable.md` B-10), rather than issuing the call and
+            // discovering the shortfall only after it returns. `MAX_TOKENS_PER_STEP` — the same
+            // ceiling sent below as `CompletionRequest::max_tokens` — is the most this step could
+            // ever be charged, so it doubles as a conservative pre-call estimate; it does not
+            // need to predict the model's actual output length, only bound the worst case.
+            let estimated_cost = Spend {
+                tokens: u64::from(MAX_TOKENS_PER_STEP),
+                dollars_micros: 0,
+                wall_seconds: 0,
+            };
+            if !self.can_afford(&effective_budget, estimated_cost) {
+                let exhausted = first_unaffordable_dimension(&effective_budget, estimated_cost)
+                    .unwrap_or(BudgetDimension::Tokens);
+                return self.budget_handoff_outcome(task, steps, exhausted);
+            }
 
             let request = CompletionRequest {
                 system: Some(rendered.system.clone()),
@@ -933,6 +988,29 @@ pub fn first_exhausted_dimension(budget: &Budget) -> Option<BudgetDimension> {
     None
 }
 
+/// Pure helper: which [`BudgetDimension`] (if any) `estimated` would overrun in `budget` —
+/// proactive, unlike [`first_exhausted_dimension`], which only reports a dimension that has
+/// *already* hit zero. `SPEC.md` §31.2's "refuse to start what it cannot finish"
+/// (`docs/audit-2026-09-18-fable.md` B-10): a worker should decline an effect it estimates it
+/// cannot pay for *before* starting it, not discover the shortfall after the call returns.
+///
+/// Separated from [`AgentLoop::can_afford`] for the same reason [`first_exhausted_dimension`] is
+/// separated from the loop: unit-testable against plain `Budget`/`Spend` values, no provider,
+/// store or clock required.
+pub fn first_unaffordable_dimension(budget: &Budget, estimated: Spend) -> Option<BudgetDimension> {
+    let remaining = budget.remaining();
+    if budget.tokens != u64::MAX && estimated.tokens > remaining.tokens {
+        return Some(BudgetDimension::Tokens);
+    }
+    if budget.dollars_micros != u64::MAX && estimated.dollars_micros > remaining.dollars_micros {
+        return Some(BudgetDimension::Dollars);
+    }
+    if budget.wall_seconds != u64::MAX && estimated.wall_seconds > remaining.wall_seconds {
+        return Some(BudgetDimension::WallSeconds);
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,6 +1054,56 @@ mod tests {
     fn budget_with_room_left_is_not_exhausted() {
         let budget = Budget::new(1_000, 1_000, 1_000);
         assert_eq!(first_exhausted_dimension(&budget), None);
+    }
+
+    // ---- first_unaffordable_dimension / AgentLoop::can_afford (SPEC.md §31.2, B-10) --------
+
+    #[test]
+    fn unlimited_budget_can_afford_anything() {
+        assert_eq!(
+            first_unaffordable_dimension(&Budget::unlimited(), Spend::tokens(1_000_000)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_budget_with_plenty_of_room_affords_a_conservative_estimate() {
+        let budget = Budget::new(10_000, 10_000, 10_000);
+        assert_eq!(
+            first_unaffordable_dimension(&budget, Spend::tokens(4_096)),
+            None
+        );
+    }
+
+    #[test]
+    fn a_nonzero_remaining_budget_can_still_be_unaffordable() {
+        // The whole point of the proactive check: 500 tokens remain (not exhausted — see
+        // `first_exhausted_dimension`, which would report `None` here), but the estimated cost
+        // of the next step (4096, `MAX_TOKENS_PER_STEP`) would blow straight through it.
+        let mut budget = Budget::new(1_000, u64::MAX, u64::MAX);
+        budget.spent = Spend::tokens(500);
+        assert_eq!(first_exhausted_dimension(&budget), None);
+        assert_eq!(
+            first_unaffordable_dimension(&budget, Spend::tokens(4_096)),
+            Some(BudgetDimension::Tokens)
+        );
+    }
+
+    #[test]
+    fn first_unaffordable_dimension_checks_dollars_and_wall_seconds_too() {
+        let mut dollars = Budget::new(u64::MAX, 100, u64::MAX);
+        dollars.spent = Spend::dollars_micros(50);
+        assert_eq!(
+            first_unaffordable_dimension(&dollars, Spend::dollars_micros(51)),
+            Some(BudgetDimension::Dollars)
+        );
+
+        let mut wall = Budget::new(u64::MAX, u64::MAX, 100);
+        wall.spent = Spend::seconds(50);
+        assert_eq!(
+            first_unaffordable_dimension(&wall, Spend::seconds(51)),
+            Some(BudgetDimension::WallSeconds)
+        );
     }
 
     #[test]
@@ -1566,6 +1694,101 @@ mod tests {
         assert_eq!(payload.tokens, 150);
         assert_eq!(payload.ticket, Some(h.ticket.clone()));
         assert_eq!(payload.session, Some(h.session.clone()));
+    }
+
+    #[tokio::test]
+    async fn drive_hands_off_cleanly_when_it_cannot_afford_the_next_step() {
+        // `SPEC.md` §31.2/§31.3, `docs/audit-2026-09-18-fable.md` B-10: a worker whose remaining
+        // budget cannot cover even a conservative estimate of the next call must hand off
+        // *before* attempting it, not discover the shortfall mid-flight.
+        let h = LiveHarness::new();
+
+        // Put the ticket into a real Leased/Running state first, so the proactive handoff this
+        // test exercises has a real lease to release and a real `Trigger::BudgetHandoff`
+        // transition to make -- not a no-op against a ticket that was never leased.
+        h.store
+            .activate(&h.ticket, h.actor.clone())
+            .expect("activate");
+        h.store
+            .acquire_lease(
+                &h.ticket,
+                h.actor.clone(),
+                Authority::root(),
+                Vec::new(),
+                300,
+                h.actor.clone(),
+            )
+            .expect("acquire lease");
+        h.store
+            .transition(&h.ticket, tm_core::Trigger::WorkStarted, h.actor.clone())
+            .expect("work started");
+
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let provider = Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "m1"),
+            h.clock.clone(),
+        ));
+        fabric.register_provider(provider.clone());
+        // Deliberately nothing scripted: if the loop ever reaches `fabric.execute` despite the
+        // budget shortfall, `MockProvider` errors loudly rather than this test silently passing.
+
+        // Far below `MAX_TOKENS_PER_STEP`, so `can_afford` must refuse before the first step.
+        let starved_budget = Budget::new(10, u64::MAX, u64::MAX);
+
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            starved_budget,
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+
+        let outcome = agent_loop.run(h.task()).await.expect("run completes");
+        match outcome {
+            AgentOutcome::BudgetExhausted { steps, exhausted } => {
+                assert!(
+                    steps.is_empty(),
+                    "must hand off before any step executes, not mid-flight"
+                );
+                assert_eq!(exhausted, BudgetDimension::Tokens);
+            }
+            other => {
+                panic!("expected BudgetExhausted via the proactive can_afford check, got {other:?}")
+            }
+        }
+
+        let ticket = h
+            .store
+            .view()
+            .expect("view")
+            .tickets
+            .get(&h.ticket)
+            .cloned()
+            .expect("ticket still exists");
+        assert_eq!(
+            ticket.state,
+            tm_core::TicketState::Ready,
+            "the real Store::budget_handoff call must return the ticket to Ready"
+        );
+        assert_ne!(ticket.state, tm_core::TicketState::Recovery);
+        assert!(
+            h.store
+                .view()
+                .expect("view")
+                .leases
+                .values()
+                .all(|l| l.ticket != h.ticket),
+            "the lease must be released, not left dangling"
+        );
     }
 
     #[tokio::test]
