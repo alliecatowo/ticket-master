@@ -29,6 +29,7 @@ pub mod presence;
 pub mod routes;
 pub mod sse;
 pub mod state;
+pub mod wiki;
 
 pub use approvals::{ApprovalDecision, ApprovalRegistry, ApprovalRequest, ApprovalStatus};
 pub use auth::{resolve_token, token_matches, AuthError, BindAddress};

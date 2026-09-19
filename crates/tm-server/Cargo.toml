@@ -12,6 +12,11 @@ tm-core = { workspace = true }
 tm-events = { workspace = true }
 tm-provider = { workspace = true }
 tm-harness = { workspace = true }
+# `GET /wiki/*` (SPEC.md §26.4) only needs to parse a page's front-matter block to show its
+# mode/derived_from and to strip it before rendering -- tm-docs's pure registry parser, not the
+# full tm-wiki assembly crate (which the server never needs; regeneration is an offline write
+# path, and serving just reads whatever is already on disk under docs/wiki/).
+tm-docs = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -21,6 +26,8 @@ tokio = { workspace = true }
 futures = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
+regex = { workspace = true }
+pulldown-cmark = { workspace = true }
 
 [dev-dependencies]
 reqwest = { workspace = true }

@@ -28,6 +28,7 @@ tm-tui = { path = "crates/tm-tui" }
 tm-pty = { path = "crates/tm-pty" }
 tm-templates = { path = "crates/tm-templates" }
 tm-auth = { path = "crates/tm-auth" }
+tm-wiki = { path = "crates/tm-wiki" }
 
 anyhow = "1"
 thiserror = "2"
@@ -75,3 +76,8 @@ portable-pty = "0.9"
 # rendered grid. A hand-rolled subset parser would make the SIGTERM/SIGHUP/SIGTSTP tests it gates
 # flaky in exactly the cases they exist to catch, so parse properly (D-002).
 vt100 = "0.15"
+# tm-server: renders wiki pages (SPEC.md §26.4, `GET /wiki/*`) from markdown to HTML. No markdown
+# crate existed anywhere in the workspace; pulldown-cmark is the de facto minimal, pure-Rust,
+# well-maintained CommonMark parser (no unsafe, no unbounded recursion by default), chosen over
+# hand-rolling a parser in a server handler.
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }

@@ -203,6 +203,10 @@ pub fn compile(
             sections::build_retrieval(ticket, ci, weights)?,
         ),
         (
+            SectionKind::Wiki,
+            sections::build_wiki(ticket, ci, weights)?,
+        ),
+        (
             SectionKind::SymbolOutlines,
             sections::build_symbol_outlines(ticket, ci)?,
         ),
