@@ -17,10 +17,14 @@ use tm_types::Result;
 
 use crate::walk::Language;
 
-/// Current schema version. Bump alongside a new migration step in [`Store::open`].
+/// Current schema version. Bump alongside a new migration step in [`Store::open_at`].
 pub const SCHEMA_VERSION: i64 = 1;
 
-/// Relative path, from a project root, to the index database.
+/// Relative path, from a project root, to the index database under the repo-scoped layout
+/// (`.tm/index.db`, the directory [`Store::open`] and [`Store::open_at`]'s shim compute). Not
+/// meaningful for a global-scope project, whose index lives at an arbitrary `<index_dir>/index.db`
+/// via [`Store::open_at`] directly — kept only as a documented convenience/back-compat constant
+/// for the repo-scoped case, not read by [`Store::open_at`] itself.
 pub const INDEX_DB_RELATIVE_PATH: &str = ".tm/index.db";
 
 /// A row in the `files` table.
@@ -232,19 +236,26 @@ impl Store {
     /// Open (creating if absent) the index at `<project_root>/.tm/index.db`, running any
     /// pending migrations. Creates the `.tm` directory if missing.
     ///
+    /// Shim over [`Store::open_at`] for the repo-scoped layout (`<project_root>/.tm`); prefer
+    /// [`Store::open_at`] when the caller already knows the index directory (e.g. a
+    /// global-scope project under `$TM_HOME/projects/<key>/`).
+    pub fn open(project_root: &Path) -> Result<Store> {
+        Store::open_at(&project_root.join(".tm"))
+    }
+
+    /// Open (creating if absent) the index at `<index_dir>/index.db`, running any pending
+    /// migrations. Creates `index_dir` if missing.
+    ///
     /// Tables created by migration: `files`, `chunks`, `vectors`, `tokens`, `symbols`, `refs`,
     /// `commits`, `commit_files`, `doc_meta`. Foreign keys cascade from `files` to
     /// `chunks`/`symbols`, from `chunks` to `vectors`/`tokens`, from `symbols` to `refs`, from
     /// `commits` to `commit_files`, so deleting a file row (on removal) cleans up its chunks,
     /// vectors, tokens and symbols in one statement.
-    pub fn open(project_root: &Path) -> Result<Store> {
-        let db_path = project_root.join(INDEX_DB_RELATIVE_PATH);
-        let tm_dir = db_path.parent().ok_or_else(|| {
-            tm_types::TmError::invariant("Failed to get parent directory of index.db")
-        })?;
+    pub fn open_at(index_dir: &Path) -> Result<Store> {
+        let db_path = index_dir.join("index.db");
 
-        std::fs::create_dir_all(tm_dir).map_err(|e| {
-            tm_types::TmError::storage(format!("Failed to create .tm directory: {}", e))
+        std::fs::create_dir_all(index_dir).map_err(|e| {
+            tm_types::TmError::storage(format!("Failed to create index directory: {}", e))
         })?;
 
         let conn = Connection::open(&db_path)

@@ -418,7 +418,7 @@ fn assess(
 /// human; everything else is recorded as an [`Assumption`] on [`AttachReport`], not asked.
 ///
 /// # Errors
-/// Whatever [`tm_codeintel::CodeIntel::open`]/`update_incremental`/`symbol_index` or
+/// Whatever [`tm_codeintel::CodeIntel::open_at`]/`update_incremental`/`symbol_index` or
 /// [`tm_core::Store::create_ticket`] return, e.g. `TmError::Storage` if the repository or the
 /// project database cannot be read/written.
 pub fn attach_repository(
@@ -427,7 +427,7 @@ pub fn attach_repository(
     clock: &dyn Clock,
     actor: ParticipantId,
 ) -> TmResult<AttachReport> {
-    let code_intel = CodeIntel::open(project_root)?;
+    let code_intel = CodeIntel::open_at(store.state_dir(), project_root)?;
     let delta = code_intel.update_incremental(clock)?;
     // `symbol_index` tolerates any individual file's parse failure internally (logging and
     // skipping it); an `Err` here means the file list itself could not be read, which is a real

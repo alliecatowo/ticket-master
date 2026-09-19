@@ -245,6 +245,7 @@ mod tests {
             approvals: Arc::new(crate::approvals::ApprovalRegistry::new()),
             config: ServerConfig {
                 project_root: root.to_path_buf(),
+                state_dir: root.join(".tm"),
                 bind_addr: "127.0.0.1:0".parse().unwrap(),
                 token: None,
                 presence_ttl_seconds: 60,
