@@ -1,4 +1,6 @@
-//! The home screen: at a glance, what tickets need attention and what sessions are running.
+//! The home screen: at a glance, what tickets need attention, what sessions are running, and
+//! (`SPEC.md` §29, `docs/audit-2026-09-18-fable.md` B-09) the active ticket's current durable
+//! goal, if it has one.
 
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
@@ -46,13 +48,25 @@ enum Pane {
     Sessions,
 }
 
-/// The dashboard: a ticket table on the left, a session list on the right.
+/// One row reserved above the ticket/session panes for [`Dashboard::goal`]'s "Goal: <text>" line,
+/// when set. Mirrors `screens::home::Home`'s own `INPUT_HEIGHT` convention: a single row is
+/// enough for one line of text, and this screen owns no domain logic (`tm-tui` has no `tm_core`
+/// dependency — see this module's own top-level doc comment) so it never wraps or truncates the
+/// text itself beyond what `Buffer::set_stringn` already does at the area's width.
+const GOAL_HEIGHT: u16 = 1;
+
+/// The dashboard: an optional current-goal line on top, a ticket table on the left below it, a
+/// session list on the right.
 ///
 /// IMPL:
-/// - `render`: `crate::theme::split_horizontal(area, &[("tickets", 3), ("sessions", 2)])`, render
-///   `self.tickets` into the `"tickets"` slot and `self.sessions` into `"sessions"`. Draw a
-///   border/heading per pane using `ctx.theme.muted` for the inactive pane's heading and
-///   `ctx.theme.accent` for `self.active`'s.
+/// - `render`: if `self.goal` is `Some`, carve [`GOAL_HEIGHT`] rows off the top of `area` for a
+///   `"Goal: <text>"` line (styled `ctx.theme.accent`, mirroring `heading`'s active style — a
+///   goal is always worth drawing attention to, regardless of which pane has focus) before
+///   `crate::theme::split_horizontal(area, &[("tickets", 3), ("sessions", 2)])` runs on what's
+///   left; with no goal set, the full `area` goes to the split exactly as before this field
+///   existed. Render `self.tickets` into the `"tickets"` slot and `self.sessions` into
+///   `"sessions"`. Draw a border/heading per pane using `ctx.theme.muted` for the inactive pane's
+///   heading and `ctx.theme.accent` for `self.active`'s.
 /// - `handle_event`: Tab switches `self.active` between `Pane::Tickets`/`Pane::Sessions`, gated
 ///   on `ctx.focus.is_focused(self.id())` — the dashboard only owns internal pane focus while it
 ///   is itself the focused component. Otherwise forward the event to whichever child
@@ -66,18 +80,30 @@ pub struct Dashboard {
     tickets: Table,
     sessions: List,
     active: Pane,
+    /// The active ticket's current durable goal text (`SPEC.md` §29), if any — a plain `String`,
+    /// not a `tm_core::GoalState`: this crate has no `tm_core` dependency (see the module doc
+    /// comment), so the caller (`tm-cli`'s `tui.rs`, which does depend on it) reads
+    /// `tm_core::Store::goal_state` and hands over already-rendered text via
+    /// [`Dashboard::set_goal`].
+    goal: Option<String>,
 }
 
 impl Dashboard {
     /// A dashboard over the given ticket table and session list, starting with the ticket pane
-    /// active.
+    /// active and no goal line shown.
     pub fn new(id: ComponentId, tickets: Table, sessions: List) -> Self {
         Dashboard {
             id,
             tickets,
             sessions,
             active: Pane::Tickets,
+            goal: None,
         }
+    }
+
+    /// Set (or clear, with `None`) the goal line shown above the ticket/session panes.
+    pub fn set_goal(&mut self, goal: Option<String>) {
+        self.goal = goal;
     }
 }
 
@@ -87,7 +113,25 @@ impl Component for Dashboard {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &FrameContext<'_>) {
-        let slots = split_horizontal(area, &[("tickets", 3), ("sessions", 2)]);
+        let panes_area = match &self.goal {
+            Some(text) if area.height > 0 => {
+                let goal_height = GOAL_HEIGHT.min(area.height);
+                buf.set_stringn(
+                    area.x,
+                    area.y,
+                    format!("Goal: {text}"),
+                    area.width as usize,
+                    ctx.theme.accent,
+                );
+                Rect {
+                    y: area.y + goal_height,
+                    height: area.height.saturating_sub(goal_height),
+                    ..area
+                }
+            }
+            _ => area,
+        };
+        let slots = split_horizontal(panes_area, &[("tickets", 3), ("sessions", 2)]);
 
         let tickets_area = heading(
             slots.get("tickets"),
@@ -172,7 +216,104 @@ impl ComponentParent for Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::caps::Capabilities;
+    use crate::component::FocusState;
+    use crate::theme::Theme;
     use crate::widgets_data::table::Column;
+    use tm_types::FixedClock;
+
+    fn dashboard() -> Dashboard {
+        Dashboard::new(
+            ComponentId::new("dashboard"),
+            Table::new(
+                ComponentId::new("dashboard.tickets"),
+                vec![Column::new("Title", 1)],
+            ),
+            List::new(ComponentId::new("dashboard.sessions")),
+        )
+    }
+
+    fn ctx<'a>(
+        theme: &'a Theme,
+        caps: &'a Capabilities,
+        clock: &'a FixedClock,
+    ) -> FrameContext<'a> {
+        FrameContext {
+            theme,
+            caps,
+            clock,
+            focus: FocusState::new(None),
+        }
+    }
+
+    fn row_text(buf: &Buffer, area: Rect, y: u16) -> String {
+        (0..area.width)
+            .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+            .collect()
+    }
+
+    #[test]
+    fn a_fresh_dashboard_has_no_goal_line() {
+        let d = dashboard();
+        let theme = Theme::default();
+        let caps = Capabilities::minimal();
+        let clock = FixedClock::epoch();
+        let context = ctx(&theme, &caps, &clock);
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        d.render(area, &mut buf, &context);
+
+        // With no goal set, row 0 belongs to the tickets/sessions pane headings, exactly as
+        // before this field existed -- not a "Goal:" line.
+        assert!(row_text(&buf, area, 0).contains("Tickets"));
+    }
+
+    #[test]
+    fn set_goal_draws_a_goal_line_above_the_panes() {
+        let mut d = dashboard();
+        d.set_goal(Some("ship the login fix".to_string()));
+        let theme = Theme::default();
+        let caps = Capabilities::minimal();
+        let clock = FixedClock::epoch();
+        let context = ctx(&theme, &caps, &clock);
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        d.render(area, &mut buf, &context);
+
+        assert!(row_text(&buf, area, 0).contains("Goal: ship the login fix"));
+        // The panes still render, just shifted down by one row.
+        assert!(row_text(&buf, area, 1).contains("Tickets"));
+    }
+
+    #[test]
+    fn set_goal_none_clears_a_previously_set_goal() {
+        let mut d = dashboard();
+        d.set_goal(Some("temporary goal".to_string()));
+        d.set_goal(None);
+        let theme = Theme::default();
+        let caps = Capabilities::minimal();
+        let clock = FixedClock::epoch();
+        let context = ctx(&theme, &caps, &clock);
+        let area = Rect::new(0, 0, 40, 6);
+        let mut buf = Buffer::empty(area);
+        d.render(area, &mut buf, &context);
+
+        assert!(!row_text(&buf, area, 0).contains("Goal:"));
+        assert!(row_text(&buf, area, 0).contains("Tickets"));
+    }
+
+    #[test]
+    fn a_zero_height_area_with_a_goal_set_does_not_panic() {
+        let mut d = dashboard();
+        d.set_goal(Some("goal".to_string()));
+        let theme = Theme::default();
+        let caps = Capabilities::minimal();
+        let clock = FixedClock::epoch();
+        let context = ctx(&theme, &caps, &clock);
+        let area = Rect::new(0, 0, 40, 0);
+        let mut buf = Buffer::empty(area);
+        d.render(area, &mut buf, &context);
+    }
 
     #[test]
     fn dashboard_reports_both_panes_as_focusable() {
