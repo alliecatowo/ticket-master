@@ -115,6 +115,26 @@ pub trait Tracker: Send + Sync {
     /// Pull every change observed on the external system since `since` (the adapter's own
     /// notion of "since", e.g. an updated-after query parameter or GraphQL filter).
     async fn pull(&self, since: Timestamp) -> Result<Vec<ExternalChange>>;
+
+    /// Best-effort recovery probe for `SPEC.md` §21.5 (audit B-11): search the external system
+    /// for evidence that `ticket` was already pushed, for the case where a prior `push` may have
+    /// completed externally but the local idempotency receipt was lost (a crash between the
+    /// external write succeeding and [`tm_core::EffectGuard::complete`] being called — see
+    /// `crate::sync`'s callers, which call this only when
+    /// [`tm_core::EffectGuard::resumed`] is true, not on every push).
+    ///
+    /// `Ok(None)` means "no marker found" — a fresh `push` should proceed. This is a false
+    /// negative in the rare case where the external write is not yet visible to a search (e.g.
+    /// read-after-write lag); the cost of a false negative here is a possible duplicate push in
+    /// an already-rare crash window, not silent data loss, so adapters are free to return
+    /// `Ok(None)` whenever they have no reliable search surface for their own marker. The default
+    /// implementation does exactly that: an adapter with no durable "did I already push this"
+    /// signal (or one, like `tm-mirror`'s Jira/GitLab adapters today, whose `push` is not yet a
+    /// live external effect at all) has nothing to confirm against, and the documented, accepted
+    /// behavior is to re-run rather than guess.
+    async fn confirm(&self, _ticket: &tm_types::TicketId) -> Result<Option<ExternalRef>> {
+        Ok(None)
+    }
 }
 
 /// Accepts and discards every push, returns no changes on pull. The default tracker when
@@ -249,7 +269,7 @@ impl Tracker for RecordingTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tm_types::Timestamp;
+    use tm_types::{TicketId, Timestamp};
 
     // Helper to create a minimal projection for testing.
     fn test_projection(ticket_id: &str, title: &str) -> Projection {
@@ -545,6 +565,33 @@ mod tests {
             .await
             .expect("pull should succeed");
         assert_eq!(result, vec![]);
+    }
+
+    #[tokio::test]
+    async fn default_confirm_returns_none_for_adapters_that_do_not_override_it() {
+        // `SPEC.md` §21.5 (audit B-11): an adapter with no reliable "did this already happen"
+        // search surface inherits `Tracker::confirm`'s default rather than guessing, and the
+        // documented, accepted behavior for such a kind is to re-run. `NullTracker`/
+        // `RecordingTracker` are exactly that (no external system behind them at all).
+        let ticket: TicketId = "T-1".parse().expect("valid ticket id");
+        let null_tracker = NullTracker::new("null");
+        assert_eq!(null_tracker.confirm(&ticket).await.expect("confirm"), None);
+
+        let recording_tracker = RecordingTracker::new(
+            "test",
+            TrackerCapabilities {
+                parent_child: true,
+                arbitrary_states: true,
+                milestones: true,
+                labels: true,
+                comments: true,
+                max_body_bytes: 1024,
+            },
+        );
+        assert_eq!(
+            recording_tracker.confirm(&ticket).await.expect("confirm"),
+            None
+        );
     }
 
     #[tokio::test]

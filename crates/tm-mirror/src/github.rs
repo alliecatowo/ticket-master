@@ -10,9 +10,14 @@
 //! `arbitrary_states: false`: [`crate::projection::ProjectionPolicy`] rolls descendants into a
 //! checklist and coarsens state before this adapter ever sees a [`Projection`].
 //!
-//! `push` is idempotent across repeated calls for the same ticket: this adapter remembers the
-//! issue number it created for each [`tm_types::TicketId`] and issues a `PATCH` on subsequent
-//! pushes instead of creating a duplicate issue.
+//! `push` is idempotent across repeated calls for the same ticket, and durably so: every issue
+//! this adapter pushes is tagged with a `tm-id:<ticket>` label (mirroring `linear`/`gitlab`'s own
+//! convention), and `push` searches GitHub for that label before deciding whether to `POST` a new
+//! issue or `PATCH` an existing one — never a local, process-lifetime cache, since a cache that
+//! forgets on restart used to mean every fresh `tm mirror push` invocation created a duplicate
+//! issue rather than updating the one already there (`docs/audit-2026-09-18-fable.md` A-05/B-11).
+//! [`GitHubTracker::confirm`] reuses the same search as the `SPEC.md` §21.5 recovery probe for
+//! "the push may have already landed, the local idempotency receipt was lost".
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -57,10 +62,13 @@ pub struct GitHubTracker {
     http: reqwest::Client,
     clock: std::sync::Arc<dyn Clock>,
     max_retries: u32,
-    /// Ticket -> issue number, so a second `push` for the same ticket updates rather than
-    /// recreates. Interior mutability so `push` can take `&self` per the [`Tracker`] contract.
-    issue_numbers: Mutex<BTreeMap<TicketId, u64>>,
     /// Milestone title -> milestone number, resolved lazily and cached for the process lifetime.
+    /// Purely a performance cache, not an idempotency mechanism: [`GitHubTracker::resolve_milestone`]
+    /// always lists GitHub's own milestones and matches by title before ever creating one, so a
+    /// cold cache after a restart just costs one extra `GET`, not a duplicate milestone (unlike
+    /// the removed `issue_numbers` cache this module used to carry, which decided create-vs-update
+    /// from local memory alone with no check against GitHub's own state — see this module's doc
+    /// comment).
     milestone_numbers: Mutex<BTreeMap<String, i64>>,
 }
 
@@ -109,7 +117,6 @@ impl GitHubTracker {
             http,
             clock,
             max_retries: DEFAULT_MAX_RETRIES,
-            issue_numbers: Mutex::new(BTreeMap::new()),
             milestone_numbers: Mutex::new(BTreeMap::new()),
         })
     }
@@ -140,6 +147,23 @@ impl GitHubTracker {
             "{}/repos/{}/{}/milestones",
             self.base_url, self.owner, self.repo
         )
+    }
+
+    fn issues_by_label_url(&self, label: &str) -> String {
+        format!("{}?labels={label}&state=all", self.issues_url())
+    }
+
+    /// Search GitHub for an issue already tagged with `ticket`'s `tm-id:<ticket>` label — the
+    /// durable substitute for a local "have I created this before" cache (see this module's own
+    /// doc comment). Used by both [`GitHubTracker::push`] (create-vs-update) and
+    /// [`GitHubTracker::confirm`] (crash recovery).
+    async fn find_issue_by_tm_id(&self, ticket: &TicketId) -> Result<Option<Issue>> {
+        let label = tm_id_label(ticket);
+        let body = self
+            .send_with_retry(reqwest::Method::GET, self.issues_by_label_url(&label), None)
+            .await?;
+        let issues = parse_issue_list(&body)?;
+        Ok(issues.into_iter().find(|i| !i.is_pull_request()))
     }
 
     fn headers(&self) -> reqwest::header::HeaderMap {
@@ -278,30 +302,33 @@ impl Tracker for GitHubTracker {
             Some(title) => Some(self.resolve_milestone(title).await?),
             None => None,
         };
-        let payload = issue_payload(projection, milestone_number);
-        let existing = *self
-            .issue_numbers
-            .lock()
-            .map_err(|_| TmError::invariant("github: issue number cache mutex poisoned"))?
-            .get(&projection.ticket)
-            .unwrap_or(&0);
 
-        let body = if existing == 0 {
-            self.send_with_retry(reqwest::Method::POST, self.issues_url(), Some(payload))
+        // Tag every pushed issue with a `tm-id:<ticket>` marker label (mirroring `linear`'s/
+        // `gitlab`'s own convention), so a later `push`/`confirm` can ask GitHub itself whether
+        // this ticket was already mirrored instead of trusting process-lifetime local state.
+        let marker = tm_id_label(&projection.ticket);
+        let mut labeled = projection.clone();
+        if !labeled.labels.iter().any(|l| l == &marker) {
+            labeled.labels.push(marker);
+        }
+        let payload = issue_payload(&labeled, milestone_number);
+
+        let existing = self.find_issue_by_tm_id(&projection.ticket).await?;
+        let body = match &existing {
+            Some(issue) => {
+                self.send_with_retry(
+                    reqwest::Method::PATCH,
+                    self.issue_url(issue.number),
+                    Some(payload),
+                )
                 .await?
-        } else {
-            self.send_with_retry(
-                reqwest::Method::PATCH,
-                self.issue_url(existing),
-                Some(payload),
-            )
-            .await?
+            }
+            None => {
+                self.send_with_retry(reqwest::Method::POST, self.issues_url(), Some(payload))
+                    .await?
+            }
         };
         let issue = parse_issue(&body)?;
-        self.issue_numbers
-            .lock()
-            .map_err(|_| TmError::invariant("github: issue number cache mutex poisoned"))?
-            .insert(projection.ticket.clone(), issue.number);
         Ok(issue_external_ref(&self.name, &issue))
     }
 
@@ -335,6 +362,16 @@ impl Tracker for GitHubTracker {
             }
         }
         Ok(changes)
+    }
+
+    /// `SPEC.md` §21.5 recovery probe: search for an issue already tagged with `ticket`'s
+    /// `tm-id:<ticket>` label. Called by the effect-guard-wrapped call site (`tm-cli`'s
+    /// `mirror_push`) only when resuming a `journaled`-but-never-`completed` push, to tell "the
+    /// issue was already created, the receipt was lost" apart from "never pushed" before
+    /// deciding whether to call `push` again.
+    async fn confirm(&self, ticket: &TicketId) -> Result<Option<ExternalRef>> {
+        let issue = self.find_issue_by_tm_id(ticket).await?;
+        Ok(issue.map(|i| issue_external_ref(&self.name, &i)))
     }
 }
 
@@ -458,6 +495,12 @@ fn find_milestone_number(milestones: &[Milestone], title: &str) -> Option<i64> {
         .iter()
         .find(|m| m.title == title)
         .map(|m| m.number)
+}
+
+/// The label marking every issue this adapter pushes with, mirroring `linear`/`gitlab`'s own
+/// `tm-id:<ticket>` convention.
+fn tm_id_label(ticket: &TicketId) -> String {
+    format!("tm-id:{ticket}")
 }
 
 fn issue_external_ref(adapter: &str, issue: &Issue) -> ExternalRef {
@@ -629,7 +672,6 @@ mod tests {
             http: reqwest::Client::new(),
             clock: std::sync::Arc::new(tm_types::FixedClock::epoch()),
             max_retries: DEFAULT_MAX_RETRIES,
-            issue_numbers: Mutex::new(BTreeMap::new()),
             milestone_numbers: Mutex::new(BTreeMap::new()),
         }
         .capabilities();
@@ -742,6 +784,30 @@ mod tests {
         ];
         assert_eq!(find_milestone_number(&milestones, "v2"), Some(2));
         assert_eq!(find_milestone_number(&milestones, "v3"), None);
+    }
+
+    #[test]
+    fn tm_id_label_uses_stable_marker_prefix() {
+        let ticket = TicketId::new("T-42").expect("valid ticket id");
+        assert_eq!(tm_id_label(&ticket), "tm-id:T-42");
+    }
+
+    #[test]
+    fn issues_by_label_url_includes_the_label_and_state_all() {
+        let tracker = GitHubTracker::with_config(
+            "gh",
+            "owner",
+            "repo",
+            "token".to_string(),
+            DEFAULT_BASE_URL.to_string(),
+            std::sync::Arc::new(tm_types::FixedClock::epoch()),
+        )
+        .expect("build tracker");
+        let url = tracker.issues_by_label_url("tm-id:T-1");
+        assert_eq!(
+            url,
+            "https://api.github.com/repos/owner/repo/issues?labels=tm-id:T-1&state=all"
+        );
     }
 
     #[test]

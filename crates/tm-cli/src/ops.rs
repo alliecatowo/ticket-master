@@ -1267,6 +1267,16 @@ fn build_tracker(
 /// every eligible ticket to every configured adapter rather than skipping unchanged ones — a
 /// real push each time, just not an idempotent-across-restarts one; that optimization needs a
 /// richer `mirror_links` schema (a B-05 follow-up, not something this command can work around).
+///
+/// Each ticket/adapter push is wrapped in a `SPEC.md` §21.5 idempotent-effect guard
+/// (`tm_core::Store::begin_effect`, audit B-11): the effect key is
+/// `(ticket, ticket.attempts, "mirror.push:<adapter>", <projection content hash>)`, so an
+/// already-completed push for the exact same projection short-circuits (no network call, no
+/// duplicate issue) rather than trusting the removed per-adapter in-memory caches this replaces.
+/// A guard resumed from a prior, never-completed journal entry (the crash window between the
+/// external write landing and the receipt being recorded) tries the adapter's
+/// [`tm_mirror::Tracker::confirm`] probe first, so a lost receipt does not necessarily cost a
+/// duplicate external write.
 pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let mirror_path = project.root.join(".tm").join("mirror.toml");
     if !mirror_path.is_file() {
@@ -1316,7 +1326,47 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
             if !projection.degradations.is_empty() {
                 degraded += 1;
             }
-            let (link, _draft) = engine.push(tracker.as_ref(), &projection, None).await?;
+
+            let effect_kind = format!("mirror.push:{}", tracker.name());
+            let canonical_args = tm_mirror::SyncEngine::projection_hash(&projection);
+            let key = tm_core::EffectKey::compute(
+                &ticket.id,
+                ticket.attempts,
+                &effect_kind,
+                &canonical_args,
+            );
+            let guard = project.store.begin_effect(
+                key,
+                ticket.id.clone(),
+                ticket.attempts,
+                effect_kind,
+                project.actor.clone(),
+            )?;
+
+            if guard.already_completed() {
+                // The exact same projection was already pushed to this adapter under this
+                // ticket attempt — the idempotency guarantee this mechanism exists for. No
+                // network call, no re-linking; `pushed` still counts it as delivered.
+                pushed += 1;
+                continue;
+            }
+
+            // A prior journal entry existed but never completed: the process may have crashed
+            // between the external write landing and the receipt being recorded. Ask the
+            // adapter whether it already happened before assuming it didn't.
+            let external = if guard.resumed() {
+                tracker.confirm(&ticket.id).await?
+            } else {
+                None
+            };
+            let link_external = match external {
+                Some(external) => external,
+                None => {
+                    let (link, _draft) = engine.push(tracker.as_ref(), &projection, None).await?;
+                    link.external
+                }
+            };
+
             project.store.link_mirror(
                 &ticket.id,
                 tracker.name().to_string(),
@@ -1325,10 +1375,11 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
             project.store.update_mirror_link(
                 &ticket.id,
                 tracker.name().to_string(),
-                link.external.external_id.clone(),
+                link_external.external_id.clone(),
                 tm_core::MirrorSyncDirection::Push,
                 project.actor.clone(),
             )?;
+            guard.complete(&project.store, Some(&link_external.external_id))?;
             pushed += 1;
         }
     }
@@ -1666,6 +1717,144 @@ pub fn events_verify(project: &Project, renderer: &Renderer) -> tm_types::Result
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use tm_types::{Authority, Budget, Clock, CounterIds, IdSource, ParticipantId, Timestamp};
+
+    fn test_project(root: &std::path::Path) -> Project {
+        std::fs::create_dir_all(root.join(".tm")).unwrap();
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::new(
+            Timestamp::from_unix_seconds(1_000_000),
+        ));
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::seeded(1));
+        let store = Arc::new(tm_core::Store::open_with(root, clock.clone(), ids.clone()).unwrap());
+        Project {
+            root: root.to_path_buf(),
+            store,
+            clock,
+            ids,
+            actor: ParticipantId::new("human:tester").unwrap(),
+        }
+    }
+
+    fn test_renderer() -> Renderer {
+        Renderer::new(true, true, true, false)
+    }
+
+    /// A ticket the default `ProjectionPolicy` will actually mirror: `should_mirror` requires a
+    /// `Work` ticket to carry a milestone (`tm_mirror::projection::ProjectionPolicy::should_mirror`).
+    fn mirrorable_ticket(project: &Project) -> tm_types::TicketId {
+        let events = project
+            .store
+            .create_ticket(
+                tm_core::TicketKind::Work,
+                "do the thing".into(),
+                None,
+                None,
+                Authority::root(),
+                vec![],
+                tm_core::ExecutorRequirements {
+                    role: tm_types::Role::CoderFast,
+                    human_required: false,
+                    min_capability: tm_types::Tolerance::Any,
+                },
+                vec![],
+                vec![],
+                tm_core::VerificationPolicy::None,
+                Budget::unlimited(),
+                tm_core::RetryPolicy {
+                    max_attempts: 3,
+                    base_delay_seconds: 1,
+                    backoff_multiplier: 2.0,
+                    max_delay_seconds: 60,
+                },
+                0,
+                project.actor.clone(),
+            )
+            .unwrap();
+        let ticket_id = tm_types::TicketId::new(events[0].subject.as_str()).unwrap();
+        project
+            .store
+            .create_milestone(
+                "M1".into(),
+                vec![ticket_id.clone()],
+                vec![],
+                project.actor.clone(),
+            )
+            .unwrap();
+        ticket_id
+    }
+
+    #[tokio::test]
+    async fn mirror_push_is_idempotent_across_repeated_calls_via_the_effect_guard() {
+        // SPEC.md §21.5 / audit B-11: two `tm mirror push` invocations against unchanged state
+        // must not journal a second effect for the same ticket/adapter/attempt/projection — the
+        // whole point of wrapping this call site in `Store::begin_effect`.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let ticket_id = mirrorable_ticket(&project);
+
+        std::fs::write(
+            root.join(".tm").join("mirror.toml"),
+            "[adapters.testnull]\nkind = \"null\"\nenabled = true\n",
+        )
+        .unwrap();
+
+        let renderer = test_renderer();
+        mirror_push(&project, &renderer).await.expect("first push");
+        mirror_push(&project, &renderer).await.expect("second push");
+
+        let conn =
+            tm_events::schema::open_read_connection(&root.join(".tm").join("project.db")).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM effects WHERE ticket = ?1 AND kind = 'mirror.push:testnull'",
+                [ticket_id.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "two mirror_push calls against unchanged state must share one effect row"
+        );
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM effects WHERE ticket = ?1 AND kind = 'mirror.push:testnull'",
+                [ticket_id.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "completed");
+    }
+
+    #[tokio::test]
+    async fn mirror_push_journals_a_distinct_effect_per_adapter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let _ticket_id = mirrorable_ticket(&project);
+
+        std::fs::write(
+            root.join(".tm").join("mirror.toml"),
+            "[adapters.a]\nkind = \"null\"\nenabled = true\n\n[adapters.b]\nkind = \"null\"\nenabled = true\n",
+        )
+        .unwrap();
+
+        let renderer = test_renderer();
+        mirror_push(&project, &renderer).await.expect("push");
+
+        let conn =
+            tm_events::schema::open_read_connection(&root.join(".tm").join("project.db")).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM effects WHERE kind LIKE 'mirror.push:%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "one effect per (ticket, adapter) pair");
+    }
+
     #[test]
     fn docs_list_empty_registry() {
         // With empty registry, rendering should succeed

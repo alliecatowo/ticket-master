@@ -324,6 +324,17 @@ impl Tracker for LinearTracker {
         }
         Ok(changes)
     }
+
+    /// `SPEC.md` §21.5 recovery probe (audit B-11): reuses the same `tm-id:<ticket>` label
+    /// search [`LinearTracker::push`] already does on every call (this adapter has no local
+    /// idempotency cache at all — every push already asks Linear first), so a resumed
+    /// `journaled`-but-never-`completed` push can find out whether the issue was already created
+    /// before the crash without any new code path.
+    async fn confirm(&self, ticket: &TicketId) -> Result<Option<ExternalRef>> {
+        let label = ticket_label(ticket);
+        let issue = self.find_issue_by_label(&label).await?;
+        Ok(issue.map(|i| issue_to_external_ref(&self.name, &i)))
+    }
 }
 
 // ---- GraphQL documents -------------------------------------------------------------------------
