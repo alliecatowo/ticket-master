@@ -3035,4 +3035,95 @@ mod tests {
         let defs = registry.tool_defs_for(&authority);
         assert!(defs.iter().any(|d| d.name == "computer.click"));
     }
+
+    fn ctx_over<'a>(
+        authority: &'a Authority,
+        ticket: &'a TicketId,
+        session: &'a SessionId,
+        actor: &'a ParticipantId,
+        clock: &'a FixedClock,
+        ids: &'a TestIds,
+        root: &'a Path,
+    ) -> CallContext<'a> {
+        CallContext {
+            authority,
+            ticket,
+            session,
+            actor,
+            clock,
+            ids,
+            root,
+        }
+    }
+
+    // The two tests below exercise `ToolRegistry::dispatch` itself, not `to_action` +
+    // `Authority::permits` composed by hand: `dispatch` is what actually guarantees `permits` is
+    // checked *before* `provider.invoke` ever runs, mirroring
+    // `filter_is_an_economy_optimization_not_a_replacement_for_dispatch_time_enforcement` above
+    // for the builtin provider. Both fixture providers fail on `acquire`/backend-open, so a
+    // `ToolOutcome::Denied` (not `Errored`) is proof the denial happened before invocation was
+    // ever attempted — an `Errored` result here would mean `invoke` ran first and failed instead.
+
+    #[tokio::test]
+    async fn browser_navigate_to_a_disallowed_origin_is_denied_before_any_session_launches() {
+        let (dir, registry) = registry_with_browser_and_computer();
+        let mut authority = Authority::none();
+        authority
+            .network
+            .allowlist
+            .insert("allowed.example".to_string());
+        let ticket: TicketId = "T-1".parse().unwrap();
+        let session: SessionId = "S-1".parse().unwrap();
+        let actor: ParticipantId = "agent:test/worker".parse().unwrap();
+        let clock = FixedClock::epoch();
+        let ids = TestIds::new();
+        let ctx = ctx_over(
+            &authority,
+            &ticket,
+            &session,
+            &actor,
+            &clock,
+            &ids,
+            dir.path(),
+        );
+
+        let outcome = registry
+            .dispatch(
+                &call("browser.navigate", json!({"url": "https://evil.example/x"})),
+                &ctx,
+            )
+            .await;
+        assert!(
+            matches!(outcome, ToolOutcome::Denied { .. }),
+            "expected Denied (permits checked before invoke), got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn computer_click_without_input_authority_is_denied_before_any_backend_opens() {
+        let (dir, registry) = registry_with_browser_and_computer();
+        let authority = Authority::none();
+        let ticket: TicketId = "T-1".parse().unwrap();
+        let session: SessionId = "S-1".parse().unwrap();
+        let actor: ParticipantId = "agent:test/worker".parse().unwrap();
+        let clock = FixedClock::epoch();
+        let ids = TestIds::new();
+        let ctx = ctx_over(
+            &authority,
+            &ticket,
+            &session,
+            &actor,
+            &clock,
+            &ids,
+            dir.path(),
+        );
+
+        let outcome = registry
+            .dispatch(&call("computer.click", json!({"x": 1.0, "y": 2.0})), &ctx)
+            .await;
+        assert!(
+            matches!(outcome, ToolOutcome::Denied { .. }),
+            "expected Denied (permits checked before invoke), got {outcome:?}"
+        );
+    }
 }

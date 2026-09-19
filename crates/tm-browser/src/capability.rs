@@ -30,12 +30,17 @@
 //! (`tm-core::Store::expire_leases` emits `ticket.lease_expired` events, but no subscriber wakes
 //! a `SessionRegistry`), so true expiry-triggered teardown is out of this change's reach. What
 //! *is* real: `tm_agent::executor::BuiltinExecutor::execute` constructs a fresh
-//! [`SessionRegistry`] per dispatched task and calls [`SessionRegistry::close_all`] once the task
-//! finishes (success, failure, or panic-unwind-safe early return) — so a session's lifetime is
-//! bounded by its dispatch, which is the real-world proxy for "the lease that authorized it" in
-//! every call path this workspace has today. A process that crashes mid-task still leaks a
-//! browser process, exactly as before this change; closing that gap needs the lease-expiry
-//! subscriber hook M-16/B-01's follow-on work would add, not something reachable from here.
+//! [`SessionRegistry`] per dispatched task and calls [`SessionRegistry::close_all`] on every
+//! *normal* return from `AgentLoop::run` — completion, an in-band failure, or an `Err` the loop
+//! itself returns (bound before the `?` so the `?` cannot skip it) — so a session's lifetime is
+//! bounded by its dispatch in every ordinary case, the real-world proxy for "the lease that
+//! authorized it" this workspace has today. This is *not* unwind-safe: a panic inside `run`, or
+//! the dispatched task's future being dropped/cancelled before it resolves (plausible once a
+//! background-spawning dispatcher is driving it), skips `close_all` — there is no `Drop` impl or
+//! `catch_unwind` here. A process that crashes or is cancelled mid-task still leaks a browser
+//! process, exactly as before this change; closing that gap needs the lease-expiry subscriber
+//! hook M-16/B-01's follow-on work would add (or a `Drop`-based guard), neither of which this
+//! change reaches.
 
 use std::collections::HashMap;
 use std::sync::Arc;
