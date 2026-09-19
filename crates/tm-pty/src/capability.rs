@@ -28,6 +28,26 @@
 //!   [`tm_types::Action::PtyControl`], gated by `Authority.shell.enabled` alone: these tools take
 //!   only a session id (`to_action` is a pure function of `(tool, input)` with no session state
 //!   to recover the argv `pty.spawn` used), and none of them injects new input into the child.
+//!   Their [`ToolSchema::requires`] uses the matching [`tm_types::AuthorityRequirement::PtyControl`]
+//!   (bare `shell.enabled`, no `allow`-list match) rather than [`tm_types::AuthorityRequirement::Shell`]
+//!   — deliberately: a listing-time gate stricter than the call-time `Action::PtyControl` check
+//!   would advertise these tools to fewer workers than could actually call them.
+//!
+//! # `invoke` blocks the calling thread for `pty.expect`/`pty.wait_exit`
+//!
+//! [`crate::session::PtySession::expect`] and [`crate::session::PtySession::wait_exit_bounded`]
+//! are synchronous poll loops (`thread::sleep` between checks — see `crate::session`'s module doc
+//! for why that is a real wait on an external process, not a determinism hazard), and this
+//! `invoke` calls them directly rather than through `tokio::task::spawn_blocking` (which would
+//! need `&mut PtySession` to be `'static`, which it is not while a `SessionRegistry` owns the
+//! session). That means a `pty.expect`/`pty.wait_exit` call parks whatever thread is running this
+//! `invoke` for up to `timeout_ms` — on a multi-threaded Tokio runtime that is one worker thread
+//! among several; on a current-thread runtime it stalls the whole executor for that call's
+//! duration. `pty.wait_exit` is bounded by `timeout_ms` (default 5000ms, matching `pty.expect`)
+//! precisely so this is a bounded stall rather than the unbounded hang
+//! `crate::session::PtySession::wait_exit` (not used here) would risk on a hung child. A caller
+//! on a current-thread runtime should keep `timeout_ms` small and expect other work to wait
+//! behind it.
 //!
 //! # Session teardown
 //!
@@ -305,6 +325,12 @@ fn schema_expect() -> Value {
         "required": ["pattern"]
     })
 }
+fn schema_expect_like_timeout() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"timeout_ms": {"type": "integer"}}
+    })
+}
 
 const TOOLS: &[ToolSpec] = &[
     ToolSpec {
@@ -340,42 +366,43 @@ const TOOLS: &[ToolSpec] = &[
         description: "The session's rendered screen right now, as plain text lines.",
         input_schema: schema_none,
         cost: CostClass::Cheap,
-        requires: AuthorityRequirement::Shell,
+        requires: AuthorityRequirement::PtyControl,
     },
     ToolSpec {
         name: "pty.diff",
         description: "What changed on screen since the last pty.diff call.",
         input_schema: schema_none,
         cost: CostClass::Cheap,
-        requires: AuthorityRequirement::Shell,
+        requires: AuthorityRequirement::PtyControl,
     },
     ToolSpec {
         name: "pty.resize",
         description: "Resize the session's terminal, exercising reflow.",
         input_schema: schema_resize,
         cost: CostClass::Moderate,
-        requires: AuthorityRequirement::Shell,
+        requires: AuthorityRequirement::PtyControl,
     },
     ToolSpec {
         name: "pty.expect",
         description: "Block until the screen contains `pattern` or `timeout_ms` elapses.",
         input_schema: schema_expect,
         cost: CostClass::Moderate,
-        requires: AuthorityRequirement::Shell,
+        requires: AuthorityRequirement::PtyControl,
     },
     ToolSpec {
         name: "pty.wait_exit",
-        description: "Block until the child process exits, returning its exit status.",
-        input_schema: schema_none,
+        description: "Block until the child process exits or `timeout_ms` elapses, returning \
+            its exit status (or `exited: false` on timeout, without killing the child).",
+        input_schema: schema_expect_like_timeout,
         cost: CostClass::Moderate,
-        requires: AuthorityRequirement::Shell,
+        requires: AuthorityRequirement::PtyControl,
     },
     ToolSpec {
         name: "pty.record",
         description: "Store the session's asciicast recording as a ticket artifact.",
         input_schema: schema_none,
         cost: CostClass::Moderate,
-        requires: AuthorityRequirement::Shell,
+        requires: AuthorityRequirement::PtyControl,
     },
 ];
 
@@ -434,9 +461,17 @@ impl CapabilityProvider for PtyCapability {
     }
 
     fn requires(&self) -> AuthorityRequirement {
-        // Coarse capability-level gate: reachable at all only with some shell reach, exactly
-        // like `RunCommand`'s own gate — see this module's doc comment.
-        AuthorityRequirement::Shell
+        // Coarse capability-level gate: the union of every tool's own requirement, mirroring
+        // `tm_computer::capability::ComputerCapability::requires`'s same `Any(...)` shape.
+        // `PtyControl` alone (bare `shell.enabled`) is the loosest of the three and so already
+        // subsumes `Shell`/`PtySend` here, but all three are listed for the same reason
+        // `ComputerCapability` lists all of its variants: this reads as "reachable if any tool
+        // would be," not as an accident of which variant happens to be weakest today.
+        AuthorityRequirement::Any(vec![
+            AuthorityRequirement::Shell,
+            AuthorityRequirement::PtySend,
+            AuthorityRequirement::PtyControl,
+        ])
     }
 
     async fn invoke(&self, tool: &str, input: Value, ctx: &CallContext<'_>) -> Result<Value> {
@@ -502,12 +537,20 @@ impl CapabilityProvider for PtyCapability {
                 Ok(expect_outcome_json(outcome))
             }
             "pty.wait_exit" => {
-                let status = s.wait_exit()?;
-                Ok(json!({
-                    "success": status.success(),
-                    "exit_code": status.exit_code(),
-                    "signal": status.signal(),
-                }))
+                // Bounded, not `PtySession::wait_exit`: this runs inside an async `invoke` call,
+                // possibly on a shared runtime worker thread, and a hung child must not be able
+                // to park that thread forever — see `PtySession::wait_exit_bounded`'s doc
+                // comment. Default matches `pty.expect`'s own default.
+                let timeout_ms = get_u64_or(&input, "timeout_ms", 5_000);
+                match s.wait_exit_bounded(Duration::from_millis(timeout_ms))? {
+                    Some(status) => Ok(json!({
+                        "exited": true,
+                        "success": status.success(),
+                        "exit_code": status.exit_code(),
+                        "signal": status.signal(),
+                    })),
+                    None => Ok(json!({"exited": false})),
+                }
             }
             "pty.record" => {
                 let id = s.record(self.sessions.sink.as_ref())?;
@@ -653,10 +696,45 @@ mod tests {
     fn provider_requires_shell() {
         let cap = PtyCapability::new(test_registry());
         assert!(!cap.requires().admits(&Authority::none()));
-        let mut with_shell = Authority::none();
-        with_shell.shell.enabled = true;
-        with_shell.shell.allow = tm_types::PatternSet::all();
-        assert!(cap.requires().admits(&with_shell));
+
+        // `shell.enabled` alone is enough at the provider level — `PtyControl`'s tools (screen,
+        // diff, ...) need no `allow`-list match, and the provider-level gate is the union of
+        // every tool's own requirement, not the strictest one.
+        let mut enabled_only = Authority::none();
+        enabled_only.shell.enabled = true;
+        assert!(cap.requires().admits(&enabled_only));
+    }
+
+    #[test]
+    fn pty_control_tools_are_listed_for_bare_shell_enabled_with_no_allowlist() {
+        // The bug this guards: `pty.screen`/`pty.diff`/`pty.resize`/`pty.expect`/
+        // `pty.wait_exit`/`pty.record`'s per-tool `requires` must agree with
+        // `Action::PtyControl`'s own call-time gate (bare `shell.enabled`), not with the
+        // stricter `Shell` requirement `pty.spawn` alone needs. A worker with `shell.enabled`
+        // but an empty `allow` list — which `Action::PtyControl`'s `Authority::permits` arm
+        // allows — must still be *listed* these tools, not silently denied a schema for
+        // something it could actually call.
+        let cap = PtyCapability::new(test_registry());
+        let mut enabled_no_allow = Authority::none();
+        enabled_no_allow.shell.enabled = true;
+
+        let control_tools = [
+            "pty.screen",
+            "pty.diff",
+            "pty.resize",
+            "pty.expect",
+            "pty.wait_exit",
+            "pty.record",
+        ];
+        for t in cap.tools() {
+            if control_tools.contains(&t.name) {
+                assert!(
+                    t.requires.admits(&enabled_no_allow),
+                    "{} should be listed for bare shell.enabled",
+                    t.name
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -717,11 +795,50 @@ mod tests {
             .unwrap();
         assert_eq!(expect_result["matched"], true);
 
+        let wait_exit_result = cap
+            .invoke("pty.wait_exit", json!({"timeout_ms": 5000}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(
+            wait_exit_result["exited"], true,
+            "`echo` should have exited well within 5s"
+        );
+        assert_eq!(wait_exit_result["success"], true);
+
         let record_result = cap.invoke("pty.record", json!({}), &ctx).await.unwrap();
         assert_eq!(record_result["artifact"], "ART-000000000001");
 
         cap.close_all().await.unwrap();
         assert_eq!(cap.sessions.live_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn wait_exit_tool_reports_not_exited_on_timeout_without_hanging() {
+        let cap = PtyCapability::new(test_registry());
+        let authority = Authority::root();
+        let ticket: TicketId = "T-2".parse().unwrap();
+        let session: SessionId = "S-2".parse().unwrap();
+        let actor: ParticipantId = "agent:test/worker".parse().unwrap();
+        let clock = FixedClock::epoch();
+        let ids = tm_types::TestIds::new();
+        let root = std::env::temp_dir();
+        let ctx = test_ctx(&authority, &ticket, &session, &actor, &clock, &ids, &root);
+
+        cap.invoke(
+            "pty.spawn",
+            json!({"argv": ["sh", "-c", "sleep 5"], "env_allowlist": ["PATH"]}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+
+        let result = cap
+            .invoke("pty.wait_exit", json!({"timeout_ms": 200}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(result["exited"], false);
+
+        cap.close_all().await.unwrap();
     }
 
     #[test]

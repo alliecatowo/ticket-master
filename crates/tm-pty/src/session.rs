@@ -403,11 +403,36 @@ impl PtySession {
         Ok(self.child.try_wait()?)
     }
 
-    /// Block until the child exits, returning its exit status. Unbounded — a caller wanting a
-    /// bounded wait should poll [`PtySession::try_wait`] against its own deadline (via `expect`'s
-    /// same `Clock`-based pattern) rather than this blocking on a hung child forever.
+    /// Block until the child exits, returning its exit status. **Unbounded**: a hung child parks
+    /// the calling thread forever. Fine for a caller that has already decided to wait as long as
+    /// it takes (a direct, synchronous consumer of this crate); wrong for anything called from
+    /// inside an async runtime's worker thread, which [`PtySession::wait_exit_bounded`] exists
+    /// for — [`crate::capability::PtyCapability`]'s `pty.wait_exit` tool uses that one, not this
+    /// one, for exactly this reason.
     pub fn wait_exit(&mut self) -> Result<portable_pty::ExitStatus> {
         Ok(self.child.wait()?)
+    }
+
+    /// Block until the child exits or `timeout` elapses, returning `Ok(None)` on timeout rather
+    /// than blocking forever. Polls [`PtySession::try_wait`] (non-blocking) against a
+    /// [`tm_types::Clock`]-sourced deadline, the same split [`PtySession::expect`]'s doc comment
+    /// describes: the deadline arithmetic reads the injected clock, the inter-poll delay is a
+    /// real `thread::sleep`.
+    pub fn wait_exit_bounded(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<portable_pty::ExitStatus>> {
+        let start = self.clock.now();
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(Some(status));
+            }
+            let elapsed_ms = self.clock.now().millis_since(start).max(0) as u128;
+            if elapsed_ms >= timeout.as_millis() {
+                return Ok(None);
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
     }
 
     /// Send `signal` (a POSIX signal number) to the child process. The entry point for
@@ -716,6 +741,33 @@ mod tests {
             PtySession::spawn(&argv(&["true"]), None, &default_env(), 40, 10, clock()).unwrap();
         let status = pty.wait_exit().unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn wait_exit_bounded_reports_the_status_once_the_child_exits() {
+        let mut pty =
+            PtySession::spawn(&argv(&["true"]), None, &default_env(), 40, 10, clock()).unwrap();
+        let status = pty
+            .wait_exit_bounded(Duration::from_secs(5))
+            .unwrap()
+            .expect("the child should have exited within 5 seconds");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn wait_exit_bounded_returns_none_on_timeout_rather_than_blocking() {
+        let mut pty = PtySession::spawn(
+            &argv(&["sh", "-c", "sleep 5"]),
+            None,
+            &default_env(),
+            40,
+            10,
+            clock(),
+        )
+        .unwrap();
+        let outcome = pty.wait_exit_bounded(Duration::from_millis(200)).unwrap();
+        assert!(outcome.is_none(), "the child is still sleeping, not exited");
+        let _ = pty.kill_process_group();
     }
 
     #[test]
