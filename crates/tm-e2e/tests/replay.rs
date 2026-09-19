@@ -7,11 +7,16 @@ mod common;
 use std::sync::Arc;
 
 use tempfile::TempDir;
+use tm_core::MirrorSyncDirection;
 use tm_events::EventLog;
-use tm_types::{Authority, Clock, FixedClock};
+use tm_types::{Authority, Clock, FixedClock, ParticipantId};
 
 /// Build a project with well over 200 events: many tickets, most activated, several driven all
-/// the way through lease/submit/verify/audit to `Closed`.
+/// the way through lease/submit/verify/audit to `Closed`, plus at least one event of every kind
+/// B-05 gave `tm-core::Store` a durable write path for (sessions, docs, harness epochs, mirror
+/// links, provider usage, commands), so `rebuild_reproduces_byte_identical_state_over_200_events`
+/// below exercises every materializer arm this fixture is meant to cover, not just the
+/// ticket/lease/decision ones it already covered before B-05.
 fn build_fixture_project(store: &tm_core::Store) {
     let mut closeable = Vec::new();
     for i in 0..60 {
@@ -25,6 +30,117 @@ fn build_fixture_project(store: &tm_core::Store) {
         let auditor = common::agent(&format!("auditor-{i}"));
         common::close_ticket(store, &ticket, holder, auditor);
     }
+
+    let system = common::system();
+    let alice = ParticipantId::new("human:alice").expect("well-formed participant id");
+    let started = store
+        .start_session(alice.clone(), system.clone())
+        .expect("start_session");
+    let session = started[0]
+        .payload
+        .as_session_started()
+        .expect("session.started payload")
+        .session
+        .clone();
+    store
+        .join_session(&session, common::agent("pair"), system.clone())
+        .expect("join_session");
+    store
+        .end_session(&session, system.clone())
+        .expect("end_session");
+
+    let doc_ticket = common::ready_ticket(store, "doc-linked ticket", Authority::root());
+    store
+        .register_doc(
+            "docs/architecture.md".into(),
+            Some(doc_ticket.clone()),
+            system.clone(),
+        )
+        .expect("register_doc");
+    store
+        .invalidate_doc(
+            "docs/architecture.md".into(),
+            "source moved".into(),
+            system.clone(),
+        )
+        .expect("invalidate_doc");
+    store
+        .reconcile_doc("docs/architecture.md".into(), system.clone())
+        .expect("reconcile_doc");
+
+    store
+        .promote_epoch("config-a".into(), system.clone())
+        .expect("promote_epoch");
+    store
+        .promote_epoch("config-b".into(), system.clone())
+        .expect("promote_epoch");
+
+    let mirror_ticket = common::ready_ticket(store, "mirrored ticket", Authority::root());
+    store
+        .link_mirror(&mirror_ticket, "github".into(), system.clone())
+        .expect("link_mirror");
+    store
+        .update_mirror_link(
+            &mirror_ticket,
+            "github".into(),
+            "owner/repo#1".into(),
+            MirrorSyncDirection::Push,
+            system.clone(),
+        )
+        .expect("update_mirror_link push");
+    store
+        .update_mirror_link(
+            &mirror_ticket,
+            "github".into(),
+            "owner/repo#1".into(),
+            MirrorSyncDirection::Pull,
+            system.clone(),
+        )
+        .expect("update_mirror_link pull");
+
+    store
+        .append(vec![tm_events::EventDraft::new(
+            system.clone(),
+            tm_types::Id::none(),
+            tm_events::Payload::from(tm_events::payload::ProviderSelectedPayload {
+                role: "coder_fast".into(),
+                provider: "anthropic".into(),
+                model: "claude-sonnet".into(),
+            }),
+        )])
+        .expect("append provider.selected");
+
+    store
+        .record_command("cargo test -p tm-core".into(), None, None, 0, 4200, system)
+        .expect("record_command");
+}
+
+/// Row counts for every table B-05 gave a durable write path, keyed by table name, read directly
+/// off the raw connection (no `Store` read API for these exists yet — out of B-05's scope — so
+/// this mirrors how `hash_chain_detects_a_tampered_event` below already reaches for a raw
+/// connection when the fixture needs to see something `Store`'s own API doesn't expose).
+fn b05_table_snapshot(db_path: &std::path::Path) -> Vec<(&'static str, Vec<String>)> {
+    let conn = rusqlite::Connection::open(db_path).expect("open raw connection");
+    let tables: &[(&str, &str)] = &[
+        ("sessions", "SELECT id || '|' || participant || '|' || started || '|' || last_seen FROM sessions ORDER BY id"),
+        ("docs", "SELECT id || '|' || title || '|' || content || '|' || author || '|' || ts FROM docs ORDER BY id"),
+        ("doc_provenance", "SELECT doc_id || '|' || source || '|' || reason FROM doc_provenance ORDER BY doc_id, source"),
+        ("provider_usage", "SELECT provider || '|' || model || '|' || tokens_used || '|' || dollars_micros FROM provider_usage ORDER BY provider, model"),
+        ("harness_epochs", "SELECT epoch || '|' || harness_config || '|' || ts FROM harness_epochs ORDER BY epoch"),
+        ("mirror_links", "SELECT ticket || '|' || remote_id || '|' || remote_system || '|' || last_synced FROM mirror_links ORDER BY ticket"),
+    ];
+    tables
+        .iter()
+        .map(|(name, query)| {
+            let mut stmt = conn.prepare(query).expect("prepare");
+            let rows: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .expect("query")
+                .map(|r| r.expect("row"))
+                .collect();
+            (*name, rows)
+        })
+        .collect()
 }
 
 #[test]
@@ -45,8 +161,28 @@ fn rebuild_reproduces_byte_identical_state_over_200_events() {
     );
 
     let before = store.view().expect("view before rebuild");
+    let before_b05_tables = b05_table_snapshot(&db_path);
     store.rebuild().expect("rebuild");
     let after = store.view().expect("view after rebuild");
+    let after_b05_tables = b05_table_snapshot(&db_path);
+
+    // Every table `B-05` gave `tm-core::Store` a durable write path for (sessions, docs,
+    // doc_provenance, provider_usage, harness_epochs, mirror_links) must come back
+    // byte-identical too, same guarantee as the ticket/lease/decision tables below — `rebuild`
+    // drops and replays *every* materialized table, not a chosen subset.
+    for (before_table, after_table) in before_b05_tables.iter().zip(after_b05_tables.iter()) {
+        assert_eq!(before_table.0, after_table.0);
+        assert!(
+            !before_table.1.is_empty(),
+            "fixture should have produced at least one {} row",
+            before_table.0
+        );
+        assert_eq!(
+            before_table.1, after_table.1,
+            "{} must survive rebuild byte-identical",
+            before_table.0
+        );
+    }
 
     // `Store::rebuild` drops every materialized table and replays the log through the same
     // `materialize::apply` the live path used, so every field must come back identical.
