@@ -3367,6 +3367,7 @@ dependencies = [
  "portable-pty",
  "predicates",
  "ratatui-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
