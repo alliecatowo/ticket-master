@@ -41,6 +41,26 @@
 //! process, exactly as before this change; closing that gap needs the lease-expiry subscriber
 //! hook M-16/B-01's follow-on work would add (or a `Drop`-based guard), neither of which this
 //! change reaches.
+//!
+//! # Idempotent effects (`SPEC.md` §21.5, audit B-11) — deliberately not wired here
+//!
+//! B-11 asks for `tm_core::Store::begin_effect`/`EffectGuard` wrapping on "browser form
+//! submits" specifically, not every browser action. [`TOOLS`] below has no tool shaped like
+//! "submit this form": `browser.click`/`browser.press` take only an element `ref` from the last
+//! snapshot (see `schema_ref`), with no field distinguishing "this ref happens to be a submit
+//! button" from any other clickable element, and [`crate::session::BrowserSession::click`]
+//! returns `Result<()>` with no post-hoc signal (navigation, a POST request, a network idle
+//! transition) a caller could use to infer a form was actually submitted after the fact either.
+//! Wrapping every `browser.click`/`browser.type`/`browser.press` call in an effect guard would
+//! therefore either (a) journal a receipt for every menu click, hover-off-a-tooltip and
+//! incidental keystroke — a mechanism meant for irreversible external effects, applied to
+//! actions that are not — or (b) require guessing which `ref`s are "form-submission-shaped" from
+//! the accessibility tree, which this module has no reliable signal for. Per B-11's own
+//! guidance, this is scoped down rather than forced: browser wrapping is skipped entirely on
+//! this pass. A future change that adds a distinct, purpose-built tool (e.g. `browser.submit`
+//! acting on a `<form>` element specifically, as opposed to a generic clickable ref) would have
+//! a clean, unambiguous call site to wrap the same way `tm-cli`'s `mirror_push` wraps
+//! `tm_mirror::Tracker::push`.
 
 use std::collections::HashMap;
 use std::sync::Arc;

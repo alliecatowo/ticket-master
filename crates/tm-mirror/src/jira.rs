@@ -22,6 +22,14 @@
 //! and response parsing are pure functions, unit-tested here against recorded JSON.
 //! The network calls (`push`/`pull` and their private helpers) are exercised by `sync`'s
 //! round-trip tests against [`crate::tracker::RecordingTracker`], never against the network.
+//!
+//! `push` here is not yet a live external effect (see its own doc comment: it builds the
+//! request shape but the full live adapter — search, create-or-update, transition — is not
+//! wired up), so [`crate::tracker::Tracker::confirm`]'s default `Ok(None)` is inherited as-is
+//! rather than overridden (`SPEC.md` §21.5, audit B-11): there is no live external write yet to
+//! confirm. Once `push` goes live, `confirm` should search `issues_url` by the
+//! `tm-ticket:<ticket>` marker the same way [`crate::github::GitHubTracker::confirm`] and
+//! [`crate::linear::LinearTracker::confirm`] search their own markers.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};

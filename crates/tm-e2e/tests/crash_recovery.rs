@@ -1,12 +1,21 @@
 //! `SPEC.md` §16.9 / §17 invariant 5: a dead worker cannot block the project. A lease that
 //! expires without a heartbeat must return its ticket to `Ready` with authority reverted and
 //! exactly one attempt consumed, and the ticket must be leasable again afterward.
+//!
+//! `SPEC.md` §21.5 / audit B-11: crash recovery restores execution, but must not double-apply an
+//! effect that already happened externally, and must not get permanently stuck on one that never
+//! did. `effect_ran_but_process_died_before_the_receipt_was_recorded` below is the item 5 case
+//! `SPEC.md` §16 promised: an effect journaled but never completed, simulating the crash window
+//! between an external write landing and `Store::complete_effect`/`EffectGuard::complete` being
+//! called.
 
 mod common;
 
 use tempfile::TempDir;
 use tm_core::TicketState;
-use tm_types::{Authority, TmError};
+use tm_mirror::tracker::{ExternalChange, ExternalRef, Tracker, TrackerCapabilities};
+use tm_mirror::Projection;
+use tm_types::{Authority, TicketId, Timestamp, TmError};
 
 #[test]
 fn an_expired_lease_reverts_the_ticket_to_ready_with_one_attempt_consumed() {
@@ -202,4 +211,173 @@ fn repeated_reported_failures_escalate_once_attempts_are_exhausted() {
         )
         .unwrap_err();
     assert!(matches!(err, TmError::Conflict(_)));
+}
+
+/// A test double standing in for `tm_mirror::GitHubTracker`/`LinearTracker`: a `Tracker` whose
+/// `confirm` reports a marker it was pre-seeded with, the way a real adapter's `tm-id:<ticket>`
+/// label search would after the external write actually landed. `push`/`pull` are never called
+/// by this test (the whole point is exercising the *recovery* path, not a fresh push), so they
+/// panic if reached.
+struct AlreadyPushedTracker {
+    external_id: String,
+}
+
+impl AlreadyPushedTracker {
+    fn new(external_id: &str) -> Self {
+        AlreadyPushedTracker {
+            external_id: external_id.to_string(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Tracker for AlreadyPushedTracker {
+    fn name(&self) -> &str {
+        "already-pushed"
+    }
+
+    fn capabilities(&self) -> TrackerCapabilities {
+        TrackerCapabilities {
+            parent_child: false,
+            arbitrary_states: false,
+            milestones: false,
+            labels: true,
+            comments: false,
+            max_body_bytes: 65536,
+        }
+    }
+
+    async fn push(&self, _projection: &Projection) -> tm_types::Result<ExternalRef> {
+        panic!("this test exercises confirm(), not a fresh push")
+    }
+
+    async fn pull(&self, _since: Timestamp) -> tm_types::Result<Vec<ExternalChange>> {
+        panic!("this test exercises confirm(), not pull")
+    }
+
+    async fn confirm(&self, _ticket: &TicketId) -> tm_types::Result<Option<ExternalRef>> {
+        Ok(Some(ExternalRef {
+            adapter: self.name().to_string(),
+            external_id: self.external_id.clone(),
+            url: None,
+        }))
+    }
+}
+
+/// `SPEC.md` §21.5 / audit B-11: an effect journaled but never completed is the crash window
+/// between an external write landing and the receipt being recorded. `Store::begin_effect`
+/// reports this case via `EffectGuard::resumed()`, and each effect kind decides what "correct
+/// resume behavior" means for it:
+///
+/// * a kind with a reliable `confirm()` probe (a `tm_mirror::Tracker` searching by its own
+///   durable marker, e.g. GitHub's `tm-id:<ticket>` label) recovers the pre-crash receipt and
+///   completes the guard without repeating the external write;
+/// * a kind with no such probe (the "generic command" case `SPEC.md` §21.5 and this crate's own
+///   `docs/audit-2026-09-18-fable.md` B-11 both call out as accepted behavior) safely re-runs and
+///   records a fresh receipt -- correct precisely because re-running a plain command is not
+///   destructive the way re-pushing to an external tracker could be.
+#[tokio::test]
+async fn effect_ran_but_process_died_before_the_receipt_was_recorded() {
+    let dir = TempDir::new().expect("tempdir");
+    let (_clock, store) = common::open_store(dir.path());
+    let ticket = common::ready_ticket(&store, "push a ticket to github", Authority::root());
+    let actor = common::agent("worker-a");
+
+    // ---- Case (a): a confirm()-capable effect recovers the pre-crash receipt ----------------
+    let key_a = tm_core::EffectKey::compute(&ticket, 0, "mirror.push:github", "projection-hash-1");
+
+    // The effect "runs": journaled, then the process dies before `complete` is ever called.
+    let pre_crash = store
+        .begin_effect(
+            key_a.clone(),
+            ticket.clone(),
+            0,
+            "mirror.push:github",
+            actor.clone(),
+        )
+        .expect("begin_effect before the simulated crash");
+    assert!(!pre_crash.already_completed());
+    assert!(
+        !pre_crash.resumed(),
+        "the very first attempt at this key is not a resume"
+    );
+    drop(pre_crash); // simulated crash: never completed
+
+    // Resume: the same key's `begin_effect` call must report `resumed()` rather than silently
+    // starting a second, independent journal entry.
+    let resumed = store
+        .begin_effect(
+            key_a.clone(),
+            ticket.clone(),
+            0,
+            "mirror.push:github",
+            actor.clone(),
+        )
+        .expect("begin_effect on resume");
+    assert!(!resumed.already_completed());
+    assert!(
+        resumed.resumed(),
+        "a journaled-but-uncompleted row must be reported as a resume"
+    );
+
+    // The adapter's `confirm()` probe finds the external write already landed before the crash
+    // (standing in for a real tracker's `tm-id:<ticket>` label search), so the correct resume
+    // behavior is to complete with that receipt -- not to push a second, duplicate issue.
+    let tracker = AlreadyPushedTracker::new("owner/repo#7");
+    let confirmed = tracker
+        .confirm(&ticket)
+        .await
+        .expect("confirm")
+        .expect("confirm finds the pre-crash external state");
+    resumed
+        .complete(&store, Some(&confirmed.external_id))
+        .expect("complete from the confirmed receipt");
+
+    let row_a = store
+        .effect_status(&key_a)
+        .expect("effect_status")
+        .expect("row exists");
+    assert_eq!(row_a.status, tm_core::EffectStatus::Completed);
+    assert_eq!(row_a.receipt_artifact.as_deref(), Some("owner/repo#7"));
+
+    // A subsequent `begin_effect` for the identical key must now short-circuit entirely: this is
+    // the actual idempotency guarantee, exercised end to end through the crash window.
+    let post_recovery = store
+        .begin_effect(
+            key_a,
+            ticket.clone(),
+            0,
+            "mirror.push:github",
+            actor.clone(),
+        )
+        .expect("begin_effect after recovery");
+    assert!(post_recovery.already_completed());
+    assert_eq!(post_recovery.prior_receipt(), Some("owner/repo#7"));
+
+    // ---- Case (b): no confirm probe -> the documented, accepted behavior is to re-run -------
+    let key_b = tm_core::EffectKey::compute(&ticket, 0, "shell.run", "argv-hash-xyz");
+
+    let pre_crash_b = store
+        .begin_effect(key_b.clone(), ticket.clone(), 0, "shell.run", actor.clone())
+        .expect("begin_effect before the simulated crash");
+    drop(pre_crash_b); // simulated crash: never completed
+
+    let resumed_b = store
+        .begin_effect(key_b.clone(), ticket.clone(), 0, "shell.run", actor.clone())
+        .expect("begin_effect on resume");
+    assert!(resumed_b.resumed());
+    // No confirm surface exists for an arbitrary shell command (mirrors `Tracker::confirm`'s
+    // default `Ok(None)` and `tm-agent`'s plain `command::run` call sites, neither of which has
+    // one): the correct, documented resume behavior is to just re-run and record a fresh
+    // receipt, not to block waiting for a signal that will never come.
+    resumed_b
+        .complete(&store, Some("rerun-stdout-hash"))
+        .expect("complete after re-running");
+
+    let row_b = store
+        .effect_status(&key_b)
+        .expect("effect_status")
+        .expect("row exists");
+    assert_eq!(row_b.status, tm_core::EffectStatus::Completed);
+    assert_eq!(row_b.receipt_artifact.as_deref(), Some("rerun-stdout-hash"));
 }

@@ -397,6 +397,22 @@ payload_kinds! {
         remote: String,
         reference: String,
     };
+    "Payload for `effect.journaled` (`SPEC.md` §21.5).", EffectJournaledPayload, EffectJournaled, EffectJournaled, as_effect_journaled, {
+        key: String,
+        ticket: TicketId,
+        attempt: u32,
+        kind: String,
+    };
+    "Payload for `effect.completed`.", EffectCompletedPayload, EffectCompleted, EffectCompleted, as_effect_completed, {
+        key: String,
+        ticket: TicketId,
+        receipt_artifact: Option<String>,
+    };
+    "Payload for `effect.failed`.", EffectFailedPayload, EffectFailed, EffectFailed, as_effect_failed, {
+        key: String,
+        ticket: TicketId,
+        reason: String,
+    };
 }
 
 #[cfg(test)]

@@ -39,17 +39,17 @@ use rusqlite::Connection;
 use tm_events::payload::{
     ArtifactCreatedPayload, AuthorityRevertedPayload, CommandCompletedPayload,
     CommandStartedPayload, DecisionCreatedPayload, DecisionSupersededPayload,
-    DocInvalidatedPayload, DocReconciledPayload, DocRegisteredPayload, HarnessPromotedPayload,
-    MilestoneClosedPayload, MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload,
-    MirrorPulledPayload, MirrorPushedPayload, SessionEndedPayload, SessionJoinedPayload,
-    SessionStartedPayload, TicketAuditRejectedPayload, TicketAuditedPayload,
-    TicketBudgetExhaustedPayload, TicketCancelledPayload, TicketChildAddedPayload,
-    TicketClosedPayload, TicketCreatedPayload, TicketDependencyAddedPayload,
-    TicketEscalatedPayload, TicketFailedPayload, TicketHeartbeatPayload, TicketLeaseExpiredPayload,
-    TicketLeaseReleasedPayload, TicketLeasedPayload, TicketReopenedPayload,
-    TicketRetryScheduledPayload, TicketStateChangedPayload, TicketSubmittedPayload,
-    TicketUpdatedPayload, TicketVerificationFailedPayload, TicketVerifiedPayload,
-    UsageRecordedPayload,
+    DocInvalidatedPayload, DocReconciledPayload, DocRegisteredPayload, EffectCompletedPayload,
+    EffectFailedPayload, EffectJournaledPayload, HarnessPromotedPayload, MilestoneClosedPayload,
+    MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload, MirrorPulledPayload,
+    MirrorPushedPayload, SessionEndedPayload, SessionJoinedPayload, SessionStartedPayload,
+    TicketAuditRejectedPayload, TicketAuditedPayload, TicketBudgetExhaustedPayload,
+    TicketCancelledPayload, TicketChildAddedPayload, TicketClosedPayload, TicketCreatedPayload,
+    TicketDependencyAddedPayload, TicketEscalatedPayload, TicketFailedPayload,
+    TicketHeartbeatPayload, TicketLeaseExpiredPayload, TicketLeaseReleasedPayload,
+    TicketLeasedPayload, TicketReopenedPayload, TicketRetryScheduledPayload,
+    TicketStateChangedPayload, TicketSubmittedPayload, TicketUpdatedPayload,
+    TicketVerificationFailedPayload, TicketVerifiedPayload, UsageRecordedPayload,
 };
 use tm_events::{Event, EventDraft, EventLog, Payload, Tx};
 use tm_types::{
@@ -61,6 +61,7 @@ use tm_types::{
 use crate::artifact::{Artifact, ArtifactKind, ArtifactStorage, Evidence, EvidenceKind};
 use crate::budget::{BudgetLedger, BudgetScope, ScopedBudget};
 use crate::decision::Decision;
+use crate::effect::{Effect, EffectGuard, EffectKey, EffectStatus};
 use crate::graph::{DependencyEdge, DependencyGraph};
 use crate::lease::{Lease, LeaseStore, LeaseView};
 use crate::machine;
@@ -1556,6 +1557,149 @@ impl Store {
             (Ok(events), None) => Ok(events),
             (Err(e), _) => Err(e),
         }
+    }
+
+    /// Read the current materialized `effects` row for `key`, if any (`SPEC.md` §21.5).
+    pub fn effect_status(&self, key: &EffectKey) -> tm_types::Result<Option<Effect>> {
+        let conn = tm_events::schema::open_read_connection(self.log.path())?;
+        let row = conn.query_row(
+            "SELECT key, ticket, attempt, kind, status, receipt_artifact, started, completed
+             FROM effects WHERE key = ?1",
+            rusqlite::params![key.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                ))
+            },
+        );
+        match row {
+            Ok((key_s, ticket_s, attempt, kind, status, receipt, started, completed)) => {
+                let ticket: TicketId = ticket_s
+                    .parse()
+                    .map_err(|e| TmError::storage(format!("corrupt effects.ticket: {e}")))?;
+                let status = EffectStatus::parse(&status)?;
+                let started = Timestamp::parse_rfc3339(&started)
+                    .map_err(|e| TmError::storage(format!("corrupt effects.started: {e}")))?;
+                let completed = completed
+                    .map(|c| Timestamp::parse_rfc3339(&c))
+                    .transpose()
+                    .map_err(|e| TmError::storage(format!("corrupt effects.completed: {e}")))?;
+                Ok(Some(Effect {
+                    key: EffectKey::from_hex(key_s),
+                    ticket,
+                    attempt: attempt as u32,
+                    kind,
+                    status,
+                    receipt_artifact: receipt,
+                    started,
+                    completed,
+                }))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(storage_err(e)),
+        }
+    }
+
+    /// Journal-first idempotent-effect guard (`SPEC.md` §21.5): look up `key`'s current
+    /// `effects` row before doing anything else.
+    ///
+    /// * No row exists: writes a fresh `effect.journaled` event/row and returns a guard with
+    ///   neither [`EffectGuard::already_completed`] nor [`EffectGuard::resumed`] set — the caller
+    ///   should perform the effect and call [`EffectGuard::complete`].
+    /// * A `completed` row exists: writes nothing (the whole point — a completed effect is never
+    ///   re-journaled) and returns a guard with [`EffectGuard::already_completed`] set, carrying
+    ///   the prior receipt. The caller must not repeat the effect.
+    /// * A `journaled`/`failed` row exists (an earlier attempt began this exact effect and never
+    ///   reached `completed`): writes nothing and returns a guard with only
+    ///   [`EffectGuard::resumed`] set. The caller should try its effect kind's `confirm()`-shaped
+    ///   recovery probe before deciding whether to re-run.
+    pub fn begin_effect(
+        &self,
+        key: EffectKey,
+        ticket: TicketId,
+        attempt: u32,
+        kind: impl Into<String>,
+        actor: ParticipantId,
+    ) -> tm_types::Result<EffectGuard> {
+        let kind = kind.into();
+        if let Some(existing) = self.effect_status(&key)? {
+            return Ok(match existing.status {
+                EffectStatus::Completed => EffectGuard::new(
+                    key,
+                    ticket,
+                    attempt,
+                    kind,
+                    actor,
+                    true,
+                    true,
+                    existing.receipt_artifact,
+                ),
+                EffectStatus::Journaled | EffectStatus::Failed => {
+                    EffectGuard::new(key, ticket, attempt, kind, actor, false, true, None)
+                }
+            });
+        }
+        self.append(vec![EventDraft::new(
+            actor.clone(),
+            Id::from(ticket.clone()),
+            Payload::from(EffectJournaledPayload {
+                key: key.as_str().to_string(),
+                ticket: ticket.clone(),
+                attempt,
+                kind: kind.clone(),
+            }),
+        )])?;
+        Ok(EffectGuard::new(
+            key, ticket, attempt, kind, actor, false, false, None,
+        ))
+    }
+
+    /// Mark `key`'s effect completed. Called only from [`EffectGuard::complete`], which already
+    /// guards against calling this on an already-completed effect.
+    pub(crate) fn complete_effect(
+        &self,
+        key: &EffectKey,
+        ticket: &TicketId,
+        receipt_artifact: Option<&str>,
+        actor: ParticipantId,
+    ) -> tm_types::Result<()> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(ticket.clone()),
+            Payload::from(EffectCompletedPayload {
+                key: key.as_str().to_string(),
+                ticket: ticket.clone(),
+                receipt_artifact: receipt_artifact.map(str::to_string),
+            }),
+        )])?;
+        Ok(())
+    }
+
+    /// Mark `key`'s effect failed. Called only from [`EffectGuard::fail`].
+    pub(crate) fn fail_effect(
+        &self,
+        key: &EffectKey,
+        ticket: &TicketId,
+        reason: &str,
+        actor: ParticipantId,
+    ) -> tm_types::Result<()> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(ticket.clone()),
+            Payload::from(EffectFailedPayload {
+                key: key.as_str().to_string(),
+                ticket: ticket.clone(),
+                reason: reason.to_string(),
+            }),
+        )])?;
+        Ok(())
     }
 
     /// The full project view, assembled from materialized state.
@@ -3204,5 +3348,215 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].kind, tm_events::EventKind::CommandStarted);
         assert_eq!(events[1].kind, tm_events::EventKind::CommandCompleted);
+    }
+
+    // ---- Store::begin_effect / EffectGuard (SPEC.md §21.5, audit B-11) --------------------
+
+    #[test]
+    fn begin_effect_on_an_unseen_key_journals_and_returns_a_fresh_guard() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        let key = EffectKey::compute(&ticket, 0, "git.push", "abc");
+
+        let guard = store
+            .begin_effect(key.clone(), ticket.clone(), 0, "git.push", actor())
+            .expect("begin_effect");
+
+        assert!(!guard.already_completed());
+        assert!(!guard.resumed());
+        assert_eq!(guard.key(), &key);
+
+        let row = store
+            .effect_status(&key)
+            .expect("effect_status")
+            .expect("row exists");
+        assert_eq!(row.status, EffectStatus::Journaled);
+        assert_eq!(row.ticket, ticket);
+        assert_eq!(row.attempt, 0);
+        assert_eq!(row.kind, "git.push");
+        assert!(row.receipt_artifact.is_none());
+        assert!(row.completed.is_none());
+    }
+
+    #[test]
+    fn complete_marks_the_row_completed_with_the_receipt() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        let key = EffectKey::compute(&ticket, 0, "git.push", "abc");
+
+        let guard = store
+            .begin_effect(key.clone(), ticket.clone(), 0, "git.push", actor())
+            .expect("begin_effect");
+        guard
+            .complete(&store, Some("refs/heads/main@deadbeef"))
+            .expect("complete");
+
+        let row = store
+            .effect_status(&key)
+            .expect("effect_status")
+            .expect("row exists");
+        assert_eq!(row.status, EffectStatus::Completed);
+        assert_eq!(
+            row.receipt_artifact.as_deref(),
+            Some("refs/heads/main@deadbeef")
+        );
+        assert!(row.completed.is_some());
+    }
+
+    #[test]
+    fn begin_effect_on_a_completed_key_does_not_repeat_and_returns_the_prior_receipt() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        let key = EffectKey::compute(&ticket, 0, "git.push", "abc");
+
+        let first = store
+            .begin_effect(key.clone(), ticket.clone(), 0, "git.push", actor())
+            .expect("begin_effect first");
+        first.complete(&store, Some("receipt-1")).expect("complete");
+
+        // A second `begin_effect` for the *exact same key* (same ticket/attempt/kind/args) must
+        // not journal a new attempt -- this is the actual idempotency guarantee B-11 asks for.
+        let second = store
+            .begin_effect(key.clone(), ticket.clone(), 0, "git.push", actor())
+            .expect("begin_effect second");
+        assert!(second.already_completed());
+        assert!(second.resumed());
+        assert_eq!(second.prior_receipt(), Some("receipt-1"));
+
+        // Calling `complete` again on the second guard must be a harmless no-op, not overwrite
+        // the original receipt.
+        second
+            .complete(&store, Some("receipt-2-should-be-ignored"))
+            .expect("complete is a no-op on an already-completed guard");
+        let row = store
+            .effect_status(&key)
+            .expect("effect_status")
+            .expect("row exists");
+        assert_eq!(row.receipt_artifact.as_deref(), Some("receipt-1"));
+    }
+
+    #[test]
+    fn begin_effect_on_a_journaled_but_uncompleted_key_reports_resumed_without_re_journaling() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        let key = EffectKey::compute(&ticket, 0, "git.push", "abc");
+
+        // Simulates a crash: the effect was journaled but the process died before `complete` was
+        // ever called.
+        let first = store
+            .begin_effect(key.clone(), ticket.clone(), 0, "git.push", actor())
+            .expect("begin_effect first");
+        drop(first); // never completed
+
+        let resumed_guard = store
+            .begin_effect(key.clone(), ticket.clone(), 0, "git.push", actor())
+            .expect("begin_effect on resume");
+        assert!(!resumed_guard.already_completed());
+        assert!(resumed_guard.resumed());
+        assert_eq!(resumed_guard.prior_receipt(), None);
+
+        // Still only one `effects` row for this key -- re-beginning does not fork the journal.
+        let view_conn =
+            tm_events::schema::open_read_connection(store.log.path()).expect("read connection");
+        let count: i64 = view_conn
+            .query_row(
+                "SELECT COUNT(*) FROM effects WHERE key = ?1",
+                rusqlite::params![key.as_str()],
+                |r| r.get(0),
+            )
+            .expect("count effects rows");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn different_ticket_attempt_kind_or_args_produce_independent_effects() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+
+        let key_a = EffectKey::compute(&ticket, 0, "git.push", "abc");
+        let key_b = EffectKey::compute(&ticket, 1, "git.push", "abc"); // different attempt
+        assert_ne!(key_a, key_b);
+
+        store
+            .begin_effect(key_a.clone(), ticket.clone(), 0, "git.push", actor())
+            .expect("begin_effect a")
+            .complete(&store, Some("receipt-a"))
+            .expect("complete a");
+
+        // A different attempt of the *same* ticket/kind/args is a wholly independent effect: it
+        // must not see attempt 0's completion.
+        let guard_b = store
+            .begin_effect(key_b.clone(), ticket.clone(), 1, "git.push", actor())
+            .expect("begin_effect b");
+        assert!(!guard_b.already_completed());
+        assert!(!guard_b.resumed());
+    }
+
+    #[test]
+    fn fail_marks_the_row_failed_and_a_later_begin_effect_reports_resumed() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        let key = EffectKey::compute(&ticket, 0, "mirror.push:github", "hash-1");
+
+        let guard = store
+            .begin_effect(
+                key.clone(),
+                ticket.clone(),
+                0,
+                "mirror.push:github",
+                actor(),
+            )
+            .expect("begin_effect");
+        guard.fail(&store, "github returned 503").expect("fail");
+
+        let row = store
+            .effect_status(&key)
+            .expect("effect_status")
+            .expect("row exists");
+        assert_eq!(row.status, EffectStatus::Failed);
+
+        // Failed is not terminal like Completed: a later attempt at the identical effect is
+        // allowed to retry.
+        let retry_guard = store
+            .begin_effect(
+                key.clone(),
+                ticket.clone(),
+                0,
+                "mirror.push:github",
+                actor(),
+            )
+            .expect("begin_effect retry");
+        assert!(!retry_guard.already_completed());
+        assert!(retry_guard.resumed());
+    }
+
+    #[test]
+    fn effect_status_survives_rebuild() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        let key = EffectKey::compute(&ticket, 0, "git.push", "abc");
+
+        store
+            .begin_effect(key.clone(), ticket.clone(), 0, "git.push", actor())
+            .expect("begin_effect")
+            .complete(&store, Some("receipt-1"))
+            .expect("complete");
+
+        store.rebuild().expect("rebuild");
+
+        let row = store
+            .effect_status(&key)
+            .expect("effect_status after rebuild")
+            .expect("row survives rebuild");
+        assert_eq!(row.status, EffectStatus::Completed);
+        assert_eq!(row.receipt_artifact.as_deref(), Some("receipt-1"));
+    }
+
+    #[test]
+    fn effect_status_returns_none_for_an_unknown_key() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        let key = EffectKey::compute(&ticket, 0, "git.push", "never-begun");
+        assert!(store.effect_status(&key).expect("effect_status").is_none());
     }
 }

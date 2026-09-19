@@ -15,6 +15,12 @@
 //!
 //! Wire shaping and response parsing are pure functions, unit-tested here against recorded JSON.
 //! Network calls are test-doubled; no live API calls are made.
+//!
+//! `push`/`pull` are test-doubled stubs, not live effects yet (see `push`'s own doc comment), so
+//! [`crate::tracker::Tracker::confirm`]'s default `Ok(None)` is inherited as-is rather than
+//! overridden (`SPEC.md` §21.5, audit B-11): there is nothing live to confirm against. Once the
+//! live transport lands, `confirm` should search by the `tm-id:<ticket>` label the same way
+//! [`crate::github::GitHubTracker::confirm`]/[`crate::linear::LinearTracker::confirm`] do.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
