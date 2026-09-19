@@ -51,7 +51,7 @@ pub use machine::{InvalidTransition, TransitionTable};
 pub use materialize::{apply, replay};
 pub use milestone::{Milestone, MilestoneState, MilestoneStore};
 pub use schema::drop_views;
-pub use store::Store;
+pub use store::{MirrorSyncDirection, Store, StoreTx};
 pub use ticket::{
     ContextRef, DependencyKind, ExecutorRequirements, FailureClass, FailureRecord, ResourceClaim,
     ResourceMode, RetryPolicy, Ticket, TicketKind, TicketState, Trigger, VerificationPolicy,
