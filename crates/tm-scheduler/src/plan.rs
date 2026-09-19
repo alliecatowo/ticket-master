@@ -399,6 +399,73 @@ mod tests {
         );
     }
 
+    // SPEC.md §16 item 4: scheduler determinism as a property, generalizing the two fixed-example
+    // tests above (`identical_inputs_produce_identical_output`,
+    // `shuffled_ticket_insertion_order_does_not_change_plan_output`) across randomized ticket
+    // counts, ids, roles, priorities and insertion orders rather than one hand-picked case each.
+    mod determinism_props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(64))]
+
+            /// `plan()` is pure (same view twice yields the same actions) and its output does not
+            /// depend on the order `SchedulerView.tickets` was built from, only on ticket identity
+            /// and content — the guarantee `plan.rs`'s module docs promise by construction via
+            /// `BTreeMap`/sorted-`Vec` internals, checked here against inputs a hand-written
+            /// example wouldn't think to try.
+            #[test]
+            fn plan_is_pure_and_order_independent(
+                specs in proptest::collection::vec(
+                    (1u32..1000, 0usize..Role::ALL.len(), 0i32..10, 0u32..1000),
+                    1..8,
+                ),
+            ) {
+                let mut seen = BTreeSet::new();
+                let mut tickets: Vec<(Ticket, u32)> = Vec::new();
+                for (id_n, role_idx, priority, shuffle_key) in &specs {
+                    let id = format!("T-{id_n}");
+                    if !seen.insert(id.clone()) {
+                        continue;
+                    }
+                    let mut t = base_ticket(&id, TicketState::Ready);
+                    t.executor.role = Role::ALL[*role_idx];
+                    t.priority = *priority;
+                    tickets.push((t, *shuffle_key));
+                }
+                prop_assume!(!tickets.is_empty());
+
+                let forward: Vec<Ticket> = tickets.iter().map(|(t, _)| t.clone()).collect();
+                let mut shuffled = tickets.clone();
+                shuffled.sort_by_key(|(_, key)| *key);
+                let shuffled: Vec<Ticket> = shuffled.into_iter().map(|(t, _)| t).collect();
+
+                let tids: Vec<TicketId> = forward.iter().map(|t| t.id.clone()).collect();
+                let graph = DependencyGraph::build(tids, vec![], vec![]);
+
+                let mut policy = SchedulingPolicy::conservative_default();
+                policy.available_roles = Role::ALL.iter().copied().collect();
+
+                let view_forward = view_of(forward, graph.clone());
+                let view_shuffled = view_of(shuffled, graph);
+
+                let a1 = plan(&view_forward, Timestamp::EPOCH, &policy);
+                let a2 = plan(&view_forward, Timestamp::EPOCH, &policy);
+                prop_assert_eq!(
+                    &a1, &a2,
+                    "plan() must be pure: calling it twice on the same view produced different output"
+                );
+
+                let b = plan(&view_shuffled, Timestamp::EPOCH, &policy);
+                prop_assert_eq!(
+                    a1, b,
+                    "plan() output must not depend on ticket insertion order"
+                );
+            }
+        }
+    }
+
     #[test]
     fn blocked_ticket_with_closed_dependency_becomes_ready() {
         let graph = DependencyGraph::build(

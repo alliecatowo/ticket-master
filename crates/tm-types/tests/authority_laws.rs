@@ -347,4 +347,63 @@ proptest! {
             }
         }
     }
+
+    /// 11. Intersection is idempotent: `a.intersect(&a)` leaves every non-budget field
+    /// unchanged, and leaves the budget's *remaining* capacity unchanged even though
+    /// `Budget::intersect` documents that it resets `spent` to zero (so the limit fields
+    /// themselves collapse to whatever was remaining, not the original limit).
+    #[test]
+    fn intersect_is_idempotent(a in authority()) {
+        let i = a.intersect(&a);
+        prop_assert_eq!(&i.repository, &a.repository, "repository changed under self-intersection");
+        prop_assert_eq!(&i.git, &a.git, "git changed under self-intersection");
+        prop_assert_eq!(&i.tickets, &a.tickets, "tickets changed under self-intersection");
+        prop_assert_eq!(&i.project, &a.project, "project changed under self-intersection");
+        prop_assert_eq!(&i.network, &a.network, "network changed under self-intersection");
+        prop_assert_eq!(&i.shell, &a.shell, "shell changed under self-intersection");
+        prop_assert_eq!(&i.resources, &a.resources, "resources changed under self-intersection");
+        prop_assert_eq!(
+            i.budget.remaining(), a.budget.remaining(),
+            "self-intersection changed remaining budget: a = {:?}, a.intersect(&a) = {:?}", a, i
+        );
+    }
+
+    /// 12. Budget: a sequence of arbitrary spends never drives `spent` past the limit on any
+    /// component, and every refused spend in the sequence leaves the budget bit-identical to
+    /// what it was immediately before that call (no partial application, no underflow).
+    #[test]
+    fn repeated_spends_never_exceed_the_limit(
+        tokens in 0u64..1_000,
+        dollars_micros in 0u64..1_000,
+        wall_seconds in 0u64..1_000,
+        spends in proptest::collection::vec(spend(), 1..=8),
+    ) {
+        let mut b = Budget::new(tokens, dollars_micros, wall_seconds);
+        for s in spends {
+            let before = b;
+            match b.try_spend(s) {
+                Ok(()) => {
+                    prop_assert!(
+                        b.tokens == u64::MAX || b.spent.tokens <= b.tokens,
+                        "token spend exceeded the limit: before = {before:?}, spend = {s:?}, after = {b:?}"
+                    );
+                    prop_assert!(
+                        b.dollars_micros == u64::MAX || b.spent.dollars_micros <= b.dollars_micros,
+                        "dollar spend exceeded the limit: before = {before:?}, spend = {s:?}, after = {b:?}"
+                    );
+                    prop_assert!(
+                        b.wall_seconds == u64::MAX || b.spent.wall_seconds <= b.wall_seconds,
+                        "time spend exceeded the limit: before = {before:?}, spend = {s:?}, after = {b:?}"
+                    );
+                }
+                Err(_) => {
+                    prop_assert_eq!(
+                        b, before,
+                        "a refused spend in the sequence mutated the budget: before = {:?}, spend = {:?}, after = {:?}",
+                        before, s, b
+                    );
+                }
+            }
+        }
+    }
 }
