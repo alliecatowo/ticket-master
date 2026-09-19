@@ -128,6 +128,14 @@ impl AgentLoop {
         &self.budget
     }
 
+    /// The tool registry this loop dispatches through, as constructed via [`AgentLoop::new`] —
+    /// i.e. every [`tm_types::CapabilityProvider`] the caller assembled it from. Exposed so a
+    /// caller constructing the loop (e.g. `BuiltinExecutor`) can assert *which* capabilities got
+    /// registered, the same reason [`AgentLoop::authority`]/[`AgentLoop::budget`] exist.
+    pub fn tools(&self) -> &ToolRegistry {
+        &self.tools
+    }
+
     /// Run `task` to completion (or suspension), driving the provider fabric and tool registry.
     ///
     /// # Errors

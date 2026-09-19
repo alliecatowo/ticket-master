@@ -216,6 +216,14 @@ impl BrowserCapability {
     pub fn new(sessions: SessionRegistry) -> Self {
         BrowserCapability { sessions }
     }
+
+    /// Passthrough to [`SessionRegistry::close_all`] — the handle a registry's owner (e.g.
+    /// `tm_agent::executor::BuiltinExecutor::execute`) keeps a concrete `Arc<BrowserCapability>`
+    /// around for, alongside registering the same `Arc` as a `dyn CapabilityProvider`, so it can
+    /// tear every session down once its dispatched task ends without downcasting a trait object.
+    pub async fn close_all(&self) -> Result<()> {
+        self.sessions.close_all().await
+    }
 }
 
 fn wait_condition(input: &Value) -> Result<WaitCondition> {

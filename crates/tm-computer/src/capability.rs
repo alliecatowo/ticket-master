@@ -196,6 +196,13 @@ impl ComputerCapability {
     pub fn new(sessions: SessionRegistry) -> Self {
         ComputerCapability { sessions }
     }
+
+    /// Passthrough to [`SessionRegistry::close_all`] — see
+    /// `tm_browser::capability::BrowserCapability::close_all`'s doc comment for why this exists
+    /// alongside the trait-object registration rather than only on `SessionRegistry`.
+    pub async fn close_all(&self) -> Result<()> {
+        self.sessions.close_all().await
+    }
 }
 
 struct ToolSpec {
