@@ -75,8 +75,15 @@ pub enum AuthorityRequirement {
     /// Admitted iff `authority.tickets` holds the named operation.
     Ticket(TicketOp),
     /// Admitted iff `authority.network` permits reaching anything at all (docs, arbitrary, or a
-    /// nonempty allowlist).
+    /// nonempty allowlist). Covers `browser.navigate` and every other `tm-browser` tool
+    /// (`docs/audit-2026-09-18-fable.md` B-02 — see `crates/tm-browser/src/capability.rs`).
     Network,
+    /// Admitted iff `authority.computer.input` is granted (`SPEC.md` §20.5).
+    ComputerInput,
+    /// Admitted iff `authority.computer.capture` is granted (`SPEC.md` §20.5).
+    ComputerCapture,
+    /// Admitted iff `authority.computer.clipboard` is granted (`SPEC.md` §20.5).
+    ComputerClipboard,
     /// Admitted iff every inner requirement is.
     All(Vec<AuthorityRequirement>),
     /// Admitted iff at least one inner requirement is.
@@ -114,6 +121,9 @@ impl AuthorityRequirement {
                     || authority.network.arbitrary
                     || !authority.network.allowlist.is_empty()
             }
+            AuthorityRequirement::ComputerInput => authority.computer.input,
+            AuthorityRequirement::ComputerCapture => authority.computer.capture,
+            AuthorityRequirement::ComputerClipboard => authority.computer.clipboard,
             AuthorityRequirement::All(reqs) => reqs.iter().all(|r| r.admits(authority)),
             AuthorityRequirement::Any(reqs) => reqs.iter().any(|r| r.admits(authority)),
         }
@@ -285,6 +295,15 @@ mod tests {
             }
         });
         assert!(AuthorityRequirement::Network.admits(&docs));
+    }
+
+    #[test]
+    fn computer_requirements_check_the_matching_authority_field() {
+        let mut a = Authority::default();
+        a.computer.input = true;
+        assert!(AuthorityRequirement::ComputerInput.admits(&a));
+        assert!(!AuthorityRequirement::ComputerCapture.admits(&a));
+        assert!(!AuthorityRequirement::ComputerClipboard.admits(&a));
     }
 
     #[test]

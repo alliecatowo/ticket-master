@@ -181,6 +181,26 @@ impl ShellAuthority {
     }
 }
 
+/// Computer-use powers (`SPEC.md` §20.5): gates `Action::ComputerInput`/`ComputerCapture`/
+/// `ComputerClipboard`. `SPEC.md` §20.5 also says default steady-state oversight puts `input`
+/// and `clipboard` behind human approval — that escalation is [`crate::action::Oversight`]'s
+/// job, not this struct's; nothing in this workspace loads `oversight.toml` yet
+/// (`docs/audit-2026-09-18-fable.md` M-16), so today these three booleans are the whole gate: a
+/// worker either holds the power or it does not, with no separate "held but needs approval"
+/// state until M-16 wires a loader and a real effect-boundary call to `Oversight::review`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComputerAuthority {
+    /// May synthesize mouse/keyboard input into the real desktop.
+    #[serde(default)]
+    pub input: bool,
+    /// May capture the screen or an accessibility-tree snapshot.
+    #[serde(default)]
+    pub capture: bool,
+    /// May read or write the system clipboard.
+    #[serde(default)]
+    pub clipboard: bool,
+}
+
 /// Concurrency ceilings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceAuthority {
@@ -213,6 +233,9 @@ pub struct Authority {
     /// Shell reach.
     #[serde(default)]
     pub shell: ShellAuthority,
+    /// Computer-use powers.
+    #[serde(default)]
+    pub computer: ComputerAuthority,
     /// Concurrency ceilings.
     #[serde(default)]
     pub resources: ResourceAuthority,
@@ -266,6 +289,11 @@ impl Authority {
                 enabled: true,
                 allow: PatternSet::all(),
                 deny: PatternSet::empty(),
+            },
+            computer: ComputerAuthority {
+                input: true,
+                capture: true,
+                clipboard: true,
             },
             resources: ResourceAuthority {
                 max_workers: u32::MAX,
@@ -383,6 +411,17 @@ impl Authority {
                 other.network.arbitrary,
             ),
             ("shell.enabled", self.shell.enabled, other.shell.enabled),
+            ("computer.input", self.computer.input, other.computer.input),
+            (
+                "computer.capture",
+                self.computer.capture,
+                other.computer.capture,
+            ),
+            (
+                "computer.clipboard",
+                self.computer.clipboard,
+                other.computer.clipboard,
+            ),
         ] {
             if !bool_ok(p, c) {
                 out.push(format!("{name} is not held by the grantor"));
@@ -472,6 +511,11 @@ impl Authority {
                 enabled: self.shell.enabled && other.shell.enabled,
                 allow: self.shell.allow.intersect(&other.shell.allow),
                 deny: self.shell.deny.union(&other.shell.deny),
+            },
+            computer: ComputerAuthority {
+                input: self.computer.input && other.computer.input,
+                capture: self.computer.capture && other.computer.capture,
+                clipboard: self.computer.clipboard && other.computer.clipboard,
             },
             resources: ResourceAuthority {
                 max_workers: self.resources.max_workers.min(other.resources.max_workers),
@@ -595,6 +639,41 @@ impl Authority {
                         "worker ceiling {} would be exceeded",
                         self.resources.max_workers
                     ))
+                }
+            }
+            Action::BrowserNavigate { url } => {
+                // `about:`/`data:` URLs reach no network origin, so a same-page interaction
+                // tool (click/type/eval/snapshot/...) that maps to this variant with
+                // `url: "about:blank"` needs no network grant — only a real navigation to a
+                // new origin does. See this variant's doc comment.
+                if url.starts_with("about:")
+                    || url.starts_with("data:")
+                    || self.network.permits_url(url)
+                {
+                    Decision::Allow
+                } else {
+                    deny(format!("no network authority for {url}"))
+                }
+            }
+            Action::ComputerInput => {
+                if self.computer.input {
+                    Decision::Allow
+                } else {
+                    deny("no computer.input authority".to_string())
+                }
+            }
+            Action::ComputerCapture => {
+                if self.computer.capture {
+                    Decision::Allow
+                } else {
+                    deny("no computer.capture authority".to_string())
+                }
+            }
+            Action::ComputerClipboard => {
+                if self.computer.clipboard {
+                    Decision::Allow
+                } else {
+                    deny("no computer.clipboard authority".to_string())
                 }
             }
         }
@@ -814,6 +893,63 @@ mod tests {
             .is_allowed());
         assert!(a.permits(&Action::SpawnWorker { live: 4 }).is_allowed());
         assert!(!a.permits(&Action::SpawnWorker { live: 5 }).is_allowed());
+    }
+
+    #[test]
+    fn browser_navigate_is_host_scoped_like_net_fetch() {
+        let a = scoped();
+        assert!(!a
+            .permits(&Action::BrowserNavigate {
+                url: "https://evil.example/x".into()
+            })
+            .is_allowed());
+
+        let mut b = Authority::none();
+        b.network.allowlist.insert("localhost".into());
+        assert!(b
+            .permits(&Action::BrowserNavigate {
+                url: "http://localhost:7777/".into()
+            })
+            .is_allowed());
+        assert!(!b
+            .permits(&Action::BrowserNavigate {
+                url: "https://open-internet.example/".into()
+            })
+            .is_allowed());
+    }
+
+    #[test]
+    fn browser_navigate_about_blank_needs_no_network_grant() {
+        let a = Authority::none();
+        assert!(a
+            .permits(&Action::BrowserNavigate {
+                url: "about:blank".into()
+            })
+            .is_allowed());
+    }
+
+    #[test]
+    fn computer_actions_are_gated_by_the_matching_authority_field() {
+        let none = Authority::none();
+        assert!(!none.permits(&Action::ComputerInput).is_allowed());
+        assert!(!none.permits(&Action::ComputerCapture).is_allowed());
+        assert!(!none.permits(&Action::ComputerClipboard).is_allowed());
+
+        let mut granted = Authority::none();
+        granted.computer.input = true;
+        assert!(granted.permits(&Action::ComputerInput).is_allowed());
+        assert!(!granted.permits(&Action::ComputerCapture).is_allowed());
+        assert!(!granted.permits(&Action::ComputerClipboard).is_allowed());
+
+        assert!(Authority::root()
+            .permits(&Action::ComputerInput)
+            .is_allowed());
+        assert!(Authority::root()
+            .permits(&Action::ComputerCapture)
+            .is_allowed());
+        assert!(Authority::root()
+            .permits(&Action::ComputerClipboard)
+            .is_allowed());
     }
 
     #[test]

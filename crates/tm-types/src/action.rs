@@ -56,6 +56,33 @@ pub enum Action {
         /// How many workers would then be live under this authority.
         live: u32,
     },
+    /// Navigate a browser session to a URL (`SPEC.md` §19.4). Gated by the same
+    /// `Authority.network` mechanism [`Action::NetFetch`] uses — browser navigation and network
+    /// fetch are the same authority concern (`NetworkAuthority::permits_url`) — with one
+    /// carve-out: `about:`/`data:` URLs reach no network origin at all, so they need no network
+    /// grant. `docs/audit-2026-09-18-fable.md` B-02: every non-navigate `tm-browser` tool
+    /// (click/type/eval/snapshot/...) also maps to this variant with an `about:blank` url, since
+    /// those tools act on a page whose origin was already checked when `navigate` put the
+    /// session there, and `to_action` is a pure function of `(tool, input)` with no session
+    /// state to consult for "what origin is this session currently on". See
+    /// `crates/tm-browser/src/capability.rs` for exactly which tools take which path.
+    BrowserNavigate {
+        /// The absolute URL being navigated to, or `"about:blank"` for a same-page interaction
+        /// tool that reaches no new origin.
+        url: String,
+    },
+    /// Synthesize mouse/keyboard input into the real desktop (`SPEC.md` §20.5). Gated by
+    /// `Authority.computer.input`. §20.5's default steady-state oversight puts this behind
+    /// approval; `oversight.toml` loading (audit M-16) is not implemented yet, so today this
+    /// gates admission only — the approval escalation itself is future work.
+    ComputerInput,
+    /// Capture the desktop: a screenshot or an accessibility-tree snapshot (`SPEC.md` §20.5).
+    /// Gated by `Authority.computer.capture`.
+    ComputerCapture,
+    /// Read or write the system clipboard (`SPEC.md` §20.5). Gated by
+    /// `Authority.computer.clipboard`. Same M-16 caveat as [`Action::ComputerInput`]: default
+    /// oversight is supposed to put this behind approval, but there is no oversight loader yet.
+    ComputerClipboard,
 }
 
 /// Git operations, ordered by blast radius.
@@ -123,6 +150,10 @@ impl Action {
             Action::Project { op } => format!("project.{}", op.as_str()),
             Action::Spend { .. } => "budget.spend".into(),
             Action::SpawnWorker { .. } => "resources.spawn_worker".into(),
+            Action::BrowserNavigate { .. } => "browser.navigate".into(),
+            Action::ComputerInput => "computer.input".into(),
+            Action::ComputerCapture => "computer.capture".into(),
+            Action::ComputerClipboard => "computer.clipboard".into(),
         }
     }
 }
@@ -206,6 +237,12 @@ impl Oversight {
     }
 
     /// The default steady-state policy: irreversible or outward-facing actions ask first.
+    ///
+    /// `computer.input`/`computer.clipboard` are here per `SPEC.md` §20.5 ("an agent that can
+    /// synthesize keystrokes into whatever window has focus is strictly more dangerous than one
+    /// that can write files inside a scoped path"), but nothing in this workspace loads
+    /// `oversight.toml` or calls [`Oversight::review`] at a real effect boundary yet
+    /// (`docs/audit-2026-09-18-fable.md` M-16) — this policy is exercised only by tests today.
     pub fn conservative() -> Self {
         Oversight {
             approval_required: [
@@ -214,6 +251,8 @@ impl Oversight {
                 "git.force_push",
                 "project",
                 "tickets.reopen",
+                "computer.input",
+                "computer.clipboard",
             ]
             .into_iter()
             .map(String::from)
@@ -277,6 +316,33 @@ mod tests {
             }
             .class(),
             "project.close_milestone"
+        );
+        assert_eq!(
+            Action::BrowserNavigate {
+                url: "https://example.com".into()
+            }
+            .class(),
+            "browser.navigate"
+        );
+        assert_eq!(Action::ComputerInput.class(), "computer.input");
+        assert_eq!(Action::ComputerCapture.class(), "computer.capture");
+        assert_eq!(Action::ComputerClipboard.class(), "computer.clipboard");
+    }
+
+    #[test]
+    fn conservative_oversight_escalates_computer_input_and_clipboard() {
+        let o = Oversight::conservative();
+        assert!(matches!(
+            o.review(&Action::ComputerInput, Decision::Allow),
+            Decision::NeedsApproval(_)
+        ));
+        assert!(matches!(
+            o.review(&Action::ComputerClipboard, Decision::Allow),
+            Decision::NeedsApproval(_)
+        ));
+        assert_eq!(
+            o.review(&Action::ComputerCapture, Decision::Allow),
+            Decision::Allow
         );
     }
 
