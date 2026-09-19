@@ -267,6 +267,89 @@ pub struct ToolSpec {
     pub to_action: fn(&serde_json::Value) -> Result<Action>,
 }
 
+impl ToolSpec {
+    /// Whether `authority` could possibly permit *any* call to this tool, admitting it into a
+    /// request's tool surface or not (`SPEC.md` §30.1: "A ticket whose authority disallows
+    /// shell does not receive shell tool definitions — not a disabled tool ... no schema in the
+    /// context at all").
+    ///
+    /// This is a **structural, argument-independent** approximation of [`Authority::permits`]:
+    /// at listing time there is no call input yet (a tool's `to_action` needs real arguments,
+    /// e.g. a path, that don't exist until the model actually calls it), so this classifies each
+    /// [`ToolName`] statically by the slice of `authority` it could ever exercise, rather than
+    /// simulating a call. [`ToolRegistry::dispatch`]'s `Authority::permits` check is what
+    /// actually enforces the boundary per call; this function only decides what's worth
+    /// advertising, and is deliberately permissive within a tool's structural bucket (e.g. any
+    /// nonempty `repository.write` pattern admits every write-shaped tool, even one whose
+    /// specific call later gets denied for touching a path outside that pattern).
+    pub fn required_by(&self, authority: &Authority) -> bool {
+        match self.name {
+            // Read-scoped: search, symbol and history lookups, and read-shaped fs tools all
+            // dispatch through `Action::ReadPath`.
+            ToolName::SearchSemantic
+            | ToolName::SearchExact
+            | ToolName::SearchRegex
+            | ToolName::SearchHybrid
+            | ToolName::SymbolDefinition
+            | ToolName::SymbolReferences
+            | ToolName::SymbolCallers
+            | ToolName::SymbolCallees
+            | ToolName::SymbolOutline
+            | ToolName::SymbolRenamePreview
+            | ToolName::HistoryWhy
+            | ToolName::HistorySearch
+            | ToolName::HistoryDeleted
+            | ToolName::FsRead
+            | ToolName::FsReadRange
+            | ToolName::FsList
+            | ToolName::FsStat => !authority.repository.read.is_empty(),
+
+            // Write/edit/patch: dispatch through `Action::WritePath`.
+            ToolName::EditApplyPatch
+            | ToolName::EditWriteFile
+            | ToolName::EditCreateFile
+            | ToolName::EditDeleteFile => !authority.repository.write.is_empty(),
+
+            // shell.run-shaped: `shell.run`/`shell.query_output`/`test.run`/`build.run` map
+            // through `action_run_argv`, and `git.status`/`git.diff`/`git.log` map through their
+            // own `action_git_*` helpers — but all of them produce `Action::RunCommand`, not
+            // `Action::Git`, so they're gated by shell authority at dispatch time too (see the
+            // module doc comment on the `git.worktree`/`GitOp::Branch` gap for the same pattern
+            // applied to a different action). They belong in this bucket, not the git one below.
+            ToolName::ShellRun
+            | ToolName::ShellQueryOutput
+            | ToolName::GitStatus
+            | ToolName::GitDiff
+            | ToolName::GitLog
+            | ToolName::TestRun
+            | ToolName::BuildRun => authority.shell.enabled && !authority.shell.allow.is_empty(),
+
+            // Per-op git: `git.commit` maps to `Action::Git { op: Commit }`.
+            ToolName::GitCommit => authority.git.commit,
+            // `git.branch` and `git.worktree` both map to `Action::Git { op: Branch }` (see the
+            // module doc comment: `git.worktree` has no dedicated `GitOp`).
+            ToolName::GitBranch | ToolName::GitWorktree => authority.git.branch,
+
+            // Per-op ticket powers.
+            ToolName::TicketCreateChild => authority.tickets.create_children,
+            // `ticket.delegate` and `ask.human` both map to `Action::Ticket { op: Delegate }`
+            // (see `action_ask_human`'s doc comment: asking a human hands off control the same
+            // way delegating a child ticket does).
+            ToolName::TicketDelegate | ToolName::AskHuman => authority.tickets.delegate_children,
+            // `ticket.submit`, `ticket.comment`, `decision.record`, `artifact.store` and
+            // `evidence.attach` are all gated under `TicketOp::ModifySibling` at dispatch time
+            // (see the module doc comment on the closed `Action`/`TicketOp` vocabulary); mirror
+            // that same grouping here rather than inventing a finer split dispatch doesn't
+            // actually enforce.
+            ToolName::TicketSubmit
+            | ToolName::TicketComment
+            | ToolName::DecisionRecord
+            | ToolName::ArtifactStore
+            | ToolName::EvidenceAttach => authority.tickets.modify_siblings,
+        }
+    }
+}
+
 /// The full catalog of tools an [`crate::agent_loop::AgentLoop`] offers a provider.
 pub struct ToolRegistry {
     specs: BTreeMap<ToolName, ToolSpec>,
@@ -1119,6 +1202,41 @@ impl ToolRegistry {
                 name: spec.name.as_str().to_string(),
                 description: spec.description.to_string(),
                 input_schema: spec.input_schema.clone(),
+            })
+            .collect()
+    }
+
+    /// [`ToolRegistry::tool_defs`], admitted by authority rather than availability
+    /// (`SPEC.md` §30.1): only specs whose [`ToolSpec::required_by`] holds for `authority` are
+    /// rendered, so a tool a ticket's authority structurally cannot exercise never appears in
+    /// the request's tool surface at all — not merely a disabled tool that would answer
+    /// `Authority::permits` with a denial at dispatch time.
+    pub fn tool_defs_for(&self, authority: &Authority) -> Vec<tm_provider::ToolDef> {
+        self.specs
+            .values()
+            .filter(|spec| spec.required_by(authority))
+            .map(|spec| tm_provider::ToolDef {
+                name: spec.name.as_str().to_string(),
+                description: spec.description.to_string(),
+                input_schema: spec.input_schema.clone(),
+            })
+            .collect()
+    }
+
+    /// The per-tool byte/token cost of exactly the tool surface [`ToolRegistry::tool_defs_for`]
+    /// would send for `authority` (`SPEC.md` §30.2): the ecosystem-survey cost the section opens
+    /// with — a dozen connected MCP servers' worth of schemas paid on every turn — made
+    /// attributable as a line item, the same way [`tm_context::ContextPack`]'s sections are.
+    pub fn tool_surface_cost_for(&self, authority: &Authority) -> Vec<tm_context::ToolSurfaceCost> {
+        self.specs
+            .values()
+            .filter(|spec| spec.required_by(authority))
+            .map(|spec| {
+                tm_context::ToolSurfaceCost::compute(
+                    spec.name.as_str(),
+                    spec.description,
+                    &spec.input_schema,
+                )
             })
             .collect()
     }
@@ -1987,6 +2105,217 @@ mod tests {
         let defs = registry.tool_defs();
         assert_eq!(defs.len(), ToolName::ALL.len());
         assert!(defs.iter().any(|d| d.name == "fs.read"));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // SPEC.md §30.1: admit by authority, not by availability.
+    // -----------------------------------------------------------------------------------------
+
+    fn def_names(defs: &[tm_provider::ToolDef]) -> Vec<&str> {
+        defs.iter().map(|d| d.name.as_str()).collect()
+    }
+
+    #[test]
+    fn tool_defs_for_root_authority_admits_every_tool() {
+        let registry = ToolRegistry::standard();
+        let defs = registry.tool_defs_for(&Authority::root());
+        assert_eq!(defs.len(), ToolName::ALL.len());
+        for t in ToolName::ALL {
+            assert!(
+                def_names(&defs).contains(&t.as_str()),
+                "root authority should admit {}",
+                t.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn tool_defs_for_shell_disabled_omits_every_shell_shaped_tool_entirely() {
+        let mut authority = Authority::root();
+        authority.shell.enabled = false;
+        let registry = ToolRegistry::standard();
+        let defs = registry.tool_defs_for(&authority);
+        let names = def_names(&defs);
+
+        for absent in [
+            "shell.run",
+            "shell.query_output",
+            "test.run",
+            "build.run",
+            "git.status",
+            "git.diff",
+            "git.log",
+        ] {
+            assert!(
+                !names.contains(&absent),
+                "{absent} should be genuinely absent from the tool surface, not just denied, \
+                 when shell is disabled; got {names:?}"
+            );
+        }
+        // Everything outside the shell-shaped bucket is unaffected.
+        assert!(names.contains(&"fs.read"));
+        assert!(names.contains(&"edit.write_file"));
+        assert!(names.contains(&"git.commit"));
+        assert_eq!(defs.len(), ToolName::ALL.len() - 7);
+    }
+
+    #[test]
+    fn tool_defs_for_network_disabled_matches_network_enabled_since_no_tool_is_network_gated() {
+        // SPEC.md §30.1 calls out network-touching tools as a bucket, but `ToolName::ALL`
+        // currently has no tool that dispatches through `Action::NetFetch` — there is no
+        // `fetch.*`/MCP-shaped tool in the §11 catalog yet. This asserts the true-today fact
+        // (network authority changes nothing about the admitted set) rather than fabricating a
+        // network-gated tool to exercise a bullet with nothing to gate.
+        let mut enabled = Authority::root();
+        enabled.network.docs = true;
+        enabled.network.arbitrary = true;
+
+        let mut disabled = Authority::root();
+        disabled.network.docs = false;
+        disabled.network.arbitrary = false;
+        disabled.network.allowlist.clear();
+
+        let registry = ToolRegistry::standard();
+        let with_network = registry.tool_defs_for(&enabled);
+        let without_network = registry.tool_defs_for(&disabled);
+
+        assert_eq!(with_network.len(), without_network.len());
+        assert_eq!(def_names(&with_network), def_names(&without_network));
+    }
+
+    #[test]
+    fn tool_defs_for_write_disabled_omits_every_write_shaped_tool_entirely() {
+        let mut authority = Authority::root();
+        authority.repository.write = PatternSet::empty();
+        let registry = ToolRegistry::standard();
+        let defs = registry.tool_defs_for(&authority);
+        let names = def_names(&defs);
+
+        for absent in [
+            "edit.apply_patch",
+            "edit.write_file",
+            "edit.create_file",
+            "edit.delete_file",
+        ] {
+            assert!(
+                !names.contains(&absent),
+                "{absent} should be genuinely absent from the tool surface, not just denied, \
+                 when repository.write is empty; got {names:?}"
+            );
+        }
+        assert!(names.contains(&"fs.read"));
+        assert_eq!(defs.len(), ToolName::ALL.len() - 4);
+    }
+
+    #[test]
+    fn tool_defs_for_read_disabled_omits_every_read_shaped_tool_entirely() {
+        let mut authority = Authority::root();
+        authority.repository.read = PatternSet::empty();
+        let registry = ToolRegistry::standard();
+        let defs = registry.tool_defs_for(&authority);
+        let names = def_names(&defs);
+
+        assert!(!names.contains(&"fs.read"));
+        assert!(!names.contains(&"search.exact"));
+        assert!(!names.contains(&"symbol.outline"));
+        assert!(names.contains(&"edit.write_file"));
+        assert_eq!(defs.len(), ToolName::ALL.len() - 17);
+    }
+
+    #[test]
+    fn tool_defs_for_none_authority_admits_nothing() {
+        let registry = ToolRegistry::standard();
+        let defs = registry.tool_defs_for(&Authority::none());
+        assert!(
+            defs.is_empty(),
+            "no-authority should admit zero tools, got {:?}",
+            def_names(&defs)
+        );
+    }
+
+    #[test]
+    fn filter_is_an_economy_optimization_not_a_replacement_for_dispatch_time_enforcement() {
+        // A tool can be admitted into the surface (its structural precondition holds) while a
+        // *specific* call still gets denied by `Authority::permits` at dispatch time — the
+        // filter narrows what's offered, it does not widen what's allowed.
+        let mut h = Harness::new();
+        h.authority.repository.read = PatternSet::parse(["src/**"]).unwrap();
+        let registry = ToolRegistry::standard();
+
+        let defs = registry.tool_defs_for(&h.authority);
+        assert!(
+            def_names(&defs).contains(&"fs.read"),
+            "fs.read should be admitted: repository.read is nonempty"
+        );
+
+        let outcome = registry.dispatch(
+            &call("fs.read", json!({"path": "other/secret.txt"})),
+            &mut h.ctx(),
+        );
+        assert!(
+            matches!(outcome, ToolOutcome::Denied { .. }),
+            "a path outside the authority's read scope must still be denied at dispatch, \
+             even though fs.read was admitted into the tool surface"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // SPEC.md §30.2: every layer pays rent, including the tool surface itself.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn tool_surface_cost_for_mirrors_tool_defs_for_and_is_nonzero() {
+        let registry = ToolRegistry::standard();
+        let authority = Authority::root();
+        let defs = registry.tool_defs_for(&authority);
+        let costs = registry.tool_surface_cost_for(&authority);
+
+        assert_eq!(costs.len(), defs.len());
+        let cost_names: std::collections::BTreeSet<&str> =
+            costs.iter().map(|c| c.tool.as_str()).collect();
+        for def in &defs {
+            assert!(
+                cost_names.contains(def.name.as_str()),
+                "tool_surface_cost_for is missing a cost line for {}",
+                def.name
+            );
+        }
+        for cost in &costs {
+            assert!(
+                cost.bytes > 0,
+                "{} should have a nonzero byte cost",
+                cost.tool
+            );
+            assert!(
+                cost.tokens > 0,
+                "{} should have a nonzero token cost",
+                cost.tool
+            );
+        }
+    }
+
+    #[test]
+    fn tool_surface_cost_for_shrinks_when_the_tool_surface_shrinks() {
+        let registry = ToolRegistry::standard();
+        let root_cost: usize = registry
+            .tool_surface_cost_for(&Authority::root())
+            .iter()
+            .map(|c| c.bytes)
+            .sum();
+
+        let mut scoped = Authority::root();
+        scoped.shell.enabled = false;
+        scoped.repository.write = PatternSet::empty();
+        let scoped_cost: usize = registry
+            .tool_surface_cost_for(&scoped)
+            .iter()
+            .map(|c| c.bytes)
+            .sum();
+
+        assert!(
+            scoped_cost < root_cost,
+            "a narrower authority should pay less tool-surface rent: {scoped_cost} >= {root_cost}"
+        );
     }
 
     #[test]

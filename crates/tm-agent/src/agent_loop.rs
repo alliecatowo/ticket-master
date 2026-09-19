@@ -243,7 +243,7 @@ impl AgentLoop {
             let request = CompletionRequest {
                 system: Some(rendered.system.clone()),
                 messages: messages.clone(),
-                tools: self.tools.tool_defs(),
+                tools: self.tools.tool_defs_for(&effective_authority),
                 max_tokens: MAX_TOKENS_PER_STEP,
                 temperature: Some(0.0),
                 stop_sequences: Vec::new(),
