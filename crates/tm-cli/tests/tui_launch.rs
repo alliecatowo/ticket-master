@@ -21,12 +21,17 @@ fn init_project() -> tempfile::TempDir {
 #[test]
 fn bare_tm_on_a_real_tty_launches_the_dashboard_not_the_plain_loop() {
     let project = init_project();
+    // Repo scope via `--project` never reads `$TM_HOME` (D-003's `resolve_scope` returns before
+    // consulting it), but every test spawning the real binary sets it to a tempdir regardless so
+    // none can ever accidentally touch a real developer's `~/.tm`.
+    let tm_home = tempfile::tempdir().expect("tempdir");
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_tm"));
     cmd.arg("--project");
     cmd.arg(project.path());
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    cmd.env("TM_HOME", tm_home.path());
 
     let mut pty = support::Pty::spawn(cmd, 80, 24).expect("spawn `tm` inside a pty");
 
@@ -55,10 +60,12 @@ fn bare_tm_on_a_real_tty_launches_the_dashboard_not_the_plain_loop() {
 #[test]
 fn bare_tm_with_piped_stdout_uses_the_plain_loop_not_the_tui() {
     let project = init_project();
+    let tm_home = tempfile::tempdir().expect("tempdir");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_tm"))
         .arg("--project")
         .arg(project.path())
+        .env("TM_HOME", tm_home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -91,12 +98,14 @@ fn bare_tm_with_piped_stdout_uses_the_plain_loop_not_the_tui() {
 #[test]
 fn bare_tm_with_plain_flag_uses_the_plain_loop_even_on_a_real_tty() {
     let project = init_project();
+    let tm_home = tempfile::tempdir().expect("tempdir");
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_tm"));
     cmd.arg("--project");
     cmd.arg(project.path());
     cmd.arg("--plain");
     cmd.env("TERM", "xterm-256color");
+    cmd.env("TM_HOME", tm_home.path());
 
     // `Pty::screen()` trims trailing whitespace per line (see its docs), so the prompt's
     // trailing space never survives into a line to match on; match the trimmed "tm>" instead.

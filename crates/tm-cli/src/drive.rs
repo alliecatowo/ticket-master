@@ -33,14 +33,14 @@ struct BrowserSessionState {
     active_tab: String,
 }
 
-/// Get the path to the browser session file.
-fn browser_session_file(root: &std::path::Path) -> PathBuf {
-    root.join(".tm").join("browser-session.json")
+/// Get the path to the browser session file, under `state_dir`.
+fn browser_session_file(state_dir: &std::path::Path) -> PathBuf {
+    state_dir.join("browser-session.json")
 }
 
 /// Load a persisted browser session state or return a "not found" error.
 fn load_browser_session(project: &Project) -> tm_types::Result<BrowserSessionState> {
-    let path = browser_session_file(&project.root);
+    let path = browser_session_file(&project.state_dir);
     let content = fs::read_to_string(&path)
         .map_err(|_| TmError::not_found("browser session", "run `tm browser open` first"))?;
     serde_json::from_str(&content)
@@ -49,7 +49,7 @@ fn load_browser_session(project: &Project) -> tm_types::Result<BrowserSessionSta
 
 /// Save a browser session state to disk.
 fn save_browser_session(project: &Project, state: &BrowserSessionState) -> tm_types::Result<()> {
-    let path = browser_session_file(&project.root);
+    let path = browser_session_file(&project.state_dir);
     let parent = path
         .parent()
         .ok_or_else(|| TmError::invariant("browser session path has no parent directory"))?;
@@ -317,7 +317,7 @@ pub async fn browser_screenshot(
 
     let default_out_path = {
         let now = project.clock.now();
-        project.root.join(".tm/artifacts").join(format!(
+        project.state_dir.join("artifacts").join(format!(
             "screenshot-{}.png",
             now.millis_since(tm_types::Timestamp::EPOCH)
         ))
@@ -555,10 +555,10 @@ mod tests {
     }
 
     #[test]
-    fn browser_session_file_path_under_tm_dir() {
-        let root = std::path::PathBuf::from("/tmp/project");
-        let path = browser_session_file(&root);
-        assert_eq!(path, root.join(".tm/browser-session.json"));
+    fn browser_session_file_path_under_state_dir() {
+        let state_dir = std::path::PathBuf::from("/tmp/project/.tm");
+        let path = browser_session_file(&state_dir);
+        assert_eq!(path, state_dir.join("browser-session.json"));
     }
 
     #[test]

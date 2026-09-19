@@ -9,6 +9,14 @@
 //!
 //! Bare `tm` (no subcommand) opens the interactive coding agent; `tm -p <prompt>` is its
 //! scriptable, non-interactive form. Every other invocation is one of the subcommands below.
+//!
+//! D-003: `--project` always means repo scope at that exact path (unchanged, creates-if-absent).
+//! With no `--project`, every subcommand resolves a `.tm/` above the current directory the same
+//! way it always has, but now falls back further, to a project kept entirely outside the
+//! workspace under `$TM_HOME/projects/<key>/` (see [`crate::project::resolve_scope`]) — bare `tm`
+//! may create that fallback silently; every other subcommand only ever opens it, erroring
+//! `NotFound` when nothing exists yet in either scope. `tm project show|list` inspects that
+//! resolution directly.
 
 use std::path::PathBuf;
 
@@ -58,8 +66,11 @@ pub struct GlobalOpts {
     #[arg(long, global = true)]
     pub plain: bool,
 
-    /// The project root to operate on. Defaults to walking up from the current directory for a
-    /// `.tm` directory (see [`crate::project::locate`]).
+    /// The project root to operate on: always repo scope at exactly this path, creating it if
+    /// absent (unchanged since before D-003). Defaults to resolving scope from the current
+    /// directory instead (see [`crate::project::resolve_scope`]): walking up for a `.tm`
+    /// directory (see [`crate::project::locate`]), then falling back to a project kept under
+    /// `$TM_HOME` outside the workspace.
     #[arg(long, global = true, value_name = "PATH")]
     pub project: Option<PathBuf>,
 }
@@ -166,6 +177,21 @@ pub enum Command {
     /// Drive the real desktop via `tm-computer`.
     #[command(subcommand)]
     Computer(ComputerCommand),
+
+    /// Inspect D-003 scope resolution: where a project's state lives, and every global project
+    /// `tm` has ever created under `$TM_HOME`.
+    #[command(subcommand)]
+    Project(ProjectCommand),
+}
+
+/// `tm project ...` (D-003).
+#[derive(Debug, Subcommand)]
+pub enum ProjectCommand {
+    /// Show the resolved scope for the current directory (or `--project`): repo or global,
+    /// workspace root, state directory, and whether it already exists. Creates nothing.
+    Show,
+    /// List every project `tm` has ever created under `$TM_HOME/projects/`.
+    List,
 }
 
 /// `tm init`

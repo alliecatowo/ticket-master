@@ -27,6 +27,10 @@ fn init_project() -> tempfile::TempDir {
 #[test]
 fn typing_a_prompt_into_the_tui_creates_a_real_ticket_and_shows_turn_output() {
     let project = init_project();
+    // Repo scope via `--project` never reads `$TM_HOME`, but every test spawning the real binary
+    // sets it to a tempdir regardless so none can ever accidentally touch a real developer's
+    // `~/.tm` (D-003).
+    let tm_home = tempfile::tempdir().expect("tempdir");
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_tm"));
     cmd.arg("--project");
@@ -34,6 +38,7 @@ fn typing_a_prompt_into_the_tui_creates_a_real_ticket_and_shows_turn_output() {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TM_TEST_MOCK_PROVIDER", "1");
+    cmd.env("TM_HOME", tm_home.path());
 
     let mut pty = support::Pty::spawn(cmd, 100, 30).expect("spawn `tm` inside a pty");
 

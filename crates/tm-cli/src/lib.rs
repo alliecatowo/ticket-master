@@ -11,7 +11,8 @@
 //! - [`args`] — the complete `clap` derive command tree. No execution logic lives here.
 //! - [`render`] — human/JSON rendering, color, table/tree helpers, and the `TmError`-to-exit-code
 //!   mapping.
-//! - [`project`] — locating and opening a project; `init`/`attach`/`genesis`/`status`/`doctor`.
+//! - [`project`] — locating, resolving the scope of (D-003: repo vs. global under `$TM_HOME`),
+//!   and opening a project; `init`/`attach`/`genesis`/`status`/`doctor`/`project show|list`.
 //! - [`tickets`] — the `ticket`, `dep`, `milestone`, and `decision` command groups.
 //! - [`sched`] — the `sched`, `lease`, and `run` command groups.
 //! - [`search`] — the `search`, `symbol`, and `history` command groups over `tm-codeintel`.

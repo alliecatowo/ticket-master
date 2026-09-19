@@ -86,7 +86,10 @@ pub async fn run(project: Arc<Project>) -> tm_types::Result<()> {
     let session_id = agent_session.session_id().clone();
     let agent_session = Arc::new(Mutex::new(agent_session));
 
-    let home = Home::new(ComponentId::new("tm.home"), dashboard, session_id.clone());
+    let mut home = Home::new(ComponentId::new("tm.home"), dashboard, session_id.clone());
+    // D-003: the same one-line scope note the plain loop prints once before its first prompt
+    // (`agent.rs::run_interactive`), shown here as a persistent status row instead.
+    home.set_status_line(Some(project.scope_line()));
     // Held for the runtime's whole lifetime: `App::spawn_turn` clones this into each background
     // turn it spawns. Dropping it early would close `Runtime`'s message channel and turn
     // `messages.recv()` into an immediate `RuntimeError::ChannelClosed` on the very next

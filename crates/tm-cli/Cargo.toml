@@ -34,10 +34,15 @@ tm-templates = { workspace = true }
 tm-browser = { path = "../tm-browser" }
 tm-computer = { path = "../tm-computer" }
 
-# Already pulled in transitively via tm-codeintel; used directly here (bare-`tm` auto-bootstrap in
-# project.rs) to decide whether a directory is an existing git repository with committed history
-# worth assimilating via `attach`, versus a genuinely empty one to `init` instead.
+# Already pulled in transitively via tm-codeintel; used directly here (project.rs's
+# `workspace_root_for`, D-003) to find a workspace's git toplevel via `Repository::discover`, and
+# by `tm attach`'s assimilation path.
 git2 = { workspace = true }
+
+# Already pulled in transitively via several crates (tm-core, tm-events, ...); used directly here
+# (project.rs's `global_project_key`, D-003) to derive a stable `$TM_HOME/projects/<key>/`
+# directory name from a workspace's canonical path.
+blake3 = { workspace = true }
 
 axum = { workspace = true }
 tower-http = { workspace = true, features = ["fs"] }

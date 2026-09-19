@@ -29,6 +29,11 @@ use crate::widgets_viz::stream::StreamPane;
 /// full-height text box is not needed for a single always-focused prompt line.
 const INPUT_HEIGHT: u16 = 1;
 
+/// Rows reserved at the top of the screen for [`Home::status_line`], when set. Mirrors
+/// `screens::dashboard::Dashboard`'s own `GOAL_HEIGHT` convention (and, at the bottom,
+/// [`INPUT_HEIGHT`] above): a single row is enough for one line of text.
+const STATUS_HEIGHT: u16 = 1;
+
 /// The label `Home`'s chat input field renders, doubling as the "type here" affordance a human
 /// sees the instant `tm` starts.
 const INPUT_LABEL: &str = "tm›";
@@ -37,10 +42,12 @@ const INPUT_LABEL: &str = "tm›";
 /// and a chat input bar, composed vertically.
 ///
 /// IMPL:
-/// - `render`: carve [`INPUT_HEIGHT`] rows off the bottom of `area` for `self.input`; split what
-///   remains between `self.dashboard` and `self.stream` via `split_vertical` (dashboard gets
-///   enough room to read ticket state at a glance; stream gets the larger share, since watching
-///   the agent work is this screen's main draw).
+/// - `render`: if `self.status_line` is `Some`, carve [`STATUS_HEIGHT`] rows off the *top* of
+///   `area` for it first (mirrors `screens::dashboard::Dashboard`'s own `goal` line); then carve
+///   [`INPUT_HEIGHT`] rows off the bottom of what remains for `self.input`; split what remains
+///   between `self.dashboard` and `self.stream` via `split_vertical` (dashboard gets enough room
+///   to read ticket state at a glance; stream gets the larger share, since watching the agent
+///   work is this screen's main draw).
 /// - `handle_event`: the chat input is the one component actually wired into
 ///   [`crate::component::FocusTree`]'s tab order (`focusable_children`, first entry) — see this
 ///   struct's `id()`/`focusable_children` docs for why that is what makes it focused the instant
@@ -70,11 +77,16 @@ pub struct Home {
     /// `take_submission` so pressing Enter mid-turn does not start a second, overlapping turn
     /// against the same `tm-cli::agent::AgentSession`.
     turn_running: bool,
+    /// An optional status line drawn in the top row, above the dashboard/stream split, when set
+    /// (`tm-cli`'s D-003 project-scope line, via [`Home::set_status_line`]). `tm-tui` has no
+    /// opinion on what the text means — same convention as `screens::dashboard::Dashboard`'s own
+    /// `goal` field.
+    status_line: Option<String>,
 }
 
 impl Home {
-    /// A home screen over `dashboard`'s current ticket/session state, an empty stream pane, and
-    /// an empty chat input, for turns that will be attributed to `session`.
+    /// A home screen over `dashboard`'s current ticket/session state, an empty stream pane, an
+    /// empty chat input, and no status line, for turns that will be attributed to `session`.
     pub fn new(id: ComponentId, dashboard: Dashboard, session: SessionId) -> Self {
         Home {
             id,
@@ -84,7 +96,14 @@ impl Home {
             session,
             pending_submission: None,
             turn_running: false,
+            status_line: None,
         }
+    }
+
+    /// Set (or clear, with `None`) the status line drawn in the top row, above the
+    /// dashboard/stream split.
+    pub fn set_status_line(&mut self, line: Option<String>) {
+        self.status_line = line;
     }
 
     /// Replace this screen's dashboard (fresh ticket/session rows), e.g. after `tm-cli`'s `tui.rs`
@@ -147,6 +166,21 @@ impl Component for Home {
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer, ctx: &FrameContext<'_>) {
+        if area.height == 0 {
+            return;
+        }
+        let area = match &self.status_line {
+            Some(text) => {
+                let status_height = STATUS_HEIGHT.min(area.height);
+                buf.set_stringn(area.x, area.y, text, area.width as usize, ctx.theme.muted);
+                Rect {
+                    y: area.y + status_height,
+                    height: area.height.saturating_sub(status_height),
+                    ..area
+                }
+            }
+            None => area,
+        };
         if area.height == 0 {
             return;
         }
@@ -312,10 +346,63 @@ mod tests {
         )))
     }
 
+    /// Read row `y` of `buf` back as a plain string, for asserting on rendered text — the same
+    /// convention `screens::dashboard`'s own tests use for its `goal` line.
+    fn row_text(buf: &Buffer, area: Rect, y: u16) -> String {
+        (0..area.width)
+            .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+            .collect()
+    }
+
     #[test]
     fn the_input_is_first_in_tab_order_so_it_is_focused_on_launch() {
         let home = home();
         assert_eq!(home.focusable_children().first(), Some(&home.input.id()));
+    }
+
+    #[test]
+    fn a_fresh_home_screen_has_no_status_line() {
+        let home = home();
+        let theme = Theme::default();
+        let caps = Capabilities::minimal();
+        let clock = FixedClock::epoch();
+        let context = ctx(&theme, &caps, &clock, home.input.id());
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        home.render(area, &mut buf, &context);
+
+        assert!(!row_text(&buf, area, 0).contains("project:"));
+    }
+
+    #[test]
+    fn set_status_line_draws_a_status_line_above_the_panes() {
+        let mut home = home();
+        home.set_status_line(Some("project: /tmp/foo (repo scope)".to_string()));
+        let theme = Theme::default();
+        let caps = Capabilities::minimal();
+        let clock = FixedClock::epoch();
+        let context = ctx(&theme, &caps, &clock, home.input.id());
+        let area = Rect::new(0, 0, 60, 10);
+        let mut buf = Buffer::empty(area);
+        home.render(area, &mut buf, &context);
+
+        assert!(row_text(&buf, area, 0).contains("project: /tmp/foo (repo scope)"));
+    }
+
+    #[test]
+    fn set_status_line_none_clears_a_previously_set_status_line() {
+        let mut home = home();
+        home.set_status_line(Some("temporary status".to_string()));
+        home.set_status_line(None);
+        let theme = Theme::default();
+        let caps = Capabilities::minimal();
+        let clock = FixedClock::epoch();
+        let context = ctx(&theme, &caps, &clock, home.input.id());
+        let area = Rect::new(0, 0, 40, 10);
+        let mut buf = Buffer::empty(area);
+        home.render(area, &mut buf, &context);
+
+        assert!(!row_text(&buf, area, 0).contains("temporary status"));
     }
 
     #[test]
