@@ -8,6 +8,7 @@ description = "The provider fabric: routes capability roles to concrete models u
 
 [dependencies]
 tm-types = { workspace = true }
+tm-auth = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }

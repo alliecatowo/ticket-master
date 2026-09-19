@@ -1,0 +1,22 @@
+[package]
+name = "tm-auth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Auth adapters (SPEC.md §28.2): pluggable credential resolution — API key, subscription OAuth device flow, cloud IAM, platform-ephemeral, delegated — kept out of the ~18 raw std::env::var reads scattered through tm-provider/tm-mirror/tm-server, with a Credential type that can never Serialize or print its own secret."
+
+[dependencies]
+tm-types = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tokio = { workspace = true }
+parking_lot = { workspace = true }
+
+[dev-dependencies]
+tm-core = { workspace = true }
+tm-events = { workspace = true }
+tempfile = { workspace = true }
