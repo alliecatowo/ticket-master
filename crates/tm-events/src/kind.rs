@@ -57,6 +57,8 @@ pub enum EventCategory {
     Genesis,
     /// `mirror.*`
     Mirror,
+    /// `effect.*`
+    Effect,
 }
 
 /// The closed set of event kinds a project's log may contain.
@@ -279,6 +281,18 @@ pub enum EventKind {
     /// `mirror.pulled`
     #[serde(rename = "mirror.pulled")]
     MirrorPulled,
+    /// `effect.journaled` (`SPEC.md` §21.5): an idempotency receipt journal opened for one
+    /// `(ticket, attempt, kind, canonical_args)` effect, before it runs.
+    #[serde(rename = "effect.journaled")]
+    EffectJournaled,
+    /// `effect.completed`: the journaled effect ran and its receipt was recorded.
+    #[serde(rename = "effect.completed")]
+    EffectCompleted,
+    /// `effect.failed`: the journaled effect was attempted and is known to have failed
+    /// (not "unknown" — a still-open journal with no completion event is the "unknown, crashed
+    /// mid-effect" case `confirm()`-shaped recovery probes exist for).
+    #[serde(rename = "effect.failed")]
+    EffectFailed,
 }
 
 /// Every kind, in catalogue order, for iteration in tests and diagnostics.
@@ -354,6 +368,9 @@ pub const ALL: &[EventKind] = &[
     EventKind::MirrorLinked,
     EventKind::MirrorPushed,
     EventKind::MirrorPulled,
+    EventKind::EffectJournaled,
+    EventKind::EffectCompleted,
+    EventKind::EffectFailed,
 ];
 
 impl EventKind {
@@ -435,6 +452,9 @@ impl EventKind {
             EventKind::MirrorLinked => "mirror.linked",
             EventKind::MirrorPushed => "mirror.pushed",
             EventKind::MirrorPulled => "mirror.pulled",
+            EventKind::EffectJournaled => "effect.journaled",
+            EventKind::EffectCompleted => "effect.completed",
+            EventKind::EffectFailed => "effect.failed",
         }
     }
 
@@ -507,6 +527,9 @@ impl EventKind {
             | EventKind::GenesisCompleted => EventCategory::Genesis,
             EventKind::MirrorLinked | EventKind::MirrorPushed | EventKind::MirrorPulled => {
                 EventCategory::Mirror
+            }
+            EventKind::EffectJournaled | EventKind::EffectCompleted | EventKind::EffectFailed => {
+                EventCategory::Effect
             }
         }
     }
@@ -798,6 +821,13 @@ mod tests {
     }
 
     #[test]
+    fn category_maps_effect_kinds() {
+        assert_eq!(EventKind::EffectJournaled.category(), EventCategory::Effect);
+        assert_eq!(EventKind::EffectCompleted.category(), EventCategory::Effect);
+        assert_eq!(EventKind::EffectFailed.category(), EventCategory::Effect);
+    }
+
+    #[test]
     fn is_ticket_terminal_true_for_closed() {
         assert!(EventKind::TicketClosed.is_ticket_terminal());
     }
@@ -848,8 +878,8 @@ mod tests {
 
     #[test]
     fn all_kinds_sorted_and_complete() {
-        assert_eq!(ALL.len(), 71);
+        assert_eq!(ALL.len(), 74);
         assert_eq!(ALL[0], EventKind::ProjectCreated);
-        assert_eq!(ALL[ALL.len() - 1], EventKind::MirrorPulled);
+        assert_eq!(ALL[ALL.len() - 1], EventKind::EffectFailed);
     }
 }

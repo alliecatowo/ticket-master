@@ -30,6 +30,7 @@
 pub mod artifact;
 pub mod budget;
 pub mod decision;
+pub mod effect;
 pub mod executor;
 pub mod graph;
 pub mod invariants;
@@ -45,6 +46,7 @@ pub mod view;
 pub use artifact::{Artifact, ArtifactKind, ArtifactStorage, Evidence, EvidenceKind};
 pub use budget::{BudgetLedger, BudgetScope, ExhaustedScope};
 pub use decision::{Decision, DecisionStore};
+pub use effect::{Effect, EffectGuard, EffectKey, EffectStatus};
 pub use executor::{
     sandbox_for, validate_return_scope, CostClass, ExecutionHandle, Executor, ExecutorCapabilities,
     ExecutorFailure, ExecutorOutcome, ExecutorTask, FsScope, NetPolicy, ReturnScopeViolation,

@@ -687,6 +687,61 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
                 }
             }
         }
+        EventKind::EffectJournaled => {
+            if let Some(p) = event.payload.as_effect_journaled() {
+                // Fresh journal row. `Store::begin_effect` only appends this event when no row
+                // for `key` exists yet (it checks first), so a plain `INSERT` is correct on the
+                // live path; on replay the same is true because events replay in the same total
+                // order they were appended in, so this key has never been seen before either.
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "INSERT INTO effects (key, ticket, attempt, kind, status, receipt_artifact, started, completed)
+                         VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, NULL)
+                         ON CONFLICT(key) DO UPDATE SET status = excluded.status, started = excluded.started",
+                        params![
+                            p.key,
+                            p.ticket.as_str(),
+                            p.attempt,
+                            p.kind,
+                            crate::effect::EffectStatus::Journaled.as_str(),
+                            now
+                        ],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
+        EventKind::EffectCompleted => {
+            if let Some(p) = event.payload.as_effect_completed() {
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "UPDATE effects SET status = ?2, receipt_artifact = ?3, completed = ?4
+                         WHERE key = ?1",
+                        params![
+                            p.key,
+                            crate::effect::EffectStatus::Completed.as_str(),
+                            p.receipt_artifact,
+                            now
+                        ],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
+        EventKind::EffectFailed => {
+            if let Some(p) = event.payload.as_effect_failed() {
+                // `p.reason` has nowhere to persist under `effects`' schema (no column for it,
+                // per the audit's proposed column set) — same convention as `doc.invalidated`'s
+                // dropped `reason` above; still recoverable from the raw event log.
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "UPDATE effects SET status = ?2, completed = ?3 WHERE key = ?1",
+                        params![p.key, crate::effect::EffectStatus::Failed.as_str(), now],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
         // The remaining catalogued kinds aren't part of this crate's materialized view at all
         // (authority.granted/delegated/revoked/reverted, resource.conflict_detected,
         // executor.failed, index.updated, comment/approval events, genesis.*) — no table in
@@ -1602,6 +1657,113 @@ mod tests {
                 duration_ms: 10,
             });
             assert!(apply(tx, &draft_event(2, EK::CommandCompleted, completed)).is_ok());
+        });
+    }
+
+    // ---- effect.journaled / effect.completed / effect.failed (SPEC.md §21.5, audit B-11) ---
+
+    fn ticket(s: &str) -> TicketId {
+        s.parse().unwrap()
+    }
+
+    fn effect_row(tx: &Tx<'_>, key: &str) -> (String, Option<String>, i64, bool) {
+        tx.raw()
+            .query_row(
+                "SELECT status, receipt_artifact, attempt, completed IS NOT NULL FROM effects WHERE key = ?1",
+                params![key],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn effect_journaled_inserts_a_journaled_row() {
+        with_tx(|tx| {
+            let journaled = tm_events::Payload::from(EffectJournaledPayload {
+                key: "key-1".into(),
+                ticket: ticket("T-1"),
+                attempt: 0,
+                kind: "git.push".into(),
+            });
+            apply(tx, &draft_event(1, EK::EffectJournaled, journaled)).unwrap();
+
+            let (status, receipt, attempt, completed) = effect_row(tx, "key-1");
+            assert_eq!(status, "journaled");
+            assert_eq!(receipt, None);
+            assert_eq!(attempt, 0);
+            assert!(!completed);
+        });
+    }
+
+    #[test]
+    fn effect_completed_updates_status_and_receipt() {
+        with_tx(|tx| {
+            let journaled = tm_events::Payload::from(EffectJournaledPayload {
+                key: "key-1".into(),
+                ticket: ticket("T-1"),
+                attempt: 0,
+                kind: "git.push".into(),
+            });
+            apply(tx, &draft_event(1, EK::EffectJournaled, journaled)).unwrap();
+
+            let completed = tm_events::Payload::from(EffectCompletedPayload {
+                key: "key-1".into(),
+                ticket: ticket("T-1"),
+                receipt_artifact: Some("deadbeef".into()),
+            });
+            apply(tx, &draft_event(2, EK::EffectCompleted, completed)).unwrap();
+
+            let (status, receipt, _attempt, has_completed) = effect_row(tx, "key-1");
+            assert_eq!(status, "completed");
+            assert_eq!(receipt.as_deref(), Some("deadbeef"));
+            assert!(has_completed);
+        });
+    }
+
+    #[test]
+    fn effect_failed_updates_status_without_a_receipt() {
+        with_tx(|tx| {
+            let journaled = tm_events::Payload::from(EffectJournaledPayload {
+                key: "key-1".into(),
+                ticket: ticket("T-1"),
+                attempt: 0,
+                kind: "mirror.push:github".into(),
+            });
+            apply(tx, &draft_event(1, EK::EffectJournaled, journaled)).unwrap();
+
+            let failed = tm_events::Payload::from(EffectFailedPayload {
+                key: "key-1".into(),
+                ticket: ticket("T-1"),
+                reason: "github returned 503".into(),
+            });
+            apply(tx, &draft_event(2, EK::EffectFailed, failed)).unwrap();
+
+            let (status, receipt, _attempt, has_completed) = effect_row(tx, "key-1");
+            assert_eq!(status, "failed");
+            assert_eq!(receipt, None);
+            assert!(has_completed, "failed also stamps `completed` (terminal timestamp column, not the `Completed` status)");
+        });
+    }
+
+    #[test]
+    fn effect_journaled_replay_is_idempotent_for_the_same_key() {
+        // `apply` is shared by the live path and `replay`; re-applying the same
+        // `effect.journaled` event (as replay would) must not error or duplicate the row.
+        with_tx(|tx| {
+            let journaled = tm_events::Payload::from(EffectJournaledPayload {
+                key: "key-1".into(),
+                ticket: ticket("T-1"),
+                attempt: 0,
+                kind: "git.push".into(),
+            });
+            apply(tx, &draft_event(1, EK::EffectJournaled, journaled.clone())).unwrap();
+            apply(tx, &draft_event(1, EK::EffectJournaled, journaled)).unwrap();
+
+            let count: i64 = tx
+                .raw()
+                .query_row("SELECT COUNT(*) FROM effects", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
         });
     }
 }

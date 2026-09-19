@@ -2,9 +2,10 @@
 //!
 //! Owns the schema for `tickets`, `ticket_deps`, `ticket_children`, `leases`, `resource_claims`,
 //! `decisions`, `milestones`, `artifacts`, `evidence`, `budgets`, `participants`, `sessions`,
-//! `counters`, `docs`, `doc_provenance`, `provider_usage`, `harness_epochs`, `mirror_links`, and
-//! `meta`, plus [`drop_views`] which `Store::rebuild` uses to blow away every one of these
-//! tables (never the `tm-events` `events` table itself) before replaying from `seq` 0.
+//! `counters`, `docs`, `doc_provenance`, `provider_usage`, `harness_epochs`, `mirror_links`,
+//! `effects` (`SPEC.md` §21.5, `crate::effect`), and `meta`, plus [`drop_views`] which
+//! `Store::rebuild` uses to blow away every one of these tables (never the `tm-events` `events`
+//! table itself) before replaying from `seq` 0.
 //!
 //! Every table here stores denormalized, derived state: the event log is the truth, these are a
 //! cache of it. Columns therefore favor the shapes [`crate::materialize::apply`] needs to write
@@ -261,6 +262,21 @@ pub const TABLES: &[TableDef] = &[
         ",
     },
     TableDef {
+        name: "effects",
+        create_sql: "
+            CREATE TABLE IF NOT EXISTS effects (
+                key TEXT PRIMARY KEY,
+                ticket TEXT NOT NULL,
+                attempt INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                receipt_artifact TEXT,
+                started TEXT NOT NULL,
+                completed TEXT
+            )
+        ",
+    },
+    TableDef {
         name: "meta",
         create_sql: "
             CREATE TABLE IF NOT EXISTS meta (
@@ -285,6 +301,7 @@ CREATE INDEX IF NOT EXISTS evidence_ticket_idx ON evidence (ticket);
 CREATE INDEX IF NOT EXISTS sessions_participant_idx ON sessions (participant);
 CREATE INDEX IF NOT EXISTS tickets_parent_idx ON tickets (parent);
 CREATE INDEX IF NOT EXISTS tickets_milestone_idx ON tickets (milestone);
+CREATE INDEX IF NOT EXISTS effects_ticket_idx ON effects (ticket);
 ";
 
 /// Bring `conn`'s materialized-view schema forward to [`SCHEMA_VERSION`]. Shares the
