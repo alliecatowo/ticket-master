@@ -3276,6 +3276,7 @@ name = "tm-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "proptest",
  "regex",
  "serde",
  "serde_json",
