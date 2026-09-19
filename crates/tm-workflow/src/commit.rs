@@ -48,6 +48,15 @@ pub struct CommitOutcome {
     pub version: u32,
 }
 
+/// The blake3 hex digest [`commit`] keys a workflow definition's registered version under and
+/// stamps into every expanded ticket's pin (`workflow:<name>@<content_hash>`). Exposed so a
+/// caller comparing an on-disk `.toml` against `Store::workflow_defs`' registered rows (e.g.
+/// `tm workflow show`'s drift note) hashes it the exact same way `commit` did, rather than
+/// duplicating the `blake3::hash(...).to_hex().to_string()` incantation at each call site.
+pub fn content_hash(source: &str) -> String {
+    blake3::hash(source.as_bytes()).to_hex().to_string()
+}
+
 /// Commit `proposal` (already produced by [`crate::expand::expand`] and already validated by
 /// [`tm_genesis::compile::validate_graph`] -- this function does not re-validate) to `store`.
 ///
@@ -87,7 +96,7 @@ pub fn commit(
         ));
     }
 
-    let content_hash = blake3::hash(source.as_bytes()).to_hex().to_string();
+    let content_hash = content_hash(source);
     let version =
         store.register_workflow_def(def.name.clone(), content_hash.clone(), source.to_string())?;
     let pin = format!("workflow:{}@{content_hash}", def.name);

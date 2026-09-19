@@ -465,6 +465,74 @@ mod tests {
     }
 
     #[test]
+    fn test_migrate_adds_a_new_table_to_a_database_already_on_an_older_schema_version() {
+        // Simulate a project database that was migrated by an older build of this crate, before
+        // `workflows` existed: create every table *except* `workflows`, and hand-record schema
+        // version 1 (SCHEMA_VERSION's value before B-13 bumped it to 2) directly, bypassing
+        // `migrate` so this test does not depend on whatever the constant happens to be today.
+        let path = temp_db_path("test_upgrade_adds_workflows_table");
+        let conn = rusqlite::Connection::open(&path).expect("create db");
+        for table in TABLES {
+            if table.name != "workflows" {
+                conn.execute_batch(table.create_sql).expect("create table");
+            }
+        }
+        // Deliberately not creating INDEXES_SQL here: it includes an index on `workflows`, which
+        // this setup is simulating as not-yet-existing. `migrate`'s own real run below is what
+        // exercises "creates the missing table and its index together".
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tm_core_schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )",
+        )
+        .expect("create version table");
+        conn.execute(
+            "INSERT INTO tm_core_schema_version (version, applied_at) VALUES (1, '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("record version 1");
+
+        let workflows_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workflows'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query tables before migrate");
+        assert_eq!(
+            workflows_before, 0,
+            "test setup should not have created workflows yet"
+        );
+
+        drop(conn);
+        let mut conn = rusqlite::Connection::open(&path).expect("reopen db");
+        migrate(&mut conn, &tm_types::FixedClock::epoch())
+            .expect("migrate an existing v1 database");
+
+        let workflows_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='workflows'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query tables after migrate");
+        assert_eq!(
+            workflows_after, 1,
+            "migrate should add workflows to an existing v1 database"
+        );
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM tm_core_schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query version after migrate");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
     fn test_migrate_idempotent_on_rerun() {
         let path = temp_db_path("test_idempotent");
         let mut conn = rusqlite::Connection::open(&path).expect("create db");

@@ -36,7 +36,7 @@ pub mod def;
 pub mod expand;
 pub mod template;
 
-pub use commit::{commit, ticket_has_settled, CommitOutcome};
+pub use commit::{commit, content_hash, ticket_has_settled, CommitOutcome};
 pub use def::{
     BudgetSpec, ForEach, JoinDef, JoinKind, MergeStrategy, NodeDef, ParamDef, ParamKind,
     WorkflowDef,

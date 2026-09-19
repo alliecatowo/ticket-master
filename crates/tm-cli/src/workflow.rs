@@ -84,24 +84,60 @@ pub fn dispatch_workflow(
     }
 }
 
+/// One `tm workflow list` row: either a successfully parsed definition's summary, or a
+/// discovered `.toml` that failed to parse. A single malformed definition does not hide every
+/// other, valid one -- it is surfaced as its own row instead (the same "don't abort discovery
+/// over one bad file" policy [`one_by_one_workflow_names`] follows for `tm doctor`).
+enum ListedWorkflow {
+    Ok {
+        name: String,
+        nodes: usize,
+        params: usize,
+        one_by_one: bool,
+    },
+    Unparseable {
+        name: String,
+        error: String,
+    },
+}
+
 /// `tm workflow list`
 pub fn workflow_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let mut rows = Vec::new();
     for name in discover_names(project)? {
-        let (_source, def) = load(project, &name)?;
-        rows.push((name, def.nodes.len(), def.params.len(), def.is_one_by_one()));
+        rows.push(match load(project, &name) {
+            Ok((_source, def)) => ListedWorkflow::Ok {
+                name,
+                nodes: def.nodes.len(),
+                params: def.params.len(),
+                one_by_one: def.is_one_by_one(),
+            },
+            Err(e) => ListedWorkflow::Unparseable {
+                name,
+                error: e.to_string(),
+            },
+        });
     }
 
     if renderer.is_json() {
         let out: Vec<_> = rows
             .iter()
-            .map(|(name, nodes, params, one_by_one)| {
-                serde_json::json!({
+            .map(|row| match row {
+                ListedWorkflow::Ok {
+                    name,
+                    nodes,
+                    params,
+                    one_by_one,
+                } => serde_json::json!({
                     "name": name,
                     "nodes": nodes,
                     "params": params,
                     "one_by_one": one_by_one,
-                })
+                }),
+                ListedWorkflow::Unparseable { name, error } => serde_json::json!({
+                    "name": name,
+                    "error": error,
+                }),
             })
             .collect();
         renderer.emit(&out, "")?;
@@ -114,13 +150,26 @@ pub fn workflow_list(project: &Project, renderer: &Renderer) -> tm_types::Result
                 "1X1?".to_string(),
             ],
             rows.iter()
-                .map(|(name, nodes, params, one_by_one)| {
-                    vec![
+                .map(|row| match row {
+                    ListedWorkflow::Ok {
+                        name,
+                        nodes,
+                        params,
+                        one_by_one,
+                    } => vec![
                         name.clone(),
                         nodes.to_string(),
                         params.to_string(),
                         if *one_by_one { "yes" } else { "" }.to_string(),
-                    ]
+                    ],
+                    ListedWorkflow::Unparseable { name, error } => {
+                        vec![
+                            name.clone(),
+                            "ERROR".to_string(),
+                            error.clone(),
+                            String::new(),
+                        ]
+                    }
                 })
                 .collect(),
         );
@@ -129,15 +178,74 @@ pub fn workflow_list(project: &Project, renderer: &Renderer) -> tm_types::Result
     Ok(())
 }
 
+/// The version-drift relationship between the on-disk `.toml` currently being shown and whatever
+/// this project has previously registered (via `tm workflow run`) under the same name.
+enum RegistrationDrift {
+    /// Nothing under this name has ever been registered -- `tm workflow run` has never run it.
+    NeverRun,
+    /// The on-disk content hash matches the latest registered version: nothing has drifted.
+    UpToDate { version: u32 },
+    /// The on-disk content hash matches a previously registered, non-latest version: something
+    /// else registered a newer version since (or `run` was invoked against an older on-disk copy
+    /// after this one).
+    Superseded { version: u32, latest: u32 },
+    /// The on-disk content hash matches no registered version at all: `.toml` has changed since
+    /// the last `tm workflow run` -- exactly the drift `SPEC.md` §25.2's version pin exists to
+    /// make visible rather than silently reinterpreted.
+    Changed { latest: u32 },
+}
+
+fn registration_drift(
+    project: &Project,
+    name: &str,
+    source: &str,
+) -> tm_types::Result<RegistrationDrift> {
+    let hash = tm_workflow::content_hash(source);
+    let registered = project.store.workflow_defs(Some(name))?; // newest first, per Store::workflow_defs
+    let Some(latest) = registered.first() else {
+        return Ok(RegistrationDrift::NeverRun);
+    };
+    Ok(
+        match registered.iter().find(|row| row.content_hash == hash) {
+            Some(row) if row.version == latest.version => RegistrationDrift::UpToDate {
+                version: row.version,
+            },
+            Some(row) => RegistrationDrift::Superseded {
+                version: row.version,
+                latest: latest.version,
+            },
+            None => RegistrationDrift::Changed {
+                latest: latest.version,
+            },
+        },
+    )
+}
+
 /// `tm workflow show <name>`
 pub fn workflow_show(
     args: &WorkflowShowArgs,
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
-    let (_source, def) = load(project, &args.name)?;
+    let (source, def) = load(project, &args.name)?;
+    let drift = registration_drift(project, &args.name, &source)?;
     if renderer.is_json() {
-        renderer.emit(&def, "")?;
+        let drift_json = match &drift {
+            RegistrationDrift::NeverRun => serde_json::json!({"status": "never_run"}),
+            RegistrationDrift::UpToDate { version } => {
+                serde_json::json!({"status": "up_to_date", "version": version})
+            }
+            RegistrationDrift::Superseded { version, latest } => {
+                serde_json::json!({"status": "superseded", "version": version, "latest": latest})
+            }
+            RegistrationDrift::Changed { latest } => {
+                serde_json::json!({"status": "changed_on_disk", "latest_registered": latest})
+            }
+        };
+        renderer.emit(
+            &serde_json::json!({ "definition": &def, "registration": drift_json }),
+            "",
+        )?;
     } else {
         let pretty = toml::to_string_pretty(&def)
             .map_err(|e| TmError::storage(format!("Failed to format workflow: {e}")))?;
@@ -147,6 +255,24 @@ pub fn workflow_show(
                 "\n# note: this workflow is one node wide and one node deep -- tm doctor flags \
                  this as a possible \"prompt wearing a costume\" (SPEC.md §25.3).\n",
             );
+        }
+        match drift {
+            RegistrationDrift::NeverRun => {
+                human.push_str("\n# note: this workflow has never been run in this project.\n")
+            }
+            RegistrationDrift::UpToDate { version } => human.push_str(&format!(
+                "\n# on-disk matches the latest registered version ({version}).\n"
+            )),
+            RegistrationDrift::Superseded { version, latest } => human.push_str(&format!(
+                "\n# note: on-disk matches registered version {version}, but version {latest} is \
+                 the latest registered under this name.\n"
+            )),
+            RegistrationDrift::Changed { latest } => human.push_str(&format!(
+                "\n# note: on-disk content does not match any registered version (latest \
+                 registered: {latest}) -- `.toml` changed since the last `tm workflow run`; a \
+                 currently-running instance stays pinned to the version it actually expanded \
+                 from, not to this file.\n"
+            )),
         }
         renderer.emit(&(), &human)?;
     }
@@ -240,8 +366,12 @@ pub fn one_by_one_workflow_names(project: &Project) -> Vec<String> {
     let mut flagged = Vec::new();
     for name in names {
         match load(project, &name) {
-            Ok((_source, def)) if def.is_one_by_one() => flagged.push(name),
-            _ => {}
+            Ok((_source, def)) => {
+                if def.is_one_by_one() {
+                    flagged.push(name);
+                }
+            }
+            Err(e) => flagged.push(format!("{name} (unparseable: {e})")),
         }
     }
     flagged

@@ -292,6 +292,18 @@ impl WorkflowDef {
                 }
             }
             if let Some(for_each) = &node.for_each {
+                if let ForEach::Static(items) = for_each {
+                    if items.is_empty() {
+                        return Err(TmError::invariant(format!(
+                            "workflow {:?}: node {:?}'s for_each is an empty list; an empty \
+                             Static fan-out silently produces zero tickets for this node, \
+                             leaving every node that `depends` on it unblocked as if it had \
+                             already run -- write `for_each = [\"...\"]` with at least one item, \
+                             or remove `for_each` for a node that runs once",
+                            self.name, node.id
+                        )));
+                    }
+                }
                 if let ForEach::FromOutput(raw) = for_each {
                     let Some((source_id, field)) = for_each.from_output_parts() else {
                         return Err(TmError::invariant(format!(
@@ -459,6 +471,23 @@ verification = "none"
     fn rejects_empty_node_list() {
         let err = WorkflowDef::parse("name = \"empty\"\n").unwrap_err();
         assert!(err.to_string().contains("has no nodes"));
+    }
+
+    #[test]
+    fn rejects_an_empty_static_for_each() {
+        let source = r#"
+name = "empty-fan-out"
+
+[[node]]
+id = "a"
+role = "coder_fast"
+objective = "x"
+for_each = []
+budget = { tokens = 1 }
+verification = "none"
+"#;
+        let err = WorkflowDef::parse(source).unwrap_err();
+        assert!(err.to_string().contains("empty list"));
     }
 
     #[test]
