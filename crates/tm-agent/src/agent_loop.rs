@@ -598,7 +598,17 @@ impl AgentLoop {
             // the wire, unlike the promoted `StepRecord` shape) is intentionally discarded here
             // rather than folded into `steps` — `assistant_text`/`tool_call_records` already
             // carry everything `rebuild_messages` needs to reconstruct an equivalent assistant
-            // turn on replay.
+            // turn on replay. This was already true for a resumed run before this change (a
+            // suspend/resume boundary only ever carried `steps`, never a live `messages`
+            // buffer); this only extends the same reconstruction to every turn, not just a
+            // resumed one. It is lossless for `tm_provider::ContentBlock`'s current three
+            // variants (`Text`/`ToolUse`/`ToolResult` — no `thinking`/`redacted_thinking`
+            // variant exists here), collapsing only benign, order-preserving shape: multiple
+            // `Text` blocks in one turn join with `\n` into `assistant_text`, and interleaving
+            // between `Text` and `ToolUse` blocks is not preserved (all text renders before all
+            // tool uses on reconstruction). If a `thinking`-shaped variant is ever added to
+            // `ContentBlock`, this reconstruction needs a matching field on `StepRecord`/
+            // `ToolCallRecord` before that content can survive a rebuild.
             steps.push(StepRecord {
                 index: step_index,
                 served_by,
@@ -1236,11 +1246,23 @@ mod tests {
         }
     }
 
-    /// Build the exact [`CompletionRequest`] `AgentLoop::drive` will issue for `task` against a
-    /// freshly built `AgentLoop` over `tools`/`fabric`, so a test can script
+    /// Build the exact [`CompletionRequest`] `AgentLoop::drive` will issue for `task`'s very
+    /// first turn against a freshly built `AgentLoop` over `tools`/`fabric`, so a test can script
     /// [`MockProvider::script_response`]/`script_failure` against a request guaranteed to match
     /// (`MockProvider` keys scripts by an exact hash of the serialized request).
     fn expected_request(loop_: &AgentLoop, task: &AgentTask) -> CompletionRequest {
+        expected_request_after(loop_, task, &[])
+    }
+
+    /// As [`expected_request`], but for the turn that follows `steps` already having happened —
+    /// i.e. the same request [`AgentLoop::drive`]'s loop rebuilds (via `pruning::working_set`)
+    /// once `steps` is what it has accumulated so far. Lets a multi-turn test script every turn
+    /// of a run by exact request hash, not just the first.
+    fn expected_request_after(
+        loop_: &AgentLoop,
+        task: &AgentTask,
+        steps: &[StepRecord],
+    ) -> CompletionRequest {
         let effective_authority = loop_.authority.intersect(&task.authority);
         let fragments = PromptFragments {
             system_preamble: String::new(),
@@ -1248,7 +1270,7 @@ mod tests {
             extra: BTreeMap::new(),
         };
         let rendered = crate::prompt::render(&task.ticket, &task.context_pack, &fragments);
-        let messages = rebuild_messages(&rendered.task, &[]);
+        let messages = rebuild_messages(&rendered.task, steps);
         CompletionRequest {
             system: Some(rendered.system),
             messages,
@@ -1258,6 +1280,49 @@ mod tests {
             stop_sequences: Vec::new(),
             stream: false,
             n: 1,
+        }
+    }
+
+    /// The [`tm_types::Spend`] `AgentLoop::drive` charges for one provider turn, mirroring its
+    /// `step_spend` computation exactly so a test can predict a [`StepRecord`]'s `spend` before
+    /// the real loop produces it.
+    fn step_spend_of(completion: &Completion) -> Spend {
+        Spend {
+            tokens: u64::from(completion.usage.input_tokens)
+                + u64::from(completion.usage.output_tokens)
+                + u64::from(completion.usage.cache_read_tokens)
+                + u64::from(completion.usage.cache_write_tokens),
+            dollars_micros: 0,
+            wall_seconds: completion.latency.as_secs(),
+        }
+    }
+
+    /// A scripted single-tool-call turn: the model calls `tool_name(input)` and nothing else.
+    fn tool_call_completion(
+        model: ModelId,
+        clock: &Arc<dyn Clock>,
+        tool_use_id: &str,
+        tool_name: &str,
+        input: serde_json::Value,
+    ) -> Completion {
+        Completion {
+            model,
+            candidates: vec![Candidate {
+                content: vec![ContentBlock::ToolUse {
+                    id: tool_use_id.to_string(),
+                    name: tool_name.to_string(),
+                    input,
+                }],
+                stop_reason: StopReason::ToolUse,
+            }],
+            usage: Usage {
+                input_tokens: 20,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: std::time::Duration::from_millis(0),
+            received_at: clock.now(),
         }
     }
 
@@ -1437,5 +1502,175 @@ mod tests {
         // The run still closed its session even though it never reached the provider.
         let ended = find_events(&events, EventKind::SessionEnded);
         assert_eq!(ended.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn run_prunes_a_repeated_fs_stat_by_the_third_turn() {
+        // `docs/audit-2026-09-18-fable.md` B-08, end to end: a real `AgentLoop::run` across three
+        // turns, where turn 3's *scripted* request must already contain a
+        // `[superseded by step 2]` stub in place of turn 1's `fs.stat` result. `MockProvider`
+        // matches scripts by an exact hash of the serialized request, so if the loop's own
+        // per-turn `pruning::working_set` rebuild ever disagreed with what this test predicts,
+        // turn 3 would hit an unscripted request and the run would come back `Failed` with a
+        // provider error instead of `Submitted` — the assertion at the bottom is a strong one,
+        // not just a shape check.
+        let h = LiveHarness::new();
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+        let task = h.task();
+        // A path that does not exist under this test process's CWD, so `fs.stat` completes
+        // deterministically with `exists: false` regardless of where `cargo test` runs from.
+        let stat_input = serde_json::json!({"path": "nonexistent-b08-fixture.rs"});
+        let root = project_root();
+        let effective_authority = agent_loop.authority().intersect(&task.authority);
+        let ctx = CallContext {
+            authority: &effective_authority,
+            ticket: &task.ticket,
+            session: &task.session,
+            actor: &h.actor,
+            clock: h.clock.as_ref(),
+            ids: h.ids.as_ref(),
+            root: &root,
+        };
+
+        // Turn 1: the model stats the path.
+        let turn1_request = expected_request(&agent_loop, &task);
+        let turn1_completion = tool_call_completion(
+            model.clone(),
+            &h.clock,
+            "call-1",
+            "fs.stat",
+            stat_input.clone(),
+        );
+        provider.script_response(&turn1_request, turn1_completion.clone());
+        let resolution1 = agent_loop
+            .tools()
+            .dispatch(
+                &ToolCall {
+                    id: "call-1".to_string(),
+                    name: "fs.stat".to_string(),
+                    input: stat_input.clone(),
+                },
+                &ctx,
+            )
+            .await;
+        assert!(
+            matches!(resolution1, ToolOutcome::Completed { .. }),
+            "fs.stat always completes, even for a missing path: {resolution1:?}"
+        );
+        let step1 = StepRecord {
+            index: 1,
+            served_by: model.to_string(),
+            assistant_text: None,
+            tool_calls: vec![ToolCallRecord {
+                tool_use_id: "call-1".to_string(),
+                tool_name: "fs.stat".to_string(),
+                input: stat_input.clone(),
+                resolution: resolution1,
+            }],
+            spend: step_spend_of(&turn1_completion),
+            at: h.clock.now(),
+        };
+
+        // Turn 2: the model stats the exact same path again.
+        let turn2_request =
+            expected_request_after(&agent_loop, &task, std::slice::from_ref(&step1));
+        let turn2_completion = tool_call_completion(
+            model.clone(),
+            &h.clock,
+            "call-2",
+            "fs.stat",
+            stat_input.clone(),
+        );
+        provider.script_response(&turn2_request, turn2_completion.clone());
+        let resolution2 = agent_loop
+            .tools()
+            .dispatch(
+                &ToolCall {
+                    id: "call-2".to_string(),
+                    name: "fs.stat".to_string(),
+                    input: stat_input.clone(),
+                },
+                &ctx,
+            )
+            .await;
+        let step2 = StepRecord {
+            index: 2,
+            served_by: model.to_string(),
+            assistant_text: None,
+            tool_calls: vec![ToolCallRecord {
+                tool_use_id: "call-2".to_string(),
+                tool_name: "fs.stat".to_string(),
+                input: stat_input.clone(),
+                resolution: resolution2,
+            }],
+            spend: step_spend_of(&turn2_completion),
+            at: h.clock.now(),
+        };
+
+        // Turn 3's request is the actual assertion: step 1's `fs.stat` result must already be a
+        // stub, checked directly on the request before the run ever gets to it.
+        let steps_so_far = vec![step1, step2];
+        let turn3_request = expected_request_after(&agent_loop, &task, &steps_so_far);
+        let step1_result_text = match &turn3_request.messages[2].content[0] {
+            ContentBlock::ToolResult { content, .. } => match &content[0] {
+                ContentBlock::Text { text } => text.clone(),
+                other => panic!("expected a text block, got {other:?}"),
+            },
+            other => panic!("expected a tool result, got {other:?}"),
+        };
+        assert_eq!(step1_result_text, "[superseded by step 2]");
+        // Turn 2's own result (still the latest for this key) must NOT be stubbed.
+        let step2_result_text = match &turn3_request.messages[4].content[0] {
+            ContentBlock::ToolResult { content, .. } => match &content[0] {
+                ContentBlock::Text { text } => text.clone(),
+                other => panic!("expected a text block, got {other:?}"),
+            },
+            other => panic!("expected a tool result, got {other:?}"),
+        };
+        assert_ne!(step2_result_text, "[superseded by step 2]");
+
+        // Turn 3: a plain text reply ends the run as `Failed` (no `ticket.submit` called) --
+        // `ticket.submit` itself requires a real evidence artifact and a claimed ticket, which is
+        // irrelevant setup for what this test checks (pruning across turns), so a text-only
+        // ending is the simplest terminal turn available, matching
+        // `run_records_usage_recorded_with_the_completions_actual_spend`'s idiom above.
+        let turn3_completion = text_only_completion(model.clone(), &h.clock);
+        provider.script_response(&turn3_request, turn3_completion);
+
+        let outcome = agent_loop.run(task).await.expect("run completes");
+        assert!(
+            matches!(outcome, AgentOutcome::Failed { .. }),
+            "a text-only turn 3 reply ends the run as Failed, not an infra error \
+             (and if this is a provider error instead, an earlier turn's request didn't match \
+             what was scripted -- the pruning prediction was wrong): {outcome:?}"
+        );
+        assert_eq!(
+            outcome.steps().len(),
+            3,
+            "all three turns should be recorded"
+        );
+        assert!(
+            outcome.bytes_pruned() > 0,
+            "turn 1's stale fs.stat result should count toward AgentOutcome::bytes_pruned"
+        );
     }
 }
