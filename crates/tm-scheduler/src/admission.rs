@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use tm_core::ticket::{Ticket, TicketKind, TicketState};
 use tm_core::view::SchedulerView;
-use tm_types::{Role, TicketId};
+use tm_types::{Budget, Role, TicketId};
 
 use crate::policy::SchedulingPolicy;
 use crate::select::ExecutorAvailability;
@@ -48,6 +48,15 @@ pub enum AdmissionRefusal {
     /// in-flight capacity over [`SchedulingPolicy::harness_capacity_fraction`].
     #[error("harness capacity share exceeded")]
     HarnessCapacityExceeded,
+    /// The ticket's own remaining budget, after reserving
+    /// [`SchedulingPolicy::verification_budget_reserve_fraction`] of its limit in some dimension
+    /// for the verification phase that must follow, would not even cover that reserve —
+    /// dispatching the work phase now would either strand it mid-run or leave nothing to verify
+    /// with (`SPEC.md` §31.4, `docs/audit-2026-09-18-fable.md` B-10).
+    #[error(
+        "ticket {0}'s remaining budget cannot both fund this dispatch and its verification reserve"
+    )]
+    BudgetInsufficientForVerificationReserve(TicketId),
 }
 
 /// Live in-flight counts derived from a [`SchedulerView`], the state [`AdmissionGate::check`]
@@ -144,7 +153,53 @@ impl AdmissionGate {
             ));
         }
 
+        // Gate 6: Budget, reserving a verification slice (`SPEC.md` §31.4,
+        // `docs/audit-2026-09-18-fable.md` B-10). `Budget::none()` (limit 0 in every dimension)
+        // is treated as "no budget tracking configured for this ticket" — the same sentinel
+        // meaning it already carries throughout this codebase's own test fixtures — not as "this
+        // ticket can never be dispatched"; the gate only ever refuses a ticket that was given a
+        // real, finite budget and has since spent past what its own reserve requires.
+        if let Some(refusal) = Self::budget_reserve_refusal(ticket, policy) {
+            return AdmissionDecision::Refuse(refusal);
+        }
+
         AdmissionDecision::Admit
+    }
+
+    /// [`AdmissionGate::check`]'s Gate 6: `Some` if `ticket.budget` is a real, finite budget
+    /// (not [`Budget::none`]'s "untracked" sentinel, not [`Budget::unlimited`]) whose remaining
+    /// room in some dimension has fallen to or below the verification reserve
+    /// [`SchedulingPolicy::verification_budget_reserve_fraction`] carves out of that dimension's
+    /// limit. This is deliberately conservative rather than a precise cost estimate (`tm-scheduler`
+    /// has no per-role pricing to draw on — see `tm_context::sections::build_budget` for where a
+    /// worker actually sees the tier menu): if what remains cannot even cover the reserve, it
+    /// certainly cannot cover both this dispatch's work and the verification after it.
+    fn budget_reserve_refusal(
+        ticket: &Ticket,
+        policy: &SchedulingPolicy,
+    ) -> Option<AdmissionRefusal> {
+        let budget = ticket.budget;
+        if budget == Budget::none() {
+            // No budget tracking requested for this ticket; nothing to gate on.
+            return None;
+        }
+        let remaining = budget.remaining();
+        let fraction = policy.verification_budget_reserve_fraction.clamp(0.0, 1.0);
+
+        let short = |limit: u64, remaining: u64| -> bool {
+            limit != u64::MAX && remaining <= (limit as f64 * fraction).round() as u64
+        };
+
+        if short(budget.tokens, remaining.tokens)
+            || short(budget.dollars_micros, remaining.dollars_micros)
+            || short(budget.wall_seconds, remaining.wall_seconds)
+        {
+            Some(AdmissionRefusal::BudgetInsufficientForVerificationReserve(
+                ticket.id.clone(),
+            ))
+        } else {
+            None
+        }
     }
 
     /// Record that `ticket` was admitted, so the next [`AdmissionGate::check`] call in the same
@@ -572,6 +627,129 @@ mod tests {
 
         let decision = gate.check(&ticket, &policy, &availability);
         assert_eq!(decision, AdmissionDecision::Admit);
+    }
+
+    // ---- Gate 6: budget reserve (SPEC.md §31.4, docs/audit-2026-09-18-fable.md B-10) --------
+
+    fn empty_gate() -> AdmissionGate {
+        AdmissionGate {
+            project_in_flight: 0,
+            parent_in_flight: BTreeMap::new(),
+            harness_in_flight: 0,
+            commands_in_flight: 0,
+        }
+    }
+
+    #[test]
+    fn check_admits_a_ticket_with_budget_none_untracked() {
+        // `Budget::none()` is this codebase's own "no budget tracking configured" sentinel
+        // (every other fixture in this test module uses it precisely because these tests don't
+        // care about budget) — the gate must not start refusing every ticket that never opted
+        // into budget tracking.
+        let gate = empty_gate();
+        let ticket = test_ticket("T-1", TicketKind::Work); // budget: Budget::none()
+        let policy = SchedulingPolicy::conservative_default();
+        let availability = AlwaysAvailable;
+
+        assert_eq!(
+            gate.check(&ticket, &policy, &availability),
+            AdmissionDecision::Admit
+        );
+    }
+
+    #[test]
+    fn check_admits_a_ticket_with_plenty_of_real_budget_left() {
+        let gate = empty_gate();
+        let mut ticket = test_ticket("T-1", TicketKind::Work);
+        ticket.budget = tm_types::Budget::new(1_000, 1_000, 1_000);
+        let policy = SchedulingPolicy::conservative_default();
+        let availability = AlwaysAvailable;
+
+        assert_eq!(
+            gate.check(&ticket, &policy, &availability),
+            AdmissionDecision::Admit
+        );
+    }
+
+    #[test]
+    fn check_admits_a_ticket_with_an_unlimited_budget_regardless_of_spend() {
+        let gate = empty_gate();
+        let mut ticket = test_ticket("T-1", TicketKind::Work);
+        ticket.budget = tm_types::Budget::unlimited();
+        ticket
+            .budget
+            .try_spend(tm_types::Spend::tokens(u64::MAX / 2))
+            .expect("unlimited always has room");
+        let policy = SchedulingPolicy::conservative_default();
+        let availability = AlwaysAvailable;
+
+        assert_eq!(
+            gate.check(&ticket, &policy, &availability),
+            AdmissionDecision::Admit
+        );
+    }
+
+    #[test]
+    fn check_refuses_a_ticket_whose_remaining_budget_cannot_cover_its_verification_reserve() {
+        let gate = empty_gate();
+        let mut ticket = test_ticket("T-1", TicketKind::Work);
+        // 20% conservative_default() reserve of a 1000-token limit is 200; spending 850 leaves
+        // 150 remaining, below the reserve.
+        ticket.budget = tm_types::Budget::new(1_000, u64::MAX, u64::MAX);
+        ticket
+            .budget
+            .try_spend(tm_types::Spend::tokens(850))
+            .expect("spend within the limit");
+        let policy = SchedulingPolicy::conservative_default();
+        let availability = AlwaysAvailable;
+
+        assert_eq!(
+            gate.check(&ticket, &policy, &availability),
+            AdmissionDecision::Refuse(AdmissionRefusal::BudgetInsufficientForVerificationReserve(
+                ticket.id.clone()
+            ))
+        );
+    }
+
+    #[test]
+    fn check_admits_a_ticket_right_at_the_edge_of_its_reserve_with_one_token_more() {
+        let gate = empty_gate();
+        let mut ticket = test_ticket("T-1", TicketKind::Work);
+        // Reserve is exactly 200; spending 799 leaves 201 remaining -- just clear of the
+        // reserve boundary (the gate refuses at `remaining <= reserve`, so 200 itself refuses).
+        ticket.budget = tm_types::Budget::new(1_000, u64::MAX, u64::MAX);
+        ticket
+            .budget
+            .try_spend(tm_types::Spend::tokens(799))
+            .expect("spend within the limit");
+        let policy = SchedulingPolicy::conservative_default();
+        let availability = AlwaysAvailable;
+
+        assert_eq!(
+            gate.check(&ticket, &policy, &availability),
+            AdmissionDecision::Admit
+        );
+    }
+
+    #[test]
+    fn check_a_zero_reserve_fraction_still_refuses_true_exhaustion() {
+        let gate = empty_gate();
+        let mut ticket = test_ticket("T-1", TicketKind::Work);
+        ticket.budget = tm_types::Budget::new(100, u64::MAX, u64::MAX);
+        ticket
+            .budget
+            .try_spend(tm_types::Spend::tokens(100))
+            .expect("spend the full limit");
+        let mut policy = SchedulingPolicy::conservative_default();
+        policy.verification_budget_reserve_fraction = 0.0;
+        let availability = AlwaysAvailable;
+
+        assert_eq!(
+            gate.check(&ticket, &policy, &availability),
+            AdmissionDecision::Refuse(AdmissionRefusal::BudgetInsufficientForVerificationReserve(
+                ticket.id.clone()
+            ))
+        );
     }
 
     #[test]

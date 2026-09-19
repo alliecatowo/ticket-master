@@ -142,6 +142,15 @@ pub struct SchedulingPolicy {
     /// with_max_events_per_ticket` — see that constant's doc comment for the same default value
     /// and the arithmetic behind it.
     pub max_events_per_ticket: u32,
+    /// Fraction, in `[0.0, 1.0]`, of a ticket's own `Budget` (each dimension's *limit*, not just
+    /// what remains) reserved for the verification phase that must follow its work phase
+    /// (`SPEC.md` §31.4 "reserve verification budget before dispatching work",
+    /// `docs/audit-2026-09-18-fable.md` B-10). [`crate::admission::AdmissionGate::check`] refuses
+    /// to admit a ticket whose remaining budget, after this reserve, could not even cover the
+    /// reserve itself — a project that spends its last dollars on execution and cannot afford to
+    /// verify has produced nothing trustworthy. `0.0` shrinks the reserve to nothing, so only a
+    /// dimension already fully exhausted (`0` remaining) still refuses.
+    pub verification_budget_reserve_fraction: f64,
 }
 
 impl SchedulingPolicy {
@@ -164,6 +173,9 @@ impl SchedulingPolicy {
             // Matches `tm_agent::agent_loop::DEFAULT_MAX_EVENTS_PER_TICKET` exactly; see this
             // field's own doc comment for why the two are duplicated rather than shared.
             max_events_per_ticket: 5000,
+            // A conservative fifth of a ticket's budget held back for verification, mirroring
+            // `harness_capacity_fraction`'s "reserve a slice, don't just hope" shape.
+            verification_budget_reserve_fraction: 0.2,
         }
     }
 
