@@ -52,6 +52,12 @@ pub struct GlobalOpts {
     #[arg(long = "no-color", global = true)]
     pub no_color: bool,
 
+    /// Force the plain, linear bare-`tm` loop instead of the ratatui TUI, even on a real tty:
+    /// same information, no cursor addressing, no alternate screen. For scripting, logging, and
+    /// screen readers (D-002, "Terminal surface quality bar").
+    #[arg(long, global = true)]
+    pub plain: bool,
+
     /// The project root to operate on. Defaults to walking up from the current directory for a
     /// `.tm` directory (see [`crate::project::locate`]).
     #[arg(long, global = true, value_name = "PATH")]

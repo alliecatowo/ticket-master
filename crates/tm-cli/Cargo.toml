@@ -24,6 +24,7 @@ tm-agent = { workspace = true }
 tm-genesis = { workspace = true }
 tm-mirror = { workspace = true }
 tm-server = { workspace = true }
+tm-tui = { workspace = true }
 # Not yet promoted to [workspace.dependencies] in the root manifest; pathed directly so this
 # crate does not require editing the workspace root.
 tm-browser = { path = "../tm-browser" }
@@ -41,8 +42,16 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dirs = { workspace = true }
+crossterm = { workspace = true }
+ratatui-core = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
+# For the bare-`tm`-launches-the-TUI-on-a-real-tty integration test (tests/tui_launch.rs), which
+# needs a real pty the way tm-tui's own `testing::PtyHarness` does — that module is
+# `#[cfg(test)]`-gated in tm-tui and unreachable from this crate's own build, so this test writes
+# an equivalent helper under tests/support/ instead of importing it. See that module's docs.
+portable-pty = { workspace = true }
+vt100 = { workspace = true }

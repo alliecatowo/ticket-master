@@ -10,7 +10,7 @@ use clap::Parser;
 use tm_cli::args::{Cli, Command};
 use tm_cli::project;
 use tm_cli::render::Renderer;
-use tm_cli::{agent, drive, ops, sched, search, serve, tickets};
+use tm_cli::{agent, drive, ops, sched, search, serve, tickets, tui};
 
 /// Parse argv, dispatch, and translate the outcome into a process exit code.
 ///
@@ -45,20 +45,29 @@ fn install_tracing() {
 
 /// Route a parsed [`Cli`] to its execution module.
 ///
-/// When `cli.command` is `None`, open the project and run the interactive coding agent (or a
-/// single prompt if `--prompt` was set). When `cli.command` is `Some`, delegate to the matching
-/// execution module. `Init` is the only command that doesn't need an already-open project.
+/// When `cli.command` is `None`, open the project and either run one prompt to completion
+/// (`--prompt`), open the ratatui TUI (a real tty, per [`tui::should_launch`] — D-002: "a mode of
+/// the existing binary, entered on the bare-`tm` TTY path"), or fall back to the plain interactive
+/// agent loop (`--plain`, `--json`, `--quiet`, `TERM=dumb`, or stdout/stdin not a tty). When
+/// `cli.command` is `Some`, delegate to the matching execution module. `Init` is the only command
+/// that doesn't need an already-open project.
 async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
     match cli.command {
         None => {
             let project_dir = project::resolve_project_dir(cli.global.project.as_deref())?;
             let opened = project::open(&project_dir)?;
             let project = Arc::new(opened);
-            let mut session = agent::AgentSession::new(project, *renderer);
 
-            match cli.prompt {
-                Some(prompt) => session.run_prompt(&prompt).await,
-                None => session.run_interactive().await,
+            if let Some(prompt) = cli.prompt {
+                let mut session = agent::AgentSession::new(project, *renderer);
+                return session.run_prompt(&prompt).await;
+            }
+
+            if tui::should_launch(&cli.global) {
+                tui::run(project).await
+            } else {
+                let mut session = agent::AgentSession::new(project, *renderer);
+                session.run_interactive().await
             }
         }
         Some(Command::Init(args)) => project::init(&args, renderer),
@@ -206,6 +215,7 @@ mod tests {
                 json: false,
                 quiet: false,
                 no_color: true,
+                plain: false,
                 project: None,
             },
             prompt: None,
@@ -226,6 +236,7 @@ mod tests {
                 json: false,
                 quiet: false,
                 no_color: true,
+                plain: false,
                 project: None,
             },
             prompt: None,
@@ -250,6 +261,7 @@ mod tests {
                 json: false,
                 quiet: false,
                 no_color: true,
+                plain: false,
                 project: None,
             },
             prompt: Some("test prompt".to_string()),
@@ -274,6 +286,7 @@ mod tests {
                 json: false,
                 quiet: false,
                 no_color: true,
+                plain: false,
                 project: None,
             },
             prompt: None,
@@ -304,6 +317,7 @@ mod tests {
                 json: false,
                 quiet: false,
                 no_color: true,
+                plain: false,
                 project: None,
             },
             prompt: None,
@@ -330,6 +344,7 @@ mod tests {
             json: true,
             quiet: true,
             no_color: true,
+            plain: false,
             project: None,
         };
         let renderer = Renderer::from_flags(opts.json, opts.quiet, opts.no_color);

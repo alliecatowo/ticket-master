@@ -19,6 +19,8 @@
 //! - [`drive`] — the `browser` and `computer` command groups over `tm-browser`/`tm-computer`.
 //! - [`serve`] — the `serve` command.
 //! - [`agent`] — the bare-`tm` interactive coding client and its `tm -p` scriptable form.
+//! - [`tui`] — the bare-`tm` ratatui TUI mode (D-002) and the `should_launch` gate that decides
+//!   between it and [`agent`]'s plain loop.
 //!
 //! `main.rs` is deliberately thin: parse, install tracing, open the project when needed, route
 //! to one of the modules above, render, exit with the mapped code.
@@ -36,3 +38,4 @@ pub mod sched;
 pub mod search;
 pub mod serve;
 pub mod tickets;
+pub mod tui;

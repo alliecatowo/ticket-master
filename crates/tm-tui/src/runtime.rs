@@ -57,6 +57,12 @@ const SYNC_BEGIN: &[u8] = b"\x1b[?2026h";
 /// The matching "end synchronized update" sequence for [`SYNC_BEGIN`].
 const SYNC_END: &[u8] = b"\x1b[?2026l";
 
+/// How long [`Runtime::run`] waits after the *last* `Event::Resize` before flushing it as one
+/// redraw. A drag-resize fires a burst of `Event::Resize`s in quick succession; debouncing (reset
+/// on every new resize, fire once the burst goes quiet) coalesces that burst into a single redraw
+/// instead of one per intermediate size, per D-002 ("Resize ... handled without a redraw storm").
+const RESIZE_DEBOUNCE: Duration = Duration::from_millis(60);
+
 /// Everything that can go wrong standing up or driving the terminal.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -146,6 +152,35 @@ fn translate(event: crossterm::event::Event) -> Event {
     }
 }
 
+/// The pure coalescing policy behind [`RESIZE_DEBOUNCE`]: remembers only the *latest* pending
+/// resize, so a burst of `Event::Resize`s collapses to the one size that mattered by the time the
+/// debounce timer (owned by `Runtime::run`, not this struct) fires. Kept separate from the
+/// `tokio::time::Sleep` that drives it so the coalescing policy itself is unit-testable without a
+/// runtime.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ResizeCoalescer {
+    pending: Option<(u16, u16)>,
+}
+
+impl ResizeCoalescer {
+    /// Record a resize, overwriting whatever was pending — only the most recent size in a burst
+    /// is worth redrawing to.
+    fn on_resize(&mut self, width: u16, height: u16) {
+        self.pending = Some((width, height));
+    }
+
+    /// True while a resize is waiting to be flushed, i.e. whether `Runtime::run`'s debounce timer
+    /// should be polled at all this iteration.
+    fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Take the pending resize, if any, clearing it.
+    fn take(&mut self) -> Option<(u16, u16)> {
+        self.pending.take()
+    }
+}
+
 /// Owns the terminal for the lifetime of the TUI.
 ///
 /// Enters raw mode and the alternate screen on construction ([`Runtime::start`]), restores both
@@ -185,6 +220,14 @@ impl Runtime {
         &self.theme
     }
 
+    /// A clone of this runtime's shutdown notifier, for application code (e.g. a quit
+    /// keybinding on the root [`ComponentParent`]) that wants to end [`Runtime::run`]'s event
+    /// loop the same way a `SIGTERM`/`SIGHUP` does, rather than the runtime needing to know about
+    /// any particular key.
+    pub fn shutdown_handle(&self) -> Arc<Notify> {
+        Arc::clone(&self.shutdown)
+    }
+
     /// Enter raw mode and the alternate screen, install the signal handlers below, and return a
     /// `Runtime` plus a [`MessageSender`] background tasks can clone freely.
     pub async fn start(
@@ -195,15 +238,37 @@ impl Runtime {
         let synchronized_output = caps::probe_synchronized_output(&env);
 
         let mouse_enabled = setup_terminal(true)?;
-        // The OSC 11 / kitty-keyboard / DA1 round trip needs raw mode already active (no line
-        // buffering/echo swallowing the reply) and stdin/stdout, which is why this happens here
-        // rather than before `setup_terminal` above.
-        let probe_reply = {
-            let mut stdin = tokio::io::stdin();
-            let mut stdout = tokio::io::stdout();
-            caps::probe(&mut stdin, &mut stdout, caps::PROBE_TIMEOUT).await
-        };
-        let caps = caps::detect_with_probe(&env, probe_reply, synchronized_output, mouse_enabled);
+        // `caps::probe` is *not* called here, deliberately: it needs to read the OSC 11/kitty/DA1
+        // reply off the real stdin, and the only `AsyncRead` available for that is
+        // `tokio::io::stdin()`. On Unix, `tokio::io::stdin()` is backed by a dedicated blocking
+        // OS thread that keeps issuing `read()` on fd 0 for the rest of the process, even after
+        // the future using it is dropped (e.g. on `caps::PROBE_TIMEOUT`, which is the *expected*
+        // outcome whenever nothing answers the probe — a plain terminal, tmux, or, as here, no
+        // terminal at all). That background thread then wins every future race for stdin bytes
+        // against the `EventStream` this same `Runtime` constructs in `run` below, so any key the
+        // human ever presses is silently swallowed instead of reaching the event loop — confirmed
+        // with a minimal repro (`tokio::io::stdin()` read, dropped on timeout, then
+        // `EventStream::next()` never resolves for a real keypress even 20s later) before this
+        // was fixed. This is not new in this change: it predates `tm-cli` ever driving `Runtime`
+        // with real keyboard input, which is exactly why no earlier test caught it — only the
+        // signal-handling tests exercised this runtime before `tm-cli`'s `tui_launch` PTY tests.
+        //
+        // `caps::probe` itself is untouched and still fully tested against a `tokio::io::duplex`
+        // pair (see `caps.rs`'s own tests) — the bug was this call site's choice of reader, not
+        // the function. Until there is a way to read the reply through the same internal reader
+        // `EventStream` uses (crossterm keeps that reader `pub(crate)`; its own
+        // `supports_keyboard_enhancement()` is the one probe it exposes publicly, and it has no
+        // equivalent for the OSC 11 truecolor query `caps::probe` also sends), detection here is
+        // env-only via `caps::detect`. D-002's "truecolor over SSH/tmux" bar is met exactly as far
+        // as `COLORTERM`/`TERM` get forwarded, same as every env-only fallback path already
+        // covered by `caps.rs`'s own tests — not the stronger guarantee an actual round trip would
+        // give, which is why this is called out here rather than silently downgraded.
+        let caps = caps::detect(&env, synchronized_output, mouse_enabled);
+        // Degrade once, here, rather than leaving every component to call `Theme::degraded`
+        // itself: `NO_COLOR`/`TERM=dumb` (folded into `caps.color` by `caps::detect`) must
+        // hold end to end, not just be detected and then ignored by whatever `FrameContext` hands
+        // down. `FrameContext::theme` is always this already-degraded theme from here on.
+        let theme = theme.degraded(&caps);
 
         let terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
 
@@ -241,12 +306,25 @@ impl Runtime {
     /// Run the event loop until a termination signal or `root` requests exit, redrawing after
     /// every event `root` consumed and on every tick.
     pub async fn run(&mut self, root: &mut dyn ComponentParent) -> Result<(), RuntimeError> {
+        // Compute tab order/focus before the first frame: without this, `self.focus.state()`
+        // stays empty forever (nothing ever calls `rebuild`), so every widget's
+        // `ctx.focus.is_focused(self.id)` check is always false and the whole tree is inert to
+        // input.
+        self.focus.rebuild(&*root);
+
         let mut input = EventStream::new();
         let mut ticker = tokio::time::interval(self.tick_interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // The first tick fires immediately; that is not a real elapsed interval and would just
         // force a redundant redraw before anything has happened.
         ticker.tick().await;
+
+        // See `ResizeCoalescer`'s docs: `resize_timer` is rebuilt (not `.reset()`) on every new
+        // `Event::Resize`, so it always fires `RESIZE_DEBOUNCE` after the *last* one in a burst.
+        // Its guard (`if resize.is_pending()`) keeps this idle placeholder from ever being polled
+        // before the first real resize.
+        let mut resize = ResizeCoalescer::default();
+        let mut resize_timer = Box::pin(tokio::time::sleep(Duration::from_secs(0)));
 
         loop {
             // The `shutdown` branch below breaks out of the loop without ever reading this,
@@ -270,18 +348,39 @@ impl Runtime {
                     needs_redraw = true;
                 }
 
+                // The debounce window since the last `Event::Resize` elapsed with nothing newer
+                // arriving: flush the one redraw a whole drag-resize burst earned, instead of one
+                // per intermediate size (D-002, "Resize ... handled without a redraw storm").
+                // Guarded so this branch (and therefore `resize_timer`) is never polled while no
+                // resize is pending.
+                _ = &mut resize_timer, if resize.is_pending() => {
+                    if resize.take().is_some() {
+                        needs_redraw = true;
+                    }
+                }
+
                 maybe_event = input.next() => {
                     match maybe_event {
                         Some(Ok(ct_event)) => {
                             let event = translate(ct_event);
-                            let ctx = FrameContext {
-                                theme: &self.theme,
-                                caps: &self.caps,
-                                clock: self.clock.as_ref(),
-                                focus: self.focus.state(),
-                            };
-                            let propagation = self.focus.dispatch(root, &event, &ctx);
-                            needs_redraw = propagation.is_consumed();
+                            if let Event::Resize { width, height } = event {
+                                // Debounced above rather than dispatched/redrawn immediately:
+                                // ratatui's own `Terminal::draw` autoresizes against the real
+                                // backend size on the next draw regardless, so this coalescing
+                                // only controls *how many* redraws a resize burst costs, not
+                                // whether the final frame is drawn at the right size.
+                                resize.on_resize(width, height);
+                                resize_timer = Box::pin(tokio::time::sleep(RESIZE_DEBOUNCE));
+                            } else {
+                                let ctx = FrameContext {
+                                    theme: &self.theme,
+                                    caps: &self.caps,
+                                    clock: self.clock.as_ref(),
+                                    focus: self.focus.state(),
+                                };
+                                let propagation = self.focus.dispatch(root, &event, &ctx);
+                                needs_redraw = propagation.is_consumed();
+                            }
                         }
                         Some(Err(err)) => return Err(RuntimeError::Io(err)),
                         None => return Err(RuntimeError::InputClosed),
@@ -440,11 +539,18 @@ pub async fn install_signal_handlers(
         tokio::select! {
             _ = sigterm.recv() => {
                 teardown_terminal(mouse_enabled);
-                shutdown.notify_waiters();
+                // `notify_one`, not `notify_waiters`: `Runtime::run`'s select loop reconstructs
+                // its `shutdown.notified()` listener fresh every iteration, so a `notify_waiters`
+                // fired between iterations (nobody currently registered) would be silently lost.
+                // `notify_one` stores a permit in exactly that case, so the next listener
+                // consumes it immediately instead of blocking forever — see the same reasoning on
+                // `tm-cli`'s `App::handle_event` quit-key path, which hits this race
+                // deterministically rather than just theoretically.
+                shutdown.notify_one();
             }
             _ = sighup.recv() => {
                 teardown_terminal(mouse_enabled);
-                shutdown.notify_waiters();
+                shutdown.notify_one();
             }
             _ = sigtstp.recv() => {
                 teardown_terminal(mouse_enabled);
@@ -461,9 +567,42 @@ pub async fn install_signal_handlers(
                 if let Err(err) = setup_terminal(mouse_enabled) {
                     eprintln!("tm-tui: failed to re-enter the terminal after SIGCONT: {err}");
                 }
-                resume.notify_waiters();
+                // Same `notify_one` reasoning as `shutdown` above: `resume`'s listener is also
+                // rebuilt every loop iteration.
+                resume.notify_one();
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod resize_coalescer_tests {
+    use super::ResizeCoalescer;
+
+    #[test]
+    fn fresh_coalescer_has_nothing_pending() {
+        let coalescer = ResizeCoalescer::default();
+        assert!(!coalescer.is_pending());
+    }
+
+    #[test]
+    fn on_resize_makes_it_pending_and_take_clears_it() {
+        let mut coalescer = ResizeCoalescer::default();
+        coalescer.on_resize(80, 24);
+        assert!(coalescer.is_pending());
+        assert_eq!(coalescer.take(), Some((80, 24)));
+        assert!(!coalescer.is_pending());
+        assert_eq!(coalescer.take(), None);
+    }
+
+    #[test]
+    fn a_burst_of_resizes_coalesces_to_only_the_last_one() {
+        let mut coalescer = ResizeCoalescer::default();
+        coalescer.on_resize(80, 24);
+        coalescer.on_resize(81, 24);
+        coalescer.on_resize(82, 25);
+        // A drag-resize fires many intermediate sizes; only the final one is worth a redraw.
+        assert_eq!(coalescer.take(), Some((82, 25)));
     }
 }
 
