@@ -51,12 +51,20 @@ that rule is global, not repo-specific, and still applies here.
   `docs/decisions/D-003-project-scope.md`) — `sqlite3 <state_dir>/project.db` is a legitimate way
   to inspect what actually got written, and `tm events` reads the same log a UI would.
 
-- `mise run lsp` runs a full-workspace `rust-analyzer diagnostics` dump — informational, not a
-  gate (it exits non-zero on *any* diagnostic, including the benign `#[cfg(test)]`
-  "inactive-code" note every test module produces, so read the output rather than the exit
-  code). `rust-analyzer` itself is a real LSP server available in this toolchain
-  (`mise install rust-analyzer` if it's ever missing) for anything that wants go-to-definition
-  or type-aware navigation beyond what `tm-codeintel`'s heuristics give you.
+- **Real code intelligence via the `rust-analyzer-lsp` Claude Code plugin** (installed:
+  `claude plugin install rust-analyzer-lsp@claude-plugins-official`, user scope) is the primary
+  mechanism, not a manual CLI wrapper — once active (a fresh session, or `/reload-plugins` in an
+  open one) this gives Claude a native LSP tool: automatic diagnostics after every edit, plus
+  go-to-definition/references/hover/call-hierarchy, sourced from the same `rust-analyzer` binary
+  as an IDE. It needs `rust-analyzer` in `$PATH` (`rustup component add rust-analyzer`, or
+  `mise install rust-analyzer` — this repo's `mise.toml` lists it as a tool for exactly this).
+  It can be memory-heavy on a large workspace; if it causes trouble on this machine's 8GB,
+  `/plugin disable rust-analyzer-lsp` and fall back to `tm-codeintel`'s heuristics.
+- `mise run lsp` is the fallback/manual path — a full-workspace `rust-analyzer diagnostics` CLI
+  dump, informational only (it exits non-zero on *any* diagnostic, including the benign
+  `#[cfg(test)]` "inactive-code" note every test module produces — read the output, not the exit
+  code). Prefer the plugin above; this is for when you specifically want a one-shot sweep outside
+  a live session.
 
 ## Navigation
 
