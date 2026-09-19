@@ -30,6 +30,7 @@
 pub mod artifact;
 pub mod budget;
 pub mod decision;
+pub mod executor;
 pub mod graph;
 pub mod invariants;
 pub mod lease;
@@ -44,6 +45,11 @@ pub mod view;
 pub use artifact::{Artifact, ArtifactKind, ArtifactStorage, Evidence, EvidenceKind};
 pub use budget::{BudgetLedger, BudgetScope, ExhaustedScope};
 pub use decision::{Decision, DecisionStore};
+pub use executor::{
+    sandbox_for, validate_return_scope, CostClass, ExecutionHandle, Executor, ExecutorCapabilities,
+    ExecutorFailure, ExecutorOutcome, ExecutorTask, FsScope, NetPolicy, ReturnScopeViolation,
+    Sandbox,
+};
 pub use graph::{CycleViolation, DependencyEdge, DependencyGraph};
 pub use invariants::{check_invariants, Violation};
 pub use lease::{Lease, LeaseStore, ReversionAction};

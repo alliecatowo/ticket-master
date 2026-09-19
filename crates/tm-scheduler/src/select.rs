@@ -10,6 +10,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
+use tm_core::executor::ExecutorCapabilities;
 use tm_core::graph::DependencyGraph;
 use tm_core::ticket::{ExecutorRequirements, Ticket, TicketState};
 use tm_core::view::SchedulerView;
@@ -45,9 +46,53 @@ pub enum SelectionError {
 /// supplies to [`select_next`]: is at least one healthy executor available for `role` right now?
 /// Kept as a trait so `tm-scheduler` does not depend on `tm-provider`'s routing internals, only
 /// on this narrow yes/no question.
+///
+/// Deliberately distinct from `tm_core::Executor` (the live dispatch abstraction a
+/// `crate::dispatch::ExecutorDispatcher` drives) and from [`capabilities_satisfy`] (the
+/// structural capability check against one concrete executor): this trait only answers "is
+/// *some* executor free for this role right now", asked before a ticket is ranked/selected at
+/// all, with no knowledge of which concrete executor would take it.
 pub trait ExecutorAvailability {
     /// True when `role` currently has at least one admissible executor (human or provider).
     fn is_available(&self, role: Role) -> bool;
+}
+
+/// Why a concrete executor's declared [`ExecutorCapabilities`] cannot serve a ticket's
+/// [`ExecutorRequirements`], from [`capabilities_satisfy`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CapabilityMismatch {
+    /// The ticket needs a human and this executor cannot suspend for one.
+    #[error("ticket requires a human executor but the candidate is not interactive")]
+    NotInteractive,
+    /// A non-human ticket needs an executor that can call tools; this one cannot.
+    #[error("ticket requires tool use but the candidate declares tool_use = false")]
+    NoToolUse,
+    /// Every executor is expected to accept a compiled context pack (`SPEC.md` §24.1); one that
+    /// does not is not a usable executor at all, regardless of the ticket.
+    #[error("candidate does not accept a compiled context pack")]
+    RejectsContextPack,
+}
+
+/// Match a ticket's [`ExecutorRequirements`] against one concrete executor's declared
+/// [`ExecutorCapabilities`], refusing a mismatch rather than assuming compatibility
+/// (`SPEC.md` §24.2). Pure and total: never panics, never needs live state.
+pub fn capabilities_satisfy(
+    requirements: &ExecutorRequirements,
+    capabilities: &ExecutorCapabilities,
+) -> Result<(), CapabilityMismatch> {
+    if !capabilities.accepts_context_pack {
+        return Err(CapabilityMismatch::RejectsContextPack);
+    }
+    if requirements.human_required {
+        if !capabilities.interactive {
+            return Err(CapabilityMismatch::NotInteractive);
+        }
+        return Ok(());
+    }
+    if !capabilities.tool_use {
+        return Err(CapabilityMismatch::NoToolUse);
+    }
+    Ok(())
 }
 
 /// Compare two tickets per the `SPEC.md` §5 ordering: priority desc, then critical-path length
@@ -601,5 +646,56 @@ mod tests {
         fn is_available(&self, role: Role) -> bool {
             role == self.available_role
         }
+    }
+
+    fn caps(tool_use: bool, interactive: bool, accepts_context_pack: bool) -> ExecutorCapabilities {
+        ExecutorCapabilities {
+            streaming: false,
+            tool_use,
+            patch_output: true,
+            interactive,
+            accepts_context_pack,
+            sandboxed: true,
+            max_context_tokens: None,
+            cost_class: tm_core::executor::CostClass::Standard,
+        }
+    }
+
+    fn requirements(human_required: bool) -> ExecutorRequirements {
+        ExecutorRequirements {
+            role: Role::CoderFast,
+            human_required,
+            min_capability: Tolerance::Preferred,
+        }
+    }
+
+    #[test]
+    fn capabilities_satisfy_accepts_a_tool_using_executor_for_ordinary_work() {
+        assert!(capabilities_satisfy(&requirements(false), &caps(true, false, true)).is_ok());
+    }
+
+    #[test]
+    fn capabilities_satisfy_refuses_an_executor_without_tool_use() {
+        assert_eq!(
+            capabilities_satisfy(&requirements(false), &caps(false, false, true)),
+            Err(CapabilityMismatch::NoToolUse)
+        );
+    }
+
+    #[test]
+    fn capabilities_satisfy_requires_interactive_for_human_required_tickets() {
+        assert_eq!(
+            capabilities_satisfy(&requirements(true), &caps(false, false, true)),
+            Err(CapabilityMismatch::NotInteractive)
+        );
+        assert!(capabilities_satisfy(&requirements(true), &caps(false, true, true)).is_ok());
+    }
+
+    #[test]
+    fn capabilities_satisfy_refuses_an_executor_that_rejects_context_packs() {
+        assert_eq!(
+            capabilities_satisfy(&requirements(false), &caps(true, false, false)),
+            Err(CapabilityMismatch::RejectsContextPack)
+        );
     }
 }

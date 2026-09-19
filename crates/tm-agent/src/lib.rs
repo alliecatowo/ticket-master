@@ -25,6 +25,7 @@
 #![warn(missing_docs)]
 
 pub mod agent_loop;
+pub mod executor;
 pub mod outcome;
 pub mod patch;
 pub mod prompt;
@@ -32,6 +33,7 @@ pub mod session;
 pub mod tools;
 
 pub use agent_loop::AgentLoop;
+pub use executor::{BuiltinExecutor, HumanApprovalSink, HumanDecision, HumanExecutor};
 pub use outcome::{AgentOutcome, AgentTask, EvidenceBundle, StepRecord};
 pub use patch::{Edit, PatchEngine, PatchOutcome};
 pub use prompt::{render_system_prompt, render_task_prompt};

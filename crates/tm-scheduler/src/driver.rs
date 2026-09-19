@@ -15,6 +15,7 @@ use tm_core::ticket::Trigger;
 use tm_events::Event;
 use tm_types::{Clock, ParticipantId, Timestamp};
 
+use crate::dispatch::ExecutorDispatcher;
 use crate::plan::SchedulerAction;
 use crate::policy::SchedulingPolicy;
 
@@ -59,16 +60,30 @@ pub struct SchedulerLoop<'a> {
     store: &'a Store,
     clock: Arc<dyn Clock>,
     policy: SchedulingPolicy,
+    /// When set, `SchedulerAction::Lease` is routed through a real [`ExecutorDispatcher`]
+    /// instead of leasing to a placeholder holder id. `None` (the default) keeps the exact
+    /// pre-B-01 behaviour, which existing tests (and a bare `tm sched tick` with no executors
+    /// configured) rely on staying deterministic and dispatcher-free.
+    dispatcher: Option<Arc<ExecutorDispatcher>>,
 }
 
 impl<'a> SchedulerLoop<'a> {
-    /// Build a loop over `store`, ticking with `clock` and planning under `policy`.
+    /// Build a loop over `store`, ticking with `clock` and planning under `policy`. No
+    /// dispatcher is attached; see [`Self::with_dispatcher`].
     pub fn new(store: &'a Store, clock: Arc<dyn Clock>, policy: SchedulingPolicy) -> Self {
         SchedulerLoop {
             store,
             clock,
             policy,
+            dispatcher: None,
         }
+    }
+
+    /// Route `SchedulerAction::Lease` through `dispatcher` instead of the placeholder-holder
+    /// fallback (`SPEC.md` §24, audit B-01/B-04).
+    pub fn with_dispatcher(mut self, dispatcher: Arc<ExecutorDispatcher>) -> Self {
+        self.dispatcher = Some(dispatcher);
+        self
     }
 
     /// The policy currently in effect.
@@ -141,18 +156,25 @@ impl<'a> SchedulerLoop<'a> {
                     .tickets
                     .get(ticket)
                     .ok_or_else(|| tm_types::TmError::not_found("ticket", ticket))?;
-                // Provider-fabric resolution of a live worker for `executor`'s role is out of
-                // this crate's scope (`tm-agent` owns spawning); the holder id below is a
-                // deterministic placeholder derived from the role and ticket, not a random id.
-                let holder = ParticipantId::new(format!("agent:{}/{}", executor.as_str(), ticket))?;
-                self.store.acquire_lease(
-                    ticket,
-                    holder,
-                    t.authority.clone(),
-                    t.resources.clone(),
-                    *ttl_seconds,
-                    actor.clone(),
-                )
+                if let Some(dispatcher) = &self.dispatcher {
+                    // Real executor resolution, capability matching, and hand-off to a
+                    // background run: see `crate::dispatch::ExecutorDispatcher`.
+                    dispatcher.dispatch(ticket, t, *ttl_seconds, actor.clone())
+                } else {
+                    // No dispatcher attached: keep the pre-B-01 deterministic-placeholder
+                    // behaviour (still useful for `tm sched tick`/tests that only want to
+                    // observe lease bookkeeping, not actually run anything).
+                    let holder =
+                        ParticipantId::new(format!("agent:{}/{}", executor.as_str(), ticket))?;
+                    self.store.acquire_lease(
+                        ticket,
+                        holder,
+                        t.authority.clone(),
+                        t.resources.clone(),
+                        *ttl_seconds,
+                        actor.clone(),
+                    )
+                }
             }
             SchedulerAction::ExpireLease(_lease) => {
                 // The attempt was already spent at lease acquisition (tm-core), so expiry only
@@ -318,5 +340,187 @@ mod tests {
         }
 
         assert_eq!(events_a, events_b);
+    }
+
+    /// A recording [`tm_core::Executor`] double: remembers the [`tm_core::ExecutorTask`] it was
+    /// called with and signals `done` once `execute` runs, so a test can `await` completion of
+    /// the dispatcher's background task deterministically instead of sleeping.
+    struct RecordingExecutor {
+        id: String,
+        seen: std::sync::Mutex<Option<tm_core::ExecutorTask>>,
+        done: tokio::sync::Notify,
+    }
+
+    impl RecordingExecutor {
+        fn new(id: &str) -> Arc<Self> {
+            Arc::new(RecordingExecutor {
+                id: id.to_string(),
+                seen: std::sync::Mutex::new(None),
+                done: tokio::sync::Notify::new(),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl tm_core::Executor for RecordingExecutor {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn capabilities(&self) -> tm_core::ExecutorCapabilities {
+            tm_core::ExecutorCapabilities {
+                streaming: false,
+                tool_use: true,
+                patch_output: false,
+                interactive: false,
+                accepts_context_pack: true,
+                sandboxed: true,
+                max_context_tokens: None,
+                cost_class: tm_core::CostClass::Cheap,
+            }
+        }
+
+        async fn execute(
+            &self,
+            task: tm_core::ExecutorTask,
+        ) -> tm_types::Result<tm_core::ExecutorOutcome> {
+            *self.seen.lock().unwrap() = Some(task.clone());
+            let outcome = tm_core::ExecutorOutcome {
+                ticket: task.ticket.clone(),
+                summary: "recorded".to_string(),
+                evidence: vec![],
+                patch: None,
+                usage: tm_types::Spend::default(),
+                decisions: vec![],
+                failure: None,
+            };
+            self.done.notify_one();
+            Ok(outcome)
+        }
+
+        async fn cancel(&self, _handle: &tm_core::ExecutionHandle) -> tm_types::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Always compiles to the same fixed pack text; the test does not care about pack content.
+    struct FixedContextPack;
+
+    impl crate::dispatch::ContextPackSource for FixedContextPack {
+        fn compile(&self, _ticket: &tm_types::TicketId) -> tm_types::Result<String> {
+            Ok("<compiled pack>".to_string())
+        }
+    }
+
+    fn restricted_authority() -> Authority {
+        Authority {
+            repository: tm_types::RepoAuthority {
+                read: tm_types::PatternSet::parse(["src/**"]).unwrap(),
+                write: tm_types::PatternSet::parse(["src/only/**"]).unwrap(),
+            },
+            ..Authority::none()
+        }
+    }
+
+    fn create_ready_ticket_with_authority(
+        store: &Store,
+        authority: Authority,
+    ) -> tm_types::TicketId {
+        let events = store
+            .create_ticket(
+                TicketKind::Work,
+                "do the restricted thing".into(),
+                None,
+                None,
+                authority,
+                vec![],
+                executor(),
+                vec![],
+                vec![],
+                VerificationPolicy::None,
+                Budget::unlimited(),
+                retry(),
+                0,
+                ParticipantId::system(),
+            )
+            .expect("create_ticket should succeed");
+        let ticket = tm_types::TicketId::new(events[0].subject.as_str()).expect("ticket id");
+        store
+            .activate(&ticket, ParticipantId::system())
+            .expect("activate should succeed");
+        ticket
+    }
+
+    #[tokio::test]
+    async fn lease_action_dispatches_to_a_real_executor_carrying_the_tickets_authority() {
+        let fixed = Arc::new(FixedClock::epoch());
+        let clock: Arc<dyn Clock> = fixed.clone();
+        let (_dir, store) = open_store(clock.clone());
+        let store = Arc::new(store);
+        let authority = restricted_authority();
+        let ticket = create_ready_ticket_with_authority(&store, authority.clone());
+
+        let recorder = RecordingExecutor::new("recording-exec");
+        let mut registry = crate::dispatch::ExecutorRegistry::new(recorder.clone());
+        registry.register(Role::CoderFast, recorder.clone());
+        let dispatcher = Arc::new(crate::dispatch::ExecutorDispatcher::new(
+            store.clone(),
+            tokio::runtime::Handle::current(),
+            Arc::new(FixedContextPack),
+            registry,
+        ));
+
+        let mut policy = SchedulingPolicy::conservative_default();
+        policy.available_roles = [Role::CoderFast].into_iter().collect();
+        let scheduler =
+            SchedulerLoop::new(&store, clock, policy).with_dispatcher(dispatcher.clone());
+        let events = scheduler
+            .tick(ParticipantId::system())
+            .expect("tick should succeed");
+
+        let leased = events.iter().any(|e| {
+            matches!(
+                e,
+                SchedulerLoopEvent::Applied {
+                    action: SchedulerAction::Lease { .. },
+                    ..
+                }
+            )
+        });
+        assert!(leased, "expected an Applied Lease event: {events:?}");
+
+        // The lease holder is the real executor's own id, never the pre-B-01 placeholder shape.
+        let view = store.view().expect("view");
+        let lease = view
+            .leases
+            .values()
+            .find(|l| l.ticket == ticket)
+            .expect("a lease exists for the ticket");
+        assert_eq!(
+            lease.holder.as_str(),
+            format!("agent:recording-exec/{ticket}")
+        );
+        assert_ne!(
+            lease.holder.as_str(),
+            format!("agent:{}/{ticket}", Role::CoderFast.as_str()),
+            "holder must not be the deterministic placeholder shape"
+        );
+
+        // Wait for the background run to actually happen.
+        tokio::time::timeout(std::time::Duration::from_secs(5), recorder.done.notified())
+            .await
+            .expect("executor.execute should have been called");
+
+        let seen = recorder.seen.lock().unwrap().clone().expect("task seen");
+        assert_eq!(seen.ticket, ticket);
+        assert_eq!(
+            seen.authority, authority,
+            "the executor must receive the ticket's own attenuated authority, not root()"
+        );
+        assert_ne!(
+            seen.authority,
+            Authority::root(),
+            "a restricted ticket must never reach the executor with root authority"
+        );
     }
 }

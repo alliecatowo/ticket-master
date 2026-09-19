@@ -101,20 +101,29 @@ pub fn sched_tick(project: &Project, renderer: &Renderer) -> tm_types::Result<()
     renderer.emit(&summaries, &human)
 }
 
-/// `tm sched run`: run the scheduler loop continuously until interrupted (ctrl-c).
+/// `tm sched run`: run the scheduler loop continuously until interrupted (ctrl-c), leasing
+/// `Ready` tickets to real executors via the same [`crate::dispatch::build_dispatcher`] `tm run`
+/// uses (`SPEC.md` §24, audit B-01/B-04).
 pub async fn sched_run(
     args: &SchedRunArgs,
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
-    let policy = tm_scheduler::SchedulingPolicy::conservative_default();
+    let mut policy = tm_scheduler::SchedulingPolicy::conservative_default();
+    // `conservative_default` starts with no roles available (a safe default for a caller that
+    // never attaches an executor at all). A dispatcher is attached below, so every role now has
+    // a real executor behind it — `BuiltinExecutor` today, more adapters later — and can be
+    // marked available.
+    policy.available_roles = tm_types::Role::ALL.iter().copied().collect();
     let tick_interval_secs = args
         .interval_secs
         .unwrap_or(u64::from(policy.tick_interval_seconds));
     let interval = Duration::from_secs(tick_interval_secs);
 
+    let dispatcher = crate::dispatch::build_dispatcher(project, tokio::runtime::Handle::current())?;
     let loop_driver =
-        tm_scheduler::SchedulerLoop::new(&project.store, project.clock.clone(), policy);
+        tm_scheduler::SchedulerLoop::new(&project.store, project.clock.clone(), policy)
+            .with_dispatcher(dispatcher);
     let mut interval_timer = tokio::time::interval(interval);
 
     loop {
@@ -275,8 +284,27 @@ pub fn lease_expire(project: &Project, renderer: &Renderer) -> tm_types::Result<
     Ok(())
 }
 
+/// How often [`run_ticket`] polls the ticket's state while its dispatched run is in flight.
+const RUN_TICKET_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Ceiling on a `tm run` lease's TTL: long enough for real work, short enough that a crashed
+/// executor's lease still expires and the ticket reverts to `Ready` per `tm_core::lease`'s
+/// "a dead worker cannot block the project" invariant, rather than sitting `Running` forever. A
+/// ticket whose own `budget.wall_seconds` is smaller still governs (via `.min` below); one whose
+/// budget is `Budget::unlimited()` (`wall_seconds` near `u64::MAX`) is clamped to this instead of
+/// overflowing into a multi-decade lease.
+const RUN_TICKET_MAX_TTL_SECONDS: u32 = 3600;
+
+/// How long [`run_ticket`] polls before giving up and detaching (the dispatched run keeps going
+/// in the background; only the foreground CLI process stops waiting on it).
+const RUN_TICKET_MAX_WAIT: Duration = Duration::from_secs(1800);
+
 /// `tm run <ticket>`: execute one ticket to completion in the foreground, outside the scheduler
-/// loop — the single-ticket path a human runs interactively or in CI.
+/// loop — the single-ticket path a human runs interactively or in CI. Dispatches through the
+/// same [`crate::dispatch::build_dispatcher`] `tm sched run` uses (`SPEC.md` §24, audit
+/// B-01/B-04), then blocks (polling, since [`tm_scheduler::ExecutorDispatcher::dispatch`] itself
+/// returns as soon as the lease is acquired) until the ticket leaves `Leased`/`Running`, or until
+/// [`RUN_TICKET_MAX_WAIT`] elapses.
 pub async fn run_ticket(
     args: &RunArgs,
     project: &Project,
@@ -284,38 +312,41 @@ pub async fn run_ticket(
 ) -> tm_types::Result<()> {
     let ticket = TicketId::new(&args.ticket)?;
     let view = project.store.view()?;
-
     let ticket_state = view
         .tickets
         .get(&ticket)
         .ok_or_else(|| tm_types::TmError::not_found("ticket", &ticket))?;
 
-    let lease_events = project.store.acquire_lease(
-        &ticket,
-        project.actor.clone(),
-        Authority::none(),
-        Vec::new(),
-        3600,
-        project.actor.clone(),
-    )?;
+    let dispatcher = crate::dispatch::build_dispatcher(project, tokio::runtime::Handle::current())?;
+    let ttl_seconds = u32::try_from(ticket_state.budget.wall_seconds)
+        .unwrap_or(u32::MAX)
+        .clamp(60, RUN_TICKET_MAX_TTL_SECONDS);
+    dispatcher.dispatch(&ticket, ticket_state, ttl_seconds, project.actor.clone())?;
+    renderer.note(&format!("Ticket {ticket} dispatched for execution."));
 
-    let _code_intel = project.code_intel()?;
-    let _conventions: Vec<String> = Vec::new();
-
-    let _context_pack = tm_context::pack::compile(
-        ticket_state,
-        &view,
-        &_code_intel,
-        tm_context::tokens::TokenBudget::even(10_000),
-        tm_codeintel::SignalWeights::default(),
-        &_conventions,
-    )?;
-
-    if !lease_events.is_empty() {
-        renderer.note(&format!("Ticket {} acquired for execution.", ticket));
+    let deadline = tokio::time::Instant::now() + RUN_TICKET_MAX_WAIT;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            renderer.note(&format!(
+                "Ticket {ticket} is still running after {}s; detaching (the run continues in the background).",
+                RUN_TICKET_MAX_WAIT.as_secs()
+            ));
+            break;
+        }
+        tokio::time::sleep(RUN_TICKET_POLL_INTERVAL).await;
+        let view = project.store.view()?;
+        let Some(t) = view.tickets.get(&ticket) else {
+            break;
+        };
+        if !matches!(
+            t.state,
+            tm_core::ticket::TicketState::Leased | tm_core::ticket::TicketState::Running
+        ) {
+            renderer.note(&format!("Ticket {ticket} finished: {:?}", t.state));
+            break;
+        }
     }
 
-    renderer.note("Agent loop execution not yet implemented.");
     Ok(())
 }
 

@@ -21,6 +21,8 @@
 //! - [`agent`] — the bare-`tm` interactive coding client and its `tm -p` scriptable form.
 //! - [`tui`] — the bare-`tm` ratatui TUI mode (D-002) and the `should_launch` gate that decides
 //!   between it and [`agent`]'s plain loop.
+//! - [`dispatch`] — builds the `tm_scheduler::ExecutorDispatcher` `sched::run_ticket` (`tm run`)
+//!   and `sched::sched_run` (`tm sched run`) both drive tickets through (`SPEC.md` §24).
 //!
 //! `main.rs` is deliberately thin: parse, install tracing, open the project when needed, route
 //! to one of the modules above, render, exit with the mapped code.
@@ -30,6 +32,7 @@
 
 pub mod agent;
 pub mod args;
+pub mod dispatch;
 pub mod drive;
 pub mod ops;
 pub mod project;
