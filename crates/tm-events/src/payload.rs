@@ -413,6 +413,27 @@ payload_kinds! {
         ticket: TicketId,
         reason: String,
     };
+    "Payload for `goal.set` (`SPEC.md` §29): sets or replaces the durable objective a worker's live decomposition tracks for one execution -- distinct from the ticket's own `objective` field.", GoalSetPayload, GoalSet, GoalSet, as_goal_set, {
+        ticket: TicketId,
+        text: String,
+    };
+    "Payload for `goal.step_added`: one step in the goal's live decomposition, identified by a caller-chosen `step_id` stable across `goal.step_completed`.", GoalStepAddedPayload, GoalStepAdded, GoalStepAdded, as_goal_step_added, {
+        ticket: TicketId,
+        step_id: String,
+        text: String,
+    };
+    "Payload for `goal.step_completed`.", GoalStepCompletedPayload, GoalStepCompleted, GoalStepCompleted, as_goal_step_completed, {
+        ticket: TicketId,
+        step_id: String,
+    };
+    "Payload for `goal.reoriented` (`SPEC.md` §29): the loop re-read goal state against observed state at the start of `at_step`, rather than trusting only its own in-memory conversation history.", GoalReorientedPayload, GoalReoriented, GoalReoriented, as_goal_reoriented, {
+        ticket: TicketId,
+        at_step: u32,
+    };
+    "Payload for `goal.claimed_complete` (`SPEC.md` §29): the loop believes the goal is met. A claim only -- `SPEC.md` §16's verification ladder decides whether it was, never this event.", GoalClaimedCompletePayload, GoalClaimedComplete, GoalClaimedComplete, as_goal_claimed_complete, {
+        ticket: TicketId,
+        summary: String,
+    };
 }
 
 #[cfg(test)]

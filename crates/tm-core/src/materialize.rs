@@ -24,6 +24,8 @@ use rusqlite::{params, OptionalExtension};
 use tm_events::{Event, EventKind, Tx};
 use tm_types::{IdKind, TmError};
 
+use crate::goal::GoalStep;
+
 fn storage_err(e: rusqlite::Error) -> TmError {
     TmError::storage(e.to_string())
 }
@@ -742,6 +744,90 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
                     .map_err(storage_err)?;
             }
         }
+        EventKind::GoalSet => {
+            if let Some(p) = event.payload.as_goal_set() {
+                // A fresh `goal.set` restarts the decomposition: `steps` resets to `[]` and
+                // `claimed_complete` resets to false, exactly as it would if this were the first
+                // `goal.set` for this ticket (`ON CONFLICT` re-applies the same reset on an
+                // existing row, which is what makes this idempotent under replaying the same
+                // event twice, per this module's own B-11-shaped idempotence test below).
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "INSERT INTO goals (ticket, text, steps, claimed_complete, last_reoriented_step, set_at, updated_at)
+                         VALUES (?1, ?2, '[]', 0, 0, ?3, ?3)
+                         ON CONFLICT(ticket) DO UPDATE SET
+                             text = excluded.text,
+                             steps = '[]',
+                             claimed_complete = 0,
+                             last_reoriented_step = 0,
+                             set_at = excluded.set_at,
+                             updated_at = excluded.updated_at",
+                        params![p.ticket.as_str(), p.text, now],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
+        EventKind::GoalStepAdded => {
+            if let Some(p) = event.payload.as_goal_step_added() {
+                // Read-modify-write, deduped by `step_id`: re-applying the same `goal.step_added`
+                // event twice (replay of an already-materialized log, or B-11's own
+                // apply-twice idempotence shape) updates the existing entry's `text` in place
+                // rather than appending a duplicate.
+                let now = event.ts.to_rfc3339();
+                let mut steps = read_goal_steps(tx, &p.ticket)?;
+                match steps.iter_mut().find(|s| s.id == p.step_id) {
+                    Some(existing) => existing.text = p.text.clone(),
+                    None => steps.push(GoalStep {
+                        id: p.step_id.clone(),
+                        text: p.text.clone(),
+                        done: false,
+                    }),
+                }
+                write_goal_steps(tx, &p.ticket, &steps, &now)?;
+            }
+        }
+        EventKind::GoalStepCompleted => {
+            if let Some(p) = event.payload.as_goal_step_completed() {
+                // Plain assignment of `done = true` on the matching step — idempotent by
+                // construction; a step_id with no matching row (goal never set, or step never
+                // added) is a no-op rather than an error, mirroring this module's general
+                // "unmaterializable detail is dropped, not fatal" convention.
+                let now = event.ts.to_rfc3339();
+                let mut steps = read_goal_steps(tx, &p.ticket)?;
+                if let Some(step) = steps.iter_mut().find(|s| s.id == p.step_id) {
+                    step.done = true;
+                    write_goal_steps(tx, &p.ticket, &steps, &now)?;
+                }
+            }
+        }
+        EventKind::GoalReoriented => {
+            if let Some(p) = event.payload.as_goal_reoriented() {
+                // Last-write-wins assignment, not a counter: re-applying the same event during
+                // replay sets `last_reoriented_step` to the same `at_step` both times.
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "UPDATE goals SET last_reoriented_step = ?2, updated_at = ?3 WHERE ticket = ?1",
+                        params![p.ticket.as_str(), p.at_step, now],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
+        EventKind::GoalClaimedComplete => {
+            if let Some(p) = event.payload.as_goal_claimed_complete() {
+                // `p.summary` has nowhere to persist under `goals`' schema (no column for it) —
+                // same convention as `effect.failed`'s dropped `reason` above; still recoverable
+                // from the raw event log.
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "UPDATE goals SET claimed_complete = 1, updated_at = ?2 WHERE ticket = ?1",
+                        params![p.ticket.as_str(), now],
+                    )
+                    .map_err(storage_err)?;
+            }
+        }
         // The remaining catalogued kinds aren't part of this crate's materialized view at all
         // (authority.granted/delegated/revoked/reverted, resource.conflict_detected,
         // executor.failed, index.updated, comment/approval events, genesis.*) — no table in
@@ -750,6 +836,51 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
         // fails on a kind this build doesn't project.
         _ => {}
     }
+    Ok(())
+}
+
+/// Read `goals.steps` for `ticket` back into typed [`GoalStep`]s, or an empty `Vec` if no `goals`
+/// row exists yet for it (the `goal.step_added` materializer arm is the only caller today, and it
+/// always runs after a `goal.set` in practice, but treating a missing row as "no steps yet" rather
+/// than erroring keeps this pure read-modify helper safe to call regardless of ordering).
+fn read_goal_steps(tx: &Tx<'_>, ticket: &tm_types::TicketId) -> tm_types::Result<Vec<GoalStep>> {
+    let steps_json: Option<String> = tx
+        .raw()
+        .query_row(
+            "SELECT steps FROM goals WHERE ticket = ?1",
+            params![ticket.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage_err)?;
+    match steps_json {
+        Some(json) => serde_json::from_str(&json).map_err(TmError::from),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Write `steps` back to `goals.steps` for `ticket`, bumping `updated_at` to `now` (an already
+/// RFC3339-formatted timestamp). An `INSERT ... ON CONFLICT` rather than a bare `UPDATE`: a
+/// `goal.step_added` is expected to always follow a `goal.set` in practice (`AgentLoop` never
+/// emits one without the other), but a bare `UPDATE` would silently drop the step if a `goals`
+/// row somehow didn't exist yet, rather than surfacing or recovering from it — the fresh-row
+/// branch here fills `text`/`claimed_complete`/`last_reoriented_step`/`set_at` with the same
+/// defaults `goal.set`'s own fresh-row branch uses, so a step is never lost even in that case.
+fn write_goal_steps(
+    tx: &Tx<'_>,
+    ticket: &tm_types::TicketId,
+    steps: &[GoalStep],
+    now: &str,
+) -> tm_types::Result<()> {
+    let steps_json = serde_json::to_string(steps).map_err(TmError::from)?;
+    tx.raw()
+        .execute(
+            "INSERT INTO goals (ticket, text, steps, claimed_complete, last_reoriented_step, set_at, updated_at)
+             VALUES (?1, '', ?2, 0, 0, ?3, ?3)
+             ON CONFLICT(ticket) DO UPDATE SET steps = excluded.steps, updated_at = excluded.updated_at",
+            params![ticket.as_str(), steps_json, now],
+        )
+        .map_err(storage_err)?;
     Ok(())
 }
 
@@ -1762,6 +1893,232 @@ mod tests {
             let count: i64 = tx
                 .raw()
                 .query_row("SELECT COUNT(*) FROM effects", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        });
+    }
+
+    // ---- goal.set / goal.step_added / goal.step_completed / goal.reoriented /
+    // goal.claimed_complete (SPEC.md §29, audit B-09) ----
+
+    fn goal_row(tx: &Tx<'_>, ticket: &str) -> (String, String, bool, i64) {
+        tx.raw()
+            .query_row(
+                "SELECT text, steps, claimed_complete, last_reoriented_step FROM goals WHERE ticket = ?1",
+                params![ticket],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0, r.get(3)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn goal_set_inserts_a_fresh_row() {
+        with_tx(|tx| {
+            let set = tm_events::Payload::from(GoalSetPayload {
+                ticket: ticket("T-1"),
+                text: "get the login form to validate emails".into(),
+            });
+            apply(tx, &draft_event(1, EK::GoalSet, set)).unwrap();
+
+            let (text, steps, claimed, reoriented) = goal_row(tx, "T-1");
+            assert_eq!(text, "get the login form to validate emails");
+            assert_eq!(steps, "[]");
+            assert!(!claimed);
+            assert_eq!(reoriented, 0);
+        });
+    }
+
+    #[test]
+    fn goal_set_replay_is_idempotent() {
+        with_tx(|tx| {
+            let set = tm_events::Payload::from(GoalSetPayload {
+                ticket: ticket("T-1"),
+                text: "goal text".into(),
+            });
+            apply(tx, &draft_event(1, EK::GoalSet, set.clone())).unwrap();
+            apply(tx, &draft_event(1, EK::GoalSet, set)).unwrap();
+
+            let count: i64 = tx
+                .raw()
+                .query_row("SELECT COUNT(*) FROM goals", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(count, 1);
+        });
+    }
+
+    #[test]
+    fn goal_set_again_resets_steps_and_claimed_complete() {
+        with_tx(|tx| {
+            let set = tm_events::Payload::from(GoalSetPayload {
+                ticket: ticket("T-1"),
+                text: "first goal".into(),
+            });
+            apply(tx, &draft_event(1, EK::GoalSet, set)).unwrap();
+
+            let added = tm_events::Payload::from(GoalStepAddedPayload {
+                ticket: ticket("T-1"),
+                step_id: "step-1".into(),
+                text: "do a thing".into(),
+            });
+            apply(tx, &draft_event(2, EK::GoalStepAdded, added)).unwrap();
+
+            let claimed = tm_events::Payload::from(GoalClaimedCompletePayload {
+                ticket: ticket("T-1"),
+                summary: "done".into(),
+            });
+            apply(tx, &draft_event(3, EK::GoalClaimedComplete, claimed)).unwrap();
+
+            let (_, steps, is_claimed, _) = goal_row(tx, "T-1");
+            assert_ne!(steps, "[]");
+            assert!(is_claimed);
+
+            let reset = tm_events::Payload::from(GoalSetPayload {
+                ticket: ticket("T-1"),
+                text: "second goal, restarted".into(),
+            });
+            apply(tx, &draft_event(4, EK::GoalSet, reset)).unwrap();
+
+            let (text, steps, is_claimed, _) = goal_row(tx, "T-1");
+            assert_eq!(text, "second goal, restarted");
+            assert_eq!(steps, "[]", "a fresh goal.set restarts the decomposition");
+            assert!(!is_claimed);
+        });
+    }
+
+    #[test]
+    fn goal_step_added_appends_a_step() {
+        with_tx(|tx| {
+            let set = tm_events::Payload::from(GoalSetPayload {
+                ticket: ticket("T-1"),
+                text: "goal".into(),
+            });
+            apply(tx, &draft_event(1, EK::GoalSet, set)).unwrap();
+
+            let added = tm_events::Payload::from(GoalStepAddedPayload {
+                ticket: ticket("T-1"),
+                step_id: "step-1".into(),
+                text: "read the file".into(),
+            });
+            apply(tx, &draft_event(2, EK::GoalStepAdded, added)).unwrap();
+
+            let (_, steps_json, _, _) = goal_row(tx, "T-1");
+            let steps: Vec<crate::goal::GoalStep> = serde_json::from_str(&steps_json).unwrap();
+            assert_eq!(steps.len(), 1);
+            assert_eq!(steps[0].id, "step-1");
+            assert_eq!(steps[0].text, "read the file");
+            assert!(!steps[0].done);
+        });
+    }
+
+    #[test]
+    fn goal_step_added_replay_is_idempotent_for_the_same_step_id() {
+        // Re-applying the same `goal.step_added` event (as replay would) must update the
+        // existing step in place, never append a duplicate.
+        with_tx(|tx| {
+            let set = tm_events::Payload::from(GoalSetPayload {
+                ticket: ticket("T-1"),
+                text: "goal".into(),
+            });
+            apply(tx, &draft_event(1, EK::GoalSet, set)).unwrap();
+
+            let added = tm_events::Payload::from(GoalStepAddedPayload {
+                ticket: ticket("T-1"),
+                step_id: "step-1".into(),
+                text: "read the file".into(),
+            });
+            apply(tx, &draft_event(2, EK::GoalStepAdded, added.clone())).unwrap();
+            apply(tx, &draft_event(2, EK::GoalStepAdded, added)).unwrap();
+
+            let (_, steps_json, _, _) = goal_row(tx, "T-1");
+            let steps: Vec<crate::goal::GoalStep> = serde_json::from_str(&steps_json).unwrap();
+            assert_eq!(steps.len(), 1, "must not duplicate the step on replay");
+        });
+    }
+
+    #[test]
+    fn goal_step_completed_marks_the_matching_step_done() {
+        with_tx(|tx| {
+            let set = tm_events::Payload::from(GoalSetPayload {
+                ticket: ticket("T-1"),
+                text: "goal".into(),
+            });
+            apply(tx, &draft_event(1, EK::GoalSet, set)).unwrap();
+            let added = tm_events::Payload::from(GoalStepAddedPayload {
+                ticket: ticket("T-1"),
+                step_id: "step-1".into(),
+                text: "read the file".into(),
+            });
+            apply(tx, &draft_event(2, EK::GoalStepAdded, added)).unwrap();
+
+            let completed = tm_events::Payload::from(GoalStepCompletedPayload {
+                ticket: ticket("T-1"),
+                step_id: "step-1".into(),
+            });
+            apply(
+                tx,
+                &draft_event(3, EK::GoalStepCompleted, completed.clone()),
+            )
+            .unwrap();
+            // Replay-idempotence: applying the same completion twice must not error.
+            apply(tx, &draft_event(3, EK::GoalStepCompleted, completed)).unwrap();
+
+            let (_, steps_json, _, _) = goal_row(tx, "T-1");
+            let steps: Vec<crate::goal::GoalStep> = serde_json::from_str(&steps_json).unwrap();
+            assert_eq!(steps.len(), 1);
+            assert!(steps[0].done);
+        });
+    }
+
+    #[test]
+    fn goal_reoriented_sets_last_reoriented_step_and_is_idempotent() {
+        with_tx(|tx| {
+            let set = tm_events::Payload::from(GoalSetPayload {
+                ticket: ticket("T-1"),
+                text: "goal".into(),
+            });
+            apply(tx, &draft_event(1, EK::GoalSet, set)).unwrap();
+
+            let reoriented = tm_events::Payload::from(GoalReorientedPayload {
+                ticket: ticket("T-1"),
+                at_step: 3,
+            });
+            apply(tx, &draft_event(2, EK::GoalReoriented, reoriented.clone())).unwrap();
+            apply(tx, &draft_event(2, EK::GoalReoriented, reoriented)).unwrap();
+
+            let (_, _, _, last_reoriented_step) = goal_row(tx, "T-1");
+            assert_eq!(
+                last_reoriented_step, 3,
+                "re-applying the same reorient event must not double-count"
+            );
+        });
+    }
+
+    #[test]
+    fn goal_claimed_complete_sets_the_flag_and_is_idempotent() {
+        with_tx(|tx| {
+            let set = tm_events::Payload::from(GoalSetPayload {
+                ticket: ticket("T-1"),
+                text: "goal".into(),
+            });
+            apply(tx, &draft_event(1, EK::GoalSet, set)).unwrap();
+
+            let claimed = tm_events::Payload::from(GoalClaimedCompletePayload {
+                ticket: ticket("T-1"),
+                summary: "all done".into(),
+            });
+            apply(
+                tx,
+                &draft_event(2, EK::GoalClaimedComplete, claimed.clone()),
+            )
+            .unwrap();
+            apply(tx, &draft_event(2, EK::GoalClaimedComplete, claimed)).unwrap();
+
+            let (_, _, is_claimed, _) = goal_row(tx, "T-1");
+            assert!(is_claimed);
+
+            let count: i64 = tx
+                .raw()
+                .query_row("SELECT COUNT(*) FROM goals", [], |r| r.get(0))
                 .unwrap();
             assert_eq!(count, 1);
         });

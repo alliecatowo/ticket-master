@@ -59,6 +59,8 @@ pub enum EventCategory {
     Mirror,
     /// `effect.*`
     Effect,
+    /// `goal.*`
+    Goal,
 }
 
 /// The closed set of event kinds a project's log may contain.
@@ -293,6 +295,27 @@ pub enum EventKind {
     /// mid-effect" case `confirm()`-shaped recovery probes exist for).
     #[serde(rename = "effect.failed")]
     EffectFailed,
+    /// `goal.set` (`SPEC.md` §29): a durable objective set for one ticket's live execution,
+    /// distinct from the ticket's own `objective` field — a goal is the worker's decomposition of
+    /// how it is getting there, not the ticket's static statement of the work.
+    #[serde(rename = "goal.set")]
+    GoalSet,
+    /// `goal.step_added`: one step added to the current goal's live decomposition.
+    #[serde(rename = "goal.step_added")]
+    GoalStepAdded,
+    /// `goal.step_completed`.
+    #[serde(rename = "goal.step_completed")]
+    GoalStepCompleted,
+    /// `goal.reoriented`: the loop re-read goal state against observed state at the start of a
+    /// step, rather than trusting only its own in-memory conversation history (`SPEC.md` §29's
+    /// "re-orientation is explicit").
+    #[serde(rename = "goal.reoriented")]
+    GoalReoriented,
+    /// `goal.claimed_complete`: the loop believes the goal is met. A claim only — `SPEC.md` §16's
+    /// verification ladder decides whether it was; the goal loop never marks its own work
+    /// verified.
+    #[serde(rename = "goal.claimed_complete")]
+    GoalClaimedComplete,
 }
 
 /// Every kind, in catalogue order, for iteration in tests and diagnostics.
@@ -371,6 +394,11 @@ pub const ALL: &[EventKind] = &[
     EventKind::EffectJournaled,
     EventKind::EffectCompleted,
     EventKind::EffectFailed,
+    EventKind::GoalSet,
+    EventKind::GoalStepAdded,
+    EventKind::GoalStepCompleted,
+    EventKind::GoalReoriented,
+    EventKind::GoalClaimedComplete,
 ];
 
 impl EventKind {
@@ -455,6 +483,11 @@ impl EventKind {
             EventKind::EffectJournaled => "effect.journaled",
             EventKind::EffectCompleted => "effect.completed",
             EventKind::EffectFailed => "effect.failed",
+            EventKind::GoalSet => "goal.set",
+            EventKind::GoalStepAdded => "goal.step_added",
+            EventKind::GoalStepCompleted => "goal.step_completed",
+            EventKind::GoalReoriented => "goal.reoriented",
+            EventKind::GoalClaimedComplete => "goal.claimed_complete",
         }
     }
 
@@ -531,6 +564,11 @@ impl EventKind {
             EventKind::EffectJournaled | EventKind::EffectCompleted | EventKind::EffectFailed => {
                 EventCategory::Effect
             }
+            EventKind::GoalSet
+            | EventKind::GoalStepAdded
+            | EventKind::GoalStepCompleted
+            | EventKind::GoalReoriented
+            | EventKind::GoalClaimedComplete => EventCategory::Goal,
         }
     }
 
@@ -828,6 +866,18 @@ mod tests {
     }
 
     #[test]
+    fn category_maps_goal_kinds() {
+        assert_eq!(EventKind::GoalSet.category(), EventCategory::Goal);
+        assert_eq!(EventKind::GoalStepAdded.category(), EventCategory::Goal);
+        assert_eq!(EventKind::GoalStepCompleted.category(), EventCategory::Goal);
+        assert_eq!(EventKind::GoalReoriented.category(), EventCategory::Goal);
+        assert_eq!(
+            EventKind::GoalClaimedComplete.category(),
+            EventCategory::Goal
+        );
+    }
+
+    #[test]
     fn is_ticket_terminal_true_for_closed() {
         assert!(EventKind::TicketClosed.is_ticket_terminal());
     }
@@ -878,8 +928,8 @@ mod tests {
 
     #[test]
     fn all_kinds_sorted_and_complete() {
-        assert_eq!(ALL.len(), 74);
+        assert_eq!(ALL.len(), 79);
         assert_eq!(ALL[0], EventKind::ProjectCreated);
-        assert_eq!(ALL[ALL.len() - 1], EventKind::EffectFailed);
+        assert_eq!(ALL[ALL.len() - 1], EventKind::GoalClaimedComplete);
     }
 }

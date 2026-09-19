@@ -40,16 +40,18 @@ use tm_events::payload::{
     ArtifactCreatedPayload, AuthorityRevertedPayload, CommandCompletedPayload,
     CommandStartedPayload, DecisionCreatedPayload, DecisionSupersededPayload,
     DocInvalidatedPayload, DocReconciledPayload, DocRegisteredPayload, EffectCompletedPayload,
-    EffectFailedPayload, EffectJournaledPayload, HarnessPromotedPayload, MilestoneClosedPayload,
-    MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload, MirrorPulledPayload,
-    MirrorPushedPayload, SessionEndedPayload, SessionJoinedPayload, SessionStartedPayload,
-    TicketAuditRejectedPayload, TicketAuditedPayload, TicketBudgetExhaustedPayload,
-    TicketCancelledPayload, TicketChildAddedPayload, TicketClosedPayload, TicketCreatedPayload,
-    TicketDependencyAddedPayload, TicketEscalatedPayload, TicketFailedPayload,
-    TicketHeartbeatPayload, TicketLeaseExpiredPayload, TicketLeaseReleasedPayload,
-    TicketLeasedPayload, TicketReopenedPayload, TicketRetryScheduledPayload,
-    TicketStateChangedPayload, TicketSubmittedPayload, TicketUpdatedPayload,
-    TicketVerificationFailedPayload, TicketVerifiedPayload, UsageRecordedPayload,
+    EffectFailedPayload, EffectJournaledPayload, GoalClaimedCompletePayload, GoalReorientedPayload,
+    GoalSetPayload, GoalStepAddedPayload, GoalStepCompletedPayload, HarnessPromotedPayload,
+    MilestoneClosedPayload, MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload,
+    MirrorPulledPayload, MirrorPushedPayload, SessionEndedPayload, SessionJoinedPayload,
+    SessionStartedPayload, TicketAuditRejectedPayload, TicketAuditedPayload,
+    TicketBudgetExhaustedPayload, TicketCancelledPayload, TicketChildAddedPayload,
+    TicketClosedPayload, TicketCreatedPayload, TicketDependencyAddedPayload,
+    TicketEscalatedPayload, TicketFailedPayload, TicketHeartbeatPayload, TicketLeaseExpiredPayload,
+    TicketLeaseReleasedPayload, TicketLeasedPayload, TicketReopenedPayload,
+    TicketRetryScheduledPayload, TicketStateChangedPayload, TicketSubmittedPayload,
+    TicketUpdatedPayload, TicketVerificationFailedPayload, TicketVerifiedPayload,
+    UsageRecordedPayload,
 };
 use tm_events::{Event, EventDraft, EventLog, Payload, Tx};
 use tm_types::{
@@ -62,6 +64,7 @@ use crate::artifact::{Artifact, ArtifactKind, ArtifactStorage, Evidence, Evidenc
 use crate::budget::{BudgetLedger, BudgetScope, ScopedBudget};
 use crate::decision::Decision;
 use crate::effect::{Effect, EffectGuard, EffectKey, EffectStatus};
+use crate::goal::{GoalState, GoalStep};
 use crate::graph::{DependencyEdge, DependencyGraph};
 use crate::lease::{Lease, LeaseStore, LeaseView};
 use crate::machine;
@@ -2016,6 +2019,170 @@ impl Store {
         ])
     }
 
+    /// Set (or replace) `ticket`'s durable goal (`SPEC.md` §29, `docs/audit-2026-09-18-fable.md`
+    /// B-09) — the worker's live decomposition of how it is getting to the ticket's own
+    /// `objective`, distinct from that objective itself. Replacing an existing goal resets its
+    /// step list and `claimed_complete` flag (see the `goal.set` materializer arm), so this is
+    /// also how a loop starts a fresh decomposition after abandoning a stale one.
+    pub fn set_goal(
+        &self,
+        ticket: &TicketId,
+        text: String,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(ticket.clone()),
+            Payload::from(GoalSetPayload {
+                ticket: ticket.clone(),
+                text,
+            }),
+        )])
+    }
+
+    /// Add one step to `ticket`'s current goal decomposition, identified by `step_id` (stable
+    /// across a later [`Store::complete_goal_step`] call for the same step — the caller mints
+    /// this, typically from the read-back [`GoalState::steps`] length; see
+    /// `tm-agent::agent_loop`'s own step-id convention for the concrete scheme it uses).
+    pub fn add_goal_step(
+        &self,
+        ticket: &TicketId,
+        step_id: String,
+        text: String,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(ticket.clone()),
+            Payload::from(GoalStepAddedPayload {
+                ticket: ticket.clone(),
+                step_id,
+                text,
+            }),
+        )])
+    }
+
+    /// Mark one step of `ticket`'s goal decomposition done.
+    pub fn complete_goal_step(
+        &self,
+        ticket: &TicketId,
+        step_id: String,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(ticket.clone()),
+            Payload::from(GoalStepCompletedPayload {
+                ticket: ticket.clone(),
+                step_id,
+            }),
+        )])
+    }
+
+    /// Record that a loop re-read `ticket`'s goal state against observed state at the start of
+    /// `at_step` (`SPEC.md` §29's "re-orientation is explicit") — a durable trace of when
+    /// re-orientation happened, not itself a change to the goal's text or steps.
+    pub fn reorient_goal(
+        &self,
+        ticket: &TicketId,
+        at_step: u32,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(ticket.clone()),
+            Payload::from(GoalReorientedPayload {
+                ticket: ticket.clone(),
+                at_step,
+            }),
+        )])
+    }
+
+    /// Record that a loop believes `ticket`'s goal is met, carrying `summary`. A claim only:
+    /// `SPEC.md` §16's verification ladder (never this method, never the caller) decides whether
+    /// it was — see `tm-agent::agent_loop::AgentLoop`'s own doc comment on why this is always
+    /// followed by [`Store::submit`], never [`Store::verify`].
+    pub fn claim_goal_complete(
+        &self,
+        ticket: &TicketId,
+        summary: String,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::from(ticket.clone()),
+            Payload::from(GoalClaimedCompletePayload {
+                ticket: ticket.clone(),
+                summary,
+            }),
+        )])
+    }
+
+    /// Read `ticket`'s current materialized goal state, or `None` if no `goal.set` has ever been
+    /// recorded for it. The read path a loop's re-orientation uses (`SPEC.md` §29): re-reading
+    /// this against observed state at the start of every step, rather than trusting only its own
+    /// in-memory conversation history, is what keeps a long run on target across turns and
+    /// resumptions.
+    pub fn goal_state(&self, ticket: &TicketId) -> tm_types::Result<Option<GoalState>> {
+        let conn = tm_events::schema::open_read_connection(self.log.path())?;
+        let row = conn.query_row(
+            "SELECT text, steps, claimed_complete, last_reoriented_step, set_at, updated_at
+             FROM goals WHERE ticket = ?1",
+            rusqlite::params![ticket.as_str()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        );
+        match row {
+            Ok((text, steps_json, claimed_complete, last_reoriented_step, set_at, updated_at)) => {
+                let steps: Vec<GoalStep> = serde_json::from_str(&steps_json)
+                    .map_err(|e| TmError::storage(format!("corrupt goals.steps: {e}")))?;
+                let set_at = Timestamp::parse_rfc3339(&set_at)
+                    .map_err(|e| TmError::storage(format!("corrupt goals.set_at: {e}")))?;
+                let updated_at = Timestamp::parse_rfc3339(&updated_at)
+                    .map_err(|e| TmError::storage(format!("corrupt goals.updated_at: {e}")))?;
+                Ok(Some(GoalState {
+                    ticket: ticket.clone(),
+                    text,
+                    steps,
+                    claimed_complete: claimed_complete != 0,
+                    last_reoriented_step: last_reoriented_step as u32,
+                    set_at,
+                    updated_at,
+                }))
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(storage_err(e)),
+        }
+    }
+
+    /// Total number of events recorded against `subject` so far (a raw `COUNT(*)` over
+    /// `tm-events`' own `events` table, keyed by its `subject` column — see
+    /// [`tm_events::log::EventLog::read_subject`], which this deliberately does not call: reading
+    /// every row back just to `.len()` them would work but do needless deserialization work for
+    /// what a caller like `tm-agent::agent_loop::AgentLoop`'s `max_events_per_ticket` backstop
+    /// checks on every single step of a run). Not scoped to any one [`tm_events::EventKind`] —
+    /// the backstop this feeds is a dumb, global ceiling on *any* accumulation against one
+    /// ticket, per `SPEC.md` §21.5's "dumb global backstop" the same audit item (B-09) cites.
+    pub fn event_count_for(&self, subject: &Id) -> tm_types::Result<u64> {
+        let conn = tm_events::schema::open_read_connection(self.log.path())?;
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE subject = ?1",
+                rusqlite::params![subject.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(storage_err)?;
+        Ok(count as u64)
+    }
+
     /// Current high-water mark of every id counter, for persistence/diagnostics.
     pub fn counters(&self) -> tm_types::Result<BTreeMap<String, u64>> {
         Ok(self.view()?.counters)
@@ -3682,5 +3849,113 @@ mod tests {
         let ticket = create_root_ticket(&store);
         let key = EffectKey::compute(&ticket, 0, "git.push", "never-begun");
         assert!(store.effect_status(&key).expect("effect_status").is_none());
+    }
+
+    // ---- goal loop (SPEC.md §29, audit B-09) ----
+
+    #[test]
+    fn goal_state_is_none_before_any_goal_set() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        assert!(store.goal_state(&ticket).expect("goal_state").is_none());
+    }
+
+    #[test]
+    fn set_goal_then_add_and_complete_steps_round_trips_through_goal_state() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+
+        store
+            .set_goal(&ticket, "ship the feature".into(), actor())
+            .expect("set_goal");
+        store
+            .add_goal_step(&ticket, "step-1".into(), "read the code".into(), actor())
+            .expect("add_goal_step");
+        store
+            .add_goal_step(&ticket, "step-2".into(), "write the patch".into(), actor())
+            .expect("add_goal_step");
+        store
+            .complete_goal_step(&ticket, "step-1".into(), actor())
+            .expect("complete_goal_step");
+
+        let state = store
+            .goal_state(&ticket)
+            .expect("goal_state")
+            .expect("goal exists");
+        assert_eq!(state.text, "ship the feature");
+        assert_eq!(state.steps.len(), 2);
+        assert!(state.steps[0].done);
+        assert!(!state.steps[1].done);
+        assert!(!state.claimed_complete);
+    }
+
+    #[test]
+    fn reorient_goal_and_claim_complete_update_goal_state() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+
+        store
+            .set_goal(&ticket, "ship the feature".into(), actor())
+            .expect("set_goal");
+        store
+            .reorient_goal(&ticket, 2, actor())
+            .expect("reorient_goal");
+        store
+            .claim_goal_complete(&ticket, "shipped it".into(), actor())
+            .expect("claim_goal_complete");
+
+        let state = store
+            .goal_state(&ticket)
+            .expect("goal_state")
+            .expect("goal exists");
+        assert_eq!(state.last_reoriented_step, 2);
+        assert!(state.claimed_complete);
+    }
+
+    #[test]
+    fn goal_state_survives_rebuild() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+
+        store
+            .set_goal(&ticket, "ship the feature".into(), actor())
+            .expect("set_goal");
+        store
+            .add_goal_step(&ticket, "step-1".into(), "read the code".into(), actor())
+            .expect("add_goal_step");
+
+        store.rebuild().expect("rebuild");
+
+        let state = store
+            .goal_state(&ticket)
+            .expect("goal_state after rebuild")
+            .expect("goal survives rebuild");
+        assert_eq!(state.text, "ship the feature");
+        assert_eq!(state.steps.len(), 1);
+    }
+
+    #[test]
+    fn event_count_for_counts_every_event_recorded_against_a_subject() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        let subject = Id::from(ticket.clone());
+
+        let before = store.event_count_for(&subject).expect("event_count_for");
+        store
+            .set_goal(&ticket, "ship the feature".into(), actor())
+            .expect("set_goal");
+        store
+            .add_goal_step(&ticket, "step-1".into(), "read the code".into(), actor())
+            .expect("add_goal_step");
+        let after = store.event_count_for(&subject).expect("event_count_for");
+
+        assert_eq!(after, before + 2);
+    }
+
+    #[test]
+    fn event_count_for_an_unknown_subject_is_zero() {
+        let (_dir, store) = open_store();
+        let subject = Id::new("T-999999");
+        assert_eq!(store.event_count_for(&subject).expect("event_count_for"), 0);
     }
 }

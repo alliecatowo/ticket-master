@@ -32,6 +32,7 @@ pub mod budget;
 pub mod decision;
 pub mod effect;
 pub mod executor;
+pub mod goal;
 pub mod graph;
 pub mod invariants;
 pub mod lease;
@@ -52,6 +53,7 @@ pub use executor::{
     ExecutorFailure, ExecutorOutcome, ExecutorTask, FsScope, NetPolicy, ReturnScopeViolation,
     Sandbox,
 };
+pub use goal::{GoalState, GoalStep};
 pub use graph::{CycleViolation, DependencyEdge, DependencyGraph};
 pub use invariants::{check_invariants, Violation};
 pub use lease::{Lease, LeaseStore, ReversionAction};

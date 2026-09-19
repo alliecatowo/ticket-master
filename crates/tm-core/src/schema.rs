@@ -3,7 +3,8 @@
 //! Owns the schema for `tickets`, `ticket_deps`, `ticket_children`, `leases`, `resource_claims`,
 //! `decisions`, `milestones`, `artifacts`, `evidence`, `budgets`, `participants`, `sessions`,
 //! `counters`, `docs`, `doc_provenance`, `provider_usage`, `harness_epochs`, `mirror_links`,
-//! `effects` (`SPEC.md` §21.5, `crate::effect`), `workflows`, and `meta`, plus [`drop_views`]
+//! `effects` (`SPEC.md` §21.5, `crate::effect`), `goals` (`SPEC.md` §29, `crate::goal`),
+//! `workflows`, and `meta`, plus [`drop_views`]
 //! which `Store::rebuild` uses to blow away every one of these tables (never the `tm-events`
 //! `events` table itself) before replaying from `seq` 0.
 //!
@@ -25,7 +26,11 @@ use rusqlite::Connection;
 use tm_types::TmError;
 
 /// The schema version this build of `tm-core` expects. Bump when adding a migration.
-pub const SCHEMA_VERSION: i64 = 2;
+///
+/// `3`: adds the `goals` table (`docs/audit-2026-09-18-fable.md` B-09, `SPEC.md` §29), following
+/// the same "add a table, bump the version, `migrate`'s existing forward-only loop picks it up"
+/// precedent `effects` (version 2, B-11) just set.
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// One materialized table's name, paired with the `CREATE TABLE IF NOT EXISTS` DDL for it.
 pub struct TableDef {
@@ -283,6 +288,20 @@ pub const TABLES: &[TableDef] = &[
                 receipt_artifact TEXT,
                 started TEXT NOT NULL,
                 completed TEXT
+            )
+        ",
+    },
+    TableDef {
+        name: "goals",
+        create_sql: "
+            CREATE TABLE IF NOT EXISTS goals (
+                ticket TEXT PRIMARY KEY,
+                text TEXT NOT NULL,
+                steps TEXT NOT NULL,
+                claimed_complete INTEGER NOT NULL,
+                last_reoriented_step INTEGER NOT NULL,
+                set_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
         ",
     },
