@@ -324,9 +324,12 @@ pub async fn run_ticket(
     dispatcher.dispatch(&ticket, ticket_state, ttl_seconds, project.actor.clone())?;
     renderer.note(&format!("Ticket {ticket} dispatched for execution."));
 
-    let deadline = tokio::time::Instant::now() + RUN_TICKET_MAX_WAIT;
+    let deadline = project
+        .clock
+        .now()
+        .plus_seconds(RUN_TICKET_MAX_WAIT.as_secs() as i64);
     loop {
-        if tokio::time::Instant::now() >= deadline {
+        if project.clock.now() >= deadline {
             renderer.note(&format!(
                 "Ticket {ticket} is still running after {}s; detaching (the run continues in the background).",
                 RUN_TICKET_MAX_WAIT.as_secs()

@@ -136,7 +136,11 @@ impl BuiltinExecutor {
 }
 
 fn session_id_from(rendered: &str) -> SessionId {
-    SessionId::new(rendered).unwrap_or_else(|_| SessionId::new("S-0").expect("S-0 is valid"))
+    SessionId::new(rendered).unwrap_or_else(|_| {
+        SessionId::new("S-0").expect(
+            "the literal S-0 matches SessionId's fixed S-<n> numeric format and can never fail",
+        )
+    })
 }
 
 #[async_trait]
