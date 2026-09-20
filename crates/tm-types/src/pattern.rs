@@ -86,7 +86,20 @@ impl PathPattern {
     /// `self` (see [`PathPattern::match_disjuncts`]) against every disjunct of `other`, since a
     /// path can reach `self` through either of its own disjuncts and has to be covered by
     /// `other` regardless of which one.
+    ///
+    /// Identical source strings short-circuit to `true` before that structural comparison runs.
+    /// This isn't an optimization; it's what keeps `is_subset_of` reflexive (`p.implied_by(p)`)
+    /// for every pattern, including one containing a `[...]` class [`segment_implies`] can't
+    /// tokenize (a non-ASCII member, or one split into an unclosed fragment by
+    /// [`PathPattern::segments`]'s `/`-splitting — see [`parse_class`]'s doc comment) and
+    /// therefore always answers conservatively `false` about, itself included. Equal source
+    /// strings compile to the identical `compile_glob` matcher and the identical
+    /// [`PathPattern::match_disjuncts`] output regardless of whether this module can reason
+    /// about their internal structure, so this is sound unconditionally, not just a carve-out.
     pub fn implied_by(&self, other: &PathPattern) -> bool {
+        if self.0 == other.0 {
+            return true;
+        }
         self.match_disjuncts().iter().all(|dp| {
             other
                 .match_disjuncts()
@@ -176,21 +189,255 @@ fn segments_imply(q: &[&str], p: &[&str]) -> bool {
     segments_imply(qt, pt)
 }
 
-/// Character-level implication inside one path segment.
-fn segment_implies(q: &[u8], p: &[u8]) -> bool {
+/// A `[...]` character class: matches exactly one character, drawn from (or, if `negated`,
+/// excluded from) `ranges`.
+///
+/// Mirrors `globset`'s own class grammar (`Parser::parse_class` in the vendored `globset`
+/// crate's `glob.rs`) at the byte level: an optional leading `!`/`^` negates the whole class;
+/// `]` is a literal member only when it is the very first character after `[`/`[!`; `-` is a
+/// literal member when it is first, last, or immediately follows another `-`, and forms an
+/// inclusive range otherwise.
+///
+/// Unlike `*`/`?` (compiled as `[^/]*`/`[^/]` under `compile_glob`'s `literal_separator(true)`),
+/// `globset`'s own class regex generation applies no such restriction — a class *can* match a
+/// literal `/`, e.g. `[!a]` (anything but `a`) or an explicit `[/]`. `coverage` reflects that
+/// faithfully; callers that need the `*`/`?` exclusion (`tokens_imply`'s `Star` branch) check for
+/// it explicitly rather than this type hiding it.
+#[derive(Clone)]
+struct CharClass {
+    negated: bool,
+    ranges: Vec<(u8, u8)>,
+}
+
+impl CharClass {
+    /// The 256-entry membership table this class matches, expanded once so every comparison in
+    /// [`tokens_imply`] is a plain array scan rather than re-deriving membership per byte.
+    fn coverage(&self) -> [bool; 256] {
+        let mut covered = [false; 256];
+        for &(lo, hi) in &self.ranges {
+            for b in lo..=hi {
+                covered[b as usize] = true;
+            }
+        }
+        if self.negated {
+            for c in &mut covered {
+                *c = !*c;
+            }
+        }
+        covered
+    }
+}
+
+/// Parse a `[...]` class starting at `bytes[0] == b'['`, returning the parsed class and the
+/// remaining bytes after its closing `]`. See [`CharClass`] for the grammar this mirrors.
+///
+/// Returns `None` — the caller's cue to answer conservatively rather than guess — for two cases
+/// that should not arise from an already-validated [`PathPattern`] but are defensively rejected
+/// rather than trusted:
+///
+/// * A genuinely unclosed class. `PathPattern::new` validates the *whole* pattern string through
+///   `compile_glob` before storing it, which already rejects an unclosed `[` — but
+///   [`PathPattern::segments`] and [`PathPattern::match_disjuncts`] slice that validated string
+///   on `/`, and a class that (unusually) contains a literal `/` member can be split apart by
+///   that slicing into two fragments, each individually missing its other half: `"a[/]b"` is a
+///   real, valid, compiling pattern whose segment split (`"a["`, `"]b"`) hands this function an
+///   unclosed class on each side.
+/// * Any class member or range endpoint that is not a single ASCII byte. `ranges: Vec<(u8, u8)>`
+///   reasons about class membership one *byte* at a time, but `globset` parses a class one
+///   *Unicode scalar value* at a time; for a multi-byte UTF-8 character these disagree — `[é]`
+///   is the one-member class `{'é'}` to `globset`, but would decompose into the two-member byte
+///   set `{0xC3, 0xA9}` here, a different (and, compared against another multi-byte class
+///   sharing one of those bytes, unsoundly inflated) claim than what actually matches. Bailing
+///   out entirely for any non-ASCII byte avoids reasoning about a class this representation
+///   cannot express faithfully.
+fn parse_class(bytes: &[u8]) -> Option<(CharClass, &[u8])> {
+    let mut i = 1; // bytes[0] is the leading '['.
+    let negated = matches!(bytes.get(i), Some(b'!') | Some(b'^'));
+    if negated {
+        i += 1;
+    }
+    let mut ranges: Vec<(u8, u8)> = Vec::new();
+    let mut first = true;
+    let mut in_range = false;
+    loop {
+        let b = *bytes.get(i)?;
+        if b >= 0x80 {
+            return None; // non-ASCII: see doc comment above.
+        }
+        i += 1;
+        match b {
+            b']' if !first => break,
+            b']' => ranges.push((b']', b']')),
+            b'-' => {
+                if first {
+                    ranges.push((b'-', b'-'));
+                } else if in_range {
+                    let r = ranges.last_mut()?;
+                    if b'-' < r.0 {
+                        return None;
+                    }
+                    r.1 = b'-';
+                    in_range = false;
+                } else if ranges.is_empty() {
+                    return None;
+                } else {
+                    in_range = true;
+                }
+            }
+            c => {
+                if in_range {
+                    let r = ranges.last_mut()?;
+                    if c < r.0 {
+                        return None;
+                    }
+                    r.1 = c;
+                    in_range = false;
+                } else {
+                    ranges.push((c, c));
+                }
+            }
+        }
+        first = false;
+    }
+    if in_range {
+        ranges.push((b'-', b'-'));
+    }
+    Some((CharClass { negated, ranges }, &bytes[i..]))
+}
+
+/// One matcher-level "step" within a single path segment — the granularity `globset`'s own
+/// matcher actually consumes, so structural comparison can walk `q` and `p` in lock step even
+/// across a multi-byte `[...]` class. [`tokenize`] splits a segment's raw bytes into these before
+/// [`tokens_imply`] compares them; this is what fixes `segment_implies` treating `[ab]`'s four
+/// source bytes as four independent literal characters instead of the one actual character the
+/// class matches (`is_subset_of(["[ab]"], ["????"])` wrongly returned `true` — see
+/// `docs/decisions/D-014-pattern-subset-double-star-fix.md`'s "Bug 4 (follow-up)" section for the
+/// original report).
+enum SegTok {
+    /// `*`: zero or more characters (never `/`; see [`CharClass`]'s doc comment).
+    Star,
+    /// `?`: exactly one character, any byte except `/`.
+    Question,
+    /// `[...]`: exactly one character, constrained to (or, if negated, excluding) the class.
+    Class(CharClass),
+    /// Any other byte, matched literally.
+    Literal(u8),
+}
+
+/// Split one path segment's raw pattern bytes into [`SegTok`]s. `None` means this segment
+/// contains a `[...]` class this module cannot faithfully reason about (see [`parse_class`]'s
+/// doc comment) — the caller's cue to treat the whole comparison as "not provably contained"
+/// rather than guess.
+fn tokenize(bytes: &[u8]) -> Option<Vec<SegTok>> {
+    let mut out = Vec::new();
+    let mut rest = bytes;
+    while let Some((&b, tail)) = rest.split_first() {
+        match b {
+            b'*' => {
+                out.push(SegTok::Star);
+                rest = tail;
+            }
+            b'?' => {
+                out.push(SegTok::Question);
+                rest = tail;
+            }
+            b'[' => {
+                let (class, remainder) = parse_class(rest)?;
+                out.push(SegTok::Class(class));
+                rest = remainder;
+            }
+            _ => {
+                out.push(SegTok::Literal(b));
+                rest = tail;
+            }
+        }
+    }
+    Some(out)
+}
+
+/// The path separator — the one byte `*`/`?` always exclude (`globset` compiles them as `[^/]*`
+/// / `[^/]` under `literal_separator(true)`, `compile_glob`'s own setting) but a `[...]` class
+/// does not automatically exclude. This asymmetry is exactly what [`tokens_imply`]'s `Star`
+/// branch has to check before crediting `*`/`?` with covering a class that (unusually, but
+/// validly) includes `/`.
+const SEGMENT_SEPARATOR: u8 = b'/';
+
+/// The 256-entry membership table for a token that always matches exactly one character —
+/// `Literal`, `Question`, or `Class` — or `None` for `Star`, which doesn't.
+fn fixed_coverage(tok: &SegTok) -> Option<[bool; 256]> {
+    match tok {
+        SegTok::Literal(b) => {
+            let mut c = [false; 256];
+            c[*b as usize] = true;
+            Some(c)
+        }
+        SegTok::Question => {
+            let mut c = [true; 256];
+            c[SEGMENT_SEPARATOR as usize] = false;
+            Some(c)
+        }
+        SegTok::Class(class) => Some(class.coverage()),
+        SegTok::Star => None,
+    }
+}
+
+/// Token-level implication inside one path segment (see [`SegTok`]/[`tokenize`]): the same
+/// recursive shape `segment_implies` always used (`*` absorbs zero-or-more, everything else is a
+/// single fixed position), generalized from raw bytes to tokens so a `[...]` class compares as
+/// the one character it actually matches rather than as its raw source bytes.
+///
+/// Two cases are handled exactly, not just conservatively:
+/// * A fixed-width head on both sides (`Literal`/`Question`/`Class` in any combination) implies
+///   iff `p`'s full character coverage is a subset of `q`'s, checked by direct enumeration of
+///   both 256-entry coverage tables — exact for arbitrary combinations of literals, ranges, and
+///   negation, not just the originally-reported `[ab]`-vs-`????` shape.
+/// * `Star` absorbing one more character of `p` (the existing `*`/`**`-absorption recursion) is
+///   sound for a `Literal`/`Question` p-head unconditionally, exactly as before this fix — their
+///   coverage never includes `/`, so dropping one was always safe — and for a `Class` p-head only
+///   when that class's own coverage excludes `/`. Otherwise the class could realize as a `/` that
+///   `*`/`?` provably cannot match, and absorbing it would silently credit `*`/`?` with covering
+///   a path-separator crossing it cannot actually cross (confirmed directly: `PatternSet::parse(
+///   ["x[!a]y"]).matches("x/y")` is `true` — the class realizes the middle `/` — while
+///   `PatternSet::parse(["x*y"]).matches("x/y")` is `false`).
+///
+/// One case is deliberately conservative in the sense of matching reality exactly rather than
+/// approximating it: `Star`/`Question` in `p` opposite a fixed-width `q` head is always `false`
+/// — not because it might sometimes be true and this function can't tell, but because it never
+/// is: a single fixed character can't cover a construct that can also produce zero or
+/// two-or-more characters.
+fn tokens_imply(q: &[SegTok], p: &[SegTok]) -> bool {
     match q.split_first() {
         None => p.is_empty(),
-        Some((b'*', qt)) => {
-            segment_implies(qt, p) || (!p.is_empty() && segment_implies(q, &p[1..]))
+        Some((SegTok::Star, qt)) => {
+            let absorb_one = match p.split_first() {
+                None => false,
+                Some((SegTok::Star, _)) => true,
+                Some((ph, _)) => {
+                    matches!(fixed_coverage(ph), Some(cov) if !cov[SEGMENT_SEPARATOR as usize])
+                }
+            };
+            tokens_imply(qt, p) || (absorb_one && tokens_imply(q, &p[1..]))
         }
-        Some((b'?', qt)) => match p.split_first() {
-            Some((pc, pt)) if *pc != b'*' => segment_implies(qt, pt),
+        Some((qh, qt)) => match (fixed_coverage(qh), p.split_first()) {
+            (Some(q_cov), Some((ph, pt))) => match fixed_coverage(ph) {
+                Some(p_cov) => {
+                    p_cov.iter().zip(q_cov.iter()).all(|(&pc, &qc)| !pc || qc)
+                        && tokens_imply(qt, pt)
+                }
+                None => false,
+            },
             _ => false,
         },
-        Some((qc, qt)) => match p.split_first() {
-            Some((pc, pt)) if pc == qc => segment_implies(qt, pt),
-            _ => false,
-        },
+    }
+}
+
+/// Character-level implication inside one path segment. Tokenizes both sides (see [`tokenize`])
+/// and delegates to [`tokens_imply`]; `false` (never provably contained) if either side contains
+/// a `[...]` class this module cannot faithfully tokenize (see [`parse_class`]'s doc comment).
+fn segment_implies(q: &[u8], p: &[u8]) -> bool {
+    match (tokenize(q), tokenize(p)) {
+        (Some(qt), Some(pt)) => tokens_imply(&qt, &pt),
+        _ => false,
     }
 }
 
@@ -492,6 +739,115 @@ mod tests {
     fn invalid_patterns_are_rejected() {
         assert!(PathPattern::new("src/[").is_err());
     }
+
+    /// Regression for the false-positive class D-014 found but explicitly left unfixed (its
+    /// "Bug 4 (follow-up)" section): `segment_implies` treated a `[...]`
+    /// character class as its raw source bytes (`[`, `a`, `b`, `]` — four literal characters)
+    /// instead of the one actual character it matches. `[ab]` matches a single character ('a'
+    /// or 'b'); `????` requires exactly four. The old byte-level code happened to line up `[ab]`'s
+    /// four *source* bytes against `????`'s four `?`s and wrongly called that a subset.
+    #[test]
+    fn subset_reasons_about_a_character_class_not_its_source_bytes() {
+        // The exact originally-reported false positive.
+        assert!(!set(&["[ab]"]).is_subset_of(&set(&["????"])));
+        // Same shape, fewer/more `?`s: a one-character class is never implied by a fixed width
+        // other than exactly one.
+        assert!(!set(&["[ab]"]).is_subset_of(&set(&["??"])));
+        assert!(!set(&["[ab]"]).is_subset_of(&set(&[""])));
+    }
+
+    /// A `[...]` class is exactly one character, unconstrained-`?`-wide — so it legitimately
+    /// *is* implied by a bare `?`, and this must keep working now that `?` reasons about the
+    /// class's real width instead of consuming one raw source byte at a time.
+    #[test]
+    fn subset_recognizes_a_character_class_implied_by_question_mark() {
+        assert!(set(&["[ab]"]).is_subset_of(&set(&["?"])));
+        assert!(set(&["[a-c]"]).is_subset_of(&set(&["?"])));
+    }
+
+    /// Class-vs-class and class-vs-literal containment, computed by direct 256-entry coverage
+    /// comparison rather than case analysis over negation/ranges — exercises that the fix is
+    /// precise, not just conservatively `false` for everything touching `[...]`.
+    #[test]
+    fn subset_recognizes_real_character_class_containment() {
+        // A narrower class is a subset of a wider one covering all its members.
+        assert!(set(&["[a]"]).is_subset_of(&set(&["[ab]"])));
+        assert!(set(&["[a-b]"]).is_subset_of(&set(&["[a-c]"])));
+        // A literal is a subset of any class that contains it.
+        assert!(set(&["x"]).is_subset_of(&set(&["[wxy]"])));
+        // A class is a subset of a literal only when it is a non-negated singleton for exactly
+        // that character.
+        assert!(set(&["[x]"]).is_subset_of(&set(&["x"])));
+        assert!(!set(&["[wx]"]).is_subset_of(&set(&["x"])));
+        // Negation is accounted for: anything but 'a' contains 'b' and 'c', not 'a'.
+        assert!(set(&["b"]).is_subset_of(&set(&["[!a]"])));
+        assert!(set(&["c"]).is_subset_of(&set(&["[!a]"])));
+        assert!(!set(&["a"]).is_subset_of(&set(&["[!a]"])));
+    }
+
+    #[test]
+    fn subset_never_approves_an_escape_through_a_character_class() {
+        // The wider class is not a subset of the narrower one.
+        assert!(!set(&["[ab]"]).is_subset_of(&set(&["[a]"])));
+        // Reversed containment must fail too.
+        assert!(!set(&["[wxy]"]).is_subset_of(&set(&["x"])));
+    }
+
+    /// Regression for a false-positive shape found by adversarial review of this fix's first
+    /// draft (not by the exhaustive check, whose alphabet — see `exhaustive_differential` below
+    /// — never puts a class in the same segment as `*`/`?`): `globset` compiles `*`/`?` with
+    /// `literal_separator(true)` (`[^/]*` / `[^/]`, confirmed never matching `/`), but compiles a
+    /// `[...]` class with no such restriction, so a negated class like `[!a]` really can match a
+    /// literal `/` and cross what looks, in the pattern's own source text, like a single path
+    /// segment. `"x[!a]y"` really does match the two-segment real path `"x/y"` (confirmed
+    /// directly against `PatternSet::matches`); `"x*y"`/`"x?y"` do not. The structural check must
+    /// not credit `*`/`?` with covering a class whose coverage includes `/`.
+    #[test]
+    fn subset_does_not_let_a_slash_crossing_class_escape_through_star_or_question() {
+        // Confirm the real matcher asymmetry this test guards against.
+        assert!(set(&["x[!a]y"]).matches("x/y"));
+        assert!(!set(&["x*y"]).matches("x/y"));
+        assert!(!set(&["x?y"]).matches("x/y"));
+        // The structural check must agree: neither `*` nor `?` provably covers this class.
+        assert!(!set(&["x[!a]y"]).is_subset_of(&set(&["x*y"])));
+        assert!(!set(&["x[!a]y"]).is_subset_of(&set(&["x?y"])));
+        // A class that does NOT include `/` in its coverage is still safely absorbed by `*`.
+        assert!(set(&["x[bc]y"]).is_subset_of(&set(&["x*y"])));
+        // Identity still holds for a slash-crossing class compared against itself.
+        assert!(set(&["x[!a]y"]).is_subset_of(&set(&["x[!a]y"])));
+    }
+
+    /// A malformed-looking class produced only by this module's own `/`-splitting of an
+    /// otherwise-valid pattern (see `parse_class`'s doc comment) is rejected conservatively
+    /// rather than misparsed.
+    #[test]
+    fn subset_is_conservative_about_a_class_split_by_segment_slicing() {
+        // A valid, compiling pattern whose class contains a literal `/` member.
+        let p = PathPattern::new("a[/]b").unwrap();
+        assert_eq!(p.segments(), vec!["a[", "]b"]);
+        // Neither segment tokenizes as a well-formed class on its own, so the structural
+        // comparison itself can't prove containment even against an identical copy of the same
+        // pattern — but `implied_by`'s identity short-circuit (see its doc comment) proves the
+        // reflexive case a different way, without needing the structural check to understand
+        // this pattern's `[...]` class at all.
+        assert!(set(&["a[/]b"]).is_subset_of(&set(&["a[/]b"])));
+        // A *non-identical* pair, each individually unparseable this same way, is not provably
+        // contained -- the short-circuit only fires for equal source strings, not merely
+        // equivalent-looking ones.
+        assert!(!set(&["a[/]b"]).is_subset_of(&set(&["a[/]c"])));
+    }
+
+    /// `implied_by`'s identity short-circuit is what keeps `is_subset_of` reflexive for a
+    /// pattern containing a class this module can't tokenize at all -- a non-ASCII class member
+    /// (see [`parse_class`]'s doc comment) is a realistic case (unlike the previous test's
+    /// contrived `/`-splitting one), not just a defensive corner.
+    #[test]
+    fn subset_is_reflexive_even_through_an_unparseable_non_ascii_class() {
+        assert!(set(&["[é]"]).is_subset_of(&set(&["[é]"])));
+        // Two different non-ASCII-class patterns are still conservatively not provably
+        // contained in each other.
+        assert!(!set(&["[é]"]).is_subset_of(&set(&["[è]"])));
+    }
 }
 
 /// An exhaustive (not random) differential check of [`PathPattern::implied_by`]/
@@ -506,18 +862,41 @@ mod tests {
 /// is a strictly stronger check than random sampling over the same alphabet: it does not depend
 /// on luck to hit a narrow bug window.
 ///
-/// Bounded to pattern/path length 2 here so it stays CI-fast (72 patterns × 72 patterns × 42
-/// paths). Length 3 (584 patterns × 584 patterns × 258 paths, ~88M triples, a few seconds in
-/// `--release`) was run by hand during development with zero violations post-fix and is not
-/// re-run automatically.
+/// Bounded to pattern/path length 2 here so it stays CI-fast. Length 3 was run by hand during
+/// development of the original three fixes (584 patterns × 584 patterns × 258 paths, ~88M
+/// triples, a few seconds in `--release`) with zero violations post-fix and is not re-run
+/// automatically.
+///
+/// `[ab]`, `????`, `?`, and a mixed slash-crossing shape (`x[!a]y`/`x*y`/`x?y`, alongside
+/// single-char path literals `x`/`y`/`a`/`b`) were added to both alphabets for the
+/// `[...]`-class fix this module accompanies — see
+/// `docs/decisions/D-014-pattern-subset-double-star-fix.md`. Two things this addition has to get
+/// right, each missed by an earlier draft of this same alphabet extension:
+///
+/// * This check only ever flags a *false positive* (`if !p.implied_by(q) { continue; }` skips
+///   every pair it doesn't). `[ab]` and a bare `?` alone reproduce a false-*negative* fix (`[ab]`
+///   legitimately implied by `?`, wrongly `false` pre-fix) that this check structurally cannot
+///   see regardless of alphabet. `????` (four question marks, one segment) is what's needed to
+///   reproduce the originally-reported false positive itself
+///   (`is_subset_of(["[ab]"], ["????"])`) — confirmed directly: this alphabet addition does
+///   flag it against the pre-fix code and finds zero violations against the fixed code.
+/// * A class-alphabet entry that never shares a *segment* with a `*`/`?` entry can never
+///   exercise the class-can-match-`/`-but-`*`/`?`-can't asymmetry (`x[!a]y`/`x*y`/`x?y`) that bit
+///   the fix's first draft — caught by adversarial review, not this check, precisely because the
+///   check's alphabet didn't yet contain a mixed segment. The same lesson D-014's own bug 3
+///   already drew about this alphabet being the thing in question, drawn a second time about
+///   this same alphabet.
 #[cfg(test)]
 mod exhaustive_differential {
     use super::*;
 
     const ALPHABET: &[&str] = &[
-        "src", "tests", "docs", "auth", "parser", "mod.rs", "*", "**",
+        "src", "tests", "docs", "auth", "parser", "mod.rs", "*", "**", "?", "????", "[ab]",
+        "x[!a]y", "x*y", "x?y",
     ];
-    const PATH_LITERALS: &[&str] = &["src", "tests", "docs", "auth", "parser", "mod.rs"];
+    const PATH_LITERALS: &[&str] = &[
+        "src", "tests", "docs", "auth", "parser", "mod.rs", "x", "y", "a", "b",
+    ];
 
     fn strings_up_to(alphabet: &[&str], max_len: usize) -> Vec<String> {
         let mut out = Vec::new();
