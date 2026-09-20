@@ -405,6 +405,20 @@ D-005 (see that decision doc). Fix: route through the same provider-registry loo
 `crates/tm-provider/src/fabric.rs::Fabric::execute` already uses for every other role, rather than
 hardcoding a single provider type at the genesis call site.
 
+## Open decision: should `-p` exit non-zero on an in-band agent failure?
+
+`crates/tm-cli/src/agent.rs::run_turn_streaming` deliberately returns `Err` only for an
+infrastructure failure (network, storage) and `Ok(AgentOutcome::Failed {..})` for the agent's own
+turn failing in-band (e.g. the model ends its turn without submitting) — confirmed live by the
+Reconciliation Gate: `tm -p "<prompt>"` prints `failed (Other): ...` to stdout but exits `0`. This
+is intentional (the doc comment is explicit about the distinction), not a bug, but `args.rs`
+documents `-p` as "suitable for scripting," and a script that only checks the exit code would see
+success on a turn the CLI's own output just labeled failed. Needs a real decision, not a silent
+fix: either exit non-zero for `AgentOutcome::Failed` under `-p`/`--json` specifically (a real
+behavior change for anything already scripting against today's exit codes), or document the
+current split plainly in `args.rs`'s own `--help` text and `docs/` so a script author can't miss
+it. Not resolved yet — pick one deliberately before calling scripting support done.
+
 ## Stretch
 
 - iOS simulator executor (SPEC §23).

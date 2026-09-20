@@ -84,7 +84,11 @@ an existing global session keyed by `workspace_root_for(dir)` before falling bac
 verify the source's hash chain first (hard stop before anything destructive), copy `project.db` via
 SQLite's online backup API (`rusqlite::backup::Backup`, WAL-safe — never a raw `fs::copy` of a
 possibly-open database) plus an explicit allowlist of state extras (`artifacts/`, `harness.toml`,
-`mirror.toml`, `sched.paused`, `workflows/`, `bench/`), then independently re-verify the
+`mirror.toml`, `sched.paused`, `workflows/`, `bench/`) — deliberately **not** `index.db`, which is
+derived and cheaply rebuilt by the next `tm-codeintel` call (`tm doctor`'s `index-health` check
+repairs it automatically; the Reconciliation Gate confirmed this empirically, not just from the
+code comment), so a promoted project always starts with a cold code index rather than carrying a
+stale one across — then independently re-verify the
 destination (chain, invariants, event/ticket-count equality against the source) before treating the
 promotion as real. On any failure past the copy step, the half-built destination is removed and the
 source is never touched. On success, the source's `project.db`/`index.db` and copied extras are
