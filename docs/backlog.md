@@ -19,13 +19,32 @@ correct on-screen answer could only come from real model output). Confirmed the 
 `-p` loop share the exact same `build_fabric()` call (`crates/tm-cli/src/agent.rs:373`) — there is
 no separate, divergent provider-wiring path for the interactive TUI.
 
-**Structural finding, not a bug in any one code path**: a turn that ends with a correct
-conversational text answer (no submission-tool call) is always classified
-`AgentOutcome::Failed{class: Other}` and rendered to the user as `failed (Other): ...` — confirmed
-this is deliberate, existing behavior (`build_mock_fabric`'s own doc comment says the same),
-not new. The real chat experience works; the UX presents a correct answer as an error. Worth a
-real decision on whether "answered in text without submitting" should be a distinct, non-failure
-outcome class.
+**Structural finding, root cause now confirmed precisely**: a turn that ends without a successful
+`ticket.submit` is always classified `AgentOutcome::Failed{class: Other}` and rendered as
+`failed (Other): ...`, and this is not limited to text-only replies — **it is structurally
+unreachable for every bare `tm -p`/interactive scratch ticket**, confirmed directly (live `tm -p`
+run + `crates/tm-core/src/machine.rs:94`): `(Draft, Cancel)`/`(Draft, Activate)` are the only two
+valid transitions out of `Draft`, and `Submit` is only ever valid from `Running`
+(`(Running, Submit) => Ok(Submitted)`, line 94) — but a scratch ticket created by a bare `-p`/
+interactive turn is never run through the scheduler's `Activate → Ready → Leased → Running` chain
+at all; `AgentLoop` just executes tool calls against it directly, still in `Draft`. So
+`ticket.submit` returning `invalid transition: no transition from Draft on Submit` is not a rare
+edge case, it's the *only possible outcome* if the model ever calls that tool from this path —
+confirmed live: a real task (create a file, read it back, verify content) completed 100%
+correctly, including real `edit.create_file`/`fs.read`/`evidence.attach` tool calls, and still
+ended `failed (Other)` for exactly this reason. The real chat/tool-use experience genuinely works;
+the success/failure classification is what's structurally broken for this entire everyday path.
+Needs a real decision: either scratch tickets from bare `-p`/interactive mode should skip the
+`Running`-gated `Submit` requirement entirely (a different, lighter completion signal), or they
+should actually be run through the scheduler's real lifecycle before a turn starts.
+
+Two more real errors surfaced in the same live run, both recovered-from by the model on retry so
+worth noting but not blocking: `artifact.store`/`evidence.attach` rejected wrong-guessed enum
+variant names (`"file-content"`, `"file"`) — a real signal that a cheaper/smaller model (this was
+`muse-spark-1.3-contributor`) may need clearer tool-schema value hints than a larger model would;
+and `shell.run -> error: io: No such file or directory (os error 2)` fired twice before a later
+`shell.run`-adjacent step succeeded — worth a closer look at whether this is a real environment/
+working-directory issue or another wrong-guessed argument, not yet diagnosed.
 
 ## `tm-pty`'s agent tools are fully built, tested, and unreachable by any real agent turn
 
