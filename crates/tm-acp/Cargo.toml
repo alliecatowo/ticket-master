@@ -1,0 +1,24 @@
+[package]
+name = "tm-acp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Agent Client Protocol (ACP) adapter (SPEC.md §28, audit B-12): a JSON-RPC 2.0-over-stdio client that lets tm-scheduler dispatch a ticket to an external ACP-speaking coding agent (Zed's protocol) as the `acp` tm_core::Executor, answering the agent's permission callbacks from Authority::permits; and a server half that exposes a Ticketmaster project as an ACP agent so Zed (or any ACP client) can drive it."
+
+[dependencies]
+tm-types = { workspace = true }
+tm-core = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# For a test asserting `AcpExecutor::capabilities()` actually passes the dispatcher's own
+# `capabilities_satisfy` gate rather than merely asserting its fields by eye. No dependency
+# cycle: tm-scheduler depends on tm-core, not on this crate.
+tm-scheduler = { workspace = true }

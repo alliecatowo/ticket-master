@@ -6,7 +6,9 @@
 use std::io::{self, BufRead, Write as _};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
+use tm_acp::{AcpAgentConfig, AcpExecutor};
 use tm_agent::{BuiltinExecutor, HumanApprovalSink, HumanDecision, HumanExecutor};
 use tm_core::executor::ExecutorTask;
 use tm_core::store::Store;
@@ -117,11 +119,65 @@ impl HumanApprovalSink for StdinApprovalSink {
     }
 }
 
+const ACP_TOML_FILENAME: &str = "acp.toml";
+
+/// The `[agent]` table `acp.toml` names: which external ACP-speaking agent to launch and which
+/// ticket [`Role`] it should serve. Deliberately minimal compared to `browser.toml`'s
+/// provider-fallback-chain shape (`crate::drive::BrowserToml`) — B-12's scope is one external
+/// agent registered as one more role-routed executor, not a fallback chain of several.
+#[derive(Debug, serde::Deserialize)]
+struct AcpToml {
+    agent: AcpAgentToml,
+}
+
+/// See [`AcpToml`].
+#[derive(Debug, serde::Deserialize)]
+struct AcpAgentToml {
+    /// argv to launch the agent; `command[0]` is the program (e.g. `["claude-code-acp"]`).
+    command: Vec<String>,
+    /// Which ticket role this agent should be registered for, replacing [`BuiltinExecutor`] for
+    /// exactly that role — [`ExecutorRegistry::register`] replaces an earlier registration for
+    /// the same role, the same mechanism [`build_dispatcher`] already relies on to register
+    /// `builtin` for every role in the first place.
+    role: Role,
+    /// Per-call timeout in seconds for each of `initialize`/`session/new`/`session/prompt`;
+    /// defaults to 120s (`tm_acp`'s own client default) when absent.
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
+}
+
+/// Build the [`AcpExecutor`] `project.root`'s `acp.toml` describes, paired with the [`Role`] it
+/// should be registered for, or `None` when the project has no `acp.toml` — mirrors
+/// `crate::drive::optional_browser_wiring`'s "absent config file means this optional executor is
+/// simply never registered" shape exactly, so a project with no `acp.toml` dispatches every
+/// ticket identically to how it did before this crate existed.
+fn optional_acp_executor(project: &Project) -> tm_types::Result<Option<(Role, Arc<AcpExecutor>)>> {
+    let path = project.root.join(ACP_TOML_FILENAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| tm_types::TmError::Io(format!("reading {}: {e}", path.display())))?;
+    let parsed: AcpToml = toml::from_str(&source)
+        .map_err(|e| tm_types::TmError::parse(format!("{}: {e}", path.display())))?;
+    let timeout = Duration::from_secs(parsed.agent.timeout_seconds.unwrap_or(120));
+    let executor = Arc::new(AcpExecutor::new(
+        "acp",
+        AcpAgentConfig {
+            command: parsed.agent.command,
+            cwd: project.root.clone(),
+            timeout,
+        },
+        project.store.clone(),
+    ));
+    Ok(Some((parsed.agent.role, executor)))
+}
+
 /// Build the dispatcher `tm run`/`tm sched run` share: a [`BuiltinExecutor`] registered for
-/// every [`Role`] (the only shipped adapter today, per `SPEC.md` §24.3 — `claude-code`/`codex`/
-/// `pi`/`opencode` are future adapters against the same [`tm_core::Executor`] trait) plus a
-/// stdin-driven [`HumanExecutor`] for `human_required` tickets, spawning background runs onto
-/// `handle`.
+/// every [`Role`] (the reference adapter, per `SPEC.md` §24.3), optionally overridden for one
+/// role by an [`AcpExecutor`] when the project has an `acp.toml` (B-12 — `codex`/`pi`/`opencode`
+/// remain future adapters against the same [`tm_core::Executor`] trait), plus a stdin-driven
+/// [`HumanExecutor`] for `human_required` tickets, spawning background runs onto `handle`.
 pub fn build_dispatcher(
     project: &Project,
     handle: tokio::runtime::Handle,
@@ -158,6 +214,9 @@ pub fn build_dispatcher(
     for role in Role::ALL {
         registry.register(role, builtin.clone());
     }
+    if let Some((role, acp_executor)) = optional_acp_executor(project)? {
+        registry.register(role, acp_executor);
+    }
 
     let context: Arc<dyn ContextPackSource> = Arc::new(ProjectContextPackSource {
         store: project.store.clone(),
@@ -171,4 +230,137 @@ pub fn build_dispatcher(
         context,
         registry,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tm_core::Executor as _;
+    use tm_types::{Clock, CounterIds, FixedClock, IdSource};
+
+    fn test_project(root: &std::path::Path) -> Project {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store =
+            Arc::new(Store::open_with(root, clock.clone(), ids.clone()).expect("open store"));
+        Project::for_test(root, store, clock, ids)
+    }
+
+    #[test]
+    fn optional_acp_executor_is_none_without_an_acp_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        assert!(optional_acp_executor(&project).expect("no error").is_none());
+    }
+
+    #[test]
+    fn optional_acp_executor_reads_the_command_and_role_from_a_real_acp_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(ACP_TOML_FILENAME),
+            "[agent]\ncommand = [\"claude-code-acp\"]\nrole = \"coder_fast\"\n",
+        )
+        .expect("write acp.toml");
+        let project = test_project(dir.path());
+
+        let (role, executor) = optional_acp_executor(&project)
+            .expect("no error")
+            .expect("acp.toml is present, so this must be Some");
+        assert_eq!(role, Role::CoderFast);
+        assert_eq!(executor.id(), "acp");
+    }
+
+    #[test]
+    fn optional_acp_executor_honors_an_explicit_timeout() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(ACP_TOML_FILENAME),
+            "[agent]\ncommand = [\"claude-code-acp\", \"--stdio\"]\nrole = \"reviewer_semantic\"\ntimeout_seconds = 30\n",
+        )
+        .expect("write acp.toml");
+        let project = test_project(dir.path());
+
+        let (role, _executor) = optional_acp_executor(&project)
+            .expect("no error")
+            .expect("acp.toml is present");
+        assert_eq!(role, Role::ReviewerSemantic);
+    }
+
+    #[test]
+    fn optional_acp_executor_surfaces_a_parse_error_for_malformed_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(ACP_TOML_FILENAME), "not valid toml [[[")
+            .expect("write acp.toml");
+        let project = test_project(dir.path());
+
+        // `AcpExecutor` (inside the `Ok(Some(..))` this would otherwise be) doesn't implement
+        // `Debug`, so this matches the whole `Result` rather than using `expect_err`/`unwrap_err`
+        // (both require `T: Debug`).
+        let result = optional_acp_executor(&project);
+        assert!(matches!(result, Err(tm_types::TmError::Parse(_))));
+    }
+
+    /// The `builtin`-for-every-role, `acp`-overrides-one-role registration shape this module's
+    /// own doc comment on [`build_dispatcher`] describes, exercised directly against
+    /// [`ExecutorRegistry`] rather than only inferred from reading the code: registering `acp`
+    /// for one role must not disturb any other role's `builtin` registration.
+    #[test]
+    fn registering_an_acp_executor_for_one_role_leaves_every_other_role_on_builtin() {
+        struct StubExecutor(&'static str);
+        #[async_trait::async_trait]
+        impl tm_core::Executor for StubExecutor {
+            fn id(&self) -> &str {
+                self.0
+            }
+            fn capabilities(&self) -> tm_core::executor::ExecutorCapabilities {
+                tm_core::executor::ExecutorCapabilities {
+                    streaming: false,
+                    tool_use: true,
+                    patch_output: false,
+                    interactive: false,
+                    accepts_context_pack: true,
+                    sandboxed: false,
+                    max_context_tokens: None,
+                    cost_class: tm_core::executor::CostClass::Standard,
+                }
+            }
+            async fn execute(
+                &self,
+                _task: ExecutorTask,
+            ) -> tm_types::Result<tm_core::executor::ExecutorOutcome> {
+                unimplemented!("not exercised by this test")
+            }
+            async fn cancel(
+                &self,
+                _handle: &tm_core::executor::ExecutionHandle,
+            ) -> tm_types::Result<()> {
+                Ok(())
+            }
+        }
+
+        let human: Arc<dyn tm_core::Executor> = Arc::new(StubExecutor("human"));
+        let builtin: Arc<dyn tm_core::Executor> = Arc::new(StubExecutor("builtin"));
+        let acp: Arc<dyn tm_core::Executor> = Arc::new(StubExecutor("acp"));
+
+        let mut registry = ExecutorRegistry::new(human);
+        for role in Role::ALL {
+            registry.register(role, builtin.clone());
+        }
+        registry.register(Role::CoderFast, acp.clone());
+
+        assert_eq!(
+            registry.for_role(Role::CoderFast).expect("registered").id(),
+            "acp"
+        );
+        for role in Role::ALL {
+            if role == Role::CoderFast {
+                continue;
+            }
+            assert_eq!(
+                registry.for_role(role).expect("registered").id(),
+                "builtin",
+                "role {role:?} must be untouched by the acp override"
+            );
+        }
+    }
 }
