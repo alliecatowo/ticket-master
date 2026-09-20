@@ -35,6 +35,14 @@ pub fn page(view: &ProjectView) -> WikiPage {
         body.push('\n');
     }
 
+    if kinds.is_empty() && view.decisions.is_empty() {
+        body.push_str(
+            "_No ticket kinds or decisions recorded yet; this project's vocabulary is empty \
+             until `tm ticket new`/`tm decision new` record some, then `tm wiki generate` runs \
+             again._\n",
+        );
+    }
+
     let derived_from: Vec<String> = view.decisions.keys().map(|k| k.to_string()).collect();
     WikiPage::new("glossary", "glossary.md", body, derived_from)
 }
@@ -52,6 +60,19 @@ mod tests {
         assert_eq!(page.rel_path, "glossary.md");
         assert!(page.body.starts_with("# Glossary"));
         assert!(page.derived_from.is_empty());
+    }
+
+    #[test]
+    fn empty_view_explains_why_the_glossary_is_empty() {
+        let view = ProjectView::empty();
+        let page = page(&view);
+        assert!(
+            page.body
+                .contains("No ticket kinds or decisions recorded yet"),
+            "an empty glossary should explain why it's empty, not just show a bare \
+             header:\n{}",
+            page.body
+        );
     }
 
     #[test]

@@ -29,6 +29,8 @@ never drift between sessions:
 - `mise run dev` — same, with `RUST_LOG=tm=debug,tm_core=debug,tm_agent=debug` piped to
   `/tmp/tm-dev.log` instead of the alt-screen (so debug output doesn't corrupt the TUI's frame).
 - `mise run doctor` — `tm doctor` against the current directory.
+- `mise run docs:wiki` — regenerate `docs/wiki/` (`tm wiki generate`); pass `-- --dry-run` to
+  preview without writing (see "Navigation" below).
 
 Every build/test/clippy call in these tasks is already capped at `-j 2` — this is an 8GB Mac,
 concurrent full-workspace compiles have caused real disk-space incidents. If you're driving
@@ -144,6 +146,11 @@ in new tests going forward.
 - Prefer `symbol.*`/`search.hybrid`-shaped retrieval (or zvec-grep, above) over blind
   multi-file `Read` sweeps — this workspace's own `tm-codeintel` crate exists because that's
   faster and more precise than grepping cold.
+- `docs/wiki/` is generated documentation (`SPEC.md` §26, B-14): architecture/<crate>, decisions,
+  history/<path>, tickets, and glossary pages assembled from live project state. Regenerate it
+  with `mise run docs:wiki` (`tm wiki generate`; add `--dry-run` to preview without writing) —
+  don't hand-edit a page unless you also flip its front matter to `mode = "maintained"`/`"human"`,
+  or the next regeneration silently overwrites it.
 
 ## Keep documentation honest as you change things
 

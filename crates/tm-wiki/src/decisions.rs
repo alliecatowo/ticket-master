@@ -134,6 +134,10 @@ pub fn pages(view: &ProjectView) -> Vec<WikiPage> {
             out.push(page);
         }
     }
+    if view.decisions.is_empty() {
+        index_body
+            .push_str("\n_No decisions recorded yet; run `tm decision new` to record one._\n");
+    }
 
     let derived_from: Vec<String> = view.decisions.keys().map(|k| k.to_string()).collect();
     out.push(WikiPage::new(
@@ -271,5 +275,19 @@ mod tests {
 
         // One page per decision, plus the index.
         assert_eq!(pages.len(), 3);
+    }
+
+    #[test]
+    fn index_page_explains_itself_when_no_decisions_are_recorded() {
+        let view = ProjectView::empty();
+        let pages = pages(&view);
+        let index = pages.iter().find(|p| p.rel_path == "decisions.md").unwrap();
+        assert!(
+            index.body.contains("No decisions recorded yet"),
+            "an empty decisions page should explain why it's empty, not just show a bare \
+             table header:\n{}",
+            index.body
+        );
+        assert_eq!(pages.len(), 1, "only the index page, no per-decision pages");
     }
 }

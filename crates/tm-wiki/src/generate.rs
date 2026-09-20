@@ -12,7 +12,7 @@ use tm_core::view::ProjectView;
 use tm_core::Store;
 use tm_types::{Clock, ParticipantId, Result};
 
-use crate::page::{write_page, WikiPage, WriteOutcome};
+use crate::page::{preview_write, write_page, WikiPage, WriteOutcome};
 use crate::{architecture, decisions, glossary, history, tickets};
 
 /// One page's outcome after a [`run`] call.
@@ -49,21 +49,20 @@ impl GenerationReport {
     }
 }
 
-/// Assemble every wiki page family from `store`/`ci`'s current state and write them under
-/// `docs/wiki/` at `project_root`.
+/// Assemble every page family from `store`/`ci`'s current state, in the fixed order [`run`] and
+/// [`dry_run`] both write/report in. Shared by both so they can never disagree about which pages
+/// exist for a given project state.
 ///
 /// Requires `ci` to already be up to date ([`CodeIntel::update_incremental`]) — this function
 /// only reads from the existing index (via `outline`/`history_why`), it never indexes anything
 /// itself. `history_paths` seeds the `history/<path>` family; see [`default_history_paths`] for a
 /// reasonable default when the caller has no stronger opinion.
-pub fn run(
+fn assemble_pages(
     project_root: &Path,
     store: &Store,
     ci: &CodeIntel,
-    clock: &dyn Clock,
-    actor: ParticipantId,
     history_paths: &[String],
-) -> Result<GenerationReport> {
+) -> Result<Vec<WikiPage>> {
     let view = store.view()?;
 
     let mut all_pages: Vec<WikiPage> = Vec::new();
@@ -72,6 +71,21 @@ pub fn run(
     all_pages.extend(history::pages(project_root, ci, history_paths)?);
     all_pages.push(tickets::page(&view));
     all_pages.push(glossary::page(&view));
+    Ok(all_pages)
+}
+
+/// Assemble every wiki page family from `store`/`ci`'s current state and write them under
+/// `docs/wiki/` at `project_root`. See [`assemble_pages`] for the indexing precondition and
+/// `history_paths`.
+pub fn run(
+    project_root: &Path,
+    store: &Store,
+    ci: &CodeIntel,
+    clock: &dyn Clock,
+    actor: ParticipantId,
+    history_paths: &[String],
+) -> Result<GenerationReport> {
+    let all_pages = assemble_pages(project_root, store, ci, history_paths)?;
 
     let mut report = GenerationReport::default();
     for page in &all_pages {
@@ -79,6 +93,32 @@ pub fn run(
         if matches!(outcome, WriteOutcome::Written) {
             store.register_doc(page.project_path(), None, actor.clone())?;
         }
+        report.pages.push(PageOutcome {
+            id: page.id.clone(),
+            path: page.project_path(),
+            outcome,
+        });
+    }
+
+    Ok(report)
+}
+
+/// Preview [`run`] without writing anything to disk or registering anything in `store`: assemble
+/// the exact same pages `run` would, then resolve each page's outcome via
+/// [`crate::page::preview_write`] instead of [`crate::page::write_page`] — the same
+/// human/maintained protection decision, without touching the filesystem. Backs
+/// `tm wiki generate --dry-run`.
+pub fn dry_run(
+    project_root: &Path,
+    store: &Store,
+    ci: &CodeIntel,
+    history_paths: &[String],
+) -> Result<GenerationReport> {
+    let all_pages = assemble_pages(project_root, store, ci, history_paths)?;
+
+    let mut report = GenerationReport::default();
+    for page in &all_pages {
+        let outcome = preview_write(project_root, page)?;
         report.pages.push(PageOutcome {
             id: page.id.clone(),
             path: page.project_path(),

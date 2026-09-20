@@ -17,6 +17,9 @@ pub fn page(view: &ProjectView) -> WikiPage {
             t.kind, t.state
         ));
     }
+    if view.tickets.is_empty() {
+        body.push_str("\n_No tickets recorded yet; run `tm ticket new` to create one._\n");
+    }
 
     if !view.milestones.is_empty() {
         body.push_str("\n## Milestones\n\n| Milestone | Title | Tickets |\n|---|---|---|\n");
@@ -90,6 +93,18 @@ mod tests {
         assert_eq!(page.rel_path, "tickets.md");
         assert!(page.body.contains("# Tickets"));
         assert!(page.derived_from.is_empty());
+    }
+
+    #[test]
+    fn empty_view_explains_why_the_table_is_empty() {
+        let view = ProjectView::empty();
+        let page = page(&view);
+        assert!(
+            page.body.contains("No tickets recorded yet"),
+            "an empty tickets page should explain why it's empty, not just show a bare table \
+             header:\n{}",
+            page.body
+        );
     }
 
     #[test]
