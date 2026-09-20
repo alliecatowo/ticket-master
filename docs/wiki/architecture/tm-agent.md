@@ -11,12 +11,14 @@ derived_from = ["crates/tm-agent/src/**"]
 
 - `crates/tm-agent/src/agent_loop.rs`
 - `crates/tm-agent/src/executor.rs`
+- `crates/tm-agent/src/hooks.rs`
 - `crates/tm-agent/src/lib.rs`
 - `crates/tm-agent/src/outcome.rs`
 - `crates/tm-agent/src/patch.rs`
 - `crates/tm-agent/src/prompt.rs`
 - `crates/tm-agent/src/pruning.rs`
 - `crates/tm-agent/src/session.rs`
+- `crates/tm-agent/src/skill_capability.rs`
 - `crates/tm-agent/src/tools.rs`
 
 ## Public symbols
@@ -43,7 +45,11 @@ derived_from = ["crates/tm-agent/src/**"]
     ) -> Self`
   - `pub fn with_max_steps(mut self, max_steps: u32) -> Self`
   - `pub fn with_max_events_per_ticket(mut self, max_events_per_ticket: u32) -> Self`
+  - `pub fn with_oversight(mut self, oversight: Oversight) -> Self`
+  - `pub fn with_root(mut self, root: PathBuf) -> Self`
+  - `pub fn root(&self) -> PathBuf`
   - `pub fn authority(&self) -> &Authority`
+  - `pub fn oversight(&self) -> &Oversight`
   - `pub fn budget(&self) -> &Budget`
   - `pub fn tools(&self) -> &ToolRegistry`
   - `pub async fn run(&mut self, task: AgentTask) -> Result<AgentOutcome>`
@@ -80,21 +86,54 @@ derived_from = ["crates/tm-agent/src/**"]
         ids: Arc<dyn IdSource>,
         browser: Option<BrowserWiring>,
         computer: ComputerWiring,
+        oversight: Oversight,
     ) -> Self`
+  - `pub fn with_root(mut self, root: PathBuf) -> Self`
 - `pub struct HumanDecision`
 - `pub trait HumanApprovalSink: Send + Sync`
 - `pub struct HumanExecutor`
 - `impl HumanExecutor`
   - `pub fn new(id: impl Into<String>, sink: Arc<dyn HumanApprovalSink>) -> Self`
 
+### `crates/tm-agent/src/hooks.rs`
+
+- `pub const HOOKS_TOML_FILENAME: &str = "hooks.toml";`
+- `pub struct HookEntry`
+- `pub struct HookConfig`
+- `pub enum HookDecision`
+- `pub fn load_hooks_toml(root: &Path) -> tm_types::Result<HookConfig>`
+- `impl HookConfig`
+  - `pub async fn evaluate_pre_tool_use(
+        &self,
+        tool: &str,
+        input: &Value,
+        ctx: &CallContext<'_>,
+    ) -> HookDecision`
+  - `pub async fn run_post_tool_use(
+        &self,
+        tool: &str,
+        input: &Value,
+        outcome_summary: &str,
+        ctx: &CallContext<'_>,
+    )`
+  - `pub async fn evaluate_user_prompt_submit(
+        &self,
+        prompt: &str,
+        session: &SessionId,
+    ) -> HookDecision`
+  - `pub async fn run_session_start(&self, session: &SessionId)`
+  - `pub async fn run_stop(&self, session: &SessionId, ticket: Option<&str>)`
+
 ### `crates/tm-agent/src/lib.rs`
 
 - `pub mod agent_loop;`
 - `pub mod executor;`
+- `pub mod hooks;`
 - `pub mod outcome;`
 - `pub mod patch;`
 - `pub mod prompt;`
 - `pub mod session;`
+- `pub mod skill_capability;`
 - `pub mod tools;`
 
 ### `crates/tm-agent/src/outcome.rs`
@@ -159,6 +198,13 @@ derived_from = ["crates/tm-agent/src/**"]
 - `impl DurablePromotion`
   - `pub fn is_empty(&self) -> bool`
 
+### `crates/tm-agent/src/skill_capability.rs`
+
+- `pub const SKILL_LOAD: &str = "skill.load";`
+- `pub struct SkillCapability;`
+- `impl SkillCapability`
+  - `pub fn new() -> Self`
+
 ### `crates/tm-agent/src/tools.rs`
 
 - `pub const MAX_INLINE_RESULT_BYTES: usize = 8 * 1024;`
@@ -207,6 +253,8 @@ derived_from = ["crates/tm-agent/src/**"]
     ];`
   - `pub(crate) fn as_str(self) -> &'static str`
   - `pub(crate) fn parse(name: &str) -> Option<ToolName>`
+- `pub(crate) fn missing(field: &str) -> TmError`
+- `pub(crate) fn get_str<'a>(input: &'a Value, field: &str) -> Result<&'a str>`
 - `pub struct BuiltinCapability`
 - `impl BuiltinCapability`
   - `pub fn new(
@@ -218,6 +266,7 @@ derived_from = ["crates/tm-agent/src/**"]
 - `pub struct ToolRegistry`
 - `impl ToolRegistry`
   - `pub fn new(providers: Vec<Arc<dyn CapabilityProvider>>, store: Arc<Store>) -> Self`
+  - `pub fn with_hooks(mut self, hooks: crate::hooks::HookConfig) -> Self`
   - `pub fn standard(
         ci: Arc<CodeIntel>,
         store: Arc<Store>,

@@ -16,6 +16,7 @@ derived_from = ["crates/tm-auth/src/**"]
 - `crates/tm-auth/src/error.rs`
 - `crates/tm-auth/src/keychain.rs`
 - `crates/tm-auth/src/lib.rs`
+- `crates/tm-auth/src/redact.rs`
 
 ## Public symbols
 
@@ -96,5 +97,18 @@ derived_from = ["crates/tm-auth/src/**"]
 
 ### `crates/tm-auth/src/lib.rs`
 
+- `pub mod redact;`
 - `pub enum CredentialKind`
 - `pub trait AuthAdapter: Send + Sync`
+
+### `crates/tm-auth/src/redact.rs`
+
+- `pub fn redact(text: &str) -> String`
+- `pub fn redact_json(value: &Value) -> Value`
+- `pub struct SessionRedactor`
+- `impl SessionRedactor`
+  - `pub fn new() -> Self`
+  - `pub fn redact(&self, text: &str) -> String`
+  - `pub fn redact_json(&self, value: &Value) -> Value`
+  - `pub fn restore(&self, text: &str) -> String`
+  - `pub fn mapping_len(&self) -> usize`

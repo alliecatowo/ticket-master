@@ -84,6 +84,7 @@ derived_from = ["crates/tm-provider/src/**"]
   - `pub async fn execute(&self, role: Role, req: CompletionRequest) -> TmResult<Completion>`
   - `pub fn last_records(&self) -> Vec<FabricRecord>`
   - `pub fn state_snapshot(&self) -> FabricState`
+  - `pub fn restore_local(&self, text: &str) -> String`
 
 ### `crates/tm-provider/src/lib.rs`
 

@@ -17,6 +17,7 @@ derived_from = ["crates/tm-scheduler/src/**"]
 - `crates/tm-scheduler/src/policy.rs`
 - `crates/tm-scheduler/src/retry.rs`
 - `crates/tm-scheduler/src/select.rs`
+- `crates/tm-scheduler/src/snapshot.rs`
 
 ## Public symbols
 
@@ -52,6 +53,7 @@ derived_from = ["crates/tm-scheduler/src/**"]
         handle: tokio::runtime::Handle,
         context: Arc<dyn ContextPackSource>,
         registry: ExecutorRegistry,
+        repo_root: Option<PathBuf>,
     ) -> Self`
   - `pub fn dispatch(
         &self,
@@ -60,6 +62,13 @@ derived_from = ["crates/tm-scheduler/src/**"]
         ttl_seconds: u32,
         actor: ParticipantId,
     ) -> tm_types::Result<Vec<Event>>`
+  - `pub fn dispatch_with_completion(
+        &self,
+        ticket: &TicketId,
+        t: &Ticket,
+        ttl_seconds: u32,
+        actor: ParticipantId,
+    ) -> tm_types::Result<(Vec<Event>, tokio::sync::oneshot::Receiver<()>)>`
 
 ### `crates/tm-scheduler/src/driver.rs`
 
@@ -81,6 +90,7 @@ derived_from = ["crates/tm-scheduler/src/**"]
 - `pub mod policy;`
 - `pub mod retry;`
 - `pub mod select;`
+- `pub mod snapshot;`
 
 ### `crates/tm-scheduler/src/plan.rs`
 
@@ -140,3 +150,8 @@ derived_from = ["crates/tm-scheduler/src/**"]
     view: &SchedulerView,
     availability: &dyn ExecutorAvailability,
 ) -> Result<ExecutorMatch, SelectionError>`
+
+### `crates/tm-scheduler/src/snapshot.rs`
+
+- `pub struct WorkspaceSnapshot`
+- `pub fn capture_workspace_snapshot(repo_root: &Path) -> Option<WorkspaceSnapshot>`

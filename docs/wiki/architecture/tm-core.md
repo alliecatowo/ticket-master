@@ -898,6 +898,12 @@ CREATE INDEX IF NOT EXISTS workflows_name_idx ON workflows (name);
         actor: ParticipantId,
     ) -> tm_types::Result<Vec<Event>>`
   - `pub fn goal_state(&self, ticket: &TicketId) -> tm_types::Result<Option<GoalState>>`
+  - `pub fn fork_ticket(
+        &self,
+        source: &TicketId,
+        seq: u64,
+        actor: ParticipantId,
+    ) -> tm_types::Result<(TicketId, Vec<Event>)>`
   - `pub fn event_count_for(&self, subject: &Id) -> tm_types::Result<u64>`
   - `pub fn counters(&self) -> tm_types::Result<BTreeMap<String, u64>>`
   - `pub fn docs(&self) -> tm_types::Result<Vec<DocRow>>`

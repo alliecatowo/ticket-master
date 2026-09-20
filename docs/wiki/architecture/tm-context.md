@@ -14,6 +14,7 @@ derived_from = ["crates/tm-context/src/**"]
 - `crates/tm-context/src/lib.rs`
 - `crates/tm-context/src/pack.rs`
 - `crates/tm-context/src/sections.rs`
+- `crates/tm-context/src/skills.rs`
 - `crates/tm-context/src/tokens.rs`
 
 ## Public symbols
@@ -70,6 +71,7 @@ derived_from = ["crates/tm-context/src/**"]
 - `pub mod fingerprint;`
 - `pub mod pack;`
 - `pub mod sections;`
+- `pub mod skills;`
 - `pub mod tokens;`
 
 ### `crates/tm-context/src/pack.rs`
@@ -111,7 +113,14 @@ derived_from = ["crates/tm-context/src/**"]
 - `pub fn build_symbol_outlines(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSection>`
 - `pub fn build_git_history(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSection>`
 - `pub fn build_prior_failures(ticket: &Ticket) -> RawSection`
-- `pub fn build_conventions(conventions: &[String]) -> RawSection`
+- `pub fn build_conventions(ticket: &Ticket, ci: &CodeIntel, extra: &[String]) -> RawSection`
+
+### `crates/tm-context/src/skills.rs`
+
+- `pub struct SkillMetadata`
+- `pub struct SkillDoc`
+- `pub fn discover_skills(root: &Path) -> Vec<SkillMetadata>`
+- `pub fn load_skill(root: &Path, name: &str) -> tm_types::Result<SkillDoc>`
 
 ### `crates/tm-context/src/tokens.rs`
 

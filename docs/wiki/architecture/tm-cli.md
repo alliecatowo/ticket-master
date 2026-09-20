@@ -17,6 +17,7 @@ derived_from = ["crates/tm-cli/src/**"]
 - `crates/tm-cli/src/lib.rs`
 - `crates/tm-cli/src/main.rs`
 - `crates/tm-cli/src/ops.rs`
+- `crates/tm-cli/src/otel.rs`
 - `crates/tm-cli/src/project.rs`
 - `crates/tm-cli/src/render.rs`
 - `crates/tm-cli/src/sched.rs`
@@ -26,6 +27,7 @@ derived_from = ["crates/tm-cli/src/**"]
 - `crates/tm-cli/src/tui.rs`
 - `crates/tm-cli/src/wiki.rs`
 - `crates/tm-cli/src/workflow.rs`
+- `crates/tm-cli/src/worktree.rs`
 
 ## Public symbols
 
@@ -78,6 +80,7 @@ derived_from = ["crates/tm-cli/src/**"]
 - `pub struct TicketNewArgs`
 - `pub struct TicketEditArgs`
 - `pub struct TicketCancelArgs`
+- `pub struct TicketForkArgs`
 - `pub struct TicketDelegateArgs`
 - `pub struct TicketSubmitArgs`
 - `pub enum DepCommand`
@@ -143,9 +146,11 @@ derived_from = ["crates/tm-cli/src/**"]
 
 ### `crates/tm-cli/src/dispatch.rs`
 
+- `pub(crate) fn load_oversight(project: &Project) -> tm_types::Result<Oversight>`
 - `pub fn build_dispatcher(
     project: &Project,
     handle: tokio::runtime::Handle,
+    exec_root: Option<&Path>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>>`
 
 ### `crates/tm-cli/src/drive.rs`
@@ -226,6 +231,7 @@ derived_from = ["crates/tm-cli/src/**"]
 - `pub mod tui;`
 - `pub mod wiki;`
 - `pub mod workflow;`
+- `pub mod worktree;`
 
 ### `crates/tm-cli/src/ops.rs`
 
@@ -325,6 +331,14 @@ derived_from = ["crates/tm-cli/src/**"]
 ) -> tm_types::Result<()>`
 - `pub fn events_verify(project: &Project, renderer: &Renderer) -> tm_types::Result<()>`
 
+### `crates/tm-cli/src/otel.rs`
+
+- `pub const TM_OTEL_ENDPOINT_VAR: &str = "TM_OTEL_ENDPOINT";`
+- `pub const EXPORT_TIMEOUT: Duration = Duration::from_secs(3);`
+- `pub fn endpoint_from_env() -> Option<String>`
+- `pub fn build_provider(endpoint: &str) -> anyhow::Result<SdkTracerProvider>`
+- `pub fn install(endpoint: &str) -> anyhow::Result<SdkTracerProvider>`
+
 ### `crates/tm-cli/src/project.rs`
 
 - `pub enum Scope`
@@ -400,7 +414,7 @@ derived_from = ["crates/tm-cli/src/**"]
 
 ### `crates/tm-cli/src/sched.rs`
 
-- `pub fn dispatch_sched(
+- `pub async fn dispatch_sched(
     cmd: &SchedCommand,
     project: &Project,
     renderer: &Renderer,
@@ -559,6 +573,11 @@ derived_from = ["crates/tm-cli/src/**"]
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()>`
+- `pub fn ticket_fork(
+    args: &TicketForkArgs,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()>`
 - `pub fn ticket_submit(
     args: &TicketSubmitArgs,
     project: &Project,
@@ -652,3 +671,10 @@ derived_from = ["crates/tm-cli/src/**"]
 ) -> tm_types::Result<()>`
 - `pub fn one_by_one_workflow_names(project: &Project) -> Vec<String>`
 - `pub fn has_any_workflow(project: &Project) -> bool`
+
+### `crates/tm-cli/src/worktree.rs`
+
+- `pub struct TicketWorktree`
+- `pub fn create(project: &Project, ticket: &TicketId) -> tm_types::Result<TicketWorktree>`
+- `impl TicketWorktree`
+  - `pub fn cleanup(self)`

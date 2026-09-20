@@ -76,6 +76,7 @@ derived_from = ["crates/tm-events/src/**"]
     EventKind::TicketEscalated,
     EventKind::TicketBudgetExhausted,
     EventKind::TicketBudgetHandoff,
+    EventKind::TicketForked,
     EventKind::DecisionCreated,
     EventKind::DecisionSuperseded,
     EventKind::AuthorityGranted,
