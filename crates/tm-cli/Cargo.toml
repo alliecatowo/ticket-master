@@ -45,6 +45,11 @@ git2 = { workspace = true }
 # directory name from a workspace's canonical path.
 blake3 = { workspace = true }
 
+# Already pulled in transitively via tm-core/tm-events; used directly here (project.rs's
+# `promote_global`, D-003 Phase 1-C) for the SQLite online backup API (`rusqlite::backup::Backup`)
+# that copies a promoted global session's `project.db` without dropping its WAL sidecar.
+rusqlite = { workspace = true }
+
 axum = { workspace = true }
 tower-http = { workspace = true, features = ["fs"] }
 clap = { workspace = true }

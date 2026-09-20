@@ -231,8 +231,12 @@ mod tests {
                 project: None,
             },
             prompt: None,
+            // `fresh: true` bypasses the D-003 Phase 1-C promotion check entirely (it never reads
+            // `$TM_HOME`), keeping this test hermetic without an explicit `TM_HOME` override —
+            // promotion itself is covered by `project.rs`'s own tests.
             command: Some(Command::Init(tm_cli::args::InitArgs {
                 path: Some(tmp.path().to_path_buf()),
+                fresh: true,
             })),
         };
 

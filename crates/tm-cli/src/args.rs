@@ -223,6 +223,12 @@ pub struct InitArgs {
     /// Directory to initialize the project in. Defaults to the current directory.
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
+
+    /// Create an empty project even if a global session exists for this workspace (D-003 Phase
+    /// 1-C): by default, `tm init` promotes an existing `$TM_HOME` session for this workspace
+    /// into `<path>/.tm` instead of starting over.
+    #[arg(long)]
+    pub fresh: bool,
 }
 
 /// `tm attach [path]`

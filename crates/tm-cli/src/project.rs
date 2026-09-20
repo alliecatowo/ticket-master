@@ -427,12 +427,12 @@ struct GlobalProjectEntry {
     /// `workspace.json`'s `workspace` field: the canonical workspace path this entry is for.
     workspace: String,
     /// The event log's current head sequence number, i.e. how many events this project has
-    /// recorded; `0` if the log can't be opened.
+    /// recorded; `0` if `project.db` doesn't exist or can't be opened — including a promoted
+    /// entry, whose `project.db` [`promote_global`] deliberately removes (see that function's
+    /// step 6 docs).
     events: u64,
-    /// A `promoted.json` marker's contents alongside this entry, if one exists — nothing in this
-    /// track ever writes one yet (that's the next track's promotion command), so this is always
-    /// `None` today, but `list` already surfaces the field rather than needing a schema change
-    /// once promotion ships.
+    /// A `promoted.json` marker's contents alongside this entry, if [`promote_global`] promoted
+    /// this global session into a repo-scoped project (D-003 Phase 1-C).
     promoted: Option<serde_json::Value>,
 }
 
@@ -468,9 +468,18 @@ fn project_list(renderer: &Renderer) -> tm_types::Result<()> {
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_string();
-        let events = tm_events::EventLog::open(&dir.join("project.db"))
-            .and_then(|log| log.head())
-            .unwrap_or(0);
+        // Guard the existence check: `EventLog::open` creates the file if it's missing (via
+        // `schema::open_write_connection`'s `Connection::open`), which would silently resurrect
+        // a promoted-and-emptied global project's `project.db` — flipping `resolve_scope`'s
+        // `exists` back to `true` for a workspace that should now resolve to its promoted
+        // repo-scoped project instead. `list` is read-only; it must never do that.
+        let events = if dir.join("project.db").is_file() {
+            tm_events::EventLog::open(&dir.join("project.db"))
+                .and_then(|log| log.head())
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let promoted = std::fs::read_to_string(dir.join("promoted.json"))
             .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok());
@@ -514,29 +523,435 @@ fn create_project_dir(dir: &Path) -> tm_types::Result<PathBuf> {
     Ok(dir.canonicalize()?)
 }
 
-/// `tm init`: create a new project's `.tm/` directory in `args.path` (default: the current
-/// directory).
+/// What `tm init`'s promotion path did (D-003 Phase 1-C): moved an existing global session's
+/// durable state into the workspace's own repo-scoped `.tm/` directory instead of starting
+/// fresh — the seam that lets "chat first, decide to track it as a real project later" feel like
+/// one product rather than two disconnected modes. See [`promote_global`] for the mechanics.
+#[derive(Debug, Clone, Serialize)]
+pub struct PromotionReport {
+    /// Where the global session used to live (`$TM_HOME/projects/<key>/`).
+    pub from: PathBuf,
+    /// The repo-scoped `.tm/` directory the session was promoted into.
+    pub to: PathBuf,
+    /// How many events were carried over.
+    pub events: usize,
+    /// How many tickets existed in the promoted project.
+    pub tickets: usize,
+}
+
+/// A ticket's promotion-relevant identity: objective and state, captured from the source before
+/// any destructive step, so [`verify_promotion`]'s cross-check needs no second read of the
+/// (about-to-be-cleared) source.
+type TicketFingerprint = (String, tm_core::TicketState);
+
+/// Decide whether `dir` should adopt an existing global session for its workspace or start a
+/// fresh `.tm/` (D-003 Phase 1-C), and do it. Shared by [`init`], [`attach`], and [`genesis`] so
+/// none of the three silently orphans a global chat session's history the moment an explicit
+/// project-creating command runs against the same workspace.
+///
+/// `fresh` (only ever `true` from `tm init --fresh`; `attach`/`genesis` always pass `false`, per
+/// this track's design — neither has an escape hatch of its own) skips the global-session check
+/// entirely, including reading `$TM_HOME`, so a caller that already knows it wants a clean slate
+/// never depends on `$TM_HOME`'s state at all.
+///
+/// Returns the canonicalized workspace root, plus a [`PromotionReport`] when promotion happened
+/// (`None` on the plain fresh-create path, unchanged from before this track).
 ///
 /// # Errors
-/// `TmError::Conflict` if a `.tm` directory already exists there.
+/// `TmError::Conflict` if `dir` already contains a `.tm` directory (unchanged, existing
+/// behavior). Whatever [`promote_global`] returns if promotion is attempted and fails — in which
+/// case `dir` is left with no `.tm` at all, exactly as if this function had never been called.
+fn create_or_promote_project_dir(
+    dir: &Path,
+    fresh: bool,
+) -> tm_types::Result<(PathBuf, Option<PromotionReport>)> {
+    if dir.join(".tm").is_dir() {
+        return Err(TmError::conflict(format!(
+            "{} already contains a .tm project",
+            dir.display()
+        )));
+    }
+    if !fresh {
+        // The global session lives under a key derived from the *workspace* (the git toplevel,
+        // or the canonical cwd outside a repo — see `workspace_root_for`), but the destination
+        // `.tm/` this call is creating belongs at `dir` itself, not necessarily the workspace
+        // root: `dir` can be a subdirectory of a larger repo (e.g. `tm init` run from a
+        // subdirectory with an explicit path, or `tm attach some/nested/path`). Conflating the
+        // two would write into (and, via the backup API, silently clobber) whatever `.tm/`
+        // already exists at the workspace root instead of at `dir` — the conflict guard above
+        // even checks the right directory (`dir.join(".tm")`) already, so promoting into the
+        // wrong one would bypass it entirely.
+        let workspace = workspace_root_for(dir)?;
+        let global_dir = global_project_dir(&workspace)?;
+        if global_dir.join("project.db").is_file() {
+            let dest_root = dir.canonicalize()?;
+            let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+            let report = promote_global(&global_dir, &dest_root, clock)?;
+            return Ok((dest_root, Some(report)));
+        }
+    }
+    let root = create_project_dir(dir)?;
+    Ok((root, None))
+}
+
+/// Promote the global-scope session at `src_state_dir` into a fresh repo-scoped project at
+/// `dest_root/.tm`. See `docs/decisions/D-003-project-scope.md` for the vocabulary and why
+/// promotion exists; the steps here:
+///
+/// 1. Verify the source's hash chain before touching anything destructive — a corrupt source
+///    must never be promoted, and every fact step 4 checks against the destination is captured
+///    from the source right here, before any destructive step runs.
+/// 2. Copy `project.db` via SQLite's online backup API ([`backup_copy_project_db`]), never
+///    `std::fs::copy`: the source is WAL-mode (see `tm-events/src/schema.rs`'s `apply_pragmas`),
+///    so a plain file copy can silently drop the `-wal` sidecar (losing not-yet-checkpointed
+///    writes) or copy a torn, inconsistent snapshot.
+/// 3. Copy every other durable-state file ([`copy_state_extras`]) by an explicit allowlist, not a
+///    blanket recursive copy — a stale `-wal`/`-shm` sidecar sitting next to the source
+///    `project.db` must never leak into the destination on top of the backup that already
+///    completed.
+/// 4. Re-verify the *destination* independently ([`verify_promotion`]): hash chain, `rebuild`,
+///    `check_invariants`, event count, counters, and every ticket's id/objective/state, all
+///    compared against the facts captured in step 1.
+///
+/// On any failure from step 2 onward, `dest_root/.tm` is removed entirely and the source is left
+/// completely untouched. On success, `src_state_dir`'s durable-state files are removed and a
+/// `promoted.json` marker is written — see [`finalize_promoted_source`] for exactly what survives
+/// and why.
+fn promote_global(
+    src_state_dir: &Path,
+    dest_root: &Path,
+    clock: Arc<dyn Clock>,
+) -> tm_types::Result<PromotionReport> {
+    let src_db = src_state_dir.join("project.db");
+
+    let src_log = EventLog::open_with_clock(&src_db, clock.clone())?;
+    let chain = src_log.verify_chain()?;
+    if !chain.is_valid() {
+        return Err(TmError::storage(format!(
+            "source chain invalid: {}",
+            chain
+                .detail
+                .clone()
+                .unwrap_or_else(|| "chain broken".to_string())
+        )));
+    }
+    let src_events = chain.events_checked as usize;
+
+    // Capture every fact `verify_promotion` needs from the source now, before any destructive
+    // step, so "the source is left completely untouched on failure" never depends on being able
+    // to re-read the source afterward.
+    let src_store = tm_core::Store::open_at(src_state_dir)?;
+    let src_counters = src_store.counters()?;
+    let src_tickets: BTreeMap<TicketId, TicketFingerprint> = src_store
+        .view()?
+        .tickets
+        .into_iter()
+        .map(|(id, t)| (id, (t.objective, t.state)))
+        .collect();
+    drop(src_store);
+    drop(src_log);
+
+    let dest_tm = dest_root.join(".tm");
+    std::fs::create_dir_all(&dest_tm)?;
+
+    let outcome = (|| -> tm_types::Result<usize> {
+        backup_copy_project_db(&src_db, &dest_tm.join("project.db"))?;
+        copy_state_extras(src_state_dir, &dest_tm)?;
+        verify_promotion(
+            &dest_tm,
+            src_events,
+            &src_counters,
+            &src_tickets,
+            clock.clone(),
+        )
+    })();
+
+    match outcome {
+        Ok(tickets) => {
+            finalize_promoted_source(src_state_dir, &dest_tm, src_events, clock.as_ref())?;
+            Ok(PromotionReport {
+                from: src_state_dir.to_path_buf(),
+                to: dest_tm,
+                events: src_events,
+                tickets,
+            })
+        }
+        Err(e) => {
+            std::fs::remove_dir_all(&dest_tm).map_err(|remove_err| {
+                TmError::storage(format!(
+                    "promotion failed ({e}), and cleaning up the half-built destination at {} \
+                     also failed: {remove_err}",
+                    dest_tm.display()
+                ))
+            })?;
+            Err(e)
+        }
+    }
+}
+
+/// Copy `src_db`'s bytes into a fresh `dest_db` via SQLite's online backup API
+/// (`rusqlite::backup::Backup`). Never `std::fs::copy` for this file: the source is WAL-mode (see
+/// `tm-events/src/schema.rs`'s `apply_pragmas`), so a plain file copy can silently drop the
+/// `-wal` sidecar or copy a torn, inconsistent snapshot. The backup API instead reads the live
+/// database through SQLite itself and produces a complete, consistent destination file, no
+/// sidecar required.
+fn backup_copy_project_db(src_db: &Path, dest_db: &Path) -> tm_types::Result<()> {
+    let src_conn = tm_events::schema::open_read_connection(src_db)?;
+    let mut dest_conn = rusqlite::Connection::open(dest_db)
+        .map_err(|e| TmError::storage(format!("opening destination project.db: {e}")))?;
+    let backup = rusqlite::backup::Backup::new(&src_conn, &mut dest_conn)
+        .map_err(|e| TmError::storage(format!("starting sqlite backup: {e}")))?;
+    backup
+        .run_to_completion(5, std::time::Duration::from_millis(50), None)
+        .map_err(|e| TmError::storage(format!("running sqlite backup: {e}")))?;
+    Ok(())
+}
+
+/// Recursively copy every file under `from` to `to`, creating directories as needed. Used only
+/// for the allowlisted non-database directories in [`copy_state_extras`] — `project.db` itself
+/// always goes through [`backup_copy_project_db`], never this.
+fn copy_dir_recursive(from: &Path, to: &Path) -> tm_types::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest)?;
+        } else {
+            std::fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
+}
+
+/// Copy every other piece of a promoted session's durable state from `src_state_dir` to
+/// `dest_tm`, by an explicit allowlist (never a blanket recursive copy — see [`promote_global`]'s
+/// docs for why): `artifacts/` (large-artifact spill directory), `harness.toml`, `mirror.toml`,
+/// `sched.paused`, `workflows/`, `bench/`. Deliberately skips `index.db` (derived, cheaply
+/// re-indexed by the next `code_intel()` call) and `workspace.json` (a global-scope-only marker,
+/// meaningless at a repo-level destination).
+fn copy_state_extras(src_state_dir: &Path, dest_tm: &Path) -> tm_types::Result<()> {
+    for name in ["harness.toml", "mirror.toml", "sched.paused"] {
+        let src = src_state_dir.join(name);
+        if src.is_file() {
+            std::fs::copy(&src, dest_tm.join(name))?;
+        }
+    }
+    for name in ["artifacts", "workflows", "bench"] {
+        let src = src_state_dir.join(name);
+        if src.is_dir() {
+            copy_dir_recursive(&src, &dest_tm.join(name))?;
+        }
+    }
+    Ok(())
+}
+
+/// Step 4 of [`promote_global`]: open the freshly-copied destination independently and prove it
+/// is a faithful, healthy copy of the source before declaring success — hash chain, `rebuild`,
+/// `check_invariants`, event count, counters, and every source ticket's id/objective/state.
+/// Returns the ticket count on success.
+fn verify_promotion(
+    dest_tm: &Path,
+    src_events: usize,
+    src_counters: &BTreeMap<String, u64>,
+    src_tickets: &BTreeMap<TicketId, TicketFingerprint>,
+    clock: Arc<dyn Clock>,
+) -> tm_types::Result<usize> {
+    let dest_db = dest_tm.join("project.db");
+    let dest_log = EventLog::open_with_clock(&dest_db, clock)?;
+    let chain = dest_log.verify_chain()?;
+    if !chain.is_valid() {
+        return Err(TmError::storage(format!(
+            "destination chain invalid after copy: {}",
+            chain
+                .detail
+                .clone()
+                .unwrap_or_else(|| "chain broken".to_string())
+        )));
+    }
+    let dest_events = chain.events_checked as usize;
+    if dest_events != src_events {
+        return Err(TmError::storage(format!(
+            "destination event count ({dest_events}) does not match the source ({src_events})"
+        )));
+    }
+    drop(dest_log);
+
+    // `Store::rebuild` drops every materialized table and replays it purely from the event log —
+    // and the event log alone cannot reconstruct an artifact's `hash`/`bytes_len`:
+    // `ArtifactCreated`'s payload never carries them, `Store::store_artifact`'s real values land
+    // via a side-channel SQL write in the *same* live transaction (see
+    // `tm-core/src/materialize.rs`'s own comment on `ArtifactCreated`'s "placeholder row"), and
+    // replay has no way to redo that side channel. Running `rebuild` straight against the real
+    // `dest_tm` would therefore permanently blank every artifact's `hash`/`bytes_len` in the
+    // project this promotion is about to hand back to the user — silently breaking the Phase 1-A
+    // relocated-artifact read fallback, which keys off `hash`. So this check runs against a
+    // throwaway scratch copy instead: the point of calling `rebuild`/`check_invariants` here is
+    // to prove the *event log itself* replays cleanly (catching a truncated or corrupt backup),
+    // not to leave the real promoted `project.db` with corrupted artifact metadata. The scratch
+    // copy is removed before this function returns, success or failure.
+    let scratch_state_dir = dest_tm.join(".rebuild-scratch");
+    let scratch_result = (|| -> tm_types::Result<()> {
+        std::fs::create_dir_all(&scratch_state_dir)?;
+        backup_copy_project_db(&dest_db, &scratch_state_dir.join("project.db"))?;
+        let scratch_store = tm_core::Store::open_at(&scratch_state_dir)?;
+        scratch_store.rebuild()?;
+        let violations = scratch_store.check_invariants()?;
+        if !violations.is_empty() {
+            let detail = violations
+                .iter()
+                .map(|v| format!("{} ({}): {}", v.invariant, v.subject, v.detail))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(TmError::storage(format!(
+                "destination invariant violation(s) after promotion: {detail}"
+            )));
+        }
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&scratch_state_dir);
+    scratch_result?;
+
+    let dest_store = tm_core::Store::open_at(dest_tm)?;
+    // A non-mutating read (`check_invariants` is `check_invariants(&self.view()?)` over a
+    // read-only connection), so — unlike `rebuild` above — this runs directly against the real
+    // destination: the store this promotion is about to hand back to the caller must itself pass
+    // invariants, not just the scratch copy used to sanity-check that the event log replays.
+    let violations = dest_store.check_invariants()?;
+    if !violations.is_empty() {
+        let detail = violations
+            .iter()
+            .map(|v| format!("{} ({}): {}", v.invariant, v.subject, v.detail))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(TmError::storage(format!(
+            "destination invariant violation(s) after promotion: {detail}"
+        )));
+    }
+
+    let dest_counters = dest_store.counters()?;
+    if &dest_counters != src_counters {
+        return Err(TmError::storage(format!(
+            "destination counters {dest_counters:?} do not match the source {src_counters:?}"
+        )));
+    }
+
+    let dest_view = dest_store.view()?;
+    for (id, (objective, state)) in src_tickets {
+        match dest_view.tickets.get(id) {
+            Some(ticket) if &ticket.objective == objective && &ticket.state == state => {}
+            Some(ticket) => {
+                return Err(TmError::storage(format!(
+                    "ticket {id} in the destination does not match the source: expected \
+                     objective {objective:?} state {state:?}, got objective {:?} state {:?}",
+                    ticket.objective, ticket.state
+                )));
+            }
+            None => {
+                return Err(TmError::storage(format!(
+                    "ticket {id} from the source is missing from the promoted destination"
+                )));
+            }
+        }
+    }
+
+    Ok(src_tickets.len())
+}
+
+/// Step 6 of [`promote_global`], on success only: clear `src_state_dir`'s durable-state files
+/// (everything [`copy_state_extras`]/[`backup_copy_project_db`] just carried over) and write
+/// `promoted.json`, recording where the session went and when (`clock`, never the wall clock
+/// directly — hygiene forbids raw `SystemTime::now` outside `tm-types`).
+///
+/// `workspace.json` deliberately survives. `resolve_scope` only treats a global project as
+/// existing when its `project.db` is present (`Resolved::exists` in this module), so removing
+/// just the database (plus its `-wal`/`-shm` sidecars) already makes this directory resolve as
+/// "no global project here" for every future `resolve_scope` call against this workspace — while
+/// still leaving `tm project list` a row to hang a `promoted` marker off, since `list` enumerates
+/// entries by reading `workspace.json`, not `project.db`. Removing the directory outright instead
+/// would have made that impossible without a schema change to `list`'s enumeration.
+fn finalize_promoted_source(
+    src_state_dir: &Path,
+    dest_tm: &Path,
+    events: usize,
+    clock: &dyn Clock,
+) -> tm_types::Result<()> {
+    for name in [
+        "project.db",
+        "project.db-wal",
+        "project.db-shm",
+        "index.db",
+        "index.db-wal",
+        "index.db-shm",
+        "harness.toml",
+        "mirror.toml",
+        "sched.paused",
+    ] {
+        let path = src_state_dir.join(name);
+        if path.is_file() {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    for name in ["artifacts", "workflows", "bench"] {
+        let path = src_state_dir.join(name);
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        }
+    }
+    let doc = serde_json::json!({
+        "to": dest_tm,
+        "at": clock.now(),
+        "events": events,
+    });
+    std::fs::write(
+        src_state_dir.join("promoted.json"),
+        serde_json::to_vec_pretty(&doc)?,
+    )?;
+    Ok(())
+}
+
+/// `tm init`: create a new project's `.tm/` directory in `args.path` (default: the current
+/// directory) — or, unless `--fresh` is passed, promote an existing global session for this
+/// workspace into it instead of starting over (D-003 Phase 1-C; see [`create_or_promote_project_dir`]).
+///
+/// # Errors
+/// `TmError::Conflict` if a `.tm` directory already exists there. Whatever [`promote_global`]
+/// returns if promotion is attempted and fails.
 pub fn init(args: &InitArgs, renderer: &Renderer) -> tm_types::Result<()> {
     let dir = args.path.clone().unwrap_or_else(|| PathBuf::from("."));
-    let root = create_project_dir(&dir)?;
-    let human = format!(
-        "initialized a new Ticketmaster project at {}",
-        root.display()
-    );
-    renderer.emit(&serde_json::json!({ "root": root }), &human)
+    let (root, promotion) = create_or_promote_project_dir(&dir, args.fresh)?;
+    let (json, human) = match &promotion {
+        Some(report) => (
+            serde_json::json!({ "root": root, "promoted": report }),
+            format!(
+                "promoted {} events ({} tickets) from the global session for {} into {}",
+                report.events,
+                report.tickets,
+                root.display(),
+                report.to.display()
+            ),
+        ),
+        None => (
+            serde_json::json!({ "root": root }),
+            format!(
+                "initialized a new Ticketmaster project at {}",
+                root.display()
+            ),
+        ),
+    };
+    renderer.emit(&json, &human)
 }
 
 /// `tm attach [path]`: assimilate an existing repository into a project, creating one first if
-/// `args.path` has no `.tm` yet.
+/// `args.path` has no `.tm` yet — or promoting an existing global session for this workspace, the
+/// same as `tm init` (D-003 Phase 1-C), so an explicit `tm attach` never silently orphans a global
+/// chat session's history. Output otherwise unchanged from before this track.
 pub fn attach(args: &AttachArgs, renderer: &Renderer) -> tm_types::Result<()> {
     let dir = args.path.clone().unwrap_or_else(|| PathBuf::from("."));
     let root = if dir.join(".tm").is_dir() {
         dir.canonicalize()?
     } else {
-        create_project_dir(&dir)?
+        create_or_promote_project_dir(&dir, false)?.0
     };
     let (_project, report) = attach_project(&root)?;
     let human = render_attach_report(&report);
@@ -785,7 +1200,10 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
     let root = if dir.join(".tm").is_dir() {
         dir.canonicalize()?
     } else {
-        create_project_dir(&dir)?
+        // Promotes an existing global session for this workspace instead of starting fresh, the
+        // same as `tm init`/`tm attach` (D-003 Phase 1-C), so an explicit `tm genesis` never
+        // silently orphans one.
+        create_or_promote_project_dir(&dir, false)?.0
     };
     let project = open(&root)?;
 
@@ -1726,8 +2144,12 @@ mod tests {
     #[test]
     fn init_creates_a_tm_directory() {
         let tmp = tempfile::tempdir().unwrap();
+        // `--fresh` bypasses the D-003 Phase 1-C promotion check entirely (never reads
+        // `$TM_HOME`), so this stays hermetic without an explicit `TM_HOME` override —
+        // promotion itself is covered by its own tests below.
         let args = InitArgs {
             path: Some(tmp.path().to_path_buf()),
+            fresh: true,
         };
         init(&args, &test_renderer()).unwrap();
         assert!(tmp.path().join(".tm").is_dir());
@@ -1738,6 +2160,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let args = InitArgs {
             path: Some(tmp.path().to_path_buf()),
+            fresh: true,
         };
         init(&args, &test_renderer()).unwrap();
         let err = init(&args, &test_renderer()).unwrap_err();
@@ -1746,13 +2169,22 @@ mod tests {
 
     #[test]
     fn attach_initializes_a_fresh_directory_and_indexes_it() {
+        // `attach` has no `--fresh` escape hatch (D-003 Phase 1-C only adds one to `tm init`), so
+        // it always runs the promote-or-create check, which reads `$TM_HOME` — give it a real,
+        // empty tempdir rather than letting it fall through to the developer's actual `~/.tm`.
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+
         let tmp = tempfile::tempdir().unwrap();
         init_git_repo(tmp.path());
         std::fs::write(tmp.path().join("README.md"), "# hi\n").unwrap();
         let args = AttachArgs {
             path: Some(tmp.path().to_path_buf()),
         };
-        attach(&args, &test_renderer()).unwrap();
+        let result = attach(&args, &test_renderer());
+        std::env::remove_var("TM_HOME");
+        result.unwrap();
         assert!(tmp.path().join(".tm").is_dir());
     }
 
@@ -2028,5 +2460,330 @@ mod tests {
             Err(_) => (),
             Ok(_) => panic!("opening project.db as a directory should not succeed"),
         }
+    }
+
+    // --- D-003 Phase 1-C: `tm init` promotion -------------------------------------------------
+
+    fn promotion_test_executor() -> tm_core::ExecutorRequirements {
+        tm_core::ExecutorRequirements {
+            role: tm_types::Role::CoderFast,
+            human_required: false,
+            min_capability: tm_types::Tolerance::Any,
+        }
+    }
+
+    fn promotion_test_retry() -> tm_core::RetryPolicy {
+        tm_core::RetryPolicy {
+            max_attempts: 3,
+            base_delay_seconds: 1,
+            backoff_multiplier: 2.0,
+            max_delay_seconds: 60,
+        }
+    }
+
+    /// Build a global-scope store at `state_dir` with three tickets, one decision, and one
+    /// artifact spilled to disk (bigger than `INLINE_LIMIT_BYTES`), returning the ticket ids in
+    /// creation order and the spilled artifact's id — everything
+    /// [`promote_global_moves_tickets_a_decision_and_a_spilled_artifact_into_a_fresh_workspace`]
+    /// and the failure-injection test below need to assert against.
+    fn build_promotable_global_session(
+        state_dir: &Path,
+        clock: Arc<dyn Clock>,
+    ) -> (Arc<tm_core::Store>, Vec<TicketId>, tm_types::ArtifactId) {
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store =
+            Arc::new(tm_core::Store::open_with_at(state_dir, clock, ids).expect("open store"));
+        let actor = ParticipantId::system();
+
+        let mut ticket_ids = Vec::new();
+        for i in 0..3 {
+            let events = store
+                .create_ticket(
+                    tm_core::TicketKind::Work,
+                    format!("ticket {i}"),
+                    None,
+                    None,
+                    tm_types::Authority::root(),
+                    vec![],
+                    promotion_test_executor(),
+                    vec![],
+                    vec![],
+                    tm_core::VerificationPolicy::None,
+                    tm_types::Budget::unlimited(),
+                    promotion_test_retry(),
+                    0,
+                    actor.clone(),
+                )
+                .expect("create_ticket");
+            ticket_ids.push(TicketId::new(events[0].subject.as_str()).expect("ticket id"));
+        }
+
+        store
+            .record_decision(
+                "storage engine".to_string(),
+                "use sqlite".to_string(),
+                "already a dependency".to_string(),
+                vec![],
+                vec![],
+                vec![],
+                actor.clone(),
+            )
+            .expect("record_decision");
+
+        let big = vec![0xEEu8; tm_core::artifact::INLINE_LIMIT_BYTES + 512];
+        let events = store
+            .store_artifact(
+                tm_core::ArtifactKind::File,
+                "application/octet-stream".to_string(),
+                big,
+                serde_json::json!({}),
+                None,
+                actor,
+            )
+            .expect("store_artifact");
+        let artifact_id =
+            tm_types::ArtifactId::new(events[0].subject.as_str()).expect("artifact id");
+
+        (store, ticket_ids, artifact_id)
+    }
+
+    #[test]
+    fn promote_global_moves_tickets_a_decision_and_a_spilled_artifact_into_a_fresh_workspace() {
+        let tm_home = tempfile::tempdir().unwrap();
+        let global_dir = tm_home.path().join("projects").join("demo-workspace");
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        let (src_store, ticket_ids, artifact_id) =
+            build_promotable_global_session(&global_dir, clock.clone());
+        let src_counters = src_store.counters().unwrap();
+        let src_view = src_store.view().unwrap();
+        let big_bytes = match &src_view.artifacts.get(&artifact_id).unwrap().storage {
+            tm_core::ArtifactStorage::OnDisk(path) => std::fs::read(path).unwrap(),
+            tm_core::ArtifactStorage::Inline(_) => {
+                panic!("bytes over INLINE_LIMIT_BYTES must spill")
+            }
+        };
+        // 3 `create_ticket` + 1 `record_decision` + 1 `store_artifact` calls, each appending
+        // exactly one event (no parent/supersession, so none of the extra-event branches fire) —
+        // read the real count directly rather than hard-coding it, so this test can't silently
+        // drift from `build_promotable_global_session`'s own event count.
+        let expected_events =
+            EventLog::open_with_clock(&global_dir.join("project.db"), clock.clone())
+                .unwrap()
+                .head()
+                .unwrap() as usize;
+        drop(src_store);
+
+        let dest_root = tempfile::tempdir().unwrap();
+        let dest_root_path = dest_root.path().canonicalize().unwrap();
+
+        let report = promote_global(&global_dir, &dest_root_path, clock.clone()).unwrap();
+
+        assert_eq!(report.from, global_dir);
+        assert_eq!(report.to, dest_root_path.join(".tm"));
+        assert_eq!(report.events, expected_events);
+        assert_eq!(report.tickets, 3);
+
+        // The destination's hash chain verifies independently.
+        let dest_log =
+            EventLog::open_with_clock(&report.to.join("project.db"), clock.clone()).unwrap();
+        let chain = dest_log.verify_chain().unwrap();
+        assert!(chain.is_valid());
+        assert_eq!(chain.events_checked as usize, expected_events);
+        drop(dest_log);
+
+        // Ticket ids/objectives/states match exactly, and counters() match.
+        let dest_ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let dest_store = tm_core::Store::open_with_at(&report.to, clock.clone(), dest_ids).unwrap();
+        let dest_view = dest_store.view().unwrap();
+        assert_eq!(dest_view.tickets.len(), 3);
+        for id in &ticket_ids {
+            let src_ticket = src_view.tickets.get(id).unwrap();
+            let dest_ticket = dest_view.tickets.get(id).unwrap();
+            assert_eq!(dest_ticket.objective, src_ticket.objective);
+            assert_eq!(dest_ticket.state, src_ticket.state);
+        }
+        assert_eq!(dest_store.counters().unwrap(), src_counters);
+
+        // The spilled artifact's bytes are readable back from the promoted store (the Phase 1-A
+        // read-time fallback: the recorded absolute path is under the old global dir, which no
+        // longer has this file).
+        let dest_artifact = dest_view.artifacts.get(&artifact_id).unwrap();
+        assert_eq!(
+            dest_artifact.hash,
+            src_view.artifacts.get(&artifact_id).unwrap().hash,
+            "the artifact's hash must survive promotion intact (see verify_promotion's own \
+             comment on why its rebuild/check_invariants pass runs against a scratch copy rather \
+             than the real destination, precisely to protect this)"
+        );
+        let dest_bytes = match &dest_artifact.storage {
+            tm_core::ArtifactStorage::OnDisk(path) => {
+                assert!(
+                    path.starts_with(&report.to),
+                    "the promoted artifact path must resolve under the new state dir, got {path:?}"
+                );
+                std::fs::read(path).unwrap()
+            }
+            tm_core::ArtifactStorage::Inline(_) => {
+                panic!("bytes over INLINE_LIMIT_BYTES must spill")
+            }
+        };
+        assert_eq!(dest_bytes, big_bytes);
+
+        // promoted.json exists with events == the real count, and the source's project.db is
+        // gone (cleared, per this function's step 6 — workspace.json survives so `list` still
+        // has a row).
+        let marker: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(global_dir.join("promoted.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            marker.get("events").and_then(|v| v.as_u64()),
+            Some(expected_events as u64)
+        );
+        assert_eq!(
+            marker.get("to").and_then(|v| v.as_str()),
+            Some(report.to.to_string_lossy().as_ref())
+        );
+        assert!(
+            !global_dir.join("project.db").exists(),
+            "the source project.db must be gone after a successful promotion"
+        );
+        // `workspace.json` isn't written by this test (it builds the store directly rather than
+        // going through `open_bare`, the only place that writes it) — its survival through
+        // `finalize_promoted_source` and the resulting `tm project list` marker is covered by
+        // `crates/tm-cli/tests/promotion.rs`'s end-to-end case instead.
+    }
+
+    /// `tm init <subdir>` inside a larger workspace must promote into `<subdir>/.tm`, not the
+    /// workspace root: the global session's `$TM_HOME` key is derived from `workspace_root_for`
+    /// (the git toplevel), which can differ from the directory `tm init` was actually pointed at.
+    /// `create_or_promote_project_dir` must keep those two paths distinct — using the workspace
+    /// root as the promotion *destination* (rather than just the key lookup) would write into,
+    /// and via the backup API silently clobber, whatever already lives at
+    /// `<workspace root>/.tm`, while leaving the conflict guard's `dir.join(".tm")` check
+    /// (correctly scoped to `dir`) none the wiser.
+    #[test]
+    fn init_in_a_subdirectory_promotes_into_the_subdirectory_not_the_workspace_root() {
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+
+        let root = tempfile::tempdir().unwrap();
+        init_git_repo(root.path());
+        let sub = root.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // The global session is keyed by the *workspace* (the git toplevel, i.e. `root`), the
+        // same as a real bare `tm` run from anywhere inside this repo would resolve it.
+        let workspace = workspace_root_for(root.path()).unwrap();
+        let global_dir = global_project_dir(&workspace).unwrap();
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        build_promotable_global_session(&global_dir, clock);
+
+        let args = InitArgs {
+            path: Some(sub.clone()),
+            fresh: false,
+        };
+        let result = init(&args, &test_renderer());
+        std::env::remove_var("TM_HOME");
+        result.unwrap();
+
+        assert!(
+            sub.join(".tm").join("project.db").is_file(),
+            "promotion must land at the directory `tm init` was pointed at"
+        );
+        assert!(
+            !root.path().join(".tm").exists(),
+            "promotion must never write into the workspace root when `tm init` targeted a \
+             subdirectory of it"
+        );
+    }
+
+    #[test]
+    fn init_with_fresh_ignores_an_existing_global_session_and_leaves_both_intact() {
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_root = workspace_root_for(workspace.path()).unwrap();
+        let global_dir = global_project_dir(&workspace_root).unwrap();
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        let (_store, _tickets, _artifact) = build_promotable_global_session(&global_dir, clock);
+
+        let args = InitArgs {
+            path: Some(workspace.path().to_path_buf()),
+            fresh: true,
+        };
+        let result = init(&args, &test_renderer());
+        std::env::remove_var("TM_HOME");
+        result.unwrap();
+
+        assert!(
+            workspace.path().join(".tm").join("project.db").is_file(),
+            "`--fresh` must still create a real repo-scoped project"
+        );
+        let fresh_store = tm_core::Store::open(workspace.path()).unwrap();
+        assert!(
+            fresh_store.view().unwrap().tickets.is_empty(),
+            "`--fresh` must create an empty project, not promote the global session's tickets"
+        );
+        assert!(
+            global_dir.join("project.db").is_file(),
+            "`--fresh` must leave the global session's project.db untouched"
+        );
+        assert!(
+            !global_dir.join("promoted.json").exists(),
+            "`--fresh` must never write a promoted.json marker"
+        );
+    }
+
+    #[test]
+    fn promote_global_removes_the_half_built_destination_and_leaves_the_source_untouched_on_failure(
+    ) {
+        let tm_home = tempfile::tempdir().unwrap();
+        let global_dir = tm_home.path().join("projects").join("demo-workspace");
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        let (src_store, _tickets, _artifact) =
+            build_promotable_global_session(&global_dir, clock.clone());
+        drop(src_store);
+        let expected_events =
+            EventLog::open_with_clock(&global_dir.join("project.db"), clock.clone())
+                .unwrap()
+                .head()
+                .unwrap() as usize;
+
+        let dest_root = tempfile::tempdir().unwrap();
+        let dest_root_path = dest_root.path().canonicalize().unwrap();
+        // Force `backup_copy_project_db` to fail deterministically: `Connection::open` on a
+        // directory (rather than a plain file) fails `SQLITE_CANTOPEN` on every platform, unlike
+        // a garbage *file*, which SQLite may not reject until a later statement runs. This is the
+        // same trick `open_bare_propagates_a_real_open_error_for_an_already_found_but_broken_project`
+        // above already relies on to force a deterministic open failure.
+        std::fs::create_dir_all(dest_root_path.join(".tm").join("project.db")).unwrap();
+
+        let err = promote_global(&global_dir, &dest_root_path, clock.clone()).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("project.db")
+                || err.to_string().to_lowercase().contains("backup")
+                || err.to_string().to_lowercase().contains("sqlite"),
+            "expected an error naming the failed step, got: {err}"
+        );
+
+        assert!(
+            !dest_root_path.join(".tm").exists(),
+            "a failed promotion must remove the half-built destination entirely"
+        );
+
+        // The source must still verify cleanly: nothing was lost.
+        let src_log =
+            EventLog::open_with_clock(&global_dir.join("project.db"), clock.clone()).unwrap();
+        let chain = src_log.verify_chain().unwrap();
+        assert!(chain.is_valid());
+        assert_eq!(chain.events_checked as usize, expected_events);
+        assert!(
+            !global_dir.join("promoted.json").exists(),
+            "a failed promotion must never write promoted.json"
+        );
     }
 }
