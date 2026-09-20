@@ -2435,7 +2435,7 @@ mod tests {
 
     // -----------------------------------------------------------------------------------------
     // `Oversight` wired at the real effect boundary (`docs/audit-2026-09-18-fable.md` M-16,
-    // `docs/decisions/D-008-oversight-policy-wiring.md`): a policy requiring approval for a
+    // `docs/decisions/D-009-oversight-policy-wiring.md`): a policy requiring approval for a
     // dispatched action's class actually suspends the run *before* `ToolRegistry::dispatch`
     // executes it, and a run with no such policy (`Oversight::default`, what `load_oversight`
     // returns when a project has no `oversight.toml`) dispatches exactly as it did before this

@@ -27,7 +27,7 @@ description = "Run one crate's tests: mise run test:crate -- tm-core"
 run = "cargo test -j 2 -p {{arg(name='crate')}}"
 
 [tasks."test:otel"]
-description = "Compile + lint + test tm-cli's opt-in OpenTelemetry export path (D-008, --features otel). NOT part of verify -- see that task's note for why -- so run this by hand after touching crates/tm-cli/src/otel.rs, main.rs's install_tracing, or the otel Cargo feature's dependency pins."
+description = "Compile + lint + test tm-cli's opt-in OpenTelemetry export path (D-010, --features otel). NOT part of verify -- see that task's note for why -- so run this by hand after touching crates/tm-cli/src/otel.rs, main.rs's install_tracing, or the otel Cargo feature's dependency pins."
 run = "cargo clippy -p tm-cli --all-targets --features otel -j 2 -- -D warnings && cargo test -p tm-cli --features otel -j 2"
 
 [tasks.clippy]

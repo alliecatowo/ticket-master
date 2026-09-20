@@ -12,8 +12,8 @@ never drift between sessions:
 - `mise run test` — `cargo test --workspace`.
 - `mise run test:crate -- <crate>` — one crate's tests.
 - `mise run test:otel` — clippy + test `tm-cli`'s opt-in OpenTelemetry export path
-  (`--features otel`, D-008). **Not** part of `verify`: enabling `otel` compiles a second full
-  `reqwest`/HTTP-client stack (`docs/decisions/D-008-opentelemetry-tracing.md`'s costs section),
+  (`--features otel`, D-010). **Not** part of `verify`: enabling `otel` compiles a second full
+  `reqwest`/HTTP-client stack (`docs/decisions/D-010-opentelemetry-tracing.md`'s costs section),
   and this machine's `-j 2`/disk constraints mean `verify` shouldn't grow a second dependency tree
   by default. Run this by hand after touching `crates/tm-cli/src/otel.rs`, `main.rs`'s
   `install_tracing`, or the `otel` feature's dependency pins in `crates/tm-cli/Cargo.toml`.

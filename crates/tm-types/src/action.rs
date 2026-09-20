@@ -285,7 +285,7 @@ impl Oversight {
     /// `crates/tm-cli/src/dispatch.rs`'s `load_oversight` parses this policy from `oversight.toml`
     /// at a project's root (falling back to [`Oversight::default`] when absent), and
     /// `tm_agent::agent_loop::AgentLoop::drive` is the real effect boundary that calls
-    /// [`Oversight::review`] on it before a tool call dispatches — see `docs/decisions/D-008-oversight-policy-wiring.md`
+    /// [`Oversight::review`] on it before a tool call dispatches — see `docs/decisions/D-009-oversight-policy-wiring.md`
     /// (`docs/audit-2026-09-18-fable.md` M-16, now closed).
     pub fn conservative() -> Self {
         Oversight {

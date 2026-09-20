@@ -211,7 +211,7 @@ impl ShellAuthority {
 /// either holds the power or it does not), while a held-but-approval-required action is a
 /// separate state `Oversight::review` layers on afterwards, now wired at the real effect
 /// boundary in `tm_agent::agent_loop::AgentLoop::drive` (`docs/audit-2026-09-18-fable.md` M-16,
-/// `docs/decisions/D-008-oversight-policy-wiring.md`).
+/// `docs/decisions/D-009-oversight-policy-wiring.md`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputerAuthority {
     /// May synthesize mouse/keyboard input into the real desktop.

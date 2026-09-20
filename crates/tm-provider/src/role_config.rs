@@ -252,7 +252,7 @@ impl RoleTable {
     /// dispatcher actually drive an agent-loop turn as (see `crates/tm-cli/src/agent.rs`'s
     /// `AGENT_ROLE`), so this is the one role where "run `tm` for real without burning Anthropic
     /// quota" bites. Every other role is untouched by this check, absent or present. See
-    /// `docs/providers.md`'s "DevPass" section and `docs/decisions/D-004-devpass-default-provider.md`.
+    /// `docs/providers.md`'s "DevPass" section and `docs/decisions/D-005-devpass-default-provider.md`.
     ///
     /// This is a thin env-reading wrapper around [`Self::default_table_with`], which is pure and
     /// does the actual construction — kept separate so tests can exercise both the
