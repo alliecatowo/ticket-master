@@ -155,11 +155,11 @@ Real notifications (`notify-rust` / `terminal-notifier` / OSC 9 fallback chain) 
 
 ## In-flight work — check on these FIRST in the next session
 
-Two agents were still running when this doc was written. Use `ListAgents` to check status; if
-either shows `completed`, its report should already be in the conversation (look for a
+Three agents were still running when this doc was last updated. Use `ListAgents` to check status;
+if any shows `completed`, its report should already be in the conversation (look for a
 `SubagentHandback`/agent-message) — merge it following the established pattern (verify in a
-separate agent, then clean up the worktree). If either is still `running` or got interrupted by
-the usage cutoff, resume it via `SendMessage({to: <agentId or name>, message: "..."})` referencing
+separate agent, then clean up the worktree). If any is still `running` or got interrupted by the
+usage cutoff, resume it via `SendMessage({to: <agentId or name>, message: "..."})` referencing
 exactly what it last reported doing — this has worked reliably every time it's been needed this
 session (including across real rate-limit interruptions).
 
@@ -176,34 +176,54 @@ session (including across real rate-limit interruptions).
    ("Credential Exploration") — that authorization stands for this specific task as already
    scoped; don't re-ask, but also don't broaden scope beyond what was authorized. Security
    hygiene was explicitly required: no raw token substrings in logs/tests/commits, ever.
+3. **`af97e050cfb5c0de4`** (report-only, no worktree — reads `.env` directly, edits nothing) — a
+   live, real end-to-end test of DevPass, now that it's actually fully wired (see below). Just
+   read its report and act on the finding; nothing to merge.
+
+## DevPass — now fully wired, live test in flight (this resolves most of what used to be "pending")
+
+Resolved during this session, via the new "be liberal with research" `CLAUDE.md` directive: the
+user gave a real API key (prefixed `llmgtwy_`, i.e. an LLM Gateway key) without a base URL or
+model name. A few minutes of `WebSearch`/`WebFetch` resolved both: DevPass routes through LLM
+Gateway's own OpenAI-compatible endpoint at `https://api.llmgateway.io/v1`, and the specific
+cheap/bulk model the user asked for by a garbled name ("muse spark 1.3 contributor") is a real,
+current model: `muse-spark-1.3-contributor` (Meta, released 2026-09-02, ~$0.10/$0.20 per 1M
+tokens). All three are now in `/Users/allie/Develop/ticket-master/.env` (gitignored, mode 600):
+`DEVPASS_API_KEY`, `DEVPASS_BASE_URL=https://api.llmgateway.io/v1`,
+`DEVPASS_MODEL=muse-spark-1.3-contributor` — matching `crates/tm-provider/src/providers/
+compat.rs`'s `DevPassProvider` exactly. **`tm`/`tm-cli` does NOT auto-load `.env`** (checked, no
+dotenv dependency anywhere) — these vars need to be explicitly exported/sourced before running
+`tm` for real, or wired into a real dotenv-loading mechanism if that's wanted as a permanent
+convenience (not built yet, wasn't asked for).
+
+Agent `af97e050cfb5c0de4` is running the actual first-ever live test of this against a real
+backend (D-005's provider-preference wiring has been merged and unit-tested all session but never
+exercised for real until now). **Check its report first** — this either confirms D-005 genuinely
+works end-to-end, or surfaces a real integration bug (wrong request shape, missing header,
+auth failure) worth fixing.
+
+Note on the macOS Keychain: writing to it failed (`security add-generic-password` — "User
+interaction is not allowed") because this session's shell is non-interactive and the keychain was
+locked; that needs a GUI unlock only the user can do, not something to keep retrying
+programmatically. `.env` is the real, working store for now.
 
 ## Open / pending — things a human needs to weigh in on, not yours to resolve unilaterally
 
-1. **DevPass live testing is still blocked.** The wiring is merged and correct but has never been
-   exercised against a real backend. Was asked for repeatedly this session with no credentials
-   received. **Update just before this doc was finalized**: the user provided a different
-   credential instead — an "LLM gateway" API key (`LLM_GATEWAY_API_KEY`, stored in `.env` at the
-   repo root, mode 600, gitignored; **keychain storage failed** — `security add-generic-password`
-   requires an interactive unlock this non-interactive session can't trigger, so `.env` is the
-   only place it lives right now). **This key is not yet wired to anything** — still need the
-   gateway's base URL and a model name from the user before it can become a working
-   `AuthAdapter`/`Provider`, the same shape as DevPass. Ask for those first thing next session if
-   not already provided.
-2. **The `resolve_genesis_provider` slug-ignoring bug** (in `crates/tm-cli/src/project.rs`) —
+1. **The `resolve_genesis_provider` slug-ignoring bug** (in `crates/tm-cli/src/project.rs`) —
    found while building D-005, deliberately left unfixed and out of scope, logged in
    `docs/backlog.md`. Real bug: genesis's three frontier bootstrap roles always construct an
    `AnthropicProvider` regardless of what the role table's `provider` field actually names.
    Harmless today only because nothing points those roles at a non-Anthropic slug yet.
-3. **The `-p` scripting exit-code question** (`docs/backlog.md`, "Open decision: should `-p` exit
+2. **The `-p` scripting exit-code question** (`docs/backlog.md`, "Open decision: should `-p` exit
    non-zero on an in-band agent failure?") — `tm -p` currently prints `failed (Other): ...` but
    exits 0 for an in-band agent failure (deliberate design in `run_turn_streaming`, but
    undocumented and in tension with `-p` being described as scripting-suitable). Not resolved.
-4. **The `[...]` glob-class exhaustive-test alphabet extension is done, but the proptest
+3. **The `[...]` glob-class exhaustive-test alphabet extension is done, but the proptest
    generator itself (`authority_laws.rs`) was deliberately NOT extended** — it's a separately
    still-weak piece of test infrastructure for this bug class (confirmed empirically: ~22,000
    random proptest cases found the reported bug zero times, even though it was 100%
    reproducible). Worth someone deciding whether to strengthen the generator itself.
-5. **`segment_implies`'s handling of `[...]` character classes is now correct but deliberately
+4. **`segment_implies`'s handling of `[...]` character classes is now correct but deliberately
    conservative** in a couple of named edge cases (documented precisely in `docs/decisions/
    D-014-pattern-subset-double-star-fix.md`'s final version) — fine today (zero real, non-test
    pattern data in the workspace uses character classes at all), but worth knowing if that ever
@@ -215,9 +235,9 @@ This session did not use a formal ticket/todo-list mechanism for its own meta-wo
 done by (a) this conversation's own turn-by-turn narration, (b) `docs/backlog.md` as the durable
 record of anything not fully resolved, and (c) each `docs/decisions/D-NNN-*.md` as the durable
 record of anything that *was* resolved and why. If you want a more formal continuation mechanism
-next session, `docs/backlog.md`'s two "Open decision" sections above are the actual outstanding
-work items in priority order (roughly: DevPass/LLM-gateway wiring > the two in-flight agents >
-everything else).
+next session, priority order for what's left is roughly: check the three in-flight agents above
+first (especially the live DevPass test result) > `docs/backlog.md`'s remaining "Open decision"
+section (`resolve_genesis_provider`) > the smaller open items listed above.
 
 ## Practical operating notes for whoever resumes this
 
