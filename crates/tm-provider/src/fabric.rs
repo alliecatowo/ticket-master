@@ -6,19 +6,29 @@
 //! outcome back into [`crate::state::FabricState`] via [`crate::state::FabricEvent`]. It also
 //! turns each step into a structured [`FabricRecord`] the caller can adapt into workspace events
 //! (`provider.selected` / `provider.exhausted` / `provider.degraded` / `provider.recovered`).
+//!
+//! `execute()` is also the one real boundary every outbound model call goes through, which is
+//! why it is where `docs/audit-2026-09-18-fable.md`'s "M-04" item wires secret redaction: before
+//! `req` reaches [`Provider::complete`], [`Fabric`]'s own [`tm_auth::SessionRedactor`] scans its
+//! text/JSON content for secret-shaped substrings and replaces them with a placeholder (see
+//! [`redact_completion_request`]). [`Fabric::restore_local`] is the one sanctioned way back, for
+//! a human's own local view only — see `tm_auth::redact`'s docs and
+//! `docs/decisions/D-011-secret-redaction.md`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use parking_lot::RwLock;
+use tm_auth::SessionRedactor;
 use tm_types::{Clock, Result as TmResult, Role, Timestamp, TmError};
 
 use crate::role_config::RoleTable;
 use crate::route::{Need, RouteDecision};
 use crate::state::{BreakerState, FabricEvent, FabricState};
 use crate::types::{
-    Completion, CompletionRequest, EmbedRequest, Embeddings, ModelId, ProviderError,
+    Completion, CompletionRequest, ContentBlock, EmbedRequest, Embeddings, Message, ModelId,
+    ProviderError,
 };
 
 /// A backend the fabric can route to. Implemented by [`crate::anthropic::AnthropicProvider`] and
@@ -85,6 +95,7 @@ pub struct Fabric {
     breaker_cooldown: std::time::Duration,
     ewma_alpha: f64,
     records: RwLock<Vec<FabricRecord>>,
+    redactor: SessionRedactor,
 }
 
 impl Fabric {
@@ -101,6 +112,7 @@ impl Fabric {
             breaker_cooldown: std::time::Duration::from_secs(30),
             ewma_alpha: 0.3,
             records: RwLock::new(Vec::new()),
+            redactor: SessionRedactor::new(),
         }
     }
 
@@ -242,6 +254,9 @@ impl Fabric {
             now,
         );
 
+        // Redact secret-shaped substrings out of the outbound request before it reaches the
+        // provider -- see this module's top docs and `tm_auth::redact`'s.
+        let req = redact_completion_request(&self.redactor, req);
         let call_result = provider.complete(req).await;
         let finished_at = self.clock.now();
         let latency = std::time::Duration::from_millis(finished_at.millis_since(now).max(0) as u64);
@@ -315,6 +330,69 @@ impl Fabric {
     /// A snapshot of current fabric state, for diagnostics/CLI reporting.
     pub fn state_snapshot(&self) -> FabricState {
         self.state.read().clone()
+    }
+
+    /// Restore any redaction placeholders in `text` back to the secret-shaped value they
+    /// replaced, using this fabric's own [`tm_auth::SessionRedactor`]. The one sanctioned local
+    /// restore: `text` must be something about to be shown to a human directly (a CLI/TUI
+    /// render), never forwarded to a model or a persisted store -- see `tm_auth::redact`'s docs.
+    pub fn restore_local(&self, text: &str) -> String {
+        self.redactor.restore(text)
+    }
+}
+
+/// Redact secret-shaped substrings out of every text/JSON-bearing part of `req` before it
+/// reaches a [`Provider`]: the system prompt, every message's text/tool-use-input/tool-result
+/// content (recursively, since [`ContentBlock::ToolResult`] can itself carry further content
+/// blocks), via `redactor`.
+fn redact_completion_request(
+    redactor: &SessionRedactor,
+    req: CompletionRequest,
+) -> CompletionRequest {
+    CompletionRequest {
+        system: req.system.map(|s| redactor.redact(&s)),
+        messages: req
+            .messages
+            .into_iter()
+            .map(|m| redact_message(redactor, m))
+            .collect(),
+        ..req
+    }
+}
+
+fn redact_message(redactor: &SessionRedactor, message: Message) -> Message {
+    Message {
+        role: message.role,
+        content: message
+            .content
+            .into_iter()
+            .map(|b| redact_content_block(redactor, b))
+            .collect(),
+    }
+}
+
+fn redact_content_block(redactor: &SessionRedactor, block: ContentBlock) -> ContentBlock {
+    match block {
+        ContentBlock::Text { text } => ContentBlock::Text {
+            text: redactor.redact(&text),
+        },
+        ContentBlock::ToolUse { id, name, input } => ContentBlock::ToolUse {
+            id,
+            name,
+            input: redactor.redact_json(&input),
+        },
+        ContentBlock::ToolResult {
+            tool_use_id,
+            content,
+            is_error,
+        } => ContentBlock::ToolResult {
+            tool_use_id,
+            content: content
+                .into_iter()
+                .map(|b| redact_content_block(redactor, b))
+                .collect(),
+            is_error,
+        },
     }
 }
 
@@ -644,6 +722,152 @@ mod tests {
             vec![FabricRecord::Exhausted {
                 role: Role::SummarizerCheap
             }]
+        );
+    }
+
+    /// The regression gate for M-04's "secret redaction at `Fabric::execute` boundary": builds a
+    /// real request through the real `execute()` call, with a known fake-secret-shaped canary
+    /// planted in a system prompt, a message's text, a tool call's input, and a tool result's
+    /// nested content -- everywhere [`ContentBlock`] can carry text -- and asserts the plaintext
+    /// canary never reaches [`MockProvider::complete`] (inspected via its real `call_log`, i.e.
+    /// what actually left the process, not the redaction function called in isolation).
+    /// [`Fabric::restore_local`] then proves the human-local restore path still recovers it.
+    #[tokio::test]
+    async fn execute_redacts_secret_shaped_content_before_it_reaches_the_provider() {
+        const CANARY: &str = "sk-CANARY0123456789abcdefghijklmnopqrstuv";
+
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "mock", model = "m1", max_concurrency = 1 }"#,
+        );
+        let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
+
+        let provider = Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "m1"),
+            clock.clone() as Arc<dyn Clock>,
+        ));
+        // The request's own hash changes once redacted, so script a default response rather than
+        // one keyed to the (pre-redaction) request this test builds.
+        provider.script_default_response(completion(ModelId::new("mock", "m1"), &clock));
+        fabric.register_provider(Arc::clone(&provider) as Arc<dyn Provider>);
+
+        let request = CompletionRequest {
+            system: Some(format!("You may need this key: {CANARY}")),
+            messages: vec![
+                Message {
+                    role: MessageRole::User,
+                    content: vec![crate::types::ContentBlock::Text {
+                        text: format!("here's my key {CANARY}, please use it"),
+                    }],
+                },
+                Message {
+                    role: MessageRole::Assistant,
+                    content: vec![crate::types::ContentBlock::ToolUse {
+                        id: "call-1".to_string(),
+                        name: "shell.run".to_string(),
+                        input: serde_json::json!({ "command": format!("curl -H 'key: {CANARY}'") }),
+                    }],
+                },
+                Message {
+                    role: MessageRole::User,
+                    content: vec![crate::types::ContentBlock::ToolResult {
+                        tool_use_id: "call-1".to_string(),
+                        content: vec![crate::types::ContentBlock::Text {
+                            text: format!("output leaked {CANARY} from env"),
+                        }],
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![],
+            max_tokens: 100,
+            temperature: None,
+            stop_sequences: vec![],
+            stream: false,
+            n: 1,
+        };
+
+        let _ = fabric
+            .execute(Role::CoderFast, request)
+            .await
+            .expect("call succeeds");
+
+        let received = provider.call_log();
+        assert_eq!(received.len(), 1);
+        let sent = &received[0];
+        let sent_json = serde_json::to_string(sent).expect("request serializes for inspection");
+        assert!(
+            !sent_json.contains(CANARY),
+            "canary reached the provider unredacted: {sent_json}"
+        );
+        assert!(
+            sent_json.contains("<redacted:api_key:"),
+            "expected a redaction placeholder in what was actually sent: {sent_json}"
+        );
+
+        // Local restore recovers the original for a human's own view; it must never itself be
+        // sent anywhere -- this call only proves the mapping still holds it.
+        let restored = fabric.restore_local(&sent_json);
+        assert!(
+            restored.contains(CANARY),
+            "local restore should recover the canary: {restored}"
+        );
+    }
+
+    /// The false-positive half of the same gate: legitimate long identifiers this codebase (and
+    /// its own git history) already generates -- a blake3 content hash and a git commit sha --
+    /// must both survive `execute()` untouched, not get mistaken for a secret.
+    #[tokio::test]
+    async fn execute_does_not_redact_a_real_content_hash_or_a_git_sha() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "mock", model = "m1", max_concurrency = 1 }"#,
+        );
+        let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
+
+        let provider = Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "m1"),
+            clock.clone() as Arc<dyn Clock>,
+        ));
+        provider.script_default_response(completion(ModelId::new("mock", "m1"), &clock));
+        fabric.register_provider(Arc::clone(&provider) as Arc<dyn Provider>);
+
+        let content_hash = blake3::hash(b"some file contents").to_hex().to_string();
+        let git_sha = "a94a8fe5ccb19ba61c4c0873d391e987982fbbd3";
+        let request = CompletionRequest {
+            system: None,
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: vec![crate::types::ContentBlock::Text {
+                    text: format!("artifact hash: {content_hash}, commit: {git_sha}"),
+                }],
+            }],
+            tools: vec![],
+            max_tokens: 100,
+            temperature: None,
+            stop_sequences: vec![],
+            stream: false,
+            n: 1,
+        };
+
+        let _ = fabric
+            .execute(Role::CoderFast, request)
+            .await
+            .expect("call succeeds");
+
+        let received = provider.call_log();
+        let sent_json = serde_json::to_string(&received[0]).expect("serializes");
+        assert!(
+            sent_json.contains(&content_hash),
+            "a real content hash must survive redaction unchanged: {sent_json}"
+        );
+        assert!(
+            sent_json.contains(git_sha),
+            "a real git commit sha must survive redaction unchanged: {sent_json}"
         );
     }
 }

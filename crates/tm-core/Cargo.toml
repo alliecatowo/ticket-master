@@ -9,6 +9,7 @@ description = "Ticketmaster Core: the authoritative project state and the determ
 [dependencies]
 tm-types = { workspace = true }
 tm-events = { workspace = true }
+tm-auth = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -12,6 +12,7 @@ tm-core = { workspace = true }
 tm-events = { workspace = true }
 tm-codeintel = { workspace = true }
 tm-provider = { workspace = true }
+tm-auth = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

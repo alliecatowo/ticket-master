@@ -108,7 +108,19 @@ impl<'a> StoreTx<'a> {
     /// Append `draft`, materializing it via [`crate::materialize::apply`] before returning the
     /// resulting [`Event`] (durable once the enclosing [`Store::transaction`] call commits, not
     /// before).
+    ///
+    /// `draft.payload` is redacted for secret-shaped substrings (`tm_auth::redact_json`) before
+    /// the hash chain is computed or anything reaches SQLite -- this is the single real choke
+    /// point every event in the whole system passes through (`Store::append`/`append_all` and
+    /// every typed convenience method on [`Store`] all funnel through here), so it is where
+    /// `docs/audit-2026-09-18-fable.md`'s "M-04" wires the event half of its durable-persistence
+    /// redaction guarantee (`Store::store_artifact` is the artifact half; `Fabric::execute` in
+    /// `crates/tm-provider/src/fabric.rs` is the outbound-request half). Redacting before hashing
+    /// keeps the persisted hash chain consistent with what is actually stored; redacting before
+    /// [`crate::materialize::apply`] keeps the in-memory [`crate::view::ProjectView`] a caller
+    /// reads back from never holding the plaintext either.
     pub fn append(&self, draft: EventDraft) -> tm_types::Result<Event> {
+        let draft = redact_event_draft(draft)?;
         let event = self.log.append_in(&self.tx, draft)?;
         crate::materialize::apply(&self.tx, &event)?;
         Ok(event)
@@ -405,6 +417,50 @@ fn decode_artifact_storage(text: &str) -> tm_types::Result<ArtifactStorage> {
         Err(TmError::storage(format!(
             "corrupt artifact storage descriptor: {text:?}"
         )))
+    }
+}
+
+/// [`StoreTx::append`]'s redaction step: round-trip `draft.payload` through JSON, scrubbing
+/// secret-shaped substrings via `tm_auth::redact_json`, and reconstruct the typed payload from
+/// the result. A payload whose redaction touched a structured (non-freeform) field badly enough
+/// that it no longer deserializes into its own typed shape fails the append with a `TmError`
+/// rather than silently persisting a corrupted event; this module's pattern set is deliberately
+/// conservative (a fixed provider-key prefix, or an explicit `key`/`token`/`secret`/`password`
+/// label) specifically to keep this a theoretical rather than a practical risk — see
+/// `docs/decisions/D-011-secret-redaction.md` for the fuller tradeoff.
+fn redact_event_draft(mut draft: EventDraft) -> tm_types::Result<EventDraft> {
+    let kind = draft.payload.kind();
+    let json = draft.payload.to_json()?;
+    let redacted = tm_auth::redact_json(&json);
+    // `serde_json::to_value`/`from_value` is not a guaranteed byte-identity round-trip for every
+    // payload shape (map key order, number representation) -- skip reconstructing the typed
+    // payload entirely when nothing actually matched, so the overwhelming majority of appends
+    // (no secret-shaped content at all) never risk a round-trip discrepancy in the first place.
+    // See `event_payload_json_round_trip_is_exact_for_a_value_bearing_payload_when_nothing_matches`
+    // and `docs/decisions/D-011-secret-redaction.md` for why this matters specifically for a
+    // payload carrying an open-ended `serde_json::Value` field (`fields`/`from`/`to`).
+    if redacted == json {
+        return Ok(draft);
+    }
+    draft.payload = Payload::from_json(kind, redacted)?;
+    Ok(draft)
+}
+
+/// [`Store::store_artifact`]'s redaction step: scrub secret-shaped substrings (`tm_auth::redact`)
+/// out of `bytes` if (and only if) they decode as UTF-8 text. Bytes that fail to decode are a
+/// real binary artifact and are returned untouched -- scanning/rewriting them would risk
+/// corrupting content this module has no way to safely reinterpret.
+fn redact_artifact_bytes(bytes: Vec<u8>) -> Vec<u8> {
+    match std::str::from_utf8(&bytes) {
+        Ok(text) => {
+            let redacted = tm_auth::redact(text);
+            if redacted == text {
+                bytes
+            } else {
+                redacted.into_bytes()
+            }
+        }
+        Err(_) => bytes,
     }
 }
 
@@ -1539,6 +1595,17 @@ impl Store {
 
     /// Store a new artifact's bytes, choosing inline vs. on-disk placement per
     /// [`crate::artifact::plan_storage`].
+    ///
+    /// `bytes` and `meta` are redacted for secret-shaped substrings (`tm_auth::redact`) before
+    /// anything is hashed or written -- this is the one real choke point every artifact's bytes
+    /// pass through regardless of `kind`, so it is where `docs/audit-2026-09-18-fable.md`'s
+    /// "M-04" wires the durable-persistence half of its redaction guarantee (`Fabric::execute`,
+    /// `crates/tm-provider/src/fabric.rs`, is the outbound-request half). Redaction happens
+    /// before [`crate::artifact::plan_storage`] so the recorded `hash` matches the bytes that
+    /// actually land on disk/in SQLite, not the pre-redaction bytes the caller passed in. `bytes`
+    /// that do not decode as UTF-8 (a real binary artifact) are left untouched rather than risk
+    /// corrupting them -- see `tm_auth::redact`'s docs for why this is safe: the pattern set is
+    /// conservative enough that skipping non-text bytes costs no real coverage.
     pub fn store_artifact(
         &self,
         kind: ArtifactKind,
@@ -1548,6 +1615,8 @@ impl Store {
         ticket: Option<TicketId>,
         actor: ParticipantId,
     ) -> tm_types::Result<Vec<Event>> {
+        let bytes = redact_artifact_bytes(bytes);
+        let meta = tm_auth::redact_json(&meta);
         let id = ArtifactId::new(self.ids.next(IdKind::Artifact).as_str())?;
         let (hash, storage) = crate::artifact::plan_storage(&self.state_dir, &bytes);
         if let ArtifactStorage::OnDisk(path) = &storage {
@@ -3910,6 +3979,201 @@ mod tests {
             .expect("artifact materialized");
         assert_eq!(artifact.bytes_len, 5);
         assert!(matches!(artifact.storage, ArtifactStorage::Inline(_)));
+    }
+
+    /// The regression gate for M-04's "secret redaction ... an event": a real
+    /// [`ProviderDegradedPayload`] carrying a known fake-secret-shaped canary in its free-text
+    /// `reason` field, appended through the real [`Store::append`], must not reach either the
+    /// returned in-memory [`Event`] or the raw `events.payload` text SQLite actually persisted.
+    #[test]
+    fn event_payload_redacts_a_secret_shaped_substring_before_it_is_persisted() {
+        use tm_events::payload::ProviderDegradedPayload;
+
+        const CANARY: &str = "sk-EVENTCANARY0123456789abcdefghijklmnopqr";
+
+        let (_dir, store) = open_store();
+        let events = store
+            .append(vec![EventDraft::new(
+                actor(),
+                Id::none(),
+                Payload::from(ProviderDegradedPayload {
+                    provider: "openai".to_string(),
+                    reason: format!("call failed, key was: {CANARY}"),
+                }),
+            )])
+            .expect("append event");
+        assert_eq!(events.len(), 1);
+
+        // Not in the returned in-memory Event...
+        let debug_text = format!("{:?}", events[0]);
+        assert!(
+            !debug_text.contains(CANARY),
+            "canary leaked into the returned Event: {debug_text}"
+        );
+        let payload = events[0]
+            .payload
+            .as_provider_degraded()
+            .expect("provider_degraded payload");
+        assert!(!payload.reason.contains(CANARY), "{}", payload.reason);
+        // The persistence path is the pure/keyless `tm_auth::redact` (no per-secret fingerprint,
+        // unlike `Fabric::execute`'s `SessionRedactor`) -- see `tm_auth::redact`'s module docs.
+        assert!(
+            payload.reason.contains("<redacted:api_key>"),
+            "{}",
+            payload.reason
+        );
+
+        // ...and not in the raw bytes SQLite actually stored.
+        let seq = events[0].seq;
+        let persisted: String = store
+            .transaction(|tx| {
+                tx.raw()
+                    .query_row(
+                        "SELECT payload FROM events WHERE seq = ?1",
+                        rusqlite::params![seq as i64],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| TmError::storage(e.to_string()))
+            })
+            .expect("read raw payload column");
+        assert!(
+            !persisted.contains(CANARY),
+            "canary leaked into the persisted events.payload row: {persisted}"
+        );
+    }
+
+    /// The false-positive half of the same gate: a legitimate long identifier this codebase
+    /// already generates (a blake3 content hash, with no `key`/`token`/`secret`/`password` label
+    /// nearby) must survive a real append unredacted.
+    #[test]
+    fn event_payload_does_not_redact_a_real_content_hash() {
+        use tm_events::payload::ProviderDegradedPayload;
+
+        let hash = blake3::hash(b"some real content").to_hex().to_string();
+        let (_dir, store) = open_store();
+        let events = store
+            .append(vec![EventDraft::new(
+                actor(),
+                Id::none(),
+                Payload::from(ProviderDegradedPayload {
+                    provider: "openai".to_string(),
+                    reason: format!("mismatched content hash {hash}"),
+                }),
+            )])
+            .expect("append event");
+
+        let payload = events[0]
+            .payload
+            .as_provider_degraded()
+            .expect("provider_degraded payload");
+        assert!(
+            payload.reason.contains(&hash),
+            "a real content hash must survive redaction unchanged: {}",
+            payload.reason
+        );
+    }
+
+    /// `redact_event_draft`'s `to_json`/`from_json` round-trip is not a guaranteed
+    /// byte-identity for every JSON shape (map ordering, number representation) -- this proves
+    /// it is exact for the one payload in this workspace with an open-ended `serde_json::Value`
+    /// field, both when nothing matches (the round-trip is skipped entirely) and when a sibling
+    /// field does match (forcing the round-trip to actually run): a float, a nested object and
+    /// array must all survive structurally unchanged.
+    #[test]
+    fn event_payload_value_field_round_trips_exactly_around_redaction() {
+        use tm_events::payload::TicketUpdatedPayload;
+
+        let (_dir, store) = open_store();
+        let fields = serde_json::json!({
+            "priority": 3,
+            "burn_rate": 1.5,
+            "nested": { "b": 2, "a": 1 },
+            "tags": ["alpha", "beta"],
+        });
+        let events = store
+            .append(vec![EventDraft::new(
+                actor(),
+                Id::none(),
+                Payload::from(TicketUpdatedPayload {
+                    ticket: TicketId::new("T-1").unwrap(),
+                    fields: fields.clone(),
+                }),
+            )])
+            .expect("append event with no secret-shaped content");
+        let inner = events[0].payload.as_ticket_updated().expect("typed");
+        assert_eq!(inner.fields, fields, "no-match path must be byte-exact");
+
+        // Now force the round-trip to actually execute by adding a secret-shaped sibling value.
+        const CANARY: &str = "AKIAABCDEFGHIJKLMNOP";
+        let mut fields_with_secret = fields.clone();
+        fields_with_secret["leaked"] = serde_json::Value::String(CANARY.to_string());
+        let events = store
+            .append(vec![EventDraft::new(
+                actor(),
+                Id::none(),
+                Payload::from(TicketUpdatedPayload {
+                    ticket: TicketId::new("T-1").unwrap(),
+                    fields: fields_with_secret,
+                }),
+            )])
+            .expect("append event with secret-shaped content");
+        let inner = events[0].payload.as_ticket_updated().expect("typed");
+        assert_eq!(
+            inner.fields["priority"], fields["priority"],
+            "integer survives the forced round-trip"
+        );
+        assert_eq!(
+            inner.fields["burn_rate"], fields["burn_rate"],
+            "float survives the forced round-trip"
+        );
+        assert_eq!(
+            inner.fields["nested"], fields["nested"],
+            "nested object survives the forced round-trip"
+        );
+        assert_eq!(
+            inner.fields["tags"], fields["tags"],
+            "array survives the forced round-trip"
+        );
+        assert_ne!(
+            inner.fields["leaked"],
+            serde_json::Value::String(CANARY.to_string())
+        );
+    }
+
+    /// The artifact half of the same gate: [`Store::store_artifact`]'s bytes and `meta` both get
+    /// scrubbed, but a legitimate ticket id survives.
+    #[test]
+    fn store_artifact_redacts_secret_shaped_bytes_and_meta() {
+        const CANARY: &str = "AKIAABCDEFGHIJKLMNOP";
+
+        let (_dir, store) = open_store();
+        let events = store
+            .store_artifact(
+                ArtifactKind::CommandOutput,
+                "text/plain".into(),
+                format!("captured stdout:\naws_access_key_id={CANARY}\ndone (T-1)").into_bytes(),
+                serde_json::json!({ "command": format!("printenv | grep {CANARY}"), "ticket": "T-1" }),
+                None,
+                actor(),
+            )
+            .expect("store_artifact");
+        let artifact_id = ArtifactId::new(events[0].subject.as_str()).unwrap();
+        let view = store.view().expect("view");
+        let artifact = view
+            .artifacts
+            .get(&artifact_id)
+            .expect("artifact materialized");
+        let ArtifactStorage::Inline(bytes) = &artifact.storage else {
+            panic!("small artifact should be stored inline");
+        };
+        let text = String::from_utf8(bytes.clone()).expect("utf8");
+        assert!(!text.contains(CANARY), "{text}");
+        assert!(
+            text.contains("T-1"),
+            "unrelated ticket id should survive: {text}"
+        );
+        let meta_text = artifact.meta.to_string();
+        assert!(!meta_text.contains(CANARY), "{meta_text}");
     }
 
     #[test]
