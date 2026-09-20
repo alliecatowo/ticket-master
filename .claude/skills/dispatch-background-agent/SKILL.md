@@ -111,7 +111,25 @@ to live earlier in the file for readability, leave a comment at its `#[cfg(test)
 noting that everything below it in the file is now treated as test code by the hygiene scan, so
 the next person doesn't have to rediscover this by debugging a confusing hygiene failure.
 
-## 6. Use `mise run` tasks, not hand-rolled cargo
+## 6. A verify-only agent in the primary checkout still races against your own git operations there
+
+`isolation: 'worktree'` is mandatory for anything that *edits* code (rule 1) -- but a verify-only
+agent (build/test/commit a change already sitting uncommitted in the primary checkout) has to run
+there by definition, and that creates a different, narrower race: the orchestrator doing a `git
+merge`/`git commit` in that same primary checkout while the agent's own `cargo test`/`verify` run
+is still in flight. This happened for real: a Phase-1D merge landed on `main` mid-run of a
+verify-only agent checking an unrelated one-line `xtask` fix. Nothing broke, but only because that
+agent's own `git status --short` caught the transient `UU`/merge-in-progress state and it chose,
+unprompted, to re-run the full verify gate against the new HEAD before committing rather than
+trust the run that started under the old one.
+
+**When dispatching a verify-only agent against the primary checkout:** either avoid doing your own
+git writes there until it reports back, or explicitly tell it in the prompt that a concurrent
+merge may land mid-run and it should re-run verify against the final HEAD before committing if it
+notices `git status` in a mid-merge or otherwise-unexpected state rather than assuming its
+in-flight result is still valid. Don't rely on it noticing this unprompted a second time.
+
+## 7. Use `mise run` tasks, not hand-rolled cargo
 
 `mise run verify`, `mise run hygiene`, `mise run clippy`, etc. already encode the right `-j 2` job
 cap and `-p`/`--workspace` scoping for this machine (8GB, tight on disk). See the repo root
