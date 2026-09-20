@@ -251,7 +251,13 @@ impl Decision {
 }
 
 /// Which action classes a human wants to be asked about.
+///
+/// `deny_unknown_fields`: this is the whole body of a human-edited `oversight.toml`
+/// (`crates/tm-cli/src/dispatch.rs`'s `load_oversight`), a security control, not a lenient
+/// display-only config — a typo'd key (`approval_requird`) must be a parse error, not a silently
+/// empty policy that leaves a human believing an action class is gated when it is not.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Oversight {
     /// Action classes that require approval. A prefix matches its whole subtree, so
     /// `git` covers `git.push`.
@@ -272,12 +278,15 @@ impl Oversight {
     ///
     /// `computer.input`/`computer.clipboard` are here per `SPEC.md` §20.5 ("an agent that can
     /// synthesize keystrokes into whatever window has focus is strictly more dangerous than one
-    /// that can write files inside a scoped path"), but nothing in this workspace loads
-    /// `oversight.toml` or calls [`Oversight::review`] at a real effect boundary yet
-    /// (`docs/audit-2026-09-18-fable.md` M-16) — this policy is exercised only by tests today.
-    /// `pty.send` joins them per the same reasoning, restated for a pty by `SPEC.md` §22.4: an
-    /// agent that can synthesize keystrokes into a live interactive process can answer a
-    /// destructive confirmation prompt.
+    /// that can write files inside a scoped path"). `pty.send` joins them per the same
+    /// reasoning, restated for a pty by `SPEC.md` §22.4: an agent that can synthesize keystrokes
+    /// into a live interactive process can answer a destructive confirmation prompt.
+    ///
+    /// `crates/tm-cli/src/dispatch.rs`'s `load_oversight` parses this policy from `oversight.toml`
+    /// at a project's root (falling back to [`Oversight::default`] when absent), and
+    /// `tm_agent::agent_loop::AgentLoop::drive` is the real effect boundary that calls
+    /// [`Oversight::review`] on it before a tool call dispatches — see `docs/decisions/D-008-oversight-policy-wiring.md`
+    /// (`docs/audit-2026-09-18-fable.md` M-16, now closed).
     pub fn conservative() -> Self {
         Oversight {
             approval_required: [
@@ -464,5 +473,15 @@ mod tests {
             ),
             Decision::Allow
         );
+    }
+
+    #[test]
+    fn oversight_rejects_an_unknown_field_instead_of_silently_ignoring_it() {
+        // `deny_unknown_fields`, type-level: `oversight.toml`'s loader
+        // (`crates/tm-cli/src/dispatch.rs::load_oversight`) relies on this to fail a misspelled
+        // key loudly rather than parse into an empty, all-autonomous policy.
+        let err = serde_json::from_str::<Oversight>(r#"{"aproval_required": ["git.push"]}"#)
+            .expect_err("a misspelled key must not deserialize");
+        let _ = err; // exact message is serde_json's own, not this crate's to assert on
     }
 }

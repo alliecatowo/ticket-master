@@ -207,10 +207,11 @@ impl ShellAuthority {
 /// Computer-use powers (`SPEC.md` §20.5): gates `Action::ComputerInput`/`ComputerCapture`/
 /// `ComputerClipboard`. `SPEC.md` §20.5 also says default steady-state oversight puts `input`
 /// and `clipboard` behind human approval — that escalation is [`crate::action::Oversight`]'s
-/// job, not this struct's; nothing in this workspace loads `oversight.toml` yet
-/// (`docs/audit-2026-09-18-fable.md` M-16), so today these three booleans are the whole gate: a
-/// worker either holds the power or it does not, with no separate "held but needs approval"
-/// state until M-16 wires a loader and a real effect-boundary call to `Oversight::review`.
+/// job, not this struct's: these three booleans remain the whole *authority* gate (a worker
+/// either holds the power or it does not), while a held-but-approval-required action is a
+/// separate state `Oversight::review` layers on afterwards, now wired at the real effect
+/// boundary in `tm_agent::agent_loop::AgentLoop::drive` (`docs/audit-2026-09-18-fable.md` M-16,
+/// `docs/decisions/D-008-oversight-policy-wiring.md`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ComputerAuthority {
     /// May synthesize mouse/keyboard input into the real desktop.

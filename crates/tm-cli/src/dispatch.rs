@@ -14,7 +14,7 @@ use tm_core::executor::ExecutorTask;
 use tm_core::store::Store;
 use tm_core::ArtifactKind;
 use tm_scheduler::dispatch::{ContextPackSource, ExecutorDispatcher, ExecutorRegistry};
-use tm_types::{Role, TicketId};
+use tm_types::{Oversight, Role, TicketId};
 
 use crate::agent::{build_fabric, MemoryCommandCache, ProcessCommandExecutor};
 use crate::project::Project;
@@ -173,6 +173,30 @@ fn optional_acp_executor(project: &Project) -> tm_types::Result<Option<(Role, Ar
     Ok(Some((parsed.agent.role, executor)))
 }
 
+/// The human-authored approval policy (`SPEC.md` §4.4), per `docs/decisions/D-008-oversight-policy-wiring.md`.
+const OVERSIGHT_TOML_FILENAME: &str = "oversight.toml";
+
+/// Load and parse `project.root`'s `oversight.toml`, or [`Oversight::default`] — identical to
+/// [`Oversight::autonomous`], asking nothing — when the file is absent, so a project with no
+/// `oversight.toml` dispatches every ticket exactly as it did before `Oversight` had a real
+/// caller (`docs/audit-2026-09-18-fable.md` M-16). Root, not `state_dir`, per D-003: like
+/// `acp.toml`/`browser.toml`, this is a human-authored, version-controlled policy a team reviews
+/// together, not derived-and-gitignored project state the way `harness.toml`/`mirror.toml` are.
+///
+/// `pub(crate)`, not private: `crate::agent`'s interactive `tm`/`tm -p` loop is the *other* real
+/// effect boundary (`build_dispatcher`'s `tm run`/`tm sched run` is the first) and loads this the
+/// same way, rather than inventing a second loader.
+pub(crate) fn load_oversight(project: &Project) -> tm_types::Result<Oversight> {
+    let path = project.root.join(OVERSIGHT_TOML_FILENAME);
+    if !path.exists() {
+        return Ok(Oversight::default());
+    }
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| tm_types::TmError::Io(format!("reading {}: {e}", path.display())))?;
+    toml::from_str(&source)
+        .map_err(|e| tm_types::TmError::parse(format!("{}: {e}", path.display())))
+}
+
 /// Build the dispatcher `tm run`/`tm sched run` share: a [`BuiltinExecutor`] registered for
 /// every [`Role`] (the reference adapter, per `SPEC.md` §24.3), optionally overridden for one
 /// role by an [`AcpExecutor`] when the project has an `acp.toml` (B-12 — `codex`/`pi`/`opencode`
@@ -190,6 +214,7 @@ pub fn build_dispatcher(
         Arc::new(ProcessCommandExecutor);
 
     let browser = crate::drive::optional_browser_wiring(project)?;
+    let oversight = load_oversight(project)?;
     let builtin = Arc::new(BuiltinExecutor::new(
         "builtin",
         fabric,
@@ -201,6 +226,7 @@ pub fn build_dispatcher(
         project.ids.clone(),
         browser,
         tm_agent::ComputerWiring::default(),
+        oversight,
     ));
 
     let human = Arc::new(HumanExecutor::new(
@@ -298,6 +324,75 @@ mod tests {
         // (both require `T: Debug`).
         let result = optional_acp_executor(&project);
         assert!(matches!(result, Err(tm_types::TmError::Parse(_))));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // `oversight.toml` (`docs/decisions/D-008-oversight-policy-wiring.md`): the regression-safe
+    // default when absent, and real parsing when present — mirroring `optional_acp_executor`'s
+    // tests immediately above, since `load_oversight` follows the same loader shape.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn load_oversight_defaults_to_asking_nothing_without_an_oversight_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        assert_eq!(
+            load_oversight(&project).expect("no error"),
+            Oversight::default(),
+            "a project with no oversight.toml must dispatch exactly as it did before Oversight \
+             had a real caller"
+        );
+    }
+
+    #[test]
+    fn load_oversight_parses_approval_required_and_spend_limit_from_a_real_oversight_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(OVERSIGHT_TOML_FILENAME),
+            "approval_required = [\"git.commit\", \"project\"]\nspend_over_micros = 5000000\n",
+        )
+        .expect("write oversight.toml");
+        let project = test_project(dir.path());
+
+        let oversight = load_oversight(&project).expect("no error");
+        assert!(oversight.approval_required.contains("git.commit"));
+        assert!(oversight.approval_required.contains("project"));
+        assert_eq!(oversight.spend_over_micros, Some(5_000_000));
+    }
+
+    #[test]
+    fn load_oversight_surfaces_a_parse_error_for_malformed_toml() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(OVERSIGHT_TOML_FILENAME),
+            "not valid toml [[[",
+        )
+        .expect("write oversight.toml");
+        let project = test_project(dir.path());
+
+        assert!(matches!(
+            load_oversight(&project),
+            Err(tm_types::TmError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn load_oversight_rejects_a_misspelled_key_instead_of_silently_ignoring_it() {
+        // `Oversight`'s `deny_unknown_fields`: a typo here (`approval_requird`) must fail loudly,
+        // not parse into an empty, all-autonomous policy a human wrongly believes is gating
+        // something.
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join(OVERSIGHT_TOML_FILENAME),
+            "approval_requird = [\"git.force_push\"]\n",
+        )
+        .expect("write oversight.toml");
+        let project = test_project(dir.path());
+
+        assert!(matches!(
+            load_oversight(&project),
+            Err(tm_types::TmError::Parse(_))
+        ));
     }
 
     /// The `builtin`-for-every-role, `acp`-overrides-one-role registration shape this module's
