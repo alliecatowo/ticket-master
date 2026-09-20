@@ -254,6 +254,38 @@ limitation, which lives in `fabric.rs`.
   half of this backend: any other bespoke OpenAI-compatible endpoint can reuse it with a new env
   var prefix without writing a new module.
 
+### DevPass as the default provider
+
+When `DEVPASS_API_KEY`, `DEVPASS_BASE_URL` and `DEVPASS_MODEL` are **all** set to non-empty
+values, DevPass becomes the default provider for `coder.fast` — the one role `tm`'s interactive
+session (bare `tm`, `tm -p <prompt>`) and its scheduler dispatcher (`tm run`/`tm sched run`)
+actually drive an agent-loop turn as. Concretely:
+
+- `RoleTable::default_table`'s `coder.fast` primary candidate becomes `devpass`/`$DEVPASS_MODEL`
+  instead of `anthropic`/`claude-sonnet-5`; the existing Anthropic fallback candidate is left in
+  place, untouched.
+- `crates/tm-cli/src/agent.rs`'s `build_fabric` registers a `DevPassProvider` **instead of
+  requiring** `ANTHROPIC_API_KEY` — this is the point of the feature: a real end-to-end `tm`
+  session can run against a cheap/free OpenAI-compatible backend without touching Anthropic quota
+  or needing an Anthropic account at all. `AnthropicProvider::from_env` is still attempted
+  best-effort in this mode (registered if it happens to succeed, silently skipped if not), so any
+  *other* role a ticket names still gets Anthropic service if a key also happens to be present.
+- A **partial** set of the three env vars (e.g. only `DEVPASS_API_KEY`) does not activate this
+  preference at all — it falls straight through to the unchanged, Anthropic-only default. There
+  is no half-activated state.
+- This does not touch any other role: `vision.frontier`/`planner.frontier`/`architect.frontier`
+  (`tm genesis`'s bootstrap stages, resolved through a separate, Anthropic-only provider-selection
+  path — see `crates/tm-cli/src/project.rs`'s `resolve_genesis_provider`) and `embedder`
+  (background indexing) are all unaffected, on purpose: genesis's own resolution hardcodes
+  `AnthropicProvider` regardless of what a candidate's `provider` slug names, so pointing a
+  frontier role's default at `devpass` there would silently misconstruct a provider rather than
+  actually use DevPass; embedding needs a model that actually serves embeddings, which a
+  DevPass-testing model is not guaranteed to.
+- Absent all three env vars, behavior is byte-for-byte unchanged from before this feature existed.
+
+See `docs/decisions/D-004-devpass-default-provider.md` for the reasoning and what this does not
+cover.
+
 ## Free-tier summary
 
 | Slug | Free tier |

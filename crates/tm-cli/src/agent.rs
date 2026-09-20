@@ -22,7 +22,7 @@ use tm_context::{
     TokenBudget,
 };
 use tm_core::{ExecutorRequirements, RetryPolicy, Ticket, TicketKind, VerificationPolicy};
-use tm_provider::{AnthropicProvider, Fabric, ModelId, RoleTable};
+use tm_provider::{AnthropicProvider, DevPassProvider, Fabric, ModelId, RoleTable};
 use tm_types::{
     ArtifactId, Authority, Budget, Clock, IdKind, IdSource, ParticipantId, Role, SessionId,
     TicketId, Timestamp, TmError, Tolerance,
@@ -31,9 +31,13 @@ use tm_types::{
 use crate::project::Project;
 use crate::render::Renderer;
 
-/// The concrete Anthropic model this session's coder role is bound to. `Fabric`'s provider
-/// registry keys by provider slug rather than model, so this is the model every request this
-/// session issues is actually served by, regardless of which candidate a role table names.
+/// The concrete Anthropic model this session's coder role is bound to when DevPass is not
+/// configured as the default (see [`build_fabric`]). `Fabric`'s provider registry keys by
+/// provider slug rather than model, so absent DevPass, this is the model every request this
+/// session issues is actually served by, regardless of which candidate a role table names. When
+/// `DEVPASS_API_KEY`/`DEVPASS_BASE_URL`/`DEVPASS_MODEL` are all set, [`build_fabric`] instead
+/// registers a [`DevPassProvider`] and [`RoleTable::default_table`] routes [`AGENT_ROLE`] to it,
+/// so this constant is not consulted at all for that request.
 pub(crate) const AGENT_MODEL: &str = "claude-sonnet-5";
 
 /// The role the interactive/scriptable session executes turns as: well-specified implementation
@@ -514,18 +518,51 @@ fn read_line<R: BufRead>(reader: &mut R, buf: &mut String) -> tm_types::Result<u
 /// and it has no effect unless a test explicitly sets it.
 const TEST_MOCK_PROVIDER_ENV: &str = "TM_TEST_MOCK_PROVIDER";
 
-/// Build the fabric this session issues completions through: a single real Anthropic provider
-/// bound to [`AGENT_MODEL`], registered against the workspace's default role table — or, when
-/// [`TEST_MOCK_PROVIDER_ENV`] is set, a deterministic mock (see that constant's docs).
+/// Build the fabric this session issues completions through, registered against the workspace's
+/// default role table ([`RoleTable::default_table`]) — or, when [`TEST_MOCK_PROVIDER_ENV`] is
+/// set, a deterministic mock (see that constant's docs).
+///
+/// Provider selection, in order:
+/// - `TEST_MOCK_PROVIDER_ENV` set: a scripted [`tm_provider::MockProvider`], see
+///   [`build_mock_fabric`].
+/// - `DEVPASS_API_KEY`/`DEVPASS_BASE_URL`/`DEVPASS_MODEL` all set (see
+///   [`DevPassProvider::preferred_model`]): a [`DevPassProvider`] is registered under the
+///   `devpass` slug — matching [`RoleTable::default_table`]'s own DevPass preference for
+///   [`AGENT_ROLE`] — specifically *instead of requiring* `ANTHROPIC_API_KEY`, so a real `tm`
+///   session can run end to end without touching Anthropic quota. `AnthropicProvider::from_env`
+///   is still attempted best-effort and registered if it happens to succeed too (silently
+///   ignored if not), so any *other* role a ticket names (`tm run`/`tm sched run` share this same
+///   function, see `crates/tm-cli/src/dispatch.rs`) still gets Anthropic service if a key is
+///   also present — only [`AGENT_ROLE`]'s own default candidate actually changes.
+/// - Otherwise: a single real `AnthropicProvider` bound to [`AGENT_MODEL`], exactly as before
+///   DevPass support existed. `AnthropicProvider::from_env`'s error (typically a missing
+///   `ANTHROPIC_API_KEY`) is surfaced directly in this branch, unchanged.
 pub(crate) fn build_fabric(clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric>> {
     if std::env::var_os(TEST_MOCK_PROVIDER_ENV).is_some() {
         return Ok(Arc::new(build_mock_fabric(clock)));
     }
     let table = RoleTable::default_table();
     let fabric = Fabric::new(table, clock.clone());
-    let provider = AnthropicProvider::from_env(ModelId::new("anthropic", AGENT_MODEL), clock)
-        .map_err(|e| TmError::Provider(e.to_string()))?;
-    fabric.register_provider(Arc::new(provider));
+
+    if DevPassProvider::preferred_model().is_some() {
+        let devpass = DevPassProvider::from_env(clock.clone())
+            .map_err(|e| TmError::Provider(e.to_string()))?;
+        fabric.register_provider(Arc::new(devpass));
+        // Best-effort: a role other than AGENT_ROLE may still be routed to `anthropic` (that
+        // part of the table is untouched by DevPass preference), so register it too if it
+        // happens to be available — but never let its absence fail fabric construction, since
+        // the whole point of DevPass preference is running without an Anthropic credential.
+        if let Ok(anthropic) =
+            AnthropicProvider::from_env(ModelId::new("anthropic", AGENT_MODEL), clock)
+        {
+            fabric.register_provider(Arc::new(anthropic));
+        }
+    } else {
+        let provider = AnthropicProvider::from_env(ModelId::new("anthropic", AGENT_MODEL), clock)
+            .map_err(|e| TmError::Provider(e.to_string()))?;
+        fabric.register_provider(Arc::new(provider));
+    }
+
     Ok(Arc::new(fabric))
 }
 
@@ -1055,5 +1092,61 @@ mod tests {
         let n = read_line(&mut input, &mut buf).unwrap();
         assert_eq!(n, 6);
         assert_eq!(buf, "hello\n");
+    }
+
+    // ---- build_fabric: DevPass default preference ----
+    //
+    // Deliberately never touches `ANTHROPIC_API_KEY` (reading or setting it in test code is a
+    // hard hygiene violation — `crates/xtask/src/hygiene.rs`'s `check_network_in_tests`, "no
+    // real credential dependency in tests"). This test's assertion doesn't need to: `build_fabric`
+    // must succeed once DevPass is configured *regardless* of whatever Anthropic credential
+    // state happens to be ambient, and `AGENT_ROLE`'s route must prefer `devpass` either way,
+    // since `default_table`'s DevPass-preferred table always puts it first for `coder.fast`.
+    //
+    // No other test in this crate touches `DEVPASS_*`, but this lock guards against a future one
+    // racing this test's env mutation under `cargo test`'s default multi-threaded runner (the
+    // same convention `tm-provider`'s `frontier.rs` tests use).
+    fn devpass_build_fabric_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn clear_devpass_env() {
+        for var in ["DEVPASS_API_KEY", "DEVPASS_BASE_URL", "DEVPASS_MODEL"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[test]
+    fn build_fabric_prefers_devpass_when_configured() {
+        let _guard = devpass_build_fabric_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_devpass_env();
+        std::env::set_var("DEVPASS_API_KEY", "sk-test");
+        std::env::set_var("DEVPASS_BASE_URL", "https://example.invalid/devpass");
+        std::env::set_var("DEVPASS_MODEL", "devpass-test-model");
+
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let result = build_fabric(clock.clone());
+        clear_devpass_env();
+
+        let fabric = result.expect(
+            "build_fabric must succeed once DevPass is configured, regardless of any ambient \
+             Anthropic credential state",
+        );
+
+        let need = tm_provider::Need {
+            tolerance: AGENT_ROLE.default_tolerance(),
+            estimated_tokens: 100,
+            max_cost_micros: None,
+        };
+        match fabric.route(AGENT_ROLE, &need, clock.now()) {
+            tm_provider::RouteDecision::Use(model_id) => {
+                assert_eq!(model_id.provider, "devpass");
+                assert_eq!(model_id.model, "devpass-test-model");
+            }
+            other => panic!("expected AGENT_ROLE to route to devpass, got {other:?}"),
+        }
     }
 }
