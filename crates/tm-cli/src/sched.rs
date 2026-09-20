@@ -2,6 +2,7 @@
 //! ([`tm_scheduler`]) or executes a ticket through [`tm_agent`].
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -101,6 +102,37 @@ pub fn sched_tick(project: &Project, renderer: &Renderer) -> tm_types::Result<()
     renderer.emit(&summaries, &human)
 }
 
+/// Start the desktop-notification watcher for `project`'s event log unless `TM_NOTIFY` opts out
+/// (`crates/tm-notify`, `docs/decisions/D-007-desktop-notifications.md`,
+/// `docs/audit-2026-09-18-fable.md` M-04). Fire-and-forget, matching `tm-server`'s identical
+/// `AppState::spawn_broadcast_poller` convention: the returned `JoinHandle` is discarded rather
+/// than held, since the watcher is meant to run for the lifetime of this process, not be joined
+/// or explicitly stopped.
+///
+/// `tm sched run` and `tm run` are this codebase's two long-running/interactive surfaces that can
+/// append `approval.requested` (via `tm-scheduler`'s dispatcher spawning `tm-agent`'s loop as a
+/// background task, `crates/tm-scheduler/src/dispatch.rs`) or `ticket.escalated` (`tm sched run`'s
+/// own tick, via `SchedulerAction::Escalate`) from *within this same process* — see
+/// `tm_notify::watch`'s module docs for why polling the log is the right seam even though a
+/// notification-worthy event's own append can happen several call frames away from wherever this
+/// function was invoked.
+fn start_notification_watcher(project: &Project) {
+    if !tm_notify::notifications_enabled_from_env() {
+        tracing::debug!("desktop notifications disabled via TM_NOTIFY");
+        return;
+    }
+    match tm_notify::spawn_notification_watcher(
+        &project.state_dir,
+        Arc::new(tm_notify::SystemNotifier::new()),
+        tm_notify::DEFAULT_POLL_INTERVAL,
+    ) {
+        Ok(_handle) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to start desktop-notification watcher");
+        }
+    }
+}
+
 /// `tm sched run`: run the scheduler loop continuously until interrupted (ctrl-c), leasing
 /// `Ready` tickets to real executors via the same [`crate::dispatch::build_dispatcher`] `tm run`
 /// uses (`SPEC.md` §24, audit B-01/B-04).
@@ -109,6 +141,8 @@ pub async fn sched_run(
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
+    start_notification_watcher(project);
+
     let mut policy = tm_scheduler::SchedulingPolicy::conservative_default();
     // `conservative_default` starts with no roles available (a safe default for a caller that
     // never attaches an executor at all). A dispatcher is attached below, so every role now has
@@ -310,6 +344,8 @@ pub async fn run_ticket(
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
+    start_notification_watcher(project);
+
     let ticket = TicketId::new(&args.ticket)?;
     let view = project.store.view()?;
     let ticket_state = view
