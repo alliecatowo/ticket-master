@@ -12,3 +12,8 @@
 # active worktree's contents as part of this repo's own history.
 .claude/worktrees/
 .claude/settings.local.json
+
+# Local secrets -- never commit
+.env
+.env.*
+!.env.example
