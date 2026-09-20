@@ -2612,4 +2612,140 @@ mod tests {
             "the default oversight policy must never ask for approval"
         );
     }
+
+    // -----------------------------------------------------------------------------------------
+    // Live Codex ChatGPT-subscription auth-loop proof (D-015, opt-in, real network): drives a
+    // real `AgentLoop` turn over a real `Fabric` registered with a real
+    // `tm_provider::providers::codex_chatgpt::CodexChatGptProvider`, itself authenticated
+    // through a real `tm_auth::CodexSubscriptionOAuth` reading whatever already-logged-in Codex
+    // CLI session is present on this machine (`$CODEX_HOME`/`$HOME/.codex/auth.json`) — the full
+    // chain the rest of this file only ever exercises against `tm_provider::MockProvider`.
+    //
+    // Three independent layers keep this out of every ordinary `cargo test`/`mise run verify`
+    // run, not just one:
+    //   1. `#[cfg(feature = "live-codex-auth")]` on this whole module — the test does not exist
+    //      in the compiled binary at all without `--features live-codex-auth` (mirrors
+    //      `crates/tm-cli`'s `otel` feature, D-010).
+    //   2. `#[ignore]` — the standard Rust escape hatch, so even a feature-enabled
+    //      `cargo test -p tm-agent --features live-codex-auth` still skips it without
+    //      `-- --ignored`.
+    //   3. The `TM_LIVE_CODEX_AUTH=1` runtime env check below — the explicit opt-in this
+    //      workspace's task brief for D-015 asked for, so a deliberate
+    //      `--features live-codex-auth -- --ignored` invocation still gets a clear skip message
+    //      rather than a hard failure on a machine with no real Codex session.
+    //
+    // See `mise.toml`'s `test:live-codex-auth` task and
+    // `docs/decisions/D-015-codex-chatgpt-session-auth-adapter.md`.
+    // -----------------------------------------------------------------------------------------
+    #[cfg(feature = "live-codex-auth")]
+    mod live_codex_auth {
+        use super::*;
+        use tm_provider::providers::codex_chatgpt::CodexChatGptProvider;
+
+        /// A task whose objective directly asks the real model to close the loop through the
+        /// one tool this file's other tests also use to reach `AgentOutcome::Submitted`
+        /// (`ticket.submit`), with a summary this test can assert on byte-for-byte — the same
+        /// "trivial, cheap prompt with an exact expected string" shape D-015 asked for, just
+        /// routed through a real tool call instead of a bare text reply, since `AgentLoop::drive`
+        /// only reaches `Submitted` via a tool call (a text-only turn is `Failed`, see `drive`'s
+        /// `tool_uses.is_empty()` branch above).
+        fn live_task(h: &LiveHarness) -> AgentTask {
+            let body = "Call the ticket.submit tool exactly once. Set its summary argument to \
+                         exactly the word authloopworks (all lowercase, no punctuation, no other \
+                         words). Do not call any other tool first."
+                .to_string();
+            let section = Section {
+                kind: SectionKind::Objective,
+                title: "Task".to_string(),
+                body: body.clone(),
+                tokens: body.len() / 4,
+                bytes: body.len(),
+                provenance: Vec::new(),
+            };
+            AgentTask {
+                ticket: h.ticket.clone(),
+                context_pack: ContextPack {
+                    sections: vec![section],
+                    tokens: body.len() / 4,
+                    bytes: body.len(),
+                    provenance: Vec::new(),
+                    dropped: Vec::new(),
+                },
+                authority: Authority::root(),
+                budget: Budget::unlimited(),
+                harness_epoch: 0,
+                session: h.session.clone(),
+            }
+        }
+
+        #[tokio::test]
+        #[ignore = "hits the real chatgpt.com/backend-api/codex backend; opt in with \
+                    TM_LIVE_CODEX_AUTH=1 and --features live-codex-auth -- --ignored"]
+        async fn real_agent_loop_turn_reaches_the_real_codex_backend_and_submits() {
+            if std::env::var("TM_LIVE_CODEX_AUTH").ok().as_deref() != Some("1") {
+                eprintln!(
+                    "skipping real_agent_loop_turn_reaches_the_real_codex_backend_and_submits: \
+                     set TM_LIVE_CODEX_AUTH=1 to actually call the real Codex backend"
+                );
+                return;
+            }
+
+            // Whatever model this machine's own real Codex CLI session is configured for
+            // (`~/.codex/config.toml`'s `model` field, surfaced by `codex doctor`) — never
+            // hardcoded, since a hardcoded model this account cannot reach would fail for a
+            // reason unrelated to what this test actually proves.
+            let model = std::env::var("TM_LIVE_CODEX_MODEL")
+                .unwrap_or_else(|_| "gpt-5.6-terra".to_string());
+
+            let h = LiveHarness::new();
+            let table = RoleTable::parse(&format!(
+                "[coder_fast]\ncandidates = [{{ provider = \"codex-chatgpt\", model = \"{model}\", max_concurrency = 1 }}]\n"
+            ))
+            .expect("role table parses");
+            let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+            let provider = Arc::new(
+                CodexChatGptProvider::from_local_session(model, h.clock.clone()).expect(
+                    "a real, already-logged-in Codex CLI session must exist at \
+                     $CODEX_HOME/auth.json (or $HOME/.codex/auth.json) to run this test -- run \
+                     `codex login` first",
+                ),
+            );
+            fabric.register_provider(provider);
+
+            let mut agent_loop = AgentLoop::new(
+                fabric,
+                h.tools(),
+                Authority::root(),
+                Budget::unlimited(),
+                h.clock.clone(),
+                h.ids.clone(),
+                Role::CoderFast,
+                h.actor.clone(),
+                h.store.clone(),
+            );
+
+            let outcome = agent_loop
+                .run(live_task(&h))
+                .await
+                .expect("no infrastructure failure driving the loop");
+
+            match outcome {
+                AgentOutcome::Submitted { evidence, .. } => {
+                    eprintln!(
+                        "live codex auth loop proved end-to-end; submitted summary: {:?}",
+                        evidence.summary
+                    );
+                    assert!(
+                        evidence.summary.to_lowercase().contains("authloopworks"),
+                        "expected the real model's submitted summary to contain the exact \
+                         word \"authloopworks\", got: {:?}",
+                        evidence.summary
+                    );
+                }
+                other => panic!(
+                    "expected a real model turn to reach AgentOutcome::Submitted, got: {other:?}"
+                ),
+            }
+        }
+    }
 }

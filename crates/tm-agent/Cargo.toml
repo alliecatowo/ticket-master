@@ -30,6 +30,20 @@ tracing = { workspace = true }
 regex = { workspace = true }
 toml = { workspace = true }
 
+[features]
+default = []
+# Live, real-network Codex ChatGPT-subscription auth-loop proof (D-015), off by default: gates a
+# single #[tokio::test] in src/agent_loop.rs's own tests module that drives a real AgentLoop turn
+# through a real tm_provider::providers::codex_chatgpt::CodexChatGptProvider against the real
+# chatgpt.com/backend-api/codex backend, using whatever real, already-logged-in Codex CLI session
+# is present on this machine. No new dependency: tm-provider (already a direct dependency above)
+# always compiles CodexChatGptProvider, unconditionally -- this feature exists purely to keep the
+# *test* itself (the one thing here that touches the real network) out of every ordinary
+# `cargo test`/`mise run verify` run, mirroring crates/tm-cli's `otel` feature (D-010). See
+# `mise.toml`'s `test:live-codex-auth` task and
+# docs/decisions/D-015-codex-chatgpt-session-auth-adapter.md.
+live-codex-auth = []
+
 [dev-dependencies]
 tempfile = { workspace = true }
 proptest = { workspace = true }
