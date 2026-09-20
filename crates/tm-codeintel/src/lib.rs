@@ -1,7 +1,9 @@
 //! Code intelligence: the reason agents stop rediscovering the codebase.
 //!
-//! `tm-codeintel` maintains a local index of a project's working tree at
-//! `<project>/.tm/index.db` and fuses four retrieval modes over it:
+//! `tm-codeintel` maintains a local index of a project's working tree, stored under that
+//! project's state directory (`<project>/.tm/index.db` in repo scope,
+//! `$TM_HOME/projects/<key>/index.db` in global scope -- see D-003) and fuses four retrieval
+//! modes over it:
 //!
 //! - **exact** ([`exact`]) — literal and regex search over the walked file set.
 //! - **semantic** ([`semantic`]) — embedding-vector search prefiltered by an inverted token

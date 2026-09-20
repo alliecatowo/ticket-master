@@ -89,8 +89,10 @@ pub struct RepoWalker {
 }
 
 impl RepoWalker {
-    /// Build a walker rooted at `root`, which must be the project root (the directory that
-    /// contains, or will contain, `.tm/`).
+    /// Build a walker rooted at `root`, the project's **workspace** root -- the directory
+    /// actually walked/indexed, which in global scope (D-003) has no `.tm/` in it at all; the
+    /// index this walk feeds lives under the project's `state_dir`, a separate path (see
+    /// [`crate::api::CodeIntel::open_at`]), not necessarily anywhere under `root`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         RepoWalker { root: root.into() }
     }

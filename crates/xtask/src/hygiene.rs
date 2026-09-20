@@ -19,6 +19,7 @@ pub fn run_all(root: &Path) -> Vec<String> {
     out.extend(check_network_in_tests(root));
     out.extend(check_unwrap_expect(root));
     out.extend(check_crate_descriptions(root));
+    out.extend(check_dot_tm_literals(root));
     out
 }
 
@@ -373,6 +374,95 @@ pub fn check_crate_descriptions(root: &Path) -> Vec<String> {
     violations
 }
 
+/// Files allowed to hardcode a `.tm` literal in production (pre-test-region) code, relative to
+/// the workspace root, forward-slash separated. Every entry here is a documented, sanctioned
+/// exception, not an oversight:
+///
+/// - `crates/tm-cli/src/project.rs` — the one place `docs/decisions/D-003-project-scope.md`
+///   designates as the resolution path (`locate`, `open`, `tm_home`, `resolve_scope`,
+///   `create_project_dir`): every other caller in the workspace is expected to go through an
+///   already-opened `Project`'s `state_dir` field instead of rediscovering it.
+/// - `crates/tm-core/src/store.rs` and `crates/tm-codeintel/src/api.rs` /
+///   `crates/tm-codeintel/src/store.rs` — each owns exactly one pair of `open`/`open_with`
+///   "old constructor" shims over an `_at`-suffixed one, kept for the repo-scoped
+///   `<project_root>/.tm` layout callers used before D-003 split `root` from `state_dir`
+///   (D-003's own "Context" section names this Phase 1-A work explicitly).
+/// - `crates/tm-browser/src/managed.rs` — `~/.tm/browsers/<channel>-<version>/`, a real,
+///   unrelated `$HOME`-based download cache that predates D-003 and has nothing to do with a
+///   project's `state_dir` (D-003 itself cites this as the convention its own `$TM_HOME` layout
+///   follows).
+const DOT_TM_LITERAL_ALLOWLIST: &[&str] = &[
+    "crates/tm-cli/src/project.rs",
+    "crates/tm-core/src/store.rs",
+    "crates/tm-codeintel/src/api.rs",
+    "crates/tm-codeintel/src/store.rs",
+    "crates/tm-browser/src/managed.rs",
+];
+
+/// (e) No new hardcoded `.tm` path-join or `".tm"` string literal outside
+/// [`DOT_TM_LITERAL_ALLOWLIST`].
+///
+/// D-003 split a project's `root` (workspace) from its `state_dir`: `<root>/.tm` in repo scope,
+/// `$TM_HOME/projects/<key>/` in global scope, entirely outside the workspace (see
+/// `docs/decisions/D-003-project-scope.md`). A hand-rolled `.join(".tm")` — or an equivalent bare
+/// `".tm"` string literal used to build one — anywhere outside the allowlist assumes the
+/// pre-D-003 shape and silently misbehaves the moment it runs against a global-scope project:
+/// exactly the class of regression this same session already found and fixed once, in
+/// `resolve_scope`'s own `locate()` false-positiving on the real `$HOME/.tm`. New code should
+/// take an already-opened `Project`'s `state_dir` field, or an `_at`-suffixed constructor that
+/// accepts one directly, rather than rediscovering it.
+///
+/// Scoped to `crates/*/src` (not `tests/`) and skips test regions the same way every check above
+/// does ([`TestRegionTracker`]): test fixtures across the workspace legitimately construct a
+/// `.tm` directory by hand to drive the very shims [`DOT_TM_LITERAL_ALLOWLIST`] documents, and
+/// flagging every one of them would be noise, not triage — the same reasoning `check-drift`'s own
+/// module docs give for staying narrow. Matching the literal string `".tm"` exactly (not a
+/// substring) means a longer, unrelated literal like `".tmp"` or a prose string that merely
+/// mentions `.tm/workflows` in a user-facing message never matches.
+pub fn check_dot_tm_literals(root: &Path) -> Vec<String> {
+    let mut violations = Vec::new();
+    for src in crate_src_dirs(root) {
+        walk_rs_files(&src, |path, contents| {
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if DOT_TM_LITERAL_ALLOWLIST
+                .iter()
+                .any(|allowed| relative == *allowed)
+            {
+                return;
+            }
+            let mut tracker = TestRegionTracker::new(path);
+            for (i, line) in contents.lines().enumerate() {
+                tracker.observe(line);
+                if tracker.in_test() {
+                    continue;
+                }
+                // Prose about the convention (including this very check's own doc comment, were
+                // it ever copied elsewhere) is not the pattern being forbidden.
+                let code = strip_line_comment(line);
+                if code.contains("\".tm\"") {
+                    violations.push(format!(
+                        "{}:{}: hardcoded `.tm` literal outside the sanctioned D-003 resolution \
+                         path — use an already-opened Project's `state_dir` (or an \
+                         `_at`-suffixed constructor) instead of joining `.tm` directly (see \
+                         docs/decisions/D-003-project-scope.md); if this call site is itself a \
+                         sanctioned exception (a new back-compat shim alongside the ones \
+                         tm-core/tm-codeintel already have), add its file to \
+                         DOT_TM_LITERAL_ALLOWLIST in crates/xtask/src/hygiene.rs with a doc \
+                         comment explaining why, rather than working around this check",
+                        path.display(),
+                        i + 1
+                    ));
+                }
+            }
+        });
+    }
+    violations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,5 +638,100 @@ mod tests {
     fn missing_crates_dir_is_skipped_not_failed() {
         let root = temp_root();
         assert!(run_all(&root).is_empty());
+    }
+
+    #[test]
+    fn dot_tm_literal_flags_a_new_join_outside_the_allowlist() {
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-agent/src/executor.rs"),
+            "fn state_dir(root: &std::path::Path) -> std::path::PathBuf { root.join(\".tm\") }\n",
+        );
+        let violations = check_dot_tm_literals(&root);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("crates/tm-agent/src/executor.rs:1"));
+    }
+
+    #[test]
+    fn dot_tm_literal_flags_a_bare_string_literal_not_just_a_join_call() {
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-agent/src/executor.rs"),
+            "fn is_state_dir_name(name: &str) -> bool { name == \".tm\" }\n",
+        );
+        assert_eq!(check_dot_tm_literals(&root).len(), 1);
+    }
+
+    #[test]
+    fn dot_tm_literal_allows_the_sanctioned_resolution_path() {
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-cli/src/project.rs"),
+            "pub fn open(root: &std::path::Path) -> std::path::PathBuf { root.join(\".tm\") }\n",
+        );
+        assert!(
+            check_dot_tm_literals(&root).is_empty(),
+            "project.rs is the D-003 resolution path and must stay exempt"
+        );
+    }
+
+    #[test]
+    fn dot_tm_literal_allows_the_documented_backcompat_shims() {
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-core/src/store.rs"),
+            "pub fn open(root: &std::path::Path) -> std::path::PathBuf { root.join(\".tm\") }\n",
+        );
+        assert!(check_dot_tm_literals(&root).is_empty());
+
+        let root2 = temp_root();
+        write(
+            &root2.join("crates/tm-codeintel/src/api.rs"),
+            "pub fn open(root: &std::path::Path) -> std::path::PathBuf { root.join(\".tm\") }\n",
+        );
+        assert!(check_dot_tm_literals(&root2).is_empty());
+
+        let root3 = temp_root();
+        write(
+            &root3.join("crates/tm-codeintel/src/store.rs"),
+            "pub fn open(root: &std::path::Path) -> std::path::PathBuf { root.join(\".tm\") }\n",
+        );
+        assert!(check_dot_tm_literals(&root3).is_empty());
+    }
+
+    #[test]
+    fn dot_tm_literal_allows_the_unrelated_browser_cache_dir() {
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-browser/src/managed.rs"),
+            "fn install_dir(home: &std::path::Path) -> std::path::PathBuf { home.join(\".tm\").join(\"browsers\") }\n",
+        );
+        assert!(check_dot_tm_literals(&root).is_empty());
+    }
+
+    #[test]
+    fn dot_tm_literal_ignores_test_regions_in_non_allowlisted_files() {
+        // Fixtures across the workspace legitimately open a `.tm` dir by hand to drive the
+        // sanctioned shims under test — flagging every one would be noise, not triage, the same
+        // reasoning every other check in this file already applies via `TestRegionTracker`.
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-agent/src/tools.rs"),
+            "#[cfg(test)]\nmod tests {\n    #[test]\n    fn opens_a_fixture_project() {\n        let db_path = dir.path().join(\".tm\").join(\"project.db\");\n        let _ = db_path;\n    }\n}\n",
+        );
+        assert!(check_dot_tm_literals(&root).is_empty());
+    }
+
+    #[test]
+    fn dot_tm_literal_ignores_comments_and_longer_unrelated_literals() {
+        // A comment mentioning the convention is not the convention being violated, and a
+        // longer, unrelated literal like ".tmp" must not match merely because it starts the
+        // same way `.tm` does.
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-agent/src/executor.rs"),
+            "// state lives under \".tm\" in repo scope, see D-003\nfn scratch_ext() -> &'static str { \".tmp\" }\n",
+        );
+        assert!(check_dot_tm_literals(&root).is_empty());
     }
 }

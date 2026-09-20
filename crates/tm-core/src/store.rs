@@ -1,6 +1,8 @@
 //! `Store`: the facade every other crate calls into.
 //!
-//! Owns the open `.tm/project.db` (via [`tm_events::EventLog`]), the injected [`Clock`]/
+//! Owns the open `project.db` at this project's state directory (`<root>/.tm/project.db` in repo
+//! scope, `$TM_HOME/projects/<key>/project.db` in global scope -- see D-003) via
+//! [`tm_events::EventLog`], the injected [`Clock`]/
 //! [`IdSource`], and every command that validates a proposed change with [`crate::machine`] and
 //! [`crate::invariants`], appends the resulting events and materializes them via
 //! [`crate::materialize::apply`] in one [`tm_events::log::Tx`], and returns the events it
