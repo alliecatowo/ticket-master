@@ -164,6 +164,7 @@ derived_from = ["crates/tm-provider/src/**"]
 - `pub struct DevPassProvider`
 - `impl DevPassProvider`
   - `pub fn from_env(clock: Arc<dyn Clock>) -> Result<Self, ProviderError>`
+  - `pub fn preferred_model() -> Option<String>`
   - `pub fn info() -> ProviderInfo`
 - `pub struct WireRequest`
 - `pub struct WireStreamOptions`

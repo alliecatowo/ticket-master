@@ -9,5 +9,4 @@ derived_from = []
 
 | Ticket | Kind | State | Objective |
 |---|---|---|---|
-
-_No tickets recorded yet; run `tm ticket new` to create one._
+| T-1 | Investigation | Draft | test |

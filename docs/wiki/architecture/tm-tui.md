@@ -18,6 +18,7 @@ derived_from = ["crates/tm-tui/src/**"]
 - `crates/tm-tui/src/screens/dashboard.rs`
 - `crates/tm-tui/src/screens/diff_viewer.rs`
 - `crates/tm-tui/src/screens/home.rs`
+- `crates/tm-tui/src/screens/kanban.rs`
 - `crates/tm-tui/src/screens/mod.rs`
 - `crates/tm-tui/src/screens/session_stream.rs`
 - `crates/tm-tui/src/screens/ticket_detail.rs`
@@ -191,12 +192,29 @@ where
   - `pub fn take_submission(&mut self) -> Option<String>`
   - `pub fn is_turn_running(&self) -> bool`
 
+### `crates/tm-tui/src/screens/kanban.rs`
+
+- `pub struct KanbanCard`
+- `impl KanbanCard`
+  - `pub fn new(id: impl Into<String>, title: impl Into<String>) -> Self`
+- `pub struct KanbanColumn`
+- `impl KanbanColumn`
+  - `pub fn new(title: impl Into<String>, cards: Vec<KanbanCard>) -> Self`
+- `pub struct Kanban`
+- `impl Kanban`
+  - `pub fn new(id: ComponentId, columns: Vec<KanbanColumn>) -> Self`
+  - `pub fn set_columns(&mut self, columns: Vec<KanbanColumn>)`
+  - `pub fn selected_column(&self) -> usize`
+  - `pub fn selected_card_id(&self) -> Option<&str>`
+  - `pub fn take_activation(&mut self) -> Option<String>`
+
 ### `crates/tm-tui/src/screens/mod.rs`
 
 - `pub mod command_palette;`
 - `pub mod dashboard;`
 - `pub mod diff_viewer;`
 - `pub mod home;`
+- `pub mod kanban;`
 - `pub mod session_stream;`
 - `pub mod ticket_detail;`
 - `pub mod ticket_graph;`

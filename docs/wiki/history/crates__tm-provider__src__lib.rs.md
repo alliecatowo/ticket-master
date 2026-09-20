@@ -7,8 +7,9 @@ derived_from = ["crates/tm-provider/src/lib.rs"]
 
 # History: crates/tm-provider/src/lib.rs
 
-Why this file looks the way it does — 5 commit(s) touched lines 1-42:
+Why this file looks the way it does — 6 commit(s) touched lines 1-43:
 
+- `bdf6925` feat(provider): prefer DevPass as coder.fast's default when fully configured — alliecatowo
 - `a004214` feat: honest reachability for local providers, surface free options in doctor/genesis — alliecatowo
 - `756f7b5` tui: finish the widget and test-harness stubs, and fix macOS signal numbers — alliecatowo
 - `d8cb05c` spec: the three adapter layers, and the goal loop — alliecatowo

@@ -348,6 +348,7 @@ derived_from = ["crates/tm-cli/src/**"]
     explicit: Option<&Path>,
     renderer: &Renderer,
 ) -> tm_types::Result<()>`
+- `pub struct PromotionReport`
 - `pub fn init(args: &InitArgs, renderer: &Renderer) -> tm_types::Result<()>`
 - `pub fn attach(args: &AttachArgs, renderer: &Renderer) -> tm_types::Result<()>`
 - `pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()>`
