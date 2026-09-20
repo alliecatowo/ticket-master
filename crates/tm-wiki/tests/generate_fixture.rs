@@ -39,6 +39,27 @@ fn retry() -> RetryPolicy {
     }
 }
 
+/// Write a real `docs/decisions/D-NNN-*.md` fixture file under `root`: `decisions::pages` is
+/// filesystem-driven (see `crates/tm-wiki/src/decisions.rs`'s module doc), so proving the
+/// generated `decisions.md`/`decisions/*.md` pages are genuinely assembled from this fixture
+/// project — not a static template, not `Store::record_decision`'s now-unrelated `Decision`
+/// entity — requires a real file on disk in the real decision-doc convention, not just a
+/// `Store::view()` entry.
+fn write_fixture_decision(root: &Path) {
+    let decisions_dir = root.join("docs/decisions");
+    fs::create_dir_all(&decisions_dir).expect("create docs/decisions");
+    fs::write(
+        decisions_dir.join("D-001-use-a-fixture-crate.md"),
+        "# D-001 — Use a fixture crate for the wiki integration test\n\n\
+         **Status:** accepted · **Date:** 2026-01-01 · **Supersedes:** nothing\n\n\
+         ## Context\n\nGenerate one real crate, ticket, and decision rather than mocking \
+         ProjectView.\n\n\
+         ## Decision\n\nProves tm_wiki::run/dry_run end to end without the cost of indexing this \
+         workspace.\n",
+    )
+    .expect("write docs/decisions/D-001-use-a-fixture-crate.md");
+}
+
 /// Write a one-crate fixture workspace under `root` and commit it: `crates/demo/src/lib.rs`
 /// declares one distinctively-named public function, so a generated `architecture/demo.md` page
 /// can only contain that name if it was genuinely assembled from this file, not a template.
@@ -90,6 +111,7 @@ fn dry_run_and_run_produce_genuinely_derived_content_from_a_fixture_project() {
     let root = dir.path();
 
     write_fixture_crate(root);
+    write_fixture_decision(root);
     commit_all(root);
 
     let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
@@ -118,7 +140,9 @@ fn dry_run_and_run_produce_genuinely_derived_content_from_a_fixture_project() {
         .expect("create_ticket");
     assert!(!ticket_events.is_empty());
 
-    // A real decision, likewise through `Store::record_decision`.
+    // A real `Store`-backed `Decision`, kept to prove `default_history_paths`'s
+    // `affected_paths`-derived fallback and `Store::record_decision` itself still work -- it no
+    // longer feeds `docs/wiki/decisions*.md` (see `write_fixture_decision` above for that).
     store
         .record_decision(
             "Use a fixture crate for the wiki integration test".to_string(),
@@ -202,7 +226,8 @@ fn dry_run_and_run_produce_genuinely_derived_content_from_a_fixture_project() {
         fs::read_to_string(root.join("docs/wiki/decisions.md")).expect("decisions.md was written");
     assert!(
         decisions.contains("Use a fixture crate for the wiki integration test"),
-        "decisions index must contain this fixture's real decision subject, not boilerplate:\n{decisions}"
+        "decisions index must contain this fixture's real docs/decisions/D-001-*.md title, not \
+         boilerplate:\n{decisions}"
     );
 
     let glossary =

@@ -67,7 +67,7 @@ fn assemble_pages(
 
     let mut all_pages: Vec<WikiPage> = Vec::new();
     all_pages.extend(architecture::pages(project_root, ci)?);
-    all_pages.extend(decisions::pages(&view));
+    all_pages.extend(decisions::pages(project_root)?);
     all_pages.extend(history::pages(project_root, ci, history_paths)?);
     all_pages.push(tickets::page(&view));
     all_pages.push(glossary::page(&view));
