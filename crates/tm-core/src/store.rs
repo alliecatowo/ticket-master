@@ -4286,6 +4286,84 @@ mod tests {
     }
 
     #[test]
+    fn fork_ticket_of_a_milestone_member_succeeds_and_carries_the_milestone() {
+        // `Store::create_ticket`'s own `fields` object already includes `"milestone"` for a
+        // caller-supplied milestone, so `fork_ticket` copying `ticket.milestone` through is not
+        // new behavior — this test's real job is proving it does not trip the post-write
+        // invariant check `Store::transaction` runs (there is no cross-check today between a
+        // ticket's own `milestone` field and `milestones.tickets`, per
+        // `crate::milestone::MilestoneStore::membership_of`'s own doc: membership is computed
+        // by scanning tickets, not read off a stored list — but a future invariant could change
+        // that, and this test would catch a fork that stopped being legal under it).
+        let (_dir, store) = open_store();
+        let source = create_root_ticket(&store);
+        let milestone_events = store
+            .create_milestone("M1".into(), vec![source.clone()], vec![], actor())
+            .expect("create_milestone");
+        let milestone_id = milestone_events[0]
+            .payload
+            .as_milestone_created()
+            .expect("milestone.created payload")
+            .milestone
+            .clone();
+        let head = store.log.head().expect("head");
+
+        let (forked_id, _events) = store
+            .fork_ticket(&source, head, actor())
+            .expect("fork_ticket must succeed for a ticket that belongs to a milestone");
+
+        let view = store.view().expect("view");
+        assert_eq!(
+            view.tickets.get(&forked_id).unwrap().milestone,
+            Some(milestone_id),
+            "the fork carries the source's milestone the same way it carries priority/kind/..."
+        );
+        assert!(store
+            .check_invariants()
+            .expect("check_invariants")
+            .is_empty());
+    }
+
+    #[test]
+    fn fork_ticket_survives_rebuild() {
+        // Matching this crate's own `effect_status_survives_rebuild`/`goal_state_survives_rebuild`
+        // convention: a fork's state must be reproducible by a full from-`seq`-0 replay, not an
+        // artifact of whatever `Store::ticket_and_goal_as_of`'s own scratch replay happened to
+        // leave behind — the same "every row is derivable by replaying the log" guarantee this
+        // crate's `materialize` module claims for everything else it writes.
+        let (_dir, store) = open_store();
+        let source = create_root_ticket(&store);
+        store
+            .set_goal(&source, "reach steady state".into(), actor())
+            .expect("set_goal");
+        store
+            .add_goal_step(&source, "step-1".into(), "first".into(), actor())
+            .expect("add_goal_step");
+        let head = store.log.head().expect("head");
+
+        let (forked_id, _events) = store
+            .fork_ticket(&source, head, actor())
+            .expect("fork_ticket");
+
+        store.rebuild().expect("rebuild");
+
+        let view = store.view().expect("view after rebuild");
+        let forked = view
+            .tickets
+            .get(&forked_id)
+            .expect("forked ticket survives rebuild");
+        assert_eq!(forked.objective, "do the thing");
+        assert_eq!(forked.state, TicketState::Draft);
+
+        let goal = store
+            .goal_state(&forked_id)
+            .expect("goal_state after rebuild")
+            .expect("forked goal survives rebuild");
+        assert_eq!(goal.text, "reach steady state");
+        assert_eq!(goal.steps.len(), 1);
+    }
+
+    #[test]
     fn counters_reflect_allocated_ticket_ids() {
         let (_dir, store) = open_store();
         create_root_ticket(&store);

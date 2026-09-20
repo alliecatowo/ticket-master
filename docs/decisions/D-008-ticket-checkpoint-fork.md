@@ -81,8 +81,10 @@ inventing new machinery:
    Pure provenance, nothing else — carrying no ticket-shape fields itself, since those already
    landed via (1). This is what makes "this ticket was forked from `T` at `seq`" itself part of the
    durable, hash-chained history rather than a side artifact: it is a real event, at a real `seq`,
-   chained like everything else, recoverable via `tm events show`/`EventLog::read_subject` for as
-   long as the log exists.
+   chained like everything else, recoverable via `EventLog::read_subject` for as long as the log
+   exists (`tm events show <seq>` confirms a `ticket.forked` event exists and which ticket it is
+   about, but — like every other event kind — does not render its payload's `source`/`source_seq`
+   fields today; see "What this costs" below).
 3. If `source` had a goal (`crate::goal::GoalState`) as of `seq`: fresh `goal.set` +
    `goal.step_added` (one per step, in order) + `goal.step_completed` (for steps already marked
    done) events for the new ticket, computed from the snapshot — not copied event rows. This is
@@ -168,15 +170,20 @@ compiles and behaves unchanged — `None` is a deliberate, zero-regression defau
 
 ## What this costs, stated plainly
 
-- **Fork provenance is durable but not (yet) a queryable column.** `ticket.forked` is a real,
-  hash-chained event, but `tickets` (the materialized table) has no `forked_from`/
-  `forked_from_seq` columns, so `materialize::apply`'s arm for it is a documented no-op — the same
-  tradeoff `harness.changed`/`harness.benchmarked` already make in that file. "Was this ticket
-  forked, and from what?" is answerable via `tm events`/`EventLog::read_subject`, not via `tm
-  ticket show`. Adding those columns would mean a real migration in `tm-core::schema`'s forward-only
-  migration list; deferred as a follow-up rather than folded into this change, since the durability
-  guarantee the audit actually asked for (provenance survives in the hash chain) does not require
-  it.
+- **Fork provenance is durable but not (yet) a queryable column, and not (yet) rendered by any CLI
+  verb.** `ticket.forked` is a real, hash-chained event, but `tickets` (the materialized table) has
+  no `forked_from`/`forked_from_seq` columns, so `materialize::apply`'s arm for it is a documented
+  no-op — the same tradeoff `harness.changed`/`harness.benchmarked` already make in that file. "Was
+  this ticket forked, and from what?" is not answerable via `tm ticket show`, and only partially via
+  `tm events show <seq>` (confirms the event's kind/subject/timestamp, not its payload — that
+  command renders no payload for any event kind today, not a gap specific to this one). The actual
+  `source`/`source_seq` values are recoverable via `EventLog::read_subject` in code, or by reading
+  `project.db`'s raw `events.payload` column directly (the `sqlite3 <state_dir>/project.db`
+  convention this repo's own `CLAUDE.md` already documents). Adding `tickets` columns for this would
+  mean a real migration in `tm-core::schema`'s forward-only migration list, and a real payload
+  renderer in `tm events show` would help every other event kind too, not just this one; both are
+  deferred as follow-ups rather than folded into this change, since the durability guarantee the
+  audit actually asked for (provenance survives in the hash chain) does not require either.
 - **`Store::ticket_and_goal_as_of` pays a full bounded replay on every fork call**, proportional to
   `seq` — one scratch SQLite file created and torn down, one pass through every event from `1` to
   `seq`. This is the same cost model `Store::rebuild()` already accepts for "replay the whole log";
@@ -205,6 +212,17 @@ compiles and behaves unchanged — `None` is a deliberate, zero-regression defau
     — this decision deliberately defers to git's own porcelain behavior rather than special-casing
     anything, per the "why shell out, not `git2`" reasoning above; any gap in `git stash create`
     itself is a gap here too.
+  - **A snapshot's attribution to one ticket is best-effort, not exclusive, under concurrent
+    turns.** `git stash create` snapshots the *entire* working tree at the repository root;
+    `ExecutorDispatcher` shares one `repo_root` across every background run it spawns, and
+    admission (`crate::admission`) can legitimately allow several tickets' turns in flight at once
+    against the same checkout. A snapshot artifact recorded against ticket `T` can therefore also
+    contain another, concurrently-running ticket's uncommitted changes — this is an attribution
+    caveat on what a snapshot means, not a crash or a correctness bug in the capture itself, and it
+    is the same sharing model every other real-filesystem tool call in this codebase already
+    accepts for concurrent turns against one checkout. A fully isolated-per-ticket snapshot would
+    need per-ticket worktree isolation (the audit's own separate `--worktree`/`git worktree add`
+    M-04 item), not a change to this primitive.
 - **Automatic per-turn capture is wired into exactly one path**: `tm-scheduler`'s
   `ExecutorDispatcher`/`report_outcome`, the scheduler-driven dispatch loop `tm sched run`/`tm run`
   use. `tm-agent::BuiltinExecutor`'s own mid-run `ticket.submit` tool (used when an executor submits
