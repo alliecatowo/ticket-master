@@ -155,19 +155,20 @@ Real notifications (`notify-rust` / `terminal-notifier` / OSC 9 fallback chain) 
 
 ## In-flight work — check on these FIRST in the next session
 
-Three agents were still running when this doc was last updated. Use `ListAgents` to check status;
-if any shows `completed`, its report should already be in the conversation (look for a
-`SubagentHandback`/agent-message) — merge it following the established pattern (verify in a
-separate agent, then clean up the worktree). If any is still `running` or got interrupted by the
-usage cutoff, resume it via `SendMessage({to: <agentId or name>, message: "..."})` referencing
-exactly what it last reported doing — this has worked reliably every time it's been needed this
-session (including across real rate-limit interruptions).
+Use `ListAgents` to check status; if any shows `completed`, its report should already be in the
+conversation (look for a `SubagentHandback`/agent-message) — merge it following the established
+pattern (verify in a separate agent, then clean up the worktree). If any is still `running` or got
+interrupted by the usage cutoff, resume it via `SendMessage({to: <agentId or name>, message:
+"..."})` referencing exactly what it last reported doing — this has worked reliably every time
+it's been needed this session (including across real rate-limit interruptions).
 
-1. **`a38a62ad76bfe1b8f`** (worktree `.claude/worktrees/agent-a38a62ad76bfe1b8f`) — rewiring
-   `crates/tm-wiki/src/decisions.rs` to read `docs/decisions/*.md` directly instead of the empty
-   `Store`-backed `Decision` model, per the resolved "Open decision" in `docs/backlog.md`
-   (markdown files stay the real source of truth; SPEC.md §26.2/§26.3 get corrected to match).
-2. **`a9c97b78b66b302b0`** (worktree `.claude/worktrees/agent-a9c97b78b66b302b0`) — building a
+**Already done and merged since this doc was first written** (mentioned here only so you don't
+redo them): the decisions/wiki fix (`a38a62ad76bfe1b8f`, merged as D-015, wiki regenerated) and
+the live DevPass test (`af97e050cfb5c0de4`, confirmed working — see the DevPass section below).
+
+**Still in flight, check these:**
+
+1. **`a9c97b78b66b302b0`** (worktree `.claude/worktrees/agent-a9c97b78b66b302b0`) — building a
    real `AuthAdapter` (`crates/tm-auth`) that reads the local, already-logged-in Codex CLI's
    stored ChatGPT OAuth session (`~/.codex/auth.json`) and a `Provider` that uses it to drive a
    real completion through Ticketmaster's own `AgentLoop` — **not** Codex as an external
@@ -176,11 +177,20 @@ session (including across real rate-limit interruptions).
    ("Credential Exploration") — that authorization stands for this specific task as already
    scoped; don't re-ask, but also don't broaden scope beyond what was authorized. Security
    hygiene was explicitly required: no raw token substrings in logs/tests/commits, ever.
-3. **`af97e050cfb5c0de4`** (report-only, no worktree — reads `.env` directly, edits nothing) — a
-   live, real end-to-end test of DevPass, now that it's actually fully wired (see below). Just
-   read its report and act on the finding; nothing to merge.
+2. **`a1a910170418e15d3`** (report-only, no worktree) — Priority 1: drive the real ratatui TUI in
+   a real pty with a real DevPass-backed model (type a prompt, confirm a real streamed response
+   renders on screen) — the user explicitly asked for this ("get this tested, see if you can
+   verify by driving real tui it works"), and it hadn't been done yet even after the plain `-p`
+   path was confirmed working. Priority 2 (only if it got to it): a scoped fact-finding pass
+   against `docs/decisions/D-002-terminal-ui-stack.md`'s six explicit "Consequences" (SIGTERM/
+   SIGHUP restore, SIGTSTP/SIGCONT, truecolor detection, synchronized output, grapheme widths,
+   layered test coverage) plus a genuine gap list on `crates/tm-pty` — report-only, not a
+   redesign; the user separately said "our pty still sucks" and wants a real, scoped assessment
+   before anyone attempts to improve it, not a blind rewrite.
+3. **`a48d619e8297ce6b9`** (report-only) — verify agent for the decisions/wiki merge. Should be
+   quick; just confirm PASS and move on.
 
-## DevPass — now fully wired, live test in flight (this resolves most of what used to be "pending")
+## DevPass — CONFIRMED WORKING end-to-end, for real, live
 
 Resolved during this session, via the new "be liberal with research" `CLAUDE.md` directive: the
 user gave a real API key (prefixed `llmgtwy_`, i.e. an LLM Gateway key) without a base URL or
@@ -196,11 +206,23 @@ dotenv dependency anywhere) — these vars need to be explicitly exported/source
 `tm` for real, or wired into a real dotenv-loading mechanism if that's wanted as a permanent
 convenience (not built yet, wasn't asked for).
 
-Agent `af97e050cfb5c0de4` is running the actual first-ever live test of this against a real
-backend (D-005's provider-preference wiring has been merged and unit-tested all session but never
-exercised for real until now). **Check its report first** — this either confirms D-005 genuinely
-works end-to-end, or surfaces a real integration bug (wrong request shape, missing header,
-auth failure) worth fixing.
+**Confirmed, for real, by agent `af97e050cfb5c0de4`**: a real `tm --json -p "Reply with exactly
+the following seven characters and nothing else: DEVPASS"` run against a real tempdir project got
+back the real model's real text reply, `DEVPASS`, over a real network round-trip to
+`https://api.llmgateway.io/v1/chat/completions`, served by `devpass`/`muse-spark-1.3-contributor`
+— confirmed by source-level elimination (no other provider was ever registered given the
+configured env) and cross-checked with an independent `curl` against the same endpoint/key/model
+(200 OK, real billed usage). **This is the first real, live confirmation this session that D-005
+(DevPass-as-default-for-`coder.fast`) actually works**, not just passes unit tests with a mock.
+
+Four real, pre-existing (not caused by D-005) bugs surfaced along the way and are logged in
+`docs/backlog.md`'s new "Four real bugs found by the first live DevPass round-trip" section —
+summary: `tm provider test`/`status` are lying no-op stubs; `compat.rs`'s finish-reason mapping
+doesn't handle this gateway's `"incomplete"` reason (a real, reproduced request-failure mode for
+this specific model when `max_tokens` is tight); the actually-served model (`served_by`) is
+computed but never surfaced anywhere, live or historical; and `tm --json -p` doesn't actually
+emit JSON despite documentation claiming it does. None block real usage (confirmed by the
+successful test above); all are real gaps worth fixing.
 
 Note on the macOS Keychain: writing to it failed (`security add-generic-password` — "User
 interaction is not allowed") because this session's shell is non-interactive and the keychain was
