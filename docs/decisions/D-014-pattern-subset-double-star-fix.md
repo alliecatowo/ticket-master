@@ -176,19 +176,147 @@ self-review pass over the bug-2 fix's own reasoning (this session's `advisor` to
 any test — a reminder that "the exhaustive check passes" and "this code is correct" are not the
 same claim when the check's own alphabet is the thing in question.
 
-## Known separate finding, not fixed here
+## Bug 4 (follow-up): `[...]` character classes, fixed after this decision was first accepted
 
-`segment_implies` (the character-level half of the comparison) treats `[...]` glob character
-classes in `p` as literal bytes rather than a class match, e.g.
-`is_subset_of(["[ab]"], ["????"])` returns `true` while `PatternSet::parse(["????"]).matches("a")`
-is `false` (`[ab]` is one character; `????` requires four, and `segment_implies` matches each `?`
-against one of `[`, `a`, `b`, `]` positionally rather than reasoning about the class). This is the
-same false-positive class as bugs 1 and 2 above, confirmed by direct check, and is invisible to
-both the random proptest and `exhaustive_differential` as committed, because neither's alphabet
-contains `?` or `[`. Left unfixed and unscoped here — it needs its own investigation into how
-`[...]` classes should structurally compose (their contents are not currently validated as a
-proper class by this code at all, only by `globset` at `PathPattern::new` time) rather than a
-hasty bolt-on next to two unrelated fixes.
+The section below originally read, verbatim: "`segment_implies` (the character-level half of the
+comparison) treats `[...]` glob character classes in `p` as literal bytes rather than a class
+match, e.g. `is_subset_of(["[ab]"], ["????"])` returns `true` while
+`PatternSet::parse(["????"]).matches("a")` is `false` (`[ab]` is one character; `????` requires
+four, and `segment_implies` matches each `?` against one of `[`, `a`, `b`, `]` positionally rather
+than reasoning about the class). This is the same false-positive class as bugs 1 and 2 above,
+confirmed by direct check, and is invisible to both the random proptest and
+`exhaustive_differential` as committed, because neither's alphabet contains `?` or `[`. Left
+unfixed and unscoped here — it needs its own investigation into how `[...]` classes should
+structurally compose (their contents are not currently validated as a proper class by this code at
+all, only by `globset` at `PathPattern::new` time) rather than a hasty bolt-on next to two
+unrelated fixes." That investigation happened as a direct follow-up in the same session and is
+recorded here rather than in a new decision doc — see "Why this doc, not a new one" below.
+
+Confirmed directly, matching this doc's own established method (not just via the proptest):
+running `set(&["[ab]"]).is_subset_of(&set(&["????"]))` against the pre-follow-up code returns
+`true` every time; the real matcher, `PatternSet::parse(["????"]).matches("a")`, is `false`.
+
+### The fix: tokenize each segment instead of comparing raw bytes
+
+`segment_implies` now tokenizes each pattern segment into `SegTok`s (`Star`, `Question`, `Class`,
+`Literal`) before comparing (delegating to a new `tokens_imply`), so a `[...]` class is one
+comparison unit worth exactly one matched character, not N raw source bytes. A new `CharClass`
+type parses `[...]` byte-for-byte, mirroring `globset`'s own class grammar (leading `!`/`^`
+negation, `]` literal only as the first member, `-` ranges), and exposes a 256-entry `coverage()`
+table (which bytes the class actually matches, negation already applied). Structural comparison
+between any two fixed-width constructs (`Literal`, `Question`, or `Class`, in any combination)
+reduces to one rule: `p`'s coverage must be a subset of `q`'s, checked by direct enumeration of
+both tables.
+
+**Handled precisely, not just conservatively:**
+- `Class` vs `Class`: exact coverage-subset check, correct for arbitrary combinations of
+  literals, ranges, and negation (e.g. `is_subset_of(["[a]"], ["[ab]"])` is `true`;
+  `is_subset_of(["b"], ["[!a]"])` is `true`; `is_subset_of(["a"], ["[!a]"])` is `false`).
+- `Class` vs `Literal` (either direction): a literal is a subset of any class containing it; a
+  class is a subset of a literal only when it is a non-negated singleton for that exact
+  character — both directions fall out of the same coverage-subset check with no special-casing.
+- `Class`/`Literal` vs `Question`: `?` is unconstrained (any byte except `/`), so it always
+  covers a class or literal's single produced character; a class can never cover `?` unless its
+  own coverage happened to be the full non-`/` universe (the coverage check handles this exactly
+  too, it just almost never holds for a realistic class).
+- `Star` absorbing one more character of `p` (the pre-existing `*`/`**`-absorption recursion,
+  structurally unchanged for `Literal`/`Question`/`Star` p-heads) now also absorbs a `Class`
+  p-head, but only when that class's own coverage excludes `/` (see bug 4b immediately below for
+  why that guard exists).
+
+**Deliberately conservative, because the true answer is always `false`, not because it's unknown:**
+`Star`/`Question` in `p` opposite a fixed-width `q` head (`Literal`/`Question`/`Class`) is always
+rejected — not a hedge, but exact: a single fixed character genuinely cannot cover a construct
+that can also produce zero or two-or-more characters, so `false` is the correct answer, not a
+conservative stand-in for "can't tell."
+
+**Conservative because precise reasoning was judged out of scope, per this doc's own stated
+preference for "conservative rather than clever" (bug 3's fix, above):** `tokenize` returns `None`
+— `segment_implies` then answers `false` for the whole comparison — for a class containing any
+non-ASCII byte, or for a class that fails to parse as well-formed at all. Both are real,
+reachable cases, not just defensive dead code:
+- **Non-ASCII class members.** `CharClass`'s `ranges: Vec<(u8, u8)>` reasons one *byte* at a
+  time; `globset` parses a class one *Unicode scalar value* at a time. These disagree for a
+  multi-byte UTF-8 character: `[é]` is the one-member class `{'é'}` to `globset`, but would
+  decompose into the two-member byte set `{0xC3, 0xA9}` here — a different, and against another
+  multi-byte class sharing one of those bytes, unsoundly inflated claim than what actually
+  matches. Precise Unicode-scalar-aware class reasoning was judged not worth the added complexity
+  for this fix; bailing out to `false` is safe and cheap.
+- **A class split apart by this module's own `/`-based segment slicing.** `PathPattern::segments`
+  and `match_disjuncts` split the (already fully validated) pattern source on `/`. A class that
+  itself contains a literal `/` member is validated as a whole by `compile_glob` at
+  `PathPattern::new` time, but the segment split doesn't know that and cuts it in half regardless:
+  `"a[/]b"` is a real, compiling pattern whose segment split is `["a[", "]b"]`, handing
+  `parse_class` an unclosed class on each side. `parse_class` reports this as `None` rather than
+  misreading a fragment as a complete class.
+
+### Bug 4b: a `[...]` class can cross `/`; `*`/`?` provably cannot — found by adversarial review of the first draft
+
+The first draft of this fix modeled `Star`'s p-absorption step as "drop one token of `p`,
+unconditionally, whatever kind of token it is" — a direct generalization of the pre-existing
+byte-dropping behavior. Adversarial review (this session's `advisor` tool, following the same
+practice bugs 2 and 3 above already established as load-bearing) found this unsound by the same
+underlying mechanism as bugs 1–3: the structural check reasoned about `q`/`p` in the abstract
+without checking a real matcher quirk. `compile_glob`'s `literal_separator(true)` makes `globset`
+compile `*` as `[^/]*` and `?` as `[^/]` — both provably never match `/` — but compiles a `[...]`
+class with no such restriction (confirmed directly in `globset 0.4.20`'s `tokens_to_regex`: the
+`Token::Class` arm emits the class's ranges unmodified, unlike the `Token::Any`/`ZeroOrMore` arms).
+A negated class like `[!a]` can therefore match a literal `/`, letting it cross what its pattern's
+own source text looks like a single path segment. Confirmed directly against the real matcher:
+`PatternSet::parse(["x[!a]y"]).matches("x/y")` is `true` (the class realizes the middle `/`) while
+`PatternSet::parse(["x*y"]).matches("x/y")` and `PatternSet::parse(["x?y"]).matches("x/y")` are
+both `false`. The first draft's `Star` absorption step would have credited `"x*y"` with covering
+`"x[!a]y"`'s `/`-crossing disjunct, which is exactly the shape of false positive this whole
+decision exists to close. The fix: `Star`'s p-absorption step now requires a `Class` p-head's own
+coverage to exclude `/` before absorbing it (a `Literal`/`Question`/`Star` p-head is unaffected —
+their coverage never included `/` in the first place, so the guard is a no-op for them, which is
+also how the fix stays a pure extension rather than a behavior change for every pattern that
+contains no class).
+
+### Bug 4c: the new conservatism broke reflexivity for one class of pattern — found by a second adversarial review pass
+
+A second adversarial review pass (requested specifically before treating this follow-up as done,
+matching this repo's own convention that a finished-feeling change still gets one distrustful pass
+before handback) found that `tokenize` returning `None` — needed for the two conservative cases
+above (non-ASCII class members; a class fragment split apart by `/`-based segment slicing) — has a
+consequence neither of those cases' own regression tests exposed on their own: comparing such a
+pattern *against itself* also answers `false`, because `segment_implies` never gets far enough to
+even attempt the comparison. `is_subset_of` is supposed to be reflexive for every pattern (`p` is
+always trivially a subset of itself) — `authority_laws.rs`'s `reflexivity` proptest law checks
+exactly this — but that law's generator alphabet contains no `[` (the same alphabet-luck bugs 1–4
+were each found or missed by, noted explicitly so the next person extending that generator has a
+pointer instead of a surprising law failure), so this went undetected until asked for directly
+rather than surfacing as a CI failure.
+
+The same gap also breaks `intersect_is_idempotent`: `PatternSet::intersect`'s self-intersection
+filters each pattern by `.any(|q| p.implied_by(q))` over the *same* set's own patterns, so a
+pattern with an unparseable class would have been silently dropped from its own intersection with
+itself.
+
+Fixed by adding an identity short-circuit to `PathPattern::implied_by`: equal source strings
+(`self.0 == other.0`) return `true` immediately, before the structural (tokenize-dependent)
+comparison runs at all. This is sound unconditionally, not merely for the classes this module
+happens to be able to tokenize: two `PathPattern`s built from the identical source string compile
+to the identical `compile_glob` matcher and the identical `match_disjuncts` output regardless of
+whether `segment_implies` can reason about what's inside them, so `p.implied_by(p)` is always
+correct to answer `true` by construction, independent of this fix's own tokenization limits. This
+restores both laws exactly, confirmed directly (`subset_is_reflexive_even_through_an_unparseable_
+non_ascii_class` and the updated `subset_is_conservative_about_a_class_split_by_segment_slicing`,
+both in `pattern.rs`) and via `cargo test -p tm-types --test authority_laws`.
+
+### Why this doc, not a new one
+
+This repository amends a decision doc in place, rather than filing a new `D-NNN`, when new
+information is a direct continuation of the same decision rather than a new one — confirmed by
+precedent, not assumed: `docs/decisions/D-003-project-scope.md` was edited in place twice after
+its initial acceptance (`85a13fc`, `3763134`), both times adding newly-discovered detail about the
+*same* decision (promotion behavior, an exit-code choice) without a `Supersedes:` bump or a new
+file. This fix is a closer fit for that pattern than for a new decision: it isn't a new choice,
+it's this decision's own explicitly-deferred follow-up ("Left unfixed and unscoped here" above),
+resolved using the exact same method (structural check vs. real `PatternSet::matches`, exhaustive
+enumeration, adversarial review) this doc already established. `Status`/`Date`/`Supersedes` above
+are left as originally accepted, matching D-003's own precedent of not bumping them for an
+in-place addition.
 
 ## Call sites checked
 
@@ -204,6 +332,24 @@ would be the unsafe direction — is combined with `.union()`, not `.intersect()
 authority, role, genesis-domain, or template pattern data in the workspace (as opposed to ad hoc
 test fixtures) was found using the specific bare-segment-vs-trailing-`/**` shape this fix changes
 the answer for.
+
+**Bug 4's own call-site survey** (the same question, asked again for the `[...]`-class follow-up,
+per this section's own precedent): a workspace-wide search for `[...]`-class syntax in real
+pattern data — every non-test call site feeding `PatternSet::parse`/`RepoAuthority`/
+`ShellAuthority` (`crates/tm-genesis/src/attach.rs`'s `investigation_authority` —
+`PatternSet::all()`/`PatternSet::empty()`, no classes; `crates/tm-templates/src/verify.rs`'s
+shell allowlist — `["true*", "false*", "echo*"]`, no classes) — found zero uses of `[...]` in real
+authority/role/genesis/template data anywhere in the workspace; every `[`-containing pattern in
+the repository is inside `pattern.rs`'s own tests or `authority_laws.rs`'s test-only alphabet.
+This is what makes bug 4b's guard and the non-ASCII/unparseable-class conservatism free in
+practice today, not just theoretically safe: there is currently no real pattern this fix makes
+*more* conservative than before for any live call site (`segment_implies` previously mishandled
+`[...]` in the unsafe direction only — see the false-positive claim above — never the safe one).
+That's a fact about today's data, not a guarantee; the identity short-circuit in `implied_by` (see
+"The fix" above) means the one law this new conservatism could otherwise have put at risk —
+reflexivity, `p.implied_by(p)` — holds unconditionally regardless of what future pattern data
+looks like, so this isn't relied on to keep the algebra's laws intact going forward, only cited as
+evidence the current conservatism costs nothing today.
 
 ## Verification
 
@@ -229,3 +375,51 @@ the answer for.
 - `mise run verify` (fmt check, `clippy --workspace --all-targets -D warnings`,
   `cargo test --workspace`, hygiene) passes with 0 failures across 2,983 passed tests
   workspace-wide (4 pre-existing, unrelated ignores).
+
+### Bug 4 (follow-up) verification
+
+- The exact originally-reported triple (`is_subset_of(["[ab]"], ["????"])`) was confirmed to
+  return `true` against the pre-follow-up code and `false` against the fixed code, via a direct,
+  non-random check (a scratch test run against a temporary copy of the pre-fix file, not just
+  read-through reasoning about the old byte-level code).
+- Seven new regression tests in `crates/tm-types/src/pattern.rs`
+  (`subset_reasons_about_a_character_class_not_its_source_bytes`,
+  `subset_recognizes_a_character_class_implied_by_question_mark`,
+  `subset_recognizes_real_character_class_containment`,
+  `subset_never_approves_an_escape_through_a_character_class`,
+  `subset_does_not_let_a_slash_crossing_class_escape_through_star_or_question`,
+  `subset_is_conservative_about_a_class_split_by_segment_slicing`, and
+  `subset_is_reflexive_even_through_an_unparseable_non_ascii_class`) cover: the original report;
+  cases that should — and do — hold through a class (a class implied by `?`, a narrower class or
+  literal implied by a wider class, negation) so the fix isn't just conservative to the point of
+  uselessness; the bug 4b slash-crossing shape found by the first adversarial review pass; and,
+  after bug 4c's fix, that reflexivity holds through both an unparseable-by-slicing class and an
+  unparseable non-ASCII class specifically (not just "most patterns," which the identity
+  short-circuit could satisfy vacuously if these two exact cases weren't each checked directly).
+  `cargo test -p tm-types` (unit tests) now passes 91 (84 + these 7), still 0 failures.
+- `exhaustive_differential`'s alphabet gained `?`, `????`, `[ab]`, and a mixed slash-crossing
+  shape (`x[!a]y`/`x*y`/`x?y`, alongside single-character path literals `x`/`y`/`a`/`b`) at the
+  same length-2 bound as before. `????` specifically, not just `?`, is what makes this alphabet
+  addition actually exercise the originally-reported bug: this check only ever flags a false
+  *positive* (it skips every pair where `implied_by` is already `false`), and `[ab]` vs. `?` alone
+  is a false-*negative* shape (bug 4's "should hold" case, structurally invisible to this check
+  regardless of alphabet) — confirmed directly by re-running this exact alphabet against a
+  temporarily-restored pre-fix `segment_implies`: it reports 316 violations, including
+  `("[ab]", "????", "a")` and `("[ab]", "????", "b")`, the originally-reported shape exactly.
+  Separately, the mixed slash-crossing segment matters for bug 4b specifically: a class-only
+  alphabet entry that never shares a *segment* with a `*`/`?` entry can never exercise that
+  asymmetry (the same lesson bug 3 already drew about this alphabet being the thing in question,
+  applied to itself a second time). `exhaustive_no_false_positive_up_to_length_2` still runs in
+  about 1.3s in a debug build (up from well under a second) and found 0 violations against the
+  fixed code.
+- `pattern_subset_is_matching_safe` (the random proptest) was re-run multiple times against the
+  fixed code with 0 failures — expected to remain a weak detector for this specific bug class,
+  same as bugs 1/2/3: its own generator alphabet (`crates/tm-types/tests/authority_laws.rs`'s
+  `SEGMENTS`) still contains no `?` or `[`, and extending it was out of this follow-up's scope
+  (the task was to extend the *exhaustive* check; the proptest generator is a separate piece of
+  infrastructure the original three fixes also left untouched).
+- `mise run verify` equivalent (`cargo fmt --all`, `cargo build --workspace -j 2`,
+  `cargo clippy --workspace --all-targets -j 2 -- -D warnings`, `cargo test --workspace -j 2`,
+  `cargo run -p xtask -- hygiene`) passes with 0 failures, 0 clippy warnings, and a clean hygiene
+  scan: 2,992 tests passed workspace-wide, 0 failed, 4 ignored (the same pre-existing, unrelated
+  ignores noted above).
