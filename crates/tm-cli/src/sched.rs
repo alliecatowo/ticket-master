@@ -49,7 +49,16 @@ struct LeaseSummary {
 }
 
 /// Dispatch one [`SchedCommand`].
-pub fn dispatch_sched(
+///
+/// `async` (unlike the sibling `dispatch_lease`) because [`SchedCommand::Run`] must reach
+/// [`sched_run`] via a plain `.await` rather than spinning up a second `tokio::runtime::Runtime`
+/// and blocking on it -- this function's only caller, `main.rs`'s `dispatch`, already runs on a
+/// worker thread of the one runtime `#[tokio::main]` installed, and a second `Runtime::new()`
+/// entered from *that* thread panics (tokio's own "Cannot start a runtime from within a runtime"
+/// guard). There was never a deliberate reason for the second runtime -- git history shows the
+/// `#[tokio::main]` `main` and this nested `Runtime::new()?.block_on(..)` were introduced in the
+/// same commit, so every `tm sched run` invocation has always hit this panic.
+pub async fn dispatch_sched(
     cmd: &SchedCommand,
     project: &Project,
     renderer: &Renderer,
@@ -57,10 +66,7 @@ pub fn dispatch_sched(
     match cmd {
         SchedCommand::Plan => sched_plan(project, renderer),
         SchedCommand::Tick => sched_tick(project, renderer),
-        SchedCommand::Run(args) => {
-            let rt = tokio::runtime::Runtime::new()?;
-            rt.block_on(sched_run(args, project, renderer))
-        }
+        SchedCommand::Run(args) => sched_run(args, project, renderer).await,
         SchedCommand::Pause => sched_pause(project, renderer),
         SchedCommand::Resume => sched_resume(project, renderer),
     }
