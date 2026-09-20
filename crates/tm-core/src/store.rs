@@ -49,7 +49,7 @@ use tm_events::payload::{
     SessionStartedPayload, TicketAuditRejectedPayload, TicketAuditedPayload,
     TicketBudgetExhaustedPayload, TicketBudgetHandoffPayload, TicketCancelledPayload,
     TicketChildAddedPayload, TicketClosedPayload, TicketCreatedPayload,
-    TicketDependencyAddedPayload, TicketEscalatedPayload, TicketFailedPayload,
+    TicketDependencyAddedPayload, TicketEscalatedPayload, TicketFailedPayload, TicketForkedPayload,
     TicketHeartbeatPayload, TicketLeaseExpiredPayload, TicketLeaseReleasedPayload,
     TicketLeasedPayload, TicketReopenedPayload, TicketRetryScheduledPayload,
     TicketStateChangedPayload, TicketSubmittedPayload, TicketUpdatedPayload,
@@ -224,6 +224,51 @@ fn from_json_text<T: serde::de::DeserializeOwned>(text: &str) -> tm_types::Resul
 
 fn parse_ts(text: &str) -> tm_types::Result<Timestamp> {
     Timestamp::parse_rfc3339(text).map_err(|e| TmError::storage(e.to_string()))
+}
+
+/// Read `ticket`'s materialized `goals` row off `conn` (any connection carrying this crate's
+/// schema — a live project's own, or the scratch schema
+/// [`Store::ticket_and_goal_as_of`] replays into), or `None` if no `goal.set` has ever been
+/// recorded for it there. The one read path [`Store::goal_state`] and
+/// [`Store::ticket_and_goal_as_of`] share, so "current goal state" and "goal state as of a
+/// bounded replay" are read identically.
+fn read_goal_state(conn: &Connection, ticket: &TicketId) -> tm_types::Result<Option<GoalState>> {
+    let row = conn.query_row(
+        "SELECT text, steps, claimed_complete, last_reoriented_step, set_at, updated_at
+         FROM goals WHERE ticket = ?1",
+        rusqlite::params![ticket.as_str()],
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        },
+    );
+    match row {
+        Ok((text, steps_json, claimed_complete, last_reoriented_step, set_at, updated_at)) => {
+            let steps: Vec<GoalStep> = serde_json::from_str(&steps_json)
+                .map_err(|e| TmError::storage(format!("corrupt goals.steps: {e}")))?;
+            let set_at = Timestamp::parse_rfc3339(&set_at)
+                .map_err(|e| TmError::storage(format!("corrupt goals.set_at: {e}")))?;
+            let updated_at = Timestamp::parse_rfc3339(&updated_at)
+                .map_err(|e| TmError::storage(format!("corrupt goals.updated_at: {e}")))?;
+            Ok(Some(GoalState {
+                ticket: ticket.clone(),
+                text,
+                steps,
+                claimed_complete: claimed_complete != 0,
+                last_reoriented_step: last_reoriented_step as u32,
+                set_at,
+                updated_at,
+            }))
+        }
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(storage_err(e)),
+    }
 }
 
 fn state_str(state: TicketState) -> String {
@@ -2290,42 +2335,175 @@ impl Store {
     /// resumptions.
     pub fn goal_state(&self, ticket: &TicketId) -> tm_types::Result<Option<GoalState>> {
         let conn = tm_events::schema::open_read_connection(self.log.path())?;
-        let row = conn.query_row(
-            "SELECT text, steps, claimed_complete, last_reoriented_step, set_at, updated_at
-             FROM goals WHERE ticket = ?1",
-            rusqlite::params![ticket.as_str()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, i64>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
-                ))
-            },
-        );
-        match row {
-            Ok((text, steps_json, claimed_complete, last_reoriented_step, set_at, updated_at)) => {
-                let steps: Vec<GoalStep> = serde_json::from_str(&steps_json)
-                    .map_err(|e| TmError::storage(format!("corrupt goals.steps: {e}")))?;
-                let set_at = Timestamp::parse_rfc3339(&set_at)
-                    .map_err(|e| TmError::storage(format!("corrupt goals.set_at: {e}")))?;
-                let updated_at = Timestamp::parse_rfc3339(&updated_at)
-                    .map_err(|e| TmError::storage(format!("corrupt goals.updated_at: {e}")))?;
-                Ok(Some(GoalState {
-                    ticket: ticket.clone(),
-                    text,
-                    steps,
-                    claimed_complete: claimed_complete != 0,
-                    last_reoriented_step: last_reoriented_step as u32,
-                    set_at,
-                    updated_at,
-                }))
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(storage_err(e)),
+        read_goal_state(&conn, ticket)
+    }
+
+    /// Compute `source`'s [`Ticket`] row and [`GoalState`] (if any) exactly as they stood after
+    /// replaying this project's own log through `seq` (inclusive) — the bounded-replay primitive
+    /// [`Store::fork_ticket`] is built on (`docs/decisions/D-008-ticket-checkpoint-fork.md`).
+    ///
+    /// Replays `[1, seq]` into a throwaway, file-backed scratch schema (the same technique
+    /// `crate::materialize`'s own tests use to exercise `apply` against a real schema without a
+    /// live project) via [`crate::materialize::replay`] — the identical function both the live
+    /// append path and [`Store::rebuild`]'s full-log replay go through — so "state as of seq" is
+    /// derived by the same mechanism as "current state," just bounded. Never touches this
+    /// project's own `project.db` or its materialized tables; the scratch file is discarded when
+    /// this call returns.
+    ///
+    /// Must be called *before* opening any [`Store::transaction`]/[`Store::run_command`] on
+    /// `self`, never from inside one: [`tm_events::EventLog`] serializes writers with one
+    /// non-reentrant lock held for a transaction's whole lifetime, and this reads `self.log` via
+    /// a fresh connection, which is safe on its own but would deadlock if nested inside a write
+    /// this same `Store` already holds open.
+    ///
+    /// # Errors
+    /// `TmError::invariant` if `seq` is `0` or exceeds the log's current head — a caller asking
+    /// to fork from a point that cannot exist, rather than being silently clamped to whatever the
+    /// log's actual extent happens to be.
+    fn ticket_and_goal_as_of(
+        &self,
+        ticket: &TicketId,
+        seq: u64,
+    ) -> tm_types::Result<(Option<Ticket>, Option<GoalState>)> {
+        let head = self.log.head()?;
+        if seq == 0 || seq > head {
+            return Err(TmError::invariant(format!(
+                "seq {seq} is out of range for a log whose current head is {head}"
+            )));
         }
+        let events = self.log.read_range(1, seq)?;
+
+        let scratch_file =
+            tempfile::NamedTempFile::new().map_err(|e| TmError::storage(e.to_string()))?;
+        let scratch_log = EventLog::open_with_clock(scratch_file.path(), Arc::clone(&self.clock))?;
+        let tx = scratch_log.begin()?;
+        crate::schema::create_views(tx.raw())?;
+        crate::materialize::replay(&tx, &events)?;
+        let view = Self::read_view(tx.raw())?;
+        let goal = read_goal_state(tx.raw(), ticket)?;
+        // Nothing written here was ever meant to be durable; the scratch file is deleted with
+        // `scratch_file` regardless, but rolling back (rather than committing) says so plainly.
+        tx.rollback()?;
+
+        Ok((view.tickets.get(ticket).cloned(), goal))
+    }
+
+    /// Fork `source`'s materialized state as of `seq` into a brand-new ticket lineage in this
+    /// same project's log (`docs/decisions/D-008-ticket-checkpoint-fork.md` has the full design
+    /// reasoning). The new ticket:
+    ///
+    /// * Starts in [`TicketState::Draft`] like every other ticket, never teleported into
+    ///   `source`'s historical machine state — a fork earns its own state transitions.
+    /// * Inherits `source`'s objective, kind, milestone, authority, resources, executor
+    ///   requirements, context refs, success predicates, verification policy, budget, retry
+    ///   policy and priority as of `seq`, plus `source`'s goal text and step decomposition (if it
+    ///   had one) — reconstructed via fresh `goal.set`/`goal.step_added`/`goal.step_completed`
+    ///   events computed from the snapshot, not copied event rows.
+    /// * Never inherits `parent`, `dependencies`, `attempts`, `failures` or `cycle`: those
+    ///   describe `source`'s own execution history, not a definition a fresh lineage inherits.
+    ///
+    /// Emits `ticket.created` + `ticket.updated` for the new ticket (the same two-event
+    /// convention [`Store::create_ticket`] itself uses, so the existing materializer arms do all
+    /// the real work) followed by a purpose-built `ticket.forked` event recording
+    /// `(new ticket, source, seq)` as durable, hash-chained provenance — all in one
+    /// [`Store::transaction`], so the fork either lands completely or not at all.
+    ///
+    /// # Errors
+    /// `TmError::not_found` if `source` did not exist as of `seq`. `TmError::invariant` if `seq`
+    /// is `0` or exceeds the log's current head (see [`Store::ticket_and_goal_as_of`]).
+    pub fn fork_ticket(
+        &self,
+        source: &TicketId,
+        seq: u64,
+        actor: ParticipantId,
+    ) -> tm_types::Result<(TicketId, Vec<Event>)> {
+        let (ticket, goal) = self.ticket_and_goal_as_of(source, seq)?;
+        let ticket = ticket.ok_or_else(|| TmError::not_found("ticket", source))?;
+
+        let new_id = TicketId::new(self.ids.next(IdKind::Ticket).as_str())?;
+        let now = self.clock.now();
+        let fields = serde_json::json!({
+            "kind": ticket.kind,
+            "milestone": ticket.milestone,
+            "authority": ticket.authority,
+            "resources": ticket.resources,
+            "executor": ticket.executor,
+            "context_refs": ticket.context_refs,
+            "success": ticket.success,
+            "verification": ticket.verification,
+            "budget": ticket.budget,
+            "retry": ticket.retry,
+            "priority": ticket.priority,
+            "created": now,
+            "updated": now,
+        });
+
+        let events = self.transaction(|tx| {
+            let mut events = tx.append_all(vec![
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(new_id.clone()),
+                    Payload::from(TicketCreatedPayload {
+                        ticket: new_id.clone(),
+                        title: ticket.objective.clone(),
+                        parent: None,
+                    }),
+                ),
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(new_id.clone()),
+                    Payload::from(TicketUpdatedPayload {
+                        ticket: new_id.clone(),
+                        fields: fields.clone(),
+                    }),
+                ),
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(new_id.clone()),
+                    Payload::from(TicketForkedPayload {
+                        ticket: new_id.clone(),
+                        source: source.clone(),
+                        source_seq: seq,
+                    }),
+                ),
+            ])?;
+
+            if let Some(goal) = &goal {
+                events.push(tx.append(EventDraft::new(
+                    actor.clone(),
+                    Id::from(new_id.clone()),
+                    Payload::from(GoalSetPayload {
+                        ticket: new_id.clone(),
+                        text: goal.text.clone(),
+                    }),
+                ))?);
+                for step in &goal.steps {
+                    events.push(tx.append(EventDraft::new(
+                        actor.clone(),
+                        Id::from(new_id.clone()),
+                        Payload::from(GoalStepAddedPayload {
+                            ticket: new_id.clone(),
+                            step_id: step.id.clone(),
+                            text: step.text.clone(),
+                        }),
+                    ))?);
+                    if step.done {
+                        events.push(tx.append(EventDraft::new(
+                            actor.clone(),
+                            Id::from(new_id.clone()),
+                            Payload::from(GoalStepCompletedPayload {
+                                ticket: new_id.clone(),
+                                step_id: step.id.clone(),
+                            }),
+                        ))?);
+                    }
+                }
+            }
+
+            Ok(events)
+        })?;
+
+        Ok((new_id, events))
     }
 
     /// Total number of events recorded against `subject` so far (a raw `COUNT(*)` over
@@ -3926,6 +4104,185 @@ mod tests {
             view.tickets.get(&ticket_id).unwrap().state,
             TicketState::Ready
         );
+    }
+
+    // --- `Store::fork_ticket` (`docs/decisions/D-008-ticket-checkpoint-fork.md`) ---
+
+    #[test]
+    fn fork_ticket_reads_source_state_as_of_seq_not_as_of_head() {
+        let (_dir, store) = open_store();
+        let source = create_root_ticket(&store);
+
+        // Move the objective to "A", capture the seq right after, then move it again to "B"
+        // before forking. If `fork_ticket` accidentally read HEAD instead of `seq`, the fork
+        // would come back with "B" instead of "A" — this is the one assertion that actually
+        // proves "--at seq" reads history, not the live view.
+        let events_a = store
+            .update_ticket(&source, serde_json::json!({"objective": "A"}), actor())
+            .expect("update to A");
+        let seq_after_a = events_a.last().expect("at least one event").seq;
+        store
+            .update_ticket(&source, serde_json::json!({"objective": "B"}), actor())
+            .expect("update to B");
+
+        let (forked_id, fork_events) = store
+            .fork_ticket(&source, seq_after_a, actor())
+            .expect("fork_ticket");
+        assert!(!fork_events.is_empty());
+
+        let view = store.view().expect("view");
+        let forked = view
+            .tickets
+            .get(&forked_id)
+            .expect("forked ticket materialized");
+        assert_eq!(
+            forked.objective, "A",
+            "fork must reflect state as of seq, not HEAD"
+        );
+        let source_now = view.tickets.get(&source).expect("source ticket");
+        assert_eq!(
+            source_now.objective, "B",
+            "the source ticket's own current state must be untouched by forking it"
+        );
+    }
+
+    #[test]
+    fn fork_ticket_starts_in_draft_with_no_lineage_or_history_carried_over() {
+        let (_dir, store) = open_store();
+        let source = create_root_ticket(&store);
+        store.activate(&source, actor()).unwrap(); // source is now Ready, not Draft
+        let head = store.log.head().expect("head");
+
+        let (forked_id, _events) = store
+            .fork_ticket(&source, head, actor())
+            .expect("fork_ticket");
+
+        let view = store.view().expect("view");
+        let forked = view
+            .tickets
+            .get(&forked_id)
+            .expect("forked ticket materialized");
+        assert_eq!(
+            forked.state,
+            TicketState::Draft,
+            "a fork always starts Draft, never teleported into the source's historical state"
+        );
+        assert_eq!(forked.objective, "do the thing");
+        assert!(forked.parent.is_none());
+        assert!(forked.children.is_empty());
+        assert!(forked.dependencies.is_empty());
+        assert_eq!(forked.attempts, 0);
+        assert!(forked.failures.is_empty());
+        assert!(forked.cycle.is_none());
+    }
+
+    #[test]
+    fn fork_ticket_reconstructs_goal_state_as_of_seq_via_fresh_goal_events() {
+        let (_dir, store) = open_store();
+        let source = create_root_ticket(&store);
+        store
+            .set_goal(&source, "reach steady state".into(), actor())
+            .expect("set_goal");
+        store
+            .add_goal_step(&source, "step-1".into(), "first".into(), actor())
+            .expect("add_goal_step");
+        let completed = store
+            .complete_goal_step(&source, "step-1".into(), actor())
+            .expect("complete_goal_step");
+        let seq_after_step_1_done = completed.last().expect("event").seq;
+        // A second step, added only *after* the snapshot point, must not appear in the fork.
+        store
+            .add_goal_step(&source, "step-2".into(), "second".into(), actor())
+            .expect("add_goal_step");
+
+        let (forked_id, _events) = store
+            .fork_ticket(&source, seq_after_step_1_done, actor())
+            .expect("fork_ticket");
+
+        let forked_goal = store
+            .goal_state(&forked_id)
+            .expect("goal_state")
+            .expect("fork carried a goal");
+        assert_eq!(forked_goal.text, "reach steady state");
+        assert_eq!(forked_goal.steps.len(), 1);
+        assert_eq!(forked_goal.steps[0].id, "step-1");
+        assert!(forked_goal.steps[0].done);
+    }
+
+    #[test]
+    fn fork_ticket_seq_before_source_existed_is_not_found() {
+        let (_dir, store) = open_store();
+        let _early_ticket = create_root_ticket(&store); // occupies the log's earliest seqs
+        let later_ticket = create_root_ticket(&store);
+        let events = store.view().expect("view"); // sanity: both tickets exist now
+        assert_eq!(events.tickets.len(), 2);
+
+        // seq 1 predates `later_ticket`'s own `ticket.created` event.
+        let err = store.fork_ticket(&later_ticket, 1, actor()).unwrap_err();
+        assert!(matches!(err, TmError::NotFound { .. }));
+    }
+
+    #[test]
+    fn fork_ticket_seq_zero_is_out_of_range() {
+        let (_dir, store) = open_store();
+        let source = create_root_ticket(&store);
+        let err = store.fork_ticket(&source, 0, actor()).unwrap_err();
+        assert!(matches!(err, TmError::Invariant(_)));
+    }
+
+    #[test]
+    fn fork_ticket_seq_past_head_is_out_of_range_not_silently_clamped() {
+        let (_dir, store) = open_store();
+        let source = create_root_ticket(&store);
+        let head = store.log.head().expect("head");
+        let err = store
+            .fork_ticket(&source, head + 1000, actor())
+            .unwrap_err();
+        assert!(matches!(err, TmError::Invariant(_)));
+    }
+
+    #[test]
+    fn fork_ticket_preserves_hash_chain_integrity() {
+        let (_dir, store) = open_store();
+        let source = create_root_ticket(&store);
+        let head = store.log.head().expect("head");
+        store
+            .fork_ticket(&source, head, actor())
+            .expect("fork_ticket");
+
+        let report = store.log.verify_chain().expect("verify_chain");
+        assert!(
+            report.is_valid(),
+            "hash chain must stay valid across a fork: {report:?}"
+        );
+
+        let violations = store.check_invariants().expect("check_invariants");
+        assert!(
+            violations.is_empty(),
+            "a fork must not leave the project in an invariant-violating state: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn fork_ticket_records_forked_event_with_correct_provenance() {
+        let (_dir, store) = open_store();
+        let source = create_root_ticket(&store);
+        let head = store.log.head().expect("head");
+        let (forked_id, events) = store
+            .fork_ticket(&source, head, actor())
+            .expect("fork_ticket");
+
+        let forked_event = events
+            .iter()
+            .find(|e| e.kind == tm_events::EventKind::TicketForked)
+            .expect("a ticket.forked event was appended");
+        let payload = forked_event
+            .payload
+            .as_ticket_forked()
+            .expect("ticket.forked payload");
+        assert_eq!(payload.ticket, forked_id);
+        assert_eq!(payload.source, source);
+        assert_eq!(payload.source_seq, head);
     }
 
     #[test]

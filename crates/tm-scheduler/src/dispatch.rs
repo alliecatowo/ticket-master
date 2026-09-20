@@ -11,6 +11,7 @@
 //! independently, with a TTL heartbeat keeping the lease alive while it runs.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -96,22 +97,28 @@ pub struct ExecutorDispatcher {
     handle: tokio::runtime::Handle,
     context: Arc<dyn ContextPackSource>,
     registry: ExecutorRegistry,
+    repo_root: Option<PathBuf>,
 }
 
 impl ExecutorDispatcher {
     /// Build a dispatcher over `store`, spawning background execution/heartbeat tasks onto
-    /// `handle`.
+    /// `handle`. `repo_root`, when set, is where a turn that produces a real patch also gets a
+    /// `git stash create`-style workspace snapshot captured (`crate::snapshot`,
+    /// `docs/decisions/D-008-ticket-checkpoint-fork.md`); `None` disables snapshot capture
+    /// entirely (e.g. a test harness with no real git working tree to snapshot).
     pub fn new(
         store: Arc<Store>,
         handle: tokio::runtime::Handle,
         context: Arc<dyn ContextPackSource>,
         registry: ExecutorRegistry,
+        repo_root: Option<PathBuf>,
     ) -> Self {
         ExecutorDispatcher {
             store,
             handle,
             context,
             registry,
+            repo_root,
         }
     }
 
@@ -188,6 +195,7 @@ impl ExecutorDispatcher {
     ) {
         let store = self.store.clone();
         let context = self.context.clone();
+        let repo_root = self.repo_root.clone();
         self.handle.spawn(async move {
             run_and_report(
                 store,
@@ -198,6 +206,7 @@ impl ExecutorDispatcher {
                 holder,
                 lease_id,
                 ttl_seconds,
+                repo_root,
             )
             .await;
         });
@@ -238,6 +247,7 @@ async fn run_and_report(
     holder: ParticipantId,
     lease_id: LeaseId,
     ttl_seconds: u32,
+    repo_root: Option<PathBuf>,
 ) {
     let pack = match context.compile(&ticket) {
         Ok(pack) => pack,
@@ -296,7 +306,7 @@ async fn run_and_report(
     let _ = stop_tx.send(());
     let _ = heartbeat_task.await;
 
-    report_outcome(&store, &ticket, &t, result, holder).await;
+    report_outcome(&store, &ticket, &t, result, holder, repo_root.as_deref()).await;
 }
 
 /// Translate an [`Executor::execute`] result into `Store::submit`/`Store::record_failure`,
@@ -310,12 +320,19 @@ async fn run_and_report(
 /// `Running` (an executor that produces evidence/a patch without itself submitting, e.g. a
 /// future external-harness adapter); when it is already `Submitted`, any extra evidence
 /// (a `patch`, most likely) is attached rather than re-submitted.
+///
+/// When the turn produced a real patch and `repo_root` is set, this also captures a
+/// `git stash create`-style workspace snapshot (`crate::snapshot::capture_workspace_snapshot`)
+/// and records it as a [`ArtifactKind::WorkspaceSnapshot`] artifact tied to `ticket` — best
+/// effort, never load-bearing for the submission itself (see that function's own doc comment for
+/// why it cannot fail this path).
 async fn report_outcome(
     store: &Store,
     ticket: &TicketId,
     t: &Ticket,
     result: tm_types::Result<ExecutorOutcome>,
     holder: ParticipantId,
+    repo_root: Option<&std::path::Path>,
 ) {
     let outcome = match result {
         Ok(outcome) => outcome,
@@ -357,6 +374,24 @@ async fn report_outcome(
                         .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone()))
                     {
                         evidence.push(id);
+                    }
+                    if let Some(root) = repo_root {
+                        if let Some(snapshot) = crate::snapshot::capture_workspace_snapshot(root) {
+                            let meta = serde_json::json!({
+                                "git_ref": snapshot.git_ref,
+                                "base_head": snapshot.base_head,
+                            });
+                            if let Err(e) = store.store_artifact(
+                                ArtifactKind::WorkspaceSnapshot,
+                                "application/x-git-stash-sha".to_string(),
+                                snapshot.sha.clone().into_bytes(),
+                                meta,
+                                Some(ticket.clone()),
+                                holder.clone(),
+                            ) {
+                                tracing::warn!(%ticket, error = %e, "failed to record workspace snapshot artifact (best-effort, not fatal)");
+                            }
+                        }
                     }
                 }
                 Err(e) => {

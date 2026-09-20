@@ -151,6 +151,14 @@ pub enum EventKind {
     /// is never a failure: it does not enter `Recovery` and does not consume a retry.
     #[serde(rename = "ticket.budget_handoff")]
     TicketBudgetHandoff,
+    /// `ticket.forked` (`docs/decisions/D-008-ticket-checkpoint-fork.md`): pure provenance —
+    /// this ticket's starting state was computed from `source`'s materialized state as of
+    /// `source_seq`, not typed by a user or another executor. Always accompanied by its own
+    /// `ticket.created`/`ticket.updated` pair (this event names no ticket-shape fields itself;
+    /// see that decision doc for why the state and the provenance are deliberately two separate
+    /// catalogued kinds rather than one payload carrying both).
+    #[serde(rename = "ticket.forked")]
+    TicketForked,
     /// `decision.created`
     #[serde(rename = "decision.created")]
     DecisionCreated,
@@ -352,6 +360,7 @@ pub const ALL: &[EventKind] = &[
     EventKind::TicketEscalated,
     EventKind::TicketBudgetExhausted,
     EventKind::TicketBudgetHandoff,
+    EventKind::TicketForked,
     EventKind::DecisionCreated,
     EventKind::DecisionSuperseded,
     EventKind::AuthorityGranted,
@@ -442,6 +451,7 @@ impl EventKind {
             EventKind::TicketEscalated => "ticket.escalated",
             EventKind::TicketBudgetExhausted => "ticket.budget_exhausted",
             EventKind::TicketBudgetHandoff => "ticket.budget_handoff",
+            EventKind::TicketForked => "ticket.forked",
             EventKind::DecisionCreated => "decision.created",
             EventKind::DecisionSuperseded => "decision.superseded",
             EventKind::AuthorityGranted => "authority.granted",
@@ -526,7 +536,8 @@ impl EventKind {
             | EventKind::TicketRetryScheduled
             | EventKind::TicketEscalated
             | EventKind::TicketBudgetExhausted
-            | EventKind::TicketBudgetHandoff => EventCategory::Ticket,
+            | EventKind::TicketBudgetHandoff
+            | EventKind::TicketForked => EventCategory::Ticket,
             EventKind::DecisionCreated | EventKind::DecisionSuperseded => EventCategory::Decision,
             EventKind::AuthorityGranted
             | EventKind::AuthorityDelegated
@@ -664,6 +675,7 @@ mod tests {
             EventKind::TicketBudgetHandoff.category(),
             EventCategory::Ticket
         );
+        assert_eq!(EventKind::TicketForked.category(), EventCategory::Ticket);
     }
 
     #[test]
@@ -941,7 +953,7 @@ mod tests {
 
     #[test]
     fn all_kinds_sorted_and_complete() {
-        assert_eq!(ALL.len(), 80);
+        assert_eq!(ALL.len(), 81);
         assert_eq!(ALL[0], EventKind::ProjectCreated);
         assert_eq!(ALL[ALL.len() - 1], EventKind::GoalClaimedComplete);
     }

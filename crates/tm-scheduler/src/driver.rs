@@ -468,6 +468,7 @@ mod tests {
             tokio::runtime::Handle::current(),
             Arc::new(FixedContextPack),
             registry,
+            None,
         ));
 
         let mut policy = SchedulingPolicy::conservative_default();

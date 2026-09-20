@@ -209,6 +209,11 @@ payload_kinds! {
         ticket: TicketId,
         dimension: String,
     };
+    "Payload for `ticket.forked` (`docs/decisions/D-008-ticket-checkpoint-fork.md`): pure provenance for a `Store::fork_ticket` call, always alongside `ticket` (the new ticket)'s own `ticket.created`/`ticket.updated` pair.", TicketForkedPayload, TicketForked, TicketForked, as_ticket_forked, {
+        ticket: TicketId,
+        source: TicketId,
+        source_seq: u64,
+    };
     "Payload for `decision.created`.", DecisionCreatedPayload, DecisionCreated, DecisionCreated, as_decision_created, {
         decision: DecisionId,
         ticket: Option<TicketId>,

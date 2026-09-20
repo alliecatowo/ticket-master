@@ -229,6 +229,7 @@ pub fn build_dispatcher(
         handle,
         context,
         registry,
+        Some(project.root.clone()),
     )))
 }
 

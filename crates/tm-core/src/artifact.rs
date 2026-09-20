@@ -32,6 +32,10 @@ pub enum ArtifactKind {
     Benchmark,
     /// A conversation/session transcript.
     Transcript,
+    /// A `git stash create`-equivalent workspace snapshot
+    /// (`docs/decisions/D-008-ticket-checkpoint-fork.md`): the bytes are a stash commit's sha,
+    /// not a diff — see that decision doc for what this does and does not guarantee.
+    WorkspaceSnapshot,
 }
 
 /// Where an artifact's bytes actually live.
@@ -302,6 +306,7 @@ mod tests {
             ArtifactKind::Index,
             ArtifactKind::Benchmark,
             ArtifactKind::Transcript,
+            ArtifactKind::WorkspaceSnapshot,
         ];
 
         for kind in &kinds {

@@ -31,6 +31,7 @@ pub mod plan;
 pub mod policy;
 pub mod retry;
 pub mod select;
+pub mod snapshot;
 
 pub use admission::{AdmissionDecision, AdmissionGate, AdmissionRefusal};
 pub use dispatch::{ContextPackSource, DispatchError, ExecutorDispatcher, ExecutorRegistry};
@@ -41,3 +42,4 @@ pub use retry::{EscalationReason, RetryDecision, RetryOutcome};
 pub use select::{
     capabilities_satisfy, select_next, CapabilityMismatch, ExecutorMatch, SelectionError,
 };
+pub use snapshot::{capture_workspace_snapshot, WorkspaceSnapshot};

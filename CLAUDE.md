@@ -62,6 +62,14 @@ that rule is global, not repo-specific, and still applies here.
   `TM_NOTIFY=0` (or `false`/`off`/`no`) to opt out in headless/CI/server contexts — a notification
   call there is pointless at best and, without a controlling terminal for the OSC 9 fallback, just
   noise on stderr.
+- `tm ticket fork <T> --at <seq>` checkpoints a ticket: a new ticket lineage starting from `T`'s
+  materialized state as of `seq` (objective/kind/authority/budget/goal — never `T`'s current state,
+  never `T`'s history), with the provenance itself a real, hash-chained `ticket.forked` event
+  (`docs/decisions/D-008-ticket-checkpoint-fork.md`). Separately, `tm sched run`/`tm run` capture a
+  `git stash create`-style workspace snapshot (pinned under `refs/tm/snapshots/<sha>`, recorded as
+  an `ArtifactKind::WorkspaceSnapshot`) whenever a scheduler-dispatched turn produces a real patch —
+  same decision doc, "What this costs" section has the real gaps (untracked files never captured,
+  only one call site wired).
 
 - **Real code intelligence via the `rust-analyzer-lsp` Claude Code plugin** (installed:
   `claude plugin install rust-analyzer-lsp@claude-plugins-official`, user scope) is the primary
