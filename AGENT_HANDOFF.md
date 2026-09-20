@@ -1,8 +1,13 @@
 # Agent Handoff — 2026-09-20
 
 Written because this session is about to run out of usage for ~2 days. Read this first in the
-next session before doing anything else. `main` is in a good, fully-verified state as of
-`00e6b10` — you are not picking up a mess, you're continuing a working build.
+next session before doing anything else. `main` is in a good, fully-verified state as of the
+latest commit on this branch — you are not picking up a mess, you're continuing a working build.
+
+**SECURITY, read this line first:** the DevPass/LLM Gateway API key in `.env` was accidentally
+printed in full into an agent's tool output this session (caught by the agent itself, not
+repeated afterward, but exposed regardless). If the user hasn't already rotated it, that's the
+very first thing to raise next session — see `docs/backlog.md`'s top section.
 
 ## What this project is
 
@@ -162,11 +167,13 @@ interrupted by the usage cutoff, resume it via `SendMessage({to: <agentId or nam
 "..."})` referencing exactly what it last reported doing — this has worked reliably every time
 it's been needed this session (including across real rate-limit interruptions).
 
-**Already done and merged since this doc was first written** (mentioned here only so you don't
-redo them): the decisions/wiki fix (`a38a62ad76bfe1b8f`, merged as D-015, wiki regenerated) and
-the live DevPass test (`af97e050cfb5c0de4`, confirmed working — see the DevPass section below).
+**Already done since this doc was first written** (mentioned only so you don't redo them): the
+decisions/wiki fix (merged as D-015, wiki regenerated); the live DevPass `-p` test (confirmed
+working, 4 bugs logged to `docs/backlog.md`); the live TUI+model test (confirmed working, same
+`build_fabric()` path as `-p`, a structural UX finding and a D-002/tm-pty gap list logged to
+`docs/backlog.md` — including the key-exposure incident at the top of that file).
 
-**Still in flight, check these:**
+**Still in flight, check this one first:**
 
 1. **`a9c97b78b66b302b0`** (worktree `.claude/worktrees/agent-a9c97b78b66b302b0`) — building a
    real `AuthAdapter` (`crates/tm-auth`) that reads the local, already-logged-in Codex CLI's
@@ -176,19 +183,10 @@ the live DevPass test (`af97e050cfb5c0de4`, confirmed working — see the DevPas
    was explicitly authorized by the user after an auto-mode classifier initially blocked it
    ("Credential Exploration") — that authorization stands for this specific task as already
    scoped; don't re-ask, but also don't broaden scope beyond what was authorized. Security
-   hygiene was explicitly required: no raw token substrings in logs/tests/commits, ever.
-2. **`a1a910170418e15d3`** (report-only, no worktree) — Priority 1: drive the real ratatui TUI in
-   a real pty with a real DevPass-backed model (type a prompt, confirm a real streamed response
-   renders on screen) — the user explicitly asked for this ("get this tested, see if you can
-   verify by driving real tui it works"), and it hadn't been done yet even after the plain `-p`
-   path was confirmed working. Priority 2 (only if it got to it): a scoped fact-finding pass
-   against `docs/decisions/D-002-terminal-ui-stack.md`'s six explicit "Consequences" (SIGTERM/
-   SIGHUP restore, SIGTSTP/SIGCONT, truecolor detection, synchronized output, grapheme widths,
-   layered test coverage) plus a genuine gap list on `crates/tm-pty` — report-only, not a
-   redesign; the user separately said "our pty still sucks" and wants a real, scoped assessment
-   before anyone attempts to improve it, not a blind rewrite.
-3. **`a48d619e8297ce6b9`** (report-only) — verify agent for the decisions/wiki merge. Should be
-   quick; just confirm PASS and move on.
+   hygiene was explicitly required: no raw token substrings in logs/tests/commits, ever (note:
+   a *different* agent leaked the *DevPass* key this session, not this one — see the security
+   note at the top of this file; re-check this agent's own diff for the same mistake before
+   trusting its own "no leak" claim, precisely because it just happened once already today).
 
 ## DevPass — CONFIRMED WORKING end-to-end, for real, live
 
