@@ -481,8 +481,13 @@ keeping `tm serve` and its event stream the real product boundary.
 
 ## A head-to-head benchmark: opencode vs. Codex vs. Claude Code vs. Ticketmaster
 
-Eventually, not now — this is a marker for later, once the standalone chat UX (D-003) and the
-core coding loop are solid enough that a comparison is actually informative rather than noise.
+**Update: this item's own stated precondition is now met.** It was written "eventually, not now
+— once the standalone chat UX (D-003) and the core coding loop are solid enough" — D-003 has
+since passed a full Reconciliation Gate (6/6 real scenarios), and the "zero-additional-cost
+credential" this section already asks for is now real and live: DevPass
+(`DEVPASS_API_KEY`/`DEVPASS_BASE_URL`/`DEVPASS_MODEL` in `.env`, auto-loaded, confirmed serving
+real completions end to end through both the plain loop and the TUI). This is genuinely buildable
+next session, not a someday item anymore.
 
 The point isn't a leaderboard for its own sake: running the same task set through all four on a
 schedule (or on every significant harness/architecture change) is how regressions in *our own*

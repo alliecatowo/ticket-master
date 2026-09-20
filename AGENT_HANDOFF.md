@@ -9,8 +9,76 @@ printed in full into an agent's tool output this session (caught by the agent it
 repeated afterward, but exposed regardless). If the user hasn't already rotated it, that's the
 very first thing to raise next session — see `docs/backlog.md`'s top section.
 
-**THE ACTUAL TOP PRIORITY, read this second:** a session should not always be a ticket. Read the
-next section before touching anything else in this file.
+## Next session's plan, in priority order
+
+1. **The session/ticket architectural fix.** Still the top priority — a session should not always
+   be a ticket. Full detail in "A real architectural gap" just below; don't skip it for the
+   newer items that follow, they all assume it's either done or deliberately deferred, not
+   forgotten.
+2. **Full, deliberate testing pass across every real surface — not just the ones touched live by
+   accident this session.** What actually got exercised against a real backend so far: bare
+   `tm -p` (twice, different prompts), the TUI's chat→Kanban→detail navigation (pty-driven,
+   automated), and the TUI's chat path with a real streamed model response (once, via a base64
+   round-trip proof). That is a thin slice of this product's real surface area. Not yet
+   live-tested at all: `tm serve`/the HTTP+SSE server and multiplayer/presence (`SPEC.md` §14);
+   `tm mirror` sync against a real GitHub/Linear/Jira/GitLab account (`crates/tm-mirror`);
+   `tm-browser`/`tm-computer` capabilities against a real browser/screen; `tm-acp`/`tm-mcp`
+   against a real third-party client (Zed for ACP, any real MCP host) rather than each crate's own
+   hand-rolled test harness; `tm-pty`'s agent-facing tools at all (confirmed built and unit-tested
+   but not wired into any reachable capability set — see the backlog); OpenTelemetry's real span
+   export to a live collector (the plumbing is tested, no span has ever actually been emitted,
+   since the workspace has zero `#[instrument]` sites); desktop notifications firing on a real OS
+   notification center (only the trigger *logic* is tested, the real `notify-rust`/
+   `terminal-notifier`/OSC 9 paths never fired for real); D-016's Codex OAuth adapter's one live
+   call (blocked twice by this sandbox's classifier, never actually run). Build this into a real
+   checklist next session, work through it deliberately, and log what's found the same way this
+   session's live DevPass/TUI tests did — real commands, real output pasted into the record, not
+   "should work."
+3. **The competitor benchmark** (`docs/backlog.md`, "A head-to-head benchmark: opencode vs. Codex
+   vs. Claude Code vs. Ticketmaster") **is now genuinely buildable, not a someday item.** Its own
+   stated precondition — D-003 solid, a zero-cost credential available — is met: D-003 passed a
+   full Reconciliation Gate, and DevPass is live, auto-loaded, and confirmed serving real
+   completions through this product's own full turn-running path. Build the fixed task suite the
+   backlog section sketches (bug-fix-with-tests, add-a-small-feature, refactor-under-constraint,
+   multi-file navigation), run it against all four tools with each one's own cheapest real
+   credential (DevPass or an OpenAI-compatible key for opencode/Codex, real Claude auth gated
+   behind an explicit opt-in flag so it's never the accidental default), and score on what
+   Ticketmaster's own kernel already gives for free: did tests pass, turn/tool-call count, tokens
+   spent, wall time, did verification actually catch what it claimed to. Store results as real
+   ticket/event state, not a bespoke report format — dogfood the product to measure the product.
+4. **"Where project state lives" is now consolidated below** (see that section) specifically
+   because it kept needing re-derivation mid-session — read it once, don't re-grep the codebase
+   for it again.
+
+## Where project state actually lives — one place, so this stops needing re-derivation
+
+- **`root`**: the workspace — git toplevel if inside a repo, else the canonical cwd.
+- **`state_dir`**: where a project's real, durable state lives — `project.db`, `index.db`,
+  `artifacts/`, `harness.toml`, `mirror.toml`, `workflows/`, `sched.paused`. Two possible
+  locations, chosen by scope (`docs/decisions/D-003-project-scope.md`):
+  - **Repo scope**: `<root>/.tm/`.
+  - **Global scope** (bare `tm` in a directory with no repo-scoped project yet):
+    `$TM_HOME/projects/<key>/`, where `key = sanitize(root) + '-' + blake3(canonical root)[..8]`.
+- **`$TM_HOME`**: the `TM_HOME` env var if set, else `$HOME/.tm` (default). This directory itself
+  is never a project's `state_dir` — only `$TM_HOME/projects/<key>/` subdirectories are; a real,
+  once-shipped bug came from `locate()`'s repo-scope walk misresolving `$TM_HOME` itself as an
+  ordinary repo (fixed by anchoring against `dirs::home_dir()`, not the overridable env var).
+- **`tm init`** *promotes* an existing global-scope project into `<root>/.tm/`, moving real
+  ticket/event data losslessly (`D-003`'s "Phase 1-C"); it does not just create a fresh one if a
+  global session already exists for that workspace.
+- **`.env`**: lives at the repo root you run `tm` from, current-directory-only (no upward search),
+  auto-loaded by `tm` itself as of this session (`main.rs::load_dotenv`), never overrides a real
+  env var already set. Holds `DEVPASS_API_KEY`/`DEVPASS_BASE_URL`/`DEVPASS_MODEL` today.
+  Gitignored; never committed.
+- **`~/.codex/auth.json`** (mode 0600): the real, separate Codex CLI's own stored ChatGPT OAuth
+  session — not this product's own state at all, just what `crates/tm-auth/src/
+  codex_subscription.rs`'s `CodexSubscriptionOAuth` (D-016) reads from, elsewhere on disk, to
+  drive the provisional Codex auth adapter.
+- **This repository's own primary checkout has no `.tm/` of its own, on purpose** — dogfooding
+  Ticketmaster's own event log on itself was deliberately never done this session (would require
+  either global scope for this exact workspace, or a real `tm init` here), and the dispatch-agent
+  playbook (`.claude/skills/dispatch-background-agent/SKILL.md`) treats a `.tm/` appearing here as
+  a contamination incident to clean up, not a normal state to expect.
 
 ## A real architectural gap, found live at the very end of this session — start here
 
@@ -357,12 +425,10 @@ read it before doing anything else in this codebase.
 This session did not use a formal ticket/todo-list mechanism for its own meta-work — tracking was
 done by (a) this conversation's own turn-by-turn narration, (b) `docs/backlog.md` as the durable
 record of anything not fully resolved, and (c) each `docs/decisions/D-NNN-*.md` as the durable
-record of anything that *was* resolved and why. If you want a more formal continuation mechanism
-next session, priority order for what's left is roughly: the session/ticket/executor fix this
-file's top section and `D-017` both point at (the real, unresolved architectural work) >
-`docs/backlog.md`'s remaining "Open decision" section (`resolve_genesis_provider`) > D-016's live
-Codex-auth proof, if a real unsandboxed environment is available to run it in > the smaller open
-items listed below.
+record of anything that *was* resolved and why. Priority order for next session is the "Next
+session's plan" section at the very top of this file — don't re-derive it here, that section is
+the current one; treat the "Open / pending" list below as the smaller items to fold in around the
+edges of that plan, not a competing priority order.
 
 ## Practical operating notes for whoever resumes this
 
