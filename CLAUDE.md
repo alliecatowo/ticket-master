@@ -20,7 +20,16 @@ never drift between sessions:
 - `mise run clippy` — workspace lint, `-D warnings`, matching CI.
 - `mise run fmt` — apply rustfmt everywhere (`cargo xtask fmt`).
 - `mise run hygiene` — the fast standalone hygiene scan (non-determinism, unwrap/expect,
-  network-in-tests, stray `.tm` literals — see `crates/xtask/src/hygiene.rs`).
+  network-in-tests, stray `.tm` literals, dangling `D-NNN` decision-doc cross-references — see
+  `crates/xtask/src/hygiene.rs`). The last of these catches a real, repeated failure mode: a
+  source comment or doc mentions `docs/decisions/D-NNN-*.md` (or bare `D-NNN`) for a number that
+  was renamed/renumbered elsewhere (see "Parallel tracks against a moving `main`" below) without
+  this cross-reference following it. It only checks that the *number* resolves to some real file
+  in `docs/decisions/` (not that the full slug matches the topic), and treats
+  `crates/xtask/src/hygiene.rs`'s `DECISION_ID_EXAMPLE_ALLOWLIST` as the escape hatch for the
+  handful of places (`SPEC.md`'s own ID-format table, mainly) that use a `D-NNN`-shaped string as
+  an illustrative example of the *other*, unrelated `DecisionId` domain type rather than as a
+  cross-reference — see that check's own doc comment for the full reasoning.
 - `mise run verify` — the full gate (fmt check + clippy + `cargo test --workspace` + hygiene).
   **Run this before considering any change done**, not just a crate-scoped test pass.
 - `mise run check-drift -- <sha>` — advisory, post-merge only, **not** part of `verify`: flags an

@@ -39,7 +39,7 @@ description = "Apply rustfmt across the workspace (xtask fmt)"
 run = "cargo run -p xtask -- fmt"
 
 [tasks.hygiene]
-description = "Run the xtask hygiene scan alone (fast; catches non-determinism, unwrap/expect, network-in-tests, stray .tm literals)"
+description = "Run the xtask hygiene scan alone (fast; catches non-determinism, unwrap/expect, network-in-tests, stray .tm literals, dangling docs/decisions/D-NNN-*.md cross-references)"
 run = "cargo run -p xtask -- hygiene"
 
 [tasks.verify]
