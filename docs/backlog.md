@@ -391,6 +391,20 @@ pass, how many turns/tool calls, tokens spent, wall time, did verification actua
 claimed to. Store results as real event-log/ticket state (dogfood the product to measure the
 product) rather than a bespoke reporting format.
 
+## Known bug: `resolve_genesis_provider` ignores the candidate's provider slug
+
+`crates/tm-cli/src/project.rs::resolve_genesis_provider` (the provider construction for `tm
+genesis`'s three frontier bootstrap roles — `vision.frontier`/`planner.frontier`/
+`architect.frontier`) reads a `RoleCandidate`'s `provider`/`model` fields into a `ModelId` but then
+unconditionally constructs an `AnthropicProvider` from it, regardless of what `provider` actually
+names. Harmless today only because `RoleConfig::default_table()` has always named `anthropic` for
+every role; pointing one of these roles at a non-Anthropic slug (e.g. `devpass`, once
+D-005-devpass-default-provider's pattern is extended past `coder.fast`) would silently construct
+the wrong provider rather than fail loudly. Found and deliberately left out of scope while building
+D-005 (see that decision doc). Fix: route through the same provider-registry lookup
+`crates/tm-provider/src/fabric.rs::Fabric::execute` already uses for every other role, rather than
+hardcoding a single provider type at the genesis call site.
+
 ## Stretch
 
 - iOS simulator executor (SPEC §23).
