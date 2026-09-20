@@ -14,11 +14,13 @@ next section before touching anything else in this file.
 
 ## A real architectural gap, found live at the very end of this session — start here
 
-The user's own words, verbatim, because a paraphrase of this already drifted twice and cost real
-patience: *"tm=claude. tickets and shit is all in the background. right now home makes session =
-ticket. sessions can create tickets. have none. or have multiple tickets. they are not like one
-session = ticket."* And separately: *"then saying something makes a new ticket. thats not what I
-want."*
+**`docs/decisions/D-017-session-ticket-executor-model.md` is now the authoritative synthesis of
+this — read it first, in full, before anything below.** It was written specifically because two
+paraphrases of the user's actual point already drifted and cost real patience; it quotes them
+directly rather than summarizing, and it cross-references exactly which parts of this were already
+correctly specified elsewhere (`SPEC.md` invariants #1/#9/#12, §14, `D-001`, the backlog's
+"Remote control and teleport" section) versus genuinely new (the plan-to-tickets decision point)
+versus an active bug in the running code (this section, below).
 
 **Confirmed, precisely, by reading the actual code (not guessing):** `crates/tm-cli/src/
 agent.rs`'s `AgentSession::resolve_ticket` eagerly creates a real, persisted scratch `Ticket` the

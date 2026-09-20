@@ -293,6 +293,11 @@ compilation (SPEC §8), ranked alongside code and wiki pages.
 
 ## Remote control and teleport (SPEC §14, §18)
 
+See `docs/decisions/D-017-session-ticket-executor-model.md` first: this item is not a standalone
+nice-to-have, it's the other half of the session-as-ephemeral-view model that document names —
+without attach/detach against durable server state, a "session" is just a shorter-lived version of
+the same session-is-the-persistent-thing conflation that document exists to correct.
+
 A project outlives any one machine, which is precisely the claim Ticketmaster makes — so a session
 must be attachable from somewhere else. Survey of how the field does it, and what we should take:
 

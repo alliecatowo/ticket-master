@@ -887,6 +887,11 @@ CI (`.github/workflows/ci.yml`) runs the same `verify` target on Linux and macOS
 
 ## 17. Invariants (the product promises, as assertions)
 
+See `docs/decisions/D-017-session-ticket-executor-model.md` for how invariants 1, 9, and 12 below
+compose into one coherent model (session as ephemeral view / ticket as durable internal primitive
+/ executor as pluggable worker, our own included) — written after a real gap surfaced between this
+list and what the running code actually did.
+
 1. The project — not any agent or session — is the persistent entity.
 2. All durable truth is derivable from the event log by replay.
 3. No model decides a transition that software can decide.
