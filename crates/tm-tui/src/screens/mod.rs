@@ -20,6 +20,11 @@ pub mod diff_viewer;
 /// The default screen bare `tm` opens into: the chat input, the running turn's live output, and
 /// the dashboard alongside it.
 pub mod home;
+/// The Kanban board: tickets as cards in columns named after their real `tm_core::TicketState`,
+/// reachable from `home` via `tm-cli`'s own navigation chord (`tm-cli`'s `tui.rs` owns *when* a
+/// screen is on screen; this crate only supplies the screen itself, plain-data-in like every
+/// other screen here).
+pub mod kanban;
 /// A single agent/session's live streaming output.
 pub mod session_stream;
 /// A single ticket's full detail view.

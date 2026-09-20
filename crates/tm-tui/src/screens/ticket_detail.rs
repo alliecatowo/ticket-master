@@ -5,7 +5,7 @@ use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use tm_types::TicketId;
 
-use crate::component::{Component, ComponentId, FrameContext};
+use crate::component::{Component, ComponentId, ComponentParent, FrameContext};
 use crate::event::{Event, InputEvent, KeyBinding, Propagation};
 use crate::theme::split_vertical;
 use crate::widgets_data::form::Form;
@@ -115,6 +115,37 @@ impl Component for TicketDetailScreen {
     }
 }
 
+/// Resolves this screen's own id and its two panes' ids — added for `tm-cli`'s navigation shell
+/// (`tui.rs`'s `App`), which composes this screen as a drill-down target the same way it already
+/// composes `screens::home::Home` and needs a uniform way to reach into either one's children
+/// without knowing their internals. Mirrors `screens::dashboard::Dashboard`'s identical impl
+/// exactly (same two-child shape: a form/list pair instead of a table/list pair).
+impl ComponentParent for TicketDetailScreen {
+    fn resolve(&self, id: ComponentId) -> Option<&dyn Component> {
+        if id == self.id {
+            Some(self)
+        } else if id == self.fields.id() {
+            Some(&self.fields)
+        } else if id == self.activity.id() {
+            Some(&self.activity)
+        } else {
+            None
+        }
+    }
+
+    fn resolve_mut(&mut self, id: ComponentId) -> Option<&mut dyn Component> {
+        if id == self.id {
+            Some(self)
+        } else if id == self.fields.id() {
+            Some(&mut self.fields)
+        } else if id == self.activity.id() {
+            Some(&mut self.activity)
+        } else {
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +163,38 @@ mod tests {
             List::new(ComponentId::new("ticket_detail.activity")),
         );
         assert_eq!(screen.ticket().as_str(), "T-42");
+    }
+
+    fn screen() -> TicketDetailScreen {
+        TicketDetailScreen::new(
+            ComponentId::new("ticket_detail"),
+            TicketId::new("T-42").expect("T-42 is a valid TicketId in this test"),
+            Form::new(
+                ComponentId::new("ticket_detail.fields"),
+                vec![Field::text("Title")],
+            ),
+            List::new(ComponentId::new("ticket_detail.activity")),
+        )
+    }
+
+    #[test]
+    fn resolve_finds_self_and_both_panes_but_not_an_unknown_id() {
+        let screen = screen();
+        assert!(screen.resolve(ComponentId::new("ticket_detail")).is_some());
+        assert!(screen
+            .resolve(ComponentId::new("ticket_detail.fields"))
+            .is_some());
+        assert!(screen
+            .resolve(ComponentId::new("ticket_detail.activity"))
+            .is_some());
+        assert!(screen.resolve(ComponentId::new("nope")).is_none());
+    }
+
+    #[test]
+    fn resolve_mut_finds_the_fields_pane() {
+        let mut screen = screen();
+        assert!(screen
+            .resolve_mut(ComponentId::new("ticket_detail.fields"))
+            .is_some());
     }
 }
