@@ -158,35 +158,40 @@ Real notifications (`notify-rust` / `terminal-notifier` / OSC 9 fallback chain) 
   earliest merge," since branch order and merge order can diverge (this bit an agent for real
   this session; see the check-drift run in the transcript for the exact method).
 
-## In-flight work — check on these FIRST in the next session
+## In-flight work — likely none by the time you read this, but check
 
-Use `ListAgents` to check status; if any shows `completed`, its report should already be in the
-conversation (look for a `SubagentHandback`/agent-message) — merge it following the established
-pattern (verify in a separate agent, then clean up the worktree). If any is still `running` or got
-interrupted by the usage cutoff, resume it via `SendMessage({to: <agentId or name>, message:
-"..."})` referencing exactly what it last reported doing — this has worked reliably every time
-it's been needed this session (including across real rate-limit interruptions).
+All four agents from this stretch (decisions/wiki fix, live DevPass `-p` test, live TUI+model
+test, Codex ChatGPT OAuth adapter) are merged as of this writing; only a final verify-only agent
+(`a6c94664dba05c309`) may still be running. Use `ListAgents` to check — if it shows `completed`,
+its report should already be in the conversation; if it's still `running` or got interrupted,
+either just re-run `cargo run -p xtask -- verify` yourself (cheap, safe, idempotent) or resume it
+via `SendMessage`. Nothing needs merging from it either way — it's report-only.
 
-**Already done since this doc was first written** (mentioned only so you don't redo them): the
-decisions/wiki fix (merged as D-015, wiki regenerated); the live DevPass `-p` test (confirmed
-working, 4 bugs logged to `docs/backlog.md`); the live TUI+model test (confirmed working, same
-`build_fabric()` path as `-p`, a structural UX finding and a D-002/tm-pty gap list logged to
-`docs/backlog.md` — including the key-exposure incident at the top of that file).
+**Everything done this stretch, for reference:** the decisions/wiki fix (merged as **D-015**,
+`crates/tm-wiki/src/decisions.rs` now reads `docs/decisions/*.md` directly, wiki regenerated); the
+live DevPass `-p` test (confirmed working, 4 bugs logged to `docs/backlog.md`); the live TUI+model
+test (confirmed working, same `build_fabric()` path as `-p`, a structural UX finding and a
+D-002/tm-pty gap list logged to `docs/backlog.md`, plus the key-exposure incident at the top of
+that file); the Codex ChatGPT-session OAuth adapter + provider (merged as **D-016**, provisional —
+read on).
 
-**Still in flight, check this one first:**
+### D-016 — Codex ChatGPT OAuth adapter: built, tested, merged, but its one live proof never ran
 
-1. **`a9c97b78b66b302b0`** (worktree `.claude/worktrees/agent-a9c97b78b66b302b0`) — building a
-   real `AuthAdapter` (`crates/tm-auth`) that reads the local, already-logged-in Codex CLI's
-   stored ChatGPT OAuth session (`~/.codex/auth.json`) and a `Provider` that uses it to drive a
-   real completion through Ticketmaster's own `AgentLoop` — **not** Codex as an external
-   executor, explicitly corrected mid-session after an initial misdirected build attempt. This
-   was explicitly authorized by the user after an auto-mode classifier initially blocked it
-   ("Credential Exploration") — that authorization stands for this specific task as already
-   scoped; don't re-ask, but also don't broaden scope beyond what was authorized. Security
-   hygiene was explicitly required: no raw token substrings in logs/tests/commits, ever (note:
-   a *different* agent leaked the *DevPass* key this session, not this one — see the security
-   note at the top of this file; re-check this agent's own diff for the same mistake before
-   trusting its own "no leak" claim, precisely because it just happened once already today).
+`crates/tm-auth/src/codex_subscription.rs` (`CodexSubscriptionOAuth`) + `crates/tm-provider/src/
+providers/codex_chatgpt.rs` (`CodexChatGptProvider`) — reads the real `~/.codex/auth.json`,
+refreshes via the same RFC 6749 §6-correct logic this session already fixed once in
+`DeviceCodeOAuth`, targets `https://chatgpt.com/backend-api/codex/responses` (Responses API shape,
+determined by decoding the JWT's public claims plus cross-referenced documentation — **never
+empirically confirmed**, since the one live network test this was built to prove
+(`mise run test:live-codex-auth`) was blocked twice by this sandbox's own auto-mode classifier,
+even after the user had already explicitly authorized this exact task. Deliberately **not** wired
+into the default provider registry/role table — reachable only by explicit name. `docs/decisions/
+D-016-codex-chatgpt-session-auth-adapter.md`'s own Status line is **provisional, not accepted**,
+specifically because of this. **Next session: run `mise run test:live-codex-auth` on a real,
+unsandboxed environment with a live `codex login` session** — if it passes, flip D-016's status to
+accepted; if it fails, the doc suggests bisecting with a bare text-only prompt first, since several
+parts of the wire shape (the `originator` header value, `stream:true` necessity, SSE terminal-event
+shape) are independently uncertain and a failure could come from any of them.
 
 ## DevPass — CONFIRMED WORKING end-to-end, for real, live
 
