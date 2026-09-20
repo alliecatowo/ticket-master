@@ -180,7 +180,11 @@ mod tests {
     use std::fs;
 
     fn temp_db_path(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join("tm_events_test");
+        // Suffixed with the test process's own pid so two concurrent `cargo test` invocations
+        // (e.g. two parallel worktree builds on a shared machine) never collide on the same file
+        // -- matching the convention every other temp-fixture in this workspace already follows
+        // (`xtask::hygiene`'s test fixtures, `tm-computer`'s, `tm-browser`'s).
+        let dir = std::env::temp_dir().join(format!("tm_events_test-{}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         let path = dir.join(format!("{}.db", name));
         let _ = fs::remove_file(&path);
