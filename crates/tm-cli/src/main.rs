@@ -165,7 +165,7 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
         }
         Some(Command::Sched(cmd)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
-            sched::dispatch_sched(&cmd, &opened, renderer)
+            sched::dispatch_sched(&cmd, &opened, renderer).await
         }
         Some(Command::Lease(cmd)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
