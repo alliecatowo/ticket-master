@@ -19,11 +19,11 @@ never drift between sessions:
   `install_tracing`, or the `otel` feature's dependency pins in `crates/tm-cli/Cargo.toml`.
 - `mise run test:live-codex-auth` — drives a real `AgentLoop` turn against the real, already
   logged-in Codex CLI's ChatGPT-subscription backend (`tm_auth::CodexSubscriptionOAuth` +
-  `tm_provider::providers::codex_chatgpt::CodexChatGptProvider`, D-015, `--features
+  `tm_provider::providers::codex_chatgpt::CodexChatGptProvider`, D-016, `--features
   live-codex-auth`). Requires a real `codex login` session on this machine and hits the real
   network. **Not** part of `verify`, same reasoning as `test:otel`: this is a real, live external
   call, not something any other machine's `cargo test --workspace` should ever attempt by
-  accident — see `docs/decisions/D-015-codex-chatgpt-session-auth-adapter.md`.
+  accident — see `docs/decisions/D-016-codex-chatgpt-session-auth-adapter.md`.
 - `mise run clippy` — workspace lint, `-D warnings`, matching CI.
 - `mise run fmt` — apply rustfmt everywhere (`cargo xtask fmt`).
 - `mise run hygiene` — the fast standalone hygiene scan (non-determinism, unwrap/expect,

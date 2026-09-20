@@ -26,7 +26,7 @@
 //!   ChatGPT-subscription session (`$CODEX_HOME/auth.json`) instead of running its own OAuth
 //!   flow — the one adapter here that resolves a credential another program produced. See its
 //!   module docs for what the resulting token is actually valid against and
-//!   `docs/decisions/D-015-codex-chatgpt-session-auth-adapter.md` for the full investigation.
+//!   `docs/decisions/D-016-codex-chatgpt-session-auth-adapter.md` for the full investigation.
 //! - [`Entitlement`] / [`QuotaClass`]: what an adapter reports itself entitled to, so the fabric
 //!   can route on subscription-vs-metered capacity per §28.2/§31.1.
 //! - [`redact`]: a distinct, complementary guarantee to [`Credential`]'s -- scans *arbitrary*

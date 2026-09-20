@@ -32,7 +32,7 @@ toml = { workspace = true }
 
 [features]
 default = []
-# Live, real-network Codex ChatGPT-subscription auth-loop proof (D-015), off by default: gates a
+# Live, real-network Codex ChatGPT-subscription auth-loop proof (D-016), off by default: gates a
 # single #[tokio::test] in src/agent_loop.rs's own tests module that drives a real AgentLoop turn
 # through a real tm_provider::providers::codex_chatgpt::CodexChatGptProvider against the real
 # chatgpt.com/backend-api/codex backend, using whatever real, already-logged-in Codex CLI session
@@ -41,7 +41,7 @@ default = []
 # *test* itself (the one thing here that touches the real network) out of every ordinary
 # `cargo test`/`mise run verify` run, mirroring crates/tm-cli's `otel` feature (D-010). See
 # `mise.toml`'s `test:live-codex-auth` task and
-# docs/decisions/D-015-codex-chatgpt-session-auth-adapter.md.
+# docs/decisions/D-016-codex-chatgpt-session-auth-adapter.md.
 live-codex-auth = []
 
 [dev-dependencies]

@@ -31,7 +31,7 @@ description = "Compile + lint + test tm-cli's opt-in OpenTelemetry export path (
 run = "cargo clippy -p tm-cli --all-targets --features otel -j 2 -- -D warnings && cargo test -p tm-cli --features otel -j 2"
 
 [tasks."test:live-codex-auth"]
-description = "Drive a real AgentLoop turn against the real, already-logged-in Codex CLI's ChatGPT-subscription backend (D-015, --features live-codex-auth). Requires a real `codex login` session on this machine; hits the real network. NOT part of verify -- see D-015 for why -- run this by hand to prove the auth-adapter/provider chain still works against the live backend."
+description = "Drive a real AgentLoop turn against the real, already-logged-in Codex CLI's ChatGPT-subscription backend (D-016, --features live-codex-auth). Requires a real `codex login` session on this machine; hits the real network. NOT part of verify -- see D-016 for why -- run this by hand to prove the auth-adapter/provider chain still works against the live backend."
 run = "TM_LIVE_CODEX_AUTH=1 cargo test -p tm-agent --features live-codex-auth -j 2 -- --ignored --nocapture live_codex_auth"
 
 [tasks.clippy]

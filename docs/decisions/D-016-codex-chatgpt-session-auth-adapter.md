@@ -1,4 +1,4 @@
-# D-015 — A `SubscriptionOAuth` auth adapter over the real Codex CLI's ChatGPT session
+# D-016 — A `SubscriptionOAuth` auth adapter over the real Codex CLI's ChatGPT session
 
 **Status:** provisional — the code, its pure-logic tests, and the full verify gate are all real and
 passing, but the live endpoint call this change exists to prove has not actually been executed

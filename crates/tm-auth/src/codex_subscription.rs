@@ -21,7 +21,7 @@
 //!
 //! Cross-referenced against public documentation and third-party reverse-engineering writeups
 //! (`developers.openai.com/codex/auth/ci-cd-auth`, `simonw/llm-openai-via-codex`, and others — see
-//! `docs/decisions/D-015-codex-chatgpt-session-auth-adapter.md` for the full source list), the
+//! `docs/decisions/D-016-codex-chatgpt-session-auth-adapter.md` for the full source list), the
 //! real backend this token is valid against is `POST https://chatgpt.com/backend-api/codex/responses`
 //! — an undocumented, Codex-CLI-specific endpoint speaking the Responses API wire shape, reached
 //! with `Authorization: Bearer <access_token>` plus a `ChatGPT-Account-ID` header carrying
@@ -57,7 +57,7 @@
 //! sibling temp file, `chmod 0600` on Unix, then `rename` over the target, so no reader ever
 //! observes a partially-written file). There is no cross-process lock: two processes racing to
 //! refresh at the same instant can still each write a token the other doesn't know about. See
-//! `docs/decisions/D-015-codex-chatgpt-session-auth-adapter.md` for why a real lock (e.g. an
+//! `docs/decisions/D-016-codex-chatgpt-session-auth-adapter.md` for why a real lock (e.g. an
 //! `flock` on a sibling `.lock` file) was left out of this change's scope.
 
 use std::path::PathBuf;

@@ -2614,7 +2614,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------------------------
-    // Live Codex ChatGPT-subscription auth-loop proof (D-015, opt-in, real network): drives a
+    // Live Codex ChatGPT-subscription auth-loop proof (D-016, opt-in, real network): drives a
     // real `AgentLoop` turn over a real `Fabric` registered with a real
     // `tm_provider::providers::codex_chatgpt::CodexChatGptProvider`, itself authenticated
     // through a real `tm_auth::CodexSubscriptionOAuth` reading whatever already-logged-in Codex
@@ -2630,12 +2630,12 @@ mod tests {
     //      `cargo test -p tm-agent --features live-codex-auth` still skips it without
     //      `-- --ignored`.
     //   3. The `TM_LIVE_CODEX_AUTH=1` runtime env check below — the explicit opt-in this
-    //      workspace's task brief for D-015 asked for, so a deliberate
+    //      workspace's task brief for D-016 asked for, so a deliberate
     //      `--features live-codex-auth -- --ignored` invocation still gets a clear skip message
     //      rather than a hard failure on a machine with no real Codex session.
     //
     // See `mise.toml`'s `test:live-codex-auth` task and
-    // `docs/decisions/D-015-codex-chatgpt-session-auth-adapter.md`.
+    // `docs/decisions/D-016-codex-chatgpt-session-auth-adapter.md`.
     // -----------------------------------------------------------------------------------------
     #[cfg(feature = "live-codex-auth")]
     mod live_codex_auth {
@@ -2645,7 +2645,7 @@ mod tests {
         /// A task whose objective directly asks the real model to close the loop through the
         /// one tool this file's other tests also use to reach `AgentOutcome::Submitted`
         /// (`ticket.submit`), with a summary this test can assert on byte-for-byte — the same
-        /// "trivial, cheap prompt with an exact expected string" shape D-015 asked for, just
+        /// "trivial, cheap prompt with an exact expected string" shape D-016 asked for, just
         /// routed through a real tool call instead of a bare text reply, since `AgentLoop::drive`
         /// only reaches `Submitted` via a tool call (a text-only turn is `Failed`, see `drive`'s
         /// `tool_uses.is_empty()` branch above).

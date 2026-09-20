@@ -12,7 +12,7 @@
 //! (`message` / `function_call` / `function_call_output`), a top-level `instructions` field for
 //! the system prompt, and `max_output_tokens` rather than Chat Completions' `max_tokens`. This is
 //! **not** [`crate::providers::compat::CompatProvider`]'s Chat Completions dialect and does not
-//! build on it — see `docs/decisions/D-015-codex-chatgpt-session-auth-adapter.md` for why a
+//! build on it — see `docs/decisions/D-016-codex-chatgpt-session-auth-adapter.md` for why a
 //! second, self-contained wire module was the right call over stretching `compat.rs` to cover a
 //! second protocol family.
 //!
