@@ -32,3 +32,4 @@ derived_from = ["crates/xtask/src/**"]
 - `pub fn check_unwrap_expect(root: &Path) -> Vec<String>`
 - `pub fn check_crate_descriptions(root: &Path) -> Vec<String>`
 - `pub fn check_dot_tm_literals(root: &Path) -> Vec<String>`
+- `pub fn check_decision_doc_references(root: &Path) -> Vec<String>`
