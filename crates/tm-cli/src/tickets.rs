@@ -5,8 +5,8 @@
 use crate::args::{
     DecisionCommand, DecisionNewArgs, DecisionRefArgs, DecisionSupersedeArgs, DepCommand,
     DepEdgeArgs, DepGraphArgs, MilestoneCommand, MilestoneRefArgs, TicketCancelArgs, TicketCommand,
-    TicketDelegateArgs, TicketEditArgs, TicketListArgs, TicketNewArgs, TicketRefArgs,
-    TicketStateArg, TicketSubmitArgs,
+    TicketDelegateArgs, TicketEditArgs, TicketForkArgs, TicketListArgs, TicketNewArgs,
+    TicketRefArgs, TicketStateArg, TicketSubmitArgs,
 };
 use crate::project::Project;
 use crate::render::{Renderer, Table, Tree};
@@ -191,6 +191,7 @@ pub fn dispatch_ticket(
         TicketCommand::Tree(args) => ticket_tree(args, project, renderer),
         TicketCommand::Delegate(args) => ticket_delegate(args, project, renderer),
         TicketCommand::Submit(args) => ticket_submit(args, project, renderer),
+        TicketCommand::Fork(args) => ticket_fork(args, project, renderer),
     }
 }
 
@@ -534,6 +535,35 @@ pub fn ticket_delegate(
                 &format!("Delegated to child ticket {}", created_id),
             )?;
         }
+    }
+
+    Ok(())
+}
+
+/// `tm ticket fork`: `Store::fork_ticket`, then render the new ticket id the same way `ticket
+/// new`/`ticket delegate` do (`docs/decisions/D-008-ticket-checkpoint-fork.md`).
+pub fn ticket_fork(
+    args: &TicketForkArgs,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let source = TicketId::new(&args.ticket)?;
+    let (new_id, _events) = project
+        .store
+        .fork_ticket(&source, args.at, project.actor.clone())?;
+
+    if renderer.is_json() {
+        let json = serde_json::json!({
+            "ticket": new_id.as_str(),
+            "forked_from": source.as_str(),
+            "at_seq": args.at,
+        });
+        renderer.emit(&json, "")?;
+    } else {
+        renderer.emit(
+            &new_id,
+            &format!("Forked {} at seq {} into {}", source, args.at, new_id),
+        )?;
     }
 
     Ok(())

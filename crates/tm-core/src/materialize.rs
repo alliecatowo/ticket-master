@@ -324,6 +324,18 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
         // (`Store::budget_handoff`/`Store::record_usage`'s handoff-eligible branch), same
         // convention as every other ticket lifecycle kind in this arm.
         | EventKind::TicketBudgetHandoff => {}
+        // `ticket.forked` (`docs/decisions/D-008-ticket-checkpoint-fork.md`) is pure provenance:
+        // `Store::fork_ticket` always appends it alongside its own `ticket.created`/
+        // `ticket.updated` pair, which is what actually populates the new ticket's row (the same
+        // two-event convention `Store::create_ticket` itself uses, per this module's top-level
+        // note). `tickets` has no `forked_from`/`forked_from_seq` columns, so this event carries
+        // nothing further to materialize here — a deliberate no-op, not a gap: the fact is
+        // durable and hash-chained in the raw log, recoverable via `EventLog::read_subject` (its
+        // `source`/`source_seq` fields specifically are not, today, surfaced by any CLI verb —
+        // `tm events show <seq>` renders `kind`/`subject`/`ts` only, for every event kind, not
+        // payload) even though it is not (yet) a queryable column, the same tradeoff
+        // `harness.changed`/`harness.benchmarked` above already make.
+        EventKind::TicketForked => {}
         EventKind::DecisionCreated => {
             if let Some(p) = event.payload.as_decision_created() {
                 // `decision.created`'s `summary` field carries the JSON blob `store.rs`'s

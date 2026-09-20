@@ -289,6 +289,9 @@ pub enum TicketCommand {
     Delegate(TicketDelegateArgs),
     /// Submit evidence for a ticket, moving it toward verification.
     Submit(TicketSubmitArgs),
+    /// Fork a ticket's materialized state as of a past `seq` into a new ticket lineage
+    /// (`docs/decisions/D-008-ticket-checkpoint-fork.md`).
+    Fork(TicketForkArgs),
 }
 
 /// Identifies a ticket by its `T-...` id.
@@ -380,6 +383,17 @@ pub struct TicketCancelArgs {
     /// Why this ticket is being cancelled.
     #[arg(long)]
     pub reason: Option<String>,
+}
+
+/// `tm ticket fork <TICKET> --at <SEQ>`
+#[derive(Debug, Args)]
+pub struct TicketForkArgs {
+    /// The ticket to fork.
+    #[arg(value_name = "TICKET")]
+    pub ticket: String,
+    /// The event-log `seq` to fork the ticket's materialized state as of (inclusive).
+    #[arg(long)]
+    pub at: u64,
 }
 
 /// `tm ticket delegate`
