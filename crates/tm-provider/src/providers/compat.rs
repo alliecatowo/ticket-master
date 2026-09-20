@@ -363,6 +363,31 @@ impl DevPassProvider {
         Ok(DevPassProvider { inner })
     }
 
+    /// The model DevPass should be preferred with, if and only if all three of
+    /// `DEVPASS_API_KEY`, `DEVPASS_BASE_URL` and `DEVPASS_MODEL` are set to non-empty values —
+    /// `None` otherwise, including when only some of the three are set.
+    ///
+    /// This is the single source of truth for "should DevPass be the default provider right
+    /// now", used by both [`crate::role_config::RoleTable::default_table`] (to decide whether
+    /// [`tm_types::Role::CoderFast`]'s primary candidate should be `devpass` instead of
+    /// `anthropic`) and by `tm-cli`'s own fabric construction (to decide whether to actually
+    /// build and register a [`DevPassProvider`] instead of, and not merely alongside, requiring
+    /// `ANTHROPIC_API_KEY`). See `docs/providers.md`'s "DevPass" section.
+    ///
+    /// Deliberately stricter than [`DevPassProvider::from_env`] itself, which treats
+    /// `DEVPASS_API_KEY` as optional (`.ok()`, not `?`) for a no-auth internal gateway — this
+    /// gate is answering "was DevPass *deliberately and fully* configured as a default", not
+    /// "would construction succeed", so a partial set (e.g. only `DEVPASS_API_KEY`) does not
+    /// activate the preference.
+    pub fn preferred_model() -> Option<String> {
+        fn set_and_nonempty(var: &str) -> Option<String> {
+            std::env::var(var).ok().filter(|v| !v.is_empty())
+        }
+        set_and_nonempty("DEVPASS_API_KEY")?;
+        set_and_nonempty("DEVPASS_BASE_URL")?;
+        set_and_nonempty("DEVPASS_MODEL")
+    }
+
     /// Static capability/env-var metadata; see `providers/mod.rs` module docs for the contract.
     pub fn info() -> ProviderInfo {
         ProviderInfo {
@@ -1826,5 +1851,79 @@ mod tests {
         assert_eq!(info.id, "devpass");
         assert_eq!(info.env_vars.len(), 3);
         assert!(info.env_vars.iter().all(|v| v.required));
+    }
+
+    // ---- DevPassProvider::preferred_model ----
+    //
+    // `preferred_model` is the only thing in this crate that reads the three `DEVPASS_*` env
+    // vars for a *default-preference* decision, and these are the only tests in this crate that
+    // set them, so a lock scoped to just these three tests is sufficient to stop them racing
+    // each other under `cargo test`'s default multi-threaded runner — no other test anywhere in
+    // this crate touches these var names. Nothing here calls
+    // `RoleTable::default_table`/`default_table_with`: that logic is pure (see
+    // `role_config.rs`), so it is tested there with no env involved and no lock needed at all.
+
+    fn devpass_pref_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn clear_devpass_pref_env() {
+        for var in ["DEVPASS_API_KEY", "DEVPASS_BASE_URL", "DEVPASS_MODEL"] {
+            std::env::remove_var(var);
+        }
+    }
+
+    #[test]
+    fn preferred_model_is_none_when_nothing_is_set() {
+        let _guard = devpass_pref_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_devpass_pref_env();
+        assert_eq!(DevPassProvider::preferred_model(), None);
+    }
+
+    #[test]
+    fn preferred_model_is_none_when_only_api_key_is_set() {
+        let _guard = devpass_pref_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_devpass_pref_env();
+        std::env::set_var("DEVPASS_API_KEY", "sk-test");
+        assert_eq!(DevPassProvider::preferred_model(), None);
+        clear_devpass_pref_env();
+    }
+
+    #[test]
+    fn preferred_model_is_none_when_base_url_and_model_are_set_but_key_is_empty() {
+        let _guard = devpass_pref_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_devpass_pref_env();
+        std::env::set_var("DEVPASS_API_KEY", "");
+        std::env::set_var("DEVPASS_BASE_URL", "https://example.invalid/devpass");
+        std::env::set_var("DEVPASS_MODEL", "some-model");
+        assert_eq!(
+            DevPassProvider::preferred_model(),
+            None,
+            "an empty-string var must count as absent, not merely unset"
+        );
+        clear_devpass_pref_env();
+    }
+
+    #[test]
+    fn preferred_model_is_some_when_all_three_are_set_and_nonempty() {
+        let _guard = devpass_pref_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_devpass_pref_env();
+        std::env::set_var("DEVPASS_API_KEY", "sk-test");
+        std::env::set_var("DEVPASS_BASE_URL", "https://example.invalid/devpass");
+        std::env::set_var("DEVPASS_MODEL", "devpass-default-model");
+        assert_eq!(
+            DevPassProvider::preferred_model(),
+            Some("devpass-default-model".to_string())
+        );
+        clear_devpass_pref_env();
     }
 }

@@ -27,6 +27,7 @@ pub mod types;
 pub use anthropic::AnthropicProvider;
 pub use fabric::{Fabric, Provider, ProviderRecord};
 pub use mock::MockProvider;
+pub use providers::compat::DevPassProvider;
 pub use providers::registry::Registry;
 pub use providers::{
     Availability, Capabilities, EnvVarRequirement, LocalProbe, ProviderInfo, LOCAL_PROVIDER_IDS,

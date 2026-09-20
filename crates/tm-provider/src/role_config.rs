@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 use tm_types::{Role, Tolerance};
 
+use crate::providers::compat::DevPassProvider;
+
 /// Rate/volume limits attached to one candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
@@ -242,7 +244,29 @@ impl RoleTable {
     /// fallback candidate with `degraded_ok = true`. Embedder gets a single embedding-model candidate.
     /// All candidates use unlimited rate/volume limits and no pricing (pricing is configured
     /// separately in a real `providers.toml`).
+    ///
+    /// **DevPass default preference:** when [`DevPassProvider::preferred_model`] returns
+    /// `Some(model)` (all three `DEVPASS_*` env vars set and non-empty), [`Role::CoderFast`]'s
+    /// primary candidate is `devpass`/`model` instead of `anthropic`/`claude-sonnet-5` —
+    /// `CoderFast` is the one role `tm-cli`'s interactive/scriptable session and its scheduler
+    /// dispatcher actually drive an agent-loop turn as (see `crates/tm-cli/src/agent.rs`'s
+    /// `AGENT_ROLE`), so this is the one role where "run `tm` for real without burning Anthropic
+    /// quota" bites. Every other role is untouched by this check, absent or present. See
+    /// `docs/providers.md`'s "DevPass" section and `docs/decisions/D-004-devpass-default-provider.md`.
+    ///
+    /// This is a thin env-reading wrapper around [`Self::default_table_with`], which is pure and
+    /// does the actual construction — kept separate so tests can exercise both the
+    /// DevPass-preferred and DevPass-absent shapes deterministically without touching real
+    /// process env vars (this function has roughly twenty call sites across the workspace,
+    /// several themselves in tests, so a test that mutated real env here could contaminate an
+    /// unrelated concurrent test's call to this same function).
     pub fn default_table() -> Self {
+        Self::default_table_with(DevPassProvider::preferred_model().as_deref())
+    }
+
+    /// Pure core of [`Self::default_table`], parameterized on whether DevPass should be
+    /// preferred as [`Role::CoderFast`]'s primary candidate (`Some(model)`) or not (`None`).
+    fn default_table_with(devpass_model: Option<&str>) -> Self {
         let mut roles = BTreeMap::new();
 
         for role in Role::ALL {
@@ -304,8 +328,12 @@ impl RoleTable {
                     vec![primary]
                 }
                 Role::CoderFast => {
-                    // Fast coding: primary on Sonnet, fallback on Haiku
-                    let primary = RoleCandidate {
+                    // Fast coding: primary on Sonnet, fallback on Haiku — unless DevPass is
+                    // configured as the default (see `default_table`'s doc comment), in which
+                    // case the primary becomes DevPass; the Anthropic fallback is left in place
+                    // untouched, so a project that also happens to have `ANTHROPIC_API_KEY` set
+                    // still gets a degrade path if DevPass becomes unavailable.
+                    let mut primary = RoleCandidate {
                         provider: "anthropic".to_string(),
                         model: "claude-sonnet-5".to_string(),
                         max_concurrency: 20,
@@ -313,6 +341,10 @@ impl RoleTable {
                         price: None,
                         limits: Limits::unlimited(),
                     };
+                    if let Some(model) = devpass_model {
+                        primary.provider = "devpass".to_string();
+                        primary.model = model.to_string();
+                    }
 
                     if tolerance == Tolerance::Strict {
                         vec![primary]
@@ -595,5 +627,85 @@ candidates = [
             // If each has only one candidate, they should differ
             assert_ne!(coder_fast[0].model, vision[0].model);
         }
+    }
+
+    // ---- default_table_with: DevPass default preference (pure, no env vars touched) ----
+    //
+    // `default_table_with` takes the DevPass-preferred model as a plain `Option<&str>` argument
+    // rather than reading `DEVPASS_*` env vars itself, specifically so these tests can assert
+    // both branches deterministically without mutating real process env state — `default_table`
+    // (the public, env-reading wrapper) has roughly twenty call sites across this workspace,
+    // several themselves in `#[cfg(test)]` code in this same crate, and any test here that set
+    // real `DEVPASS_*` vars could race one of those and make it non-deterministic. See
+    // `DevPassProvider::preferred_model`'s own tests (`providers/compat.rs`) for the one place
+    // this crate actually exercises the env-reading half.
+
+    #[test]
+    fn default_table_with_none_matches_the_unchanged_anthropic_only_default() {
+        let table = RoleTable::default_table_with(None);
+
+        // The specific regression this guards: CoderFast's primary must still be exactly what
+        // it was before DevPass preference existed.
+        let coder_fast = table.candidates_for(Role::CoderFast);
+        assert_eq!(coder_fast[0].provider, "anthropic");
+        assert_eq!(coder_fast[0].model, "claude-sonnet-5");
+        assert_eq!(coder_fast[0].max_concurrency, 20);
+        assert!(!coder_fast[0].degraded_ok);
+        assert_eq!(coder_fast[1].provider, "anthropic");
+        assert_eq!(coder_fast[1].model, "claude-haiku-3.5");
+        assert!(coder_fast[1].degraded_ok);
+
+        // Broader invariant: with no DevPass model, *every* candidate of *every* role is still
+        // Anthropic — nothing else about `default_table` moved.
+        for role in Role::ALL {
+            for candidate in table.candidates_for(role) {
+                assert_eq!(
+                    candidate.provider, "anthropic",
+                    "role {role} has a non-anthropic candidate with DevPass unconfigured"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_table_with_devpass_model_prefers_devpass_for_coder_fast_primary_only() {
+        let table = RoleTable::default_table_with(Some("devpass-test-model"));
+
+        let coder_fast = table.candidates_for(Role::CoderFast);
+        assert_eq!(coder_fast[0].provider, "devpass");
+        assert_eq!(coder_fast[0].model, "devpass-test-model");
+        assert_eq!(coder_fast[0].max_concurrency, 20);
+        assert!(!coder_fast[0].degraded_ok);
+        assert_eq!(coder_fast[0].price, None);
+
+        // The Anthropic fallback is left in place, untouched, so a project that also has
+        // `ANTHROPIC_API_KEY` set still has a degrade path if DevPass becomes unavailable.
+        assert_eq!(coder_fast[1].provider, "anthropic");
+        assert_eq!(coder_fast[1].model, "claude-haiku-3.5");
+        assert!(coder_fast[1].degraded_ok);
+
+        // Every other role is completely unaffected: still all-Anthropic.
+        for role in Role::ALL {
+            if role == Role::CoderFast {
+                continue;
+            }
+            for candidate in table.candidates_for(role) {
+                assert_eq!(
+                    candidate.provider, "anthropic",
+                    "role {role} unexpectedly changed when only CoderFast should prefer DevPass"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn default_table_with_devpass_model_still_validates() {
+        // The devpass-preferred table must still satisfy `RoleTable::validate`'s invariants
+        // (every role non-empty, every candidate's max_concurrency nonzero) — nothing about
+        // swapping the primary's provider/model should be able to produce an invalid table.
+        let table = RoleTable::default_table_with(Some("devpass-test-model"));
+        table
+            .validate()
+            .expect("devpass-preferred default table is still structurally valid");
     }
 }
