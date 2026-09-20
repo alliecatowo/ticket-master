@@ -3575,6 +3575,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tm-mcp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "clap",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tm-agent",
+ "tm-codeintel",
+ "tm-core",
+ "tm-types",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "tm-mirror"
 version = "0.1.0"
 dependencies = [

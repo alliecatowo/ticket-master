@@ -29,6 +29,7 @@ tm-pty = { path = "crates/tm-pty" }
 tm-templates = { path = "crates/tm-templates" }
 tm-auth = { path = "crates/tm-auth" }
 tm-wiki = { path = "crates/tm-wiki" }
+tm-mcp = { path = "crates/tm-mcp" }
 
 anyhow = "1"
 thiserror = "2"
