@@ -249,11 +249,16 @@ fn find_double_newline(buf: &[u8]) -> Option<(usize, usize)> {
 ///
 /// Real request/response orchestration (`reqwest`), but every byte-level decision is delegated
 /// to [`parse_sse_events`] — see this module's doc comment for why no live-server test exists
-/// for this struct itself.
+/// for this struct itself. [`SseClientTransport::ensure_endpoint`]'s relative-URL resolution
+/// *is* covered by a pure unit test below (`endpoint_join_resolves_a_relative_path_against_the_sse_url`),
+/// since it needs no live connection to exercise.
 pub struct SseClientTransport {
     client: reqwest::Client,
-    /// The `POST` endpoint learned from the stream's `endpoint` event. `None` until
-    /// [`SseClientTransport::ensure_endpoint`] has read it.
+    /// The SSE endpoint itself, kept so [`SseClientTransport::ensure_endpoint`] can resolve a
+    /// relative `endpoint` event against it (see that method's doc comment).
+    base_url: reqwest::Url,
+    /// The `POST` endpoint learned from the stream's `endpoint` event, already resolved to an
+    /// absolute URL. `None` until [`SseClientTransport::ensure_endpoint`] has read it.
     post_endpoint: Option<String>,
     stream: reqwest::Response,
     buf: Vec<u8>,
@@ -264,9 +269,11 @@ impl SseClientTransport {
     /// first event arrives, so it is resolved lazily by [`SseClientTransport::ensure_endpoint`]
     /// on first use rather than here.
     pub async fn connect(sse_url: &str) -> Result<Self> {
+        let base_url = reqwest::Url::parse(sse_url)
+            .map_err(|e| TmError::parse(format!("invalid SSE URL {sse_url:?}: {e}")))?;
         let client = reqwest::Client::new();
         let stream = client
-            .get(sse_url)
+            .get(base_url.clone())
             .header("Accept", "text/event-stream")
             .send()
             .await
@@ -279,6 +286,7 @@ impl SseClientTransport {
         }
         Ok(SseClientTransport {
             client,
+            base_url,
             post_endpoint: None,
             stream,
             buf: Vec::new(),
@@ -304,6 +312,16 @@ impl SseClientTransport {
         }
     }
 
+    /// Resolve and cache the `POST` endpoint from the stream's `endpoint` event.
+    ///
+    /// The legacy MCP HTTP+SSE transport commonly sends a bare path here (e.g.
+    /// `/messages?sessionId=...`), not an absolute URL — `reqwest` requires an absolute URL for
+    /// `Client::post`, so posting `event.data` verbatim would fail on exactly the shape real
+    /// servers use (this crate's own test fixture data, `"/session/abc123"`, is deliberately
+    /// that shape). [`reqwest::Url::join`] resolves it against `base_url` (the SSE endpoint
+    /// itself) the way a browser resolves a relative link; per RFC 3986, `join` also handles a
+    /// server that sends an already-absolute URL correctly (the reference wins outright when it
+    /// carries its own scheme), so this one call covers both cases a real server might send.
     async fn ensure_endpoint(&mut self) -> Result<String> {
         if let Some(url) = &self.post_endpoint {
             return Ok(url.clone());
@@ -317,8 +335,15 @@ impl SseClientTransport {
                 event.event
             )));
         }
-        self.post_endpoint = Some(event.data.clone());
-        Ok(event.data)
+        let resolved = self.base_url.join(&event.data).map_err(|e| {
+            TmError::parse(format!(
+                "endpoint event data {:?} is not a valid URL or path: {e}",
+                event.data
+            ))
+        })?;
+        let resolved = resolved.to_string();
+        self.post_endpoint = Some(resolved.clone());
+        Ok(resolved)
     }
 }
 
@@ -497,5 +522,29 @@ mod tests {
         let (events, _) = parse_sse_events(input);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].data, "hi");
+    }
+
+    /// Regression test for the bug an adversarial review caught before handback: the legacy MCP
+    /// HTTP+SSE transport commonly sends a bare path as its `endpoint` event data (exactly the
+    /// shape every fixture above already uses, `"/session/abc123"`), and posting that verbatim
+    /// to `reqwest` fails since it requires an absolute URL. This exercises the exact
+    /// `Url::join` call `SseClientTransport::ensure_endpoint` makes, with no live connection —
+    /// pure URL parsing, deterministic and offline.
+    #[test]
+    fn endpoint_join_resolves_a_relative_path_against_the_sse_url() {
+        let base = reqwest::Url::parse("http://example.test/sse").expect("valid literal URL");
+        let resolved = base
+            .join("/session/abc123")
+            .expect("a valid relative path joins cleanly");
+        assert_eq!(resolved.as_str(), "http://example.test/session/abc123");
+    }
+
+    #[test]
+    fn endpoint_join_leaves_an_already_absolute_url_unchanged() {
+        let base = reqwest::Url::parse("http://example.test/sse").expect("valid literal URL");
+        let resolved = base
+            .join("http://other.test/messages")
+            .expect("an absolute reference joins cleanly");
+        assert_eq!(resolved.as_str(), "http://other.test/messages");
     }
 }
