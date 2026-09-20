@@ -3,6 +3,41 @@
 Work that is specified and agreed but not yet built, in rough priority order. Anything here is
 real, scoped work — not aspiration. Items that turn out to be wrong get deleted, not quietly kept.
 
+## Four real bugs found by the first live DevPass round-trip (not fixed, report-only task)
+
+D-005 (DevPass as default provider) was confirmed working end-to-end for real for the first time
+this session: a real `tm -p` invocation got a real model reply ("DEVPASS") from the real LLM
+Gateway backend, `muse-spark-1.3-contributor`, confirmed by source-level elimination (no other
+provider was ever registered given the env) and an independent `curl` against the same
+endpoint/key/model. Along the way, four real, pre-existing gaps surfaced, all still open:
+
+1. **`tm provider test`/`tm provider status` are unimplemented stubs whose doc comments lie.**
+   `crates/tm-cli/src/ops.rs:700-740` — `provider_test`'s doc comment claims it sends a real
+   `CompletionRequest` and reports success/latency; the actual code unconditionally returns
+   `{"status":"ok","latency_ms":0}` regardless of whether the named provider even exists.
+   `provider_status` is an unconditional `{"status":"no_live_fabric"}`. Neither is real evidence
+   of anything today.
+2. **`map_finish_reason` doesn't handle the gateway's `"incomplete"` finish_reason.**
+   `crates/tm-provider/src/providers/compat.rs:911-920` — a real, reproduced failure mode:
+   `muse-spark-1.3-contributor` returns `finish_reason: "incomplete"` (reasoning tokens exhausted
+   `max_tokens` before visible output) on a real 200 OK, real-billed response, and the unmapped
+   reason falls through to `Err(ProviderError::MalformedResponse)`, failing the whole request —
+   not retried (`MalformedResponse` isn't retryable). Fix: map `"incomplete"` to
+   `StopReason::MaxTokens` alongside `"length"` at line 914.
+3. **The actually-served model/provider (`StepRecord.served_by`) is computed but never surfaced
+   anywhere.** `crates/tm-agent/src/agent_loop.rs:759` computes it from the real wire response,
+   but `crates/tm-cli/src/agent.rs`'s `format_step` drops it when rendering, and `StepRecord` is
+   never persisted to an event/`project.db` either. There is currently no `tm` surface, live or
+   historical, that lets an operator confirm which provider/model actually served a turn.
+4. **`tm --json -p <prompt>` does not emit JSON**, contradicting `args.rs`'s own module doc
+   ("every subcommand's JSON schema is stable and snapshot-tested"). `agent.rs`'s `run_turn`
+   `on_event` closure always calls `renderer.note()` with preformatted plain text, never checking
+   `renderer.is_json()`. Fixing this would also let bug 3's `served_by` ride along for free.
+
+Also noted, not a bug: the gateway's wire `"model"` field is provider-prefixed
+(`"meta-contributor/muse-spark-1.3-contributor"`), not the bare configured `DEVPASS_MODEL` value —
+worth knowing before anything string-compares served vs. configured model.
+
 ## Executors (D-001)
 
 - `Executor` trait, `ExecutorTask` / `ExecutorOutcome` / `ExecutorCapabilities` in `tm-core`, with
