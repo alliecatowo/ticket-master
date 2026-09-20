@@ -238,7 +238,7 @@ pub fn compile(
         ),
         (
             SectionKind::Conventions,
-            sections::build_conventions(conventions),
+            sections::build_conventions(ticket, ci, conventions),
         ),
     ];
 

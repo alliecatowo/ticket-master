@@ -28,11 +28,13 @@
 
 pub mod agent_loop;
 pub mod executor;
+pub mod hooks;
 pub mod outcome;
 pub mod patch;
 pub mod prompt;
 mod pruning;
 pub mod session;
+pub mod skill_capability;
 pub mod tools;
 
 pub use agent_loop::AgentLoop;
@@ -40,8 +42,10 @@ pub use executor::{
     BrowserWiring, BuiltinExecutor, ComputerWiring, HumanApprovalSink, HumanDecision,
     HumanExecutor, StoreArtifactSink,
 };
+pub use hooks::{HookConfig, HookDecision, HookEntry};
 pub use outcome::{AgentOutcome, AgentTask, EvidenceBundle, StepRecord};
 pub use patch::{Edit, PatchEngine, PatchOutcome};
 pub use prompt::{render_system_prompt, render_task_prompt};
 pub use session::{DurablePromotion, Session};
+pub use skill_capability::SkillCapability;
 pub use tools::{BuiltinCapability, ToolCall, ToolOutcome, ToolRegistry};

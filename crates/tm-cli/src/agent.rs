@@ -158,6 +158,11 @@ impl AgentSession {
         // discover by surprise later.
         self.renderer.note(&self.project.scope_line());
 
+        // `SessionStart` (`docs/audit-2026-09-18-fable.md` M-04): fires once, here, at the top
+        // of the interactive loop — the `-p` one-shot form fires it at the top of `run_prompt`
+        // instead, since that entry point never reaches this loop at all.
+        self.fire_session_start().await;
+
         loop {
             self.renderer.note("");
             write!(stdout, "tm> ").ok();
@@ -202,7 +207,21 @@ impl AgentSession {
 
     /// Run one prompt to completion non-interactively: the `tm -p <prompt>` form.
     pub async fn run_prompt(&mut self, prompt: &str) -> tm_types::Result<()> {
+        // `SessionStart`: this entry point's session is exactly this one prompt, so it fires
+        // here rather than in `run_interactive`'s loop (which this call never reaches).
+        self.fire_session_start().await;
         self.run_turn(prompt).await
+    }
+
+    /// Load `hooks.toml` (if present) and run its `session_start` entries, logging a load
+    /// failure rather than failing the whole session over a malformed `hooks.toml` — matching
+    /// `PostToolUse`/`Stop`'s own "observational only" contract (see `tm_agent::hooks`'s module
+    /// doc comment): a session should still start even if its hooks config is broken.
+    async fn fire_session_start(&self) {
+        match tm_agent::hooks::load_hooks_toml(&self.project.root) {
+            Ok(hooks) => hooks.run_session_start(&self.session).await,
+            Err(e) => tracing::warn!(error = %e, "failed to load hooks.toml for SessionStart"),
+        }
     }
 
     /// Record a `/decide <text>` slash command as a project decision, scoped to the attached
@@ -304,6 +323,34 @@ impl AgentSession {
         mut on_event: impl FnMut(TurnEvent),
         mut approve: impl FnMut(&PendingApproval) -> tm_types::Result<bool>,
     ) -> tm_types::Result<AgentOutcome> {
+        // `hooks.toml` is loaded once per turn and threaded through: `UserPromptSubmit` here,
+        // `PreToolUse`/`PostToolUse` via `ToolRegistry::with_hooks` below, `Stop` at the end
+        // (`docs/audit-2026-09-18-fable.md` M-04). A malformed `hooks.toml` fails the turn the
+        // same way a malformed `oversight.toml` already does (`crate::dispatch::load_oversight`)
+        // — loud, not silently-ignored, since a hook a human configured for a reason
+        // (e.g. a deny-shaped policy gate) silently not applying would be worse than the turn
+        // erroring up front.
+        let hooks = tm_agent::hooks::load_hooks_toml(&self.project.root)?;
+
+        let prompt_owned = match hooks
+            .evaluate_user_prompt_submit(prompt, &self.session)
+            .await
+        {
+            tm_agent::hooks::HookDecision::Allow => prompt.to_string(),
+            tm_agent::hooks::HookDecision::Rewrite(value) => value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| prompt.to_string()),
+            tm_agent::hooks::HookDecision::Deny(reason) => {
+                return Ok(AgentOutcome::Failed {
+                    steps: Vec::new(),
+                    class: tm_core::FailureClass::Other,
+                    detail: format!("denied by UserPromptSubmit hook: {reason}"),
+                });
+            }
+        };
+        let prompt = prompt_owned.as_str();
+
         let ticket = self.resolve_ticket(prompt)?;
         on_event(TurnEvent::TicketResolved(Box::new(ticket.clone())));
 
@@ -358,13 +405,21 @@ impl AgentSession {
         let computer_handle = Arc::new(tm_computer::ComputerCapability::new(computer_registry));
         extra.push(computer_handle.clone() as Arc<dyn tm_types::CapabilityProvider>);
 
+        // `skill.load` (`docs/audit-2026-09-18-fable.md` M-04): a standalone `CapabilityProvider`
+        // rather than a `tm_agent::tools::ToolName` variant — see `tm_agent::skill_capability`'s
+        // module doc comment for why.
+        extra.push(
+            Arc::new(tm_agent::SkillCapability::new()) as Arc<dyn tm_types::CapabilityProvider>
+        );
+
         let tools = ToolRegistry::with_capabilities(
             Arc::new(ci),
             self.project.store.clone(),
             command_cache,
             command_executor,
             extra,
-        );
+        )
+        .with_hooks(hooks.clone());
 
         let oversight = crate::dispatch::load_oversight(&self.project)?;
         let mut agent_loop = AgentLoop::new(
@@ -403,6 +458,14 @@ impl AgentSession {
         if let Err(e) = computer_handle.close_all().await {
             tracing::warn!(error = %e, "failed to close one or more computer sessions after this turn");
         }
+
+        // `Stop`: this turn is about to hand control back (to the human at the readline prompt,
+        // or to the `-p` caller) — the "obvious lifecycle point" for it, and single-sited here
+        // so it fires identically for `run_turn`/`run_prompt`/the TUI's turn driver, all of
+        // which call this method.
+        hooks
+            .run_stop(&self.session, Some(ticket.id.as_str()))
+            .await;
 
         result
     }

@@ -273,6 +273,12 @@ impl BuiltinExecutor {
         let computer_handle = Arc::new(tm_computer::ComputerCapability::new(computer_registry));
         extra.push(computer_handle.clone() as Arc<dyn CapabilityProvider>);
 
+        // `skill.load` (`docs/audit-2026-09-18-fable.md` M-04): registered here too, not just
+        // `tm-cli`'s interactive path, so a scheduler-dispatched worker (`tm run`/`tm sched run`)
+        // sees it as well — see `crate::skill_capability`'s module doc comment.
+        extra.push(Arc::new(crate::skill_capability::SkillCapability::new())
+            as Arc<dyn CapabilityProvider>);
+
         let tools = ToolRegistry::with_capabilities(
             self.ci.clone(),
             self.store.clone(),
@@ -280,6 +286,22 @@ impl BuiltinExecutor {
             self.command_executor.clone(),
             extra,
         );
+        // `hooks.toml`, loaded from the project root `self.ci` was opened against (see
+        // `tm_codeintel::CodeIntel::project_root`). This method's signature (this trait's
+        // `Executor::execute` contract, transitively) is infallible — unlike `tm-cli`'s
+        // interactive path (`AgentSession::run_turn_streaming`), which surfaces a malformed
+        // `hooks.toml` as a turn-ending `Err` a human sees immediately, there is no `Result`
+        // here to propagate one through, so a parse failure logs a warning and falls back to no
+        // hooks configured rather than being silently swallowed or requiring a broader signature
+        // change to this trait to fix properly.
+        let hooks = match crate::hooks::load_hooks_toml(self.ci.project_root()) {
+            Ok(hooks) => hooks,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load hooks.toml; proceeding with no hooks configured");
+                crate::hooks::HookConfig::default()
+            }
+        };
+        let tools = tools.with_hooks(hooks);
         let agent_loop = AgentLoop::new(
             self.fabric.clone(),
             tools,
@@ -666,5 +688,8 @@ mod tests {
         let defs = agent_loop.tools().tool_defs();
         assert!(defs.iter().any(|d| d.name == "computer.snapshot"));
         assert!(!defs.iter().any(|d| d.name.starts_with("browser.")));
+        // `skill.load` (`docs/audit-2026-09-18-fable.md` M-04): registered on this path too,
+        // not just `tm-cli`'s interactive one — see `crate::skill_capability`'s doc comment.
+        assert!(defs.iter().any(|d| d.name == "skill.load"));
     }
 }

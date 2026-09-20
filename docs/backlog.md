@@ -236,16 +236,16 @@ That is the thesis of this repository, validated by people paying the cost of it
 - **MCP, as both client and server.** 11 of 12 IDE agents and all three CLI agents support it; only
   Aider does not, and it is criticised for it. Codex runs both directions (`codex mcp-server` lets
   other agents call Codex as a tool), which is the shape we want too.
-- **AGENTS.md.** Donated to the Linux Foundation's Agentic AI Foundation, reportedly 60k+ projects
-  and 20+ tools. Read it natively. Do not invent `TICKETMASTER.md`; a proprietary name is a tax on
-  every user and buys nothing.
-- **Skills as progressively-disclosed procedure bundles** (`SKILL.md`: metadata first, body on
-  demand). Claude Code and Codex both ship this by that exact name.
-- **Lifecycle hooks, using the event names Claude Code and Codex already share** — `PreToolUse`,
-  `PostToolUse`, `UserPromptSubmit`, `Stop`, `SessionStart`. Two independent vendors converging on
-  one vocabulary makes it a category standard; adopting it means a switcher's existing hooks work.
-  Claude Code documents 38 events, Codex 12. Handlers must be able to deny and to *rewrite* the call,
-  not merely observe.
+- ~~**AGENTS.md.**~~ Done: `tm_context::sections::build_conventions` reads it natively, walking up
+  from a ticket's claimed paths (`docs/decisions/D-012-hooks-agents-skills.md`). No proprietary
+  filename was invented.
+- ~~**Skills as progressively-disclosed procedure bundles**~~ Done: `.tm/skills/**` discovery,
+  metadata-in-the-pack/body-on-`skill.load` (`docs/decisions/D-012-hooks-agents-skills.md`).
+- ~~**Lifecycle hooks, using the event names Claude Code and Codex already share**~~ Done, shell
+  handlers only (not in-process — see the decision doc's "what this costs" for why that's the
+  honest first cut): `PreToolUse`/`UserPromptSubmit` can deny or rewrite;
+  `PostToolUse`/`SessionStart`/`Stop` are observational
+  (`docs/decisions/D-012-hooks-agents-skills.md`).
 - **Sandboxing, with the approval policy as a separate axis.** Every serious tool separates "what is
   technically blocked" from "what needs a human yes" — Codex most explicitly (`sandbox_mode` ×
   `approval_policy`). We already have that split in authority versus escalation; say so in those terms.
@@ -355,11 +355,12 @@ keeping `tm serve` and its event stream the real product boundary.
 
 - Native notifications (desktop, push, ntfy-style), since nobody ships this and everybody needs it.
 - Zero-setup cost and token accounting off the event log, including per-ticket and per-worker spend.
-- Hooks with the Claude Code / Codex shared event vocabulary — `PreToolUse`, `PostToolUse`,
-  `UserPromptSubmit`, `Stop`, `SessionStart` — where a handler may deny or rewrite, not just observe.
-  This is what turns the effect boundary from policy into enforcement.
-- `AGENTS.md` read natively. No proprietary filename.
-- `SKILL.md` skills. Checkpoints and forking off the event log. Worktree isolation per worker.
+- ~~Hooks with the Claude Code / Codex shared event vocabulary~~ Done, shell-only
+  (`docs/decisions/D-012-hooks-agents-skills.md`) — `PreToolUse`/`UserPromptSubmit` deny or
+  rewrite; `PostToolUse`/`SessionStart`/`Stop` observe.
+- ~~`AGENTS.md` read natively.~~ Done (`docs/decisions/D-012-hooks-agents-skills.md`).
+- ~~`SKILL.md` skills.~~ Done (`docs/decisions/D-012-hooks-agents-skills.md`). Checkpoints and
+  forking off the event log. Worktree isolation per worker.
 - Secret and PII redaction before the model call, restored locally (the `vibeguard` shape).
 - Context enrichment on read: resolved types alongside a file read, from `tm-codeintel`.
 
