@@ -555,12 +555,22 @@ fn create_or_promote_project_dir(
         )));
     }
     if !fresh {
+        // The global session lives under a key derived from the *workspace* (the git toplevel,
+        // or the canonical cwd outside a repo — see `workspace_root_for`), but the destination
+        // `.tm/` this call is creating belongs at `dir` itself, not necessarily the workspace
+        // root: `dir` can be a subdirectory of a larger repo (e.g. `tm init` run from a
+        // subdirectory with an explicit path, or `tm attach some/nested/path`). Conflating the
+        // two would write into (and, via the backup API, silently clobber) whatever `.tm/`
+        // already exists at the workspace root instead of at `dir` — the conflict guard above
+        // even checks the right directory (`dir.join(".tm")`) already, so promoting into the
+        // wrong one would bypass it entirely.
         let workspace = workspace_root_for(dir)?;
         let global_dir = global_project_dir(&workspace)?;
         if global_dir.join("project.db").is_file() {
+            let dest_root = dir.canonicalize()?;
             let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-            let report = promote_global(&global_dir, &workspace, clock)?;
-            return Ok((workspace, Some(report)));
+            let report = promote_global(&global_dir, &dest_root, clock)?;
+            return Ok((dest_root, Some(report)));
         }
     }
     let root = create_project_dir(dir)?;
@@ -786,6 +796,22 @@ fn verify_promotion(
     scratch_result?;
 
     let dest_store = tm_core::Store::open_at(dest_tm)?;
+    // A non-mutating read (`check_invariants` is `check_invariants(&self.view()?)` over a
+    // read-only connection), so — unlike `rebuild` above — this runs directly against the real
+    // destination: the store this promotion is about to hand back to the caller must itself pass
+    // invariants, not just the scratch copy used to sanity-check that the event log replays.
+    let violations = dest_store.check_invariants()?;
+    if !violations.is_empty() {
+        let detail = violations
+            .iter()
+            .map(|v| format!("{} ({}): {}", v.invariant, v.subject, v.detail))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(TmError::storage(format!(
+            "destination invariant violation(s) after promotion: {detail}"
+        )));
+    }
+
     let dest_counters = dest_store.counters()?;
     if &dest_counters != src_counters {
         return Err(TmError::storage(format!(
@@ -2609,6 +2635,51 @@ mod tests {
         // going through `open_bare`, the only place that writes it) — its survival through
         // `finalize_promoted_source` and the resulting `tm project list` marker is covered by
         // `crates/tm-cli/tests/promotion.rs`'s end-to-end case instead.
+    }
+
+    /// `tm init <subdir>` inside a larger workspace must promote into `<subdir>/.tm`, not the
+    /// workspace root: the global session's `$TM_HOME` key is derived from `workspace_root_for`
+    /// (the git toplevel), which can differ from the directory `tm init` was actually pointed at.
+    /// `create_or_promote_project_dir` must keep those two paths distinct — using the workspace
+    /// root as the promotion *destination* (rather than just the key lookup) would write into,
+    /// and via the backup API silently clobber, whatever already lives at
+    /// `<workspace root>/.tm`, while leaving the conflict guard's `dir.join(".tm")` check
+    /// (correctly scoped to `dir`) none the wiser.
+    #[test]
+    fn init_in_a_subdirectory_promotes_into_the_subdirectory_not_the_workspace_root() {
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+
+        let root = tempfile::tempdir().unwrap();
+        init_git_repo(root.path());
+        let sub = root.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+
+        // The global session is keyed by the *workspace* (the git toplevel, i.e. `root`), the
+        // same as a real bare `tm` run from anywhere inside this repo would resolve it.
+        let workspace = workspace_root_for(root.path()).unwrap();
+        let global_dir = global_project_dir(&workspace).unwrap();
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        build_promotable_global_session(&global_dir, clock);
+
+        let args = InitArgs {
+            path: Some(sub.clone()),
+            fresh: false,
+        };
+        let result = init(&args, &test_renderer());
+        std::env::remove_var("TM_HOME");
+        result.unwrap();
+
+        assert!(
+            sub.join(".tm").join("project.db").is_file(),
+            "promotion must land at the directory `tm init` was pointed at"
+        );
+        assert!(
+            !root.path().join(".tm").exists(),
+            "promotion must never write into the workspace root when `tm init` targeted a \
+             subdirectory of it"
+        );
     }
 
     #[test]
