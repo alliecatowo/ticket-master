@@ -12,23 +12,54 @@ use tm_cli::project;
 use tm_cli::render::Renderer;
 use tm_cli::{agent, auth, drive, ops, sched, search, serve, tickets, tui, wiki, workflow};
 
+#[cfg(feature = "otel")]
+mod otel;
+
 /// Parse argv, dispatch, and translate the outcome into a process exit code.
 ///
 /// Install tracing first so `clap` errors print cleanly before running the command, route the
 /// parsed CLI to its execution module, and exit with the code the result maps to.
 #[tokio::main]
 async fn main() {
-    install_tracing();
+    let tracing_guard = install_tracing();
 
     let cli = Cli::parse();
     let renderer = Renderer::from_flags(cli.global.json, cli.global.quiet, cli.global.no_color);
 
     let result = dispatch(cli, &renderer).await;
-    match result {
-        Ok(()) => std::process::exit(0),
+    let code = match result {
+        Ok(()) => 0,
         Err(err) => {
             renderer.error(&err);
-            std::process::exit(tm_cli::render::exit_code(&err));
+            tm_cli::render::exit_code(&err)
+        }
+    };
+    // `std::process::exit` below skips `Drop`, so flush explicitly rather than relying on a
+    // guard's destructor -- a no-op when the `otel` feature is off or `TM_OTEL_ENDPOINT` unset.
+    drop(tracing_guard);
+    std::process::exit(code);
+}
+
+/// Guard returned by [`install_tracing`], dropped explicitly (not via RAII -- see `main`'s
+/// comment) right before `std::process::exit`. Flushes the OpenTelemetry tracer provider, if one
+/// was installed, so batched spans reach the collector before the process ends; a no-op
+/// otherwise.
+#[derive(Default)]
+struct TracingGuard {
+    #[cfg(feature = "otel")]
+    otel_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+}
+
+impl Drop for TracingGuard {
+    fn drop(&mut self) {
+        #[cfg(feature = "otel")]
+        if let Some(provider) = self.otel_provider.take() {
+            // Bounded, not `shutdown()`'s unbounded wait: a stale/unreachable `TM_OTEL_ENDPOINT`
+            // should cost this exit a few seconds at most, not hang it (see
+            // `otel::EXPORT_TIMEOUT`'s doc comment).
+            if let Err(err) = provider.shutdown_with_timeout(otel::EXPORT_TIMEOUT) {
+                eprintln!("tm: failed to flush OpenTelemetry tracer provider on shutdown: {err}");
+            }
         }
     }
 }
@@ -36,11 +67,32 @@ async fn main() {
 /// Install the process-wide tracing subscriber.
 ///
 /// Routes logs to stderr so stdout stays clean for piped/JSON output and respects `RUST_LOG`.
-fn install_tracing() {
+/// When compiled with the `otel` feature and `TM_OTEL_ENDPOINT` is set, also adds an OTLP-over-
+/// HTTP export layer alongside the stderr one (see `otel::install`, including that module's doc
+/// comment on what actually reaches a collector today) -- otherwise (feature off, or the feature
+/// on but the env var unset) this is exactly the stderr-only subscriber it has always been.
+fn install_tracing() -> TracingGuard {
+    #[cfg(feature = "otel")]
+    if let Some(endpoint) = otel::endpoint_from_env() {
+        match otel::install(&endpoint) {
+            Ok(provider) => {
+                return TracingGuard {
+                    otel_provider: Some(provider),
+                }
+            }
+            Err(err) => eprintln!(
+                "tm: {var}={endpoint:?} set but OpenTelemetry exporter failed to initialize: \
+                 {err}; continuing with stderr logging only",
+                var = otel::TM_OTEL_ENDPOINT_VAR
+            ),
+        }
+    }
+
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
+    TracingGuard::default()
 }
 
 /// Route a parsed [`Cli`] to its execution module.

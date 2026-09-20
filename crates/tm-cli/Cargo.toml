@@ -67,10 +67,41 @@ dirs = { workspace = true }
 crossterm = { workspace = true }
 ratatui-core = { workspace = true }
 
+# Behind the `otel` feature only (D-008: OpenTelemetry tracing export) -- not workspace deps
+# since nothing else in the tree touches OpenTelemetry. Pinned to the mutually-compatible line as
+# of 2026-09-20: tracing-opentelemetry 0.33.x depends on opentelemetry ^0.32 (its own 0.33 line
+# pairs with the *next* tracing-opentelemetry release, not yet out), so opentelemetry/
+# opentelemetry_sdk/opentelemetry-otlp are held to 0.32 deliberately -- bumping any one of the
+# four without checking the others' declared requirements will fail to resolve or silently pull
+# two incompatible major lines. `default-features = false` on all four to keep the opt-in build
+# itself lean: skips otel's metrics/logs support and tracing-opentelemetry's log-bridge, since
+# `install_tracing` only ever asks for traces.
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"], optional = true }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+  "trace",
+  "http-proto",
+  "reqwest-blocking-client",
+], optional = true }
+tracing-opentelemetry = { version = "0.33", default-features = false, optional = true }
+
+[features]
+default = []
+# OpenTelemetry span export (D-008), off by default: `install_tracing` only adds the OTLP layer
+# when this feature is compiled in AND `TM_OTEL_ENDPOINT` is set at runtime. Enable with
+# `cargo build -p tm-cli --features otel`.
+otel = [
+  "dep:opentelemetry",
+  "dep:opentelemetry_sdk",
+  "dep:opentelemetry-otlp",
+  "dep:tracing-opentelemetry",
+]
+
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
+serial_test = { workspace = true }
 # For the bare-`tm`-launches-the-TUI-on-a-real-tty integration test (tests/tui_launch.rs), which
 # needs a real pty the way tm-tui's own `testing::PtyHarness` does — that module is
 # `#[cfg(test)]`-gated in tm-tui and unreachable from this crate's own build, so this test writes

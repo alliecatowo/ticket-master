@@ -11,6 +11,12 @@ never drift between sessions:
 - `mise run build:all` — build the whole workspace.
 - `mise run test` — `cargo test --workspace`.
 - `mise run test:crate -- <crate>` — one crate's tests.
+- `mise run test:otel` — clippy + test `tm-cli`'s opt-in OpenTelemetry export path
+  (`--features otel`, D-008). **Not** part of `verify`: enabling `otel` compiles a second full
+  `reqwest`/HTTP-client stack (`docs/decisions/D-008-opentelemetry-tracing.md`'s costs section),
+  and this machine's `-j 2`/disk constraints mean `verify` shouldn't grow a second dependency tree
+  by default. Run this by hand after touching `crates/tm-cli/src/otel.rs`, `main.rs`'s
+  `install_tracing`, or the `otel` feature's dependency pins in `crates/tm-cli/Cargo.toml`.
 - `mise run clippy` — workspace lint, `-D warnings`, matching CI.
 - `mise run fmt` — apply rustfmt everywhere (`cargo xtask fmt`).
 - `mise run hygiene` — the fast standalone hygiene scan (non-determinism, unwrap/expect,
@@ -70,6 +76,15 @@ that rule is global, not repo-specific, and still applies here.
   an `ArtifactKind::WorkspaceSnapshot`) whenever a scheduler-dispatched turn produces a real patch —
   same decision doc, "What this costs" section has the real gaps (untracked files never captured,
   only one call site wired).
+- OpenTelemetry span export is opt-in and off by default (`docs/decisions/D-010-opentelemetry-
+  tracing.md`): build `tm-cli` with `--features otel` (`mise run test:otel` builds+lints+tests it)
+  and set `TM_OTEL_ENDPOINT` to a full OTLP/HTTP traces endpoint (e.g.
+  `http://localhost:4318/v1/traces` — the full path, not a bare host:port) to export to a
+  collector, alongside the stderr `fmt` layer rather than instead of it. Neither a normal
+  `cargo build -p tm-cli`/`mise run build` nor `TM_OTEL_ENDPOINT` alone does anything; both the
+  feature and the env var are required. As of D-010, this exports nothing yet in practice: the
+  OTel layer is span-shaped and this workspace has zero `#[instrument]`/`*_span!` call sites, only
+  bare `tracing::info!`/`debug!` events — adding real instrumentation is a separate follow-up.
 
 - **Real code intelligence via the `rust-analyzer-lsp` Claude Code plugin** (installed:
   `claude plugin install rust-analyzer-lsp@claude-plugins-official`, user scope) is the primary
