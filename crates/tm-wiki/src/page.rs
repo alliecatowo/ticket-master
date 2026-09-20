@@ -14,7 +14,7 @@ use tm_docs::reconcile::apply_regeneration;
 use tm_docs::registry::{
     parse_front_matter, parse_tmdocs_toml, resolve_front_matter, DocMode, DocRecord, TMDOCS_TOML,
 };
-use tm_types::{Clock, Result, TmError};
+use tm_types::{Clock, Result, Timestamp, TmError};
 
 /// The subdirectory, relative to the project root, every generated wiki page lives under.
 pub const WIKI_DIR: &str = "docs/wiki";
@@ -129,28 +129,32 @@ fn resolve_existing_mode(project_root: &Path, path: &str) -> Result<Option<DocMo
     }
 }
 
-/// Write `page` to disk under `project_root`, unless a pre-existing file at its path is not
-/// system-writable — in which case it is left byte-for-byte untouched and [`WriteOutcome::Skipped`]
-/// is returned instead of an error, since "a human owns this page" is an expected, routine
-/// outcome of regeneration, not a failure.
-pub fn write_page(project_root: &Path, page: &WikiPage, clock: &dyn Clock) -> Result<WriteOutcome> {
+/// Resolve `page`'s gate [`DocRecord`], rendered content, and content hash for `project_root` —
+/// the decision inputs [`write_page`] and [`preview_write`] share, so the two can never disagree
+/// about which pages are protected.
+fn prepare(project_root: &Path, page: &WikiPage) -> Result<(DocRecord, String, String)> {
     let path = page.project_path();
     let existing_mode = resolve_existing_mode(project_root, &path)?;
     // No file yet: always `Generated` (nothing to protect). Otherwise: whatever mode the file
     // itself (or `.tmdocs.toml`) declares.
     let gate_mode = existing_mode.unwrap_or(DocMode::Generated);
 
-    let mut doc = DocRecord::new(
-        page.id.clone(),
-        path.clone(),
-        gate_mode,
-        page.derived_from.clone(),
-    );
+    let doc = DocRecord::new(page.id.clone(), path, gate_mode, page.derived_from.clone());
     let content = page.render();
     let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+    Ok((doc, content, hash))
+}
+
+/// Write `page` to disk under `project_root`, unless a pre-existing file at its path is not
+/// system-writable — in which case it is left byte-for-byte untouched and [`WriteOutcome::Skipped`]
+/// is returned instead of an error, since "a human owns this page" is an expected, routine
+/// outcome of regeneration, not a failure.
+pub fn write_page(project_root: &Path, page: &WikiPage, clock: &dyn Clock) -> Result<WriteOutcome> {
+    let (mut doc, content, hash) = prepare(project_root, page)?;
 
     match apply_regeneration(&mut doc, &hash, clock.now()) {
         Ok(()) => {
+            let path = page.project_path();
             let full = project_root.join(&path);
             if let Some(parent) = full.parent() {
                 fs::create_dir_all(parent)
@@ -160,6 +164,22 @@ pub fn write_page(project_root: &Path, page: &WikiPage, clock: &dyn Clock) -> Re
                 .map_err(|e| TmError::storage(format!("writing {path}: {e}")))?;
             Ok(WriteOutcome::Written)
         }
+        Err(TmError::AuthorityDenied(msg)) => Ok(WriteOutcome::Skipped { reason: msg }),
+        Err(other) => Err(other),
+    }
+}
+
+/// Resolve what [`write_page`] would do for `page` at `project_root`, without touching the
+/// filesystem: the exact same [`resolve_existing_mode`]/`apply_regeneration` decision, minus the
+/// `fs::create_dir_all`/`fs::write` calls. The timestamp fed to `apply_regeneration` is never
+/// observed (its `Ok`/`Err` split depends only on [`DocMode`], not on when it runs — see that
+/// function's own body), so a fixed epoch stands in for a real [`Clock`] here; nothing durable is
+/// written, so there is nothing for a real timestamp to date. Backs `tm wiki generate --dry-run`.
+pub fn preview_write(project_root: &Path, page: &WikiPage) -> Result<WriteOutcome> {
+    let (mut doc, _content, hash) = prepare(project_root, page)?;
+
+    match apply_regeneration(&mut doc, &hash, Timestamp::EPOCH) {
+        Ok(()) => Ok(WriteOutcome::Written),
         Err(TmError::AuthorityDenied(msg)) => Ok(WriteOutcome::Skipped { reason: msg }),
         Err(other) => Err(other),
     }
@@ -310,6 +330,48 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dir.path().join("docs/wiki/glossary.md")).unwrap(),
             "No inline front matter, declared via .tmdocs.toml instead.\n"
+        );
+    }
+
+    #[test]
+    fn preview_write_reports_written_but_touches_no_disk() {
+        let dir = TempDir::new().unwrap();
+        let page = WikiPage::new("glossary", "glossary.md", "# Glossary\n", vec![]);
+
+        let outcome = preview_write(dir.path(), &page).unwrap();
+
+        assert_eq!(outcome, WriteOutcome::Written);
+        assert!(!dir.path().join("docs/wiki/glossary.md").exists());
+        assert!(
+            !dir.path().join("docs").exists(),
+            "preview must create no directories either"
+        );
+    }
+
+    #[test]
+    fn preview_write_agrees_with_write_page_on_a_human_mode_page() {
+        let dir = TempDir::new().unwrap();
+        let clock = FixedClock::epoch();
+        let path = dir.path().join("docs/wiki/glossary.md");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let human_content =
+            "+++\n[doc]\nid = \"wiki/glossary\"\nmode = \"human\"\n+++\n\nHand-written.\n";
+        fs::write(&path, human_content).unwrap();
+
+        let page = WikiPage::new("glossary", "glossary.md", "# Regenerated\n", vec![]);
+
+        let preview = preview_write(dir.path(), &page).unwrap();
+        let real = write_page(dir.path(), &page, &clock).unwrap();
+
+        assert!(matches!(preview, WriteOutcome::Skipped { .. }));
+        assert_eq!(
+            preview, real,
+            "preview must agree with the real write decision"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            human_content,
+            "preview must never touch the file even after write_page ran"
         );
     }
 }

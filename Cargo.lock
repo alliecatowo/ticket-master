@@ -3389,6 +3389,7 @@ dependencies = [
  "tm-templates",
  "tm-tui",
  "tm-types",
+ "tm-wiki",
  "tm-workflow",
  "tokio",
  "toml",

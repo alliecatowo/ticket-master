@@ -54,6 +54,10 @@ run = "cargo run -p tm-cli --bin tm"
 description = "Run tm doctor against the current directory"
 run = "cargo run -p tm-cli --bin tm -- doctor"
 
+[tasks."docs:wiki"]
+description = "Regenerate docs/wiki/ (SPEC.md §26, B-14) from live project state; add -- --dry-run to preview without writing"
+run = "cargo run -p tm-cli --bin tm -- wiki generate"
+
 [tasks.dev]
 description = "Build + run the TUI with debug logging to stderr (RUST_LOG=tm=debug)"
 run = "RUST_LOG=tm=debug,tm_core=debug,tm_agent=debug cargo run -p tm-cli --bin tm 2> /tmp/tm-dev.log"

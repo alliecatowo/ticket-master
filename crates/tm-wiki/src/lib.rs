@@ -41,7 +41,8 @@ pub mod architecture;
 /// `decisions/` pages, with supersession chains.
 pub mod decisions;
 
-/// Wiki generation orchestration: assemble every family and write it to disk.
+/// Wiki generation orchestration: assemble every family and write it to disk ([`generate::run`]),
+/// or preview the same assembly without writing anything ([`generate::dry_run`]).
 pub mod generate;
 
 /// `glossary` page.
@@ -56,5 +57,5 @@ pub mod page;
 /// `tickets` page.
 pub mod tickets;
 
-pub use generate::{default_history_paths, run, GenerationReport, PageOutcome};
-pub use page::{write_page, WikiPage, WriteOutcome, WIKI_DIR};
+pub use generate::{default_history_paths, dry_run, run, GenerationReport, PageOutcome};
+pub use page::{preview_write, write_page, WikiPage, WriteOutcome, WIKI_DIR};

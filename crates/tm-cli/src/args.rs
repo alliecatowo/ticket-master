@@ -182,6 +182,29 @@ pub enum Command {
     /// `tm` has ever created under `$TM_HOME`.
     #[command(subcommand)]
     Project(ProjectCommand),
+
+    /// The project wiki (`SPEC.md` §26): generated documentation pages assembled from live
+    /// project state and written under `docs/wiki/` at the workspace root.
+    #[command(subcommand)]
+    Wiki(WikiCommand),
+}
+
+/// `tm wiki ...` (`SPEC.md` §26, B-14).
+#[derive(Debug, Subcommand)]
+pub enum WikiCommand {
+    /// Assemble every wiki page family (architecture/<crate>, decisions, history/<path>,
+    /// tickets, glossary) from the project's current state and write them under `docs/wiki/`,
+    /// skipping any page a human has since marked `maintained`/`human`.
+    Generate(WikiGenerateArgs),
+}
+
+/// `tm wiki generate`
+#[derive(Debug, Args)]
+pub struct WikiGenerateArgs {
+    /// Report what would be written (and what would be skipped as human/maintained-owned)
+    /// without touching disk or the project store.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `tm project ...` (D-003).

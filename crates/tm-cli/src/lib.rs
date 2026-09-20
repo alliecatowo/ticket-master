@@ -20,6 +20,7 @@
 //! - [`auth`] — the `auth` command (`SPEC.md` §28.2) over `tm-auth`.
 //! - [`workflow`] — the `workflow` command group (`SPEC.md` §25) over `tm-workflow`.
 //! - [`drive`] — the `browser` and `computer` command groups over `tm-browser`/`tm-computer`.
+//! - [`wiki`] — the `wiki generate` command (`SPEC.md` §26) over `tm-wiki`.
 //! - [`serve`] — the `serve` command.
 //! - [`agent`] — the bare-`tm` interactive coding client and its `tm -p` scriptable form.
 //! - [`tui`] — the bare-`tm` ratatui TUI mode (D-002) and the `should_launch` gate that decides
@@ -46,4 +47,5 @@ pub mod search;
 pub mod serve;
 pub mod tickets;
 pub mod tui;
+pub mod wiki;
 pub mod workflow;

@@ -2,12 +2,21 @@
 //!
 //! Not part of the default test run: it indexes and reads *this actual workspace* (a real
 //! `CodeIntel::update_incremental` over ~120k lines of Rust plus a real git history walk), which
-//! is slow, and it writes into the real repository's `.tm/` (gitignored) and `docs/wiki/`
-//! (cleaned up at the end of this test). Run explicitly:
+//! is slow, and it writes into the real repository's `.tm/` (gitignored) and `docs/wiki/`. Run
+//! explicitly:
 //!
 //! ```sh
 //! cargo test -p tm-wiki --test e2e_real_repo -- --ignored --nocapture
 //! ```
+//!
+//! `docs/wiki/*.md` is real, committed project documentation (this task's own B-14 deliverable),
+//! not a throwaway test artifact — this test leaves whatever it regenerates in place rather than
+//! deleting `docs/wiki/` afterward, exactly as running `mise run docs:wiki` for real would. Every
+//! page is `mode = "generated"`, so this is by design idempotent when nothing in the project has
+//! changed since the last real generation, and a legitimate update to tracked content when
+//! something has (a new decision, ticket, or crate) — `git status`/`git diff` after running this
+//! test shows exactly that drift, the same signal a human regenerating the wiki for real would
+//! see before deciding whether to commit it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -91,8 +100,8 @@ fn generate_wiki_against_this_repository() {
     assert!(root.join("docs/wiki/glossary.md").is_file());
     assert!(root.join("docs/wiki/decisions.md").is_file());
 
-    // Clean up: remove only what this test itself wrote, so a manual run leaves no stray files
-    // in the real repository. `.tm/` is already gitignored and left in place (harmless, and
-    // removing a live SQLite WAL/index file out from under nothing is not worth the risk).
-    let _ = std::fs::remove_dir_all(root.join("docs/wiki"));
+    // No cleanup: `docs/wiki/` is real, committed documentation (see this file's module doc), so
+    // regenerating it here is exactly the real, intended effect of this test, not pollution to
+    // undo. `.tm/` is gitignored and left in place too (harmless, and removing a live SQLite
+    // WAL/index file out from under nothing is not worth the risk).
 }

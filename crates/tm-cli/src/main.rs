@@ -10,7 +10,7 @@ use clap::Parser;
 use tm_cli::args::{Cli, Command};
 use tm_cli::project;
 use tm_cli::render::Renderer;
-use tm_cli::{agent, auth, drive, ops, sched, search, serve, tickets, tui, workflow};
+use tm_cli::{agent, auth, drive, ops, sched, search, serve, tickets, tui, wiki, workflow};
 
 /// Parse argv, dispatch, and translate the outcome into a process exit code.
 ///
@@ -185,6 +185,10 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
         }
         Some(Command::Project(cmd)) => {
             project::dispatch_project(&cmd, cli.global.project.as_deref(), renderer)
+        }
+        Some(Command::Wiki(cmd)) => {
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
+            wiki::dispatch_wiki(&cmd, &opened, renderer)
         }
     }
 }
