@@ -57,6 +57,11 @@ that rule is global, not repo-specific, and still applies here.
 - Every session's real state lives under `Project.state_dir` (see
   `docs/decisions/D-003-project-scope.md`) — `sqlite3 <state_dir>/project.db` is a legitimate way
   to inspect what actually got written, and `tm events` reads the same log a UI would.
+- `tm sched run`/`tm run` pop a real desktop notification on `approval.requested`/
+  `ticket.escalated` (`docs/decisions/D-007-desktop-notifications.md`, `crates/tm-notify`). Set
+  `TM_NOTIFY=0` (or `false`/`off`/`no`) to opt out in headless/CI/server contexts — a notification
+  call there is pointless at best and, without a controlling terminal for the OSC 9 fallback, just
+  noise on stderr.
 
 - **Real code intelligence via the `rust-analyzer-lsp` Claude Code plugin** (installed:
   `claude plugin install rust-analyzer-lsp@claude-plugins-official`, user scope) is the primary

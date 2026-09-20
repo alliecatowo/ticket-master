@@ -1,0 +1,26 @@
+[package]
+name = "tm-notify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Desktop notifications on approval.requested/ticket.escalated (docs/audit-2026-09-18-fable.md M-04): a pure decision layer plus a thin, necessarily-untested system-notification edge."
+
+[dependencies]
+tm-types = { workspace = true }
+tm-events = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+# macOS gets its own real-desktop path (`terminal-notifier`, shelled out, with an OSC 9 fallback
+# when it is not on `PATH`) instead of `notify-rust`'s macOS backend: `notify-rust` builds on
+# macOS, but its notification center backend needs a real `.app` bundle identity to reliably show
+# a banner, which a bare `cargo build`-produced CLI binary does not have — exactly the gap
+# `terminal-notifier` (itself a tiny signed `.app`, invoked as a CLI) exists to paper over. See
+# `docs/decisions/D-007-desktop-notifications.md`.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+notify-rust = "4"
+
+[dev-dependencies]
+tempfile = { workspace = true }
