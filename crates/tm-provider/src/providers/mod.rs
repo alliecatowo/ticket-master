@@ -40,6 +40,7 @@ use crate::types::ProviderError;
 
 pub mod cloud;
 pub mod cloudflare;
+pub mod codex_chatgpt;
 pub mod compat;
 pub mod fast;
 pub mod frontier;

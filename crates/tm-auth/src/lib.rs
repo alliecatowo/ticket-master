@@ -22,6 +22,11 @@
 //!   macOS Keychain integration itself is a documented follow-up rather than guessed at here.
 //! - [`DeviceCodeOAuth`]: OAuth 2.0 device authorization grant (RFC 8628) with refresh, built on
 //!   `reqwest` (already a workspace dependency) rather than a dedicated OAuth crate.
+//! - [`CodexSubscriptionOAuth`]: reads the real, already-authenticated OpenAI Codex CLI's stored
+//!   ChatGPT-subscription session (`$CODEX_HOME/auth.json`) instead of running its own OAuth
+//!   flow — the one adapter here that resolves a credential another program produced. See its
+//!   module docs for what the resulting token is actually valid against and
+//!   `docs/decisions/D-015-codex-chatgpt-session-auth-adapter.md` for the full investigation.
 //! - [`Entitlement`] / [`QuotaClass`]: what an adapter reports itself entitled to, so the fabric
 //!   can route on subscription-vs-metered capacity per §28.2/§31.1.
 //! - [`redact`]: a distinct, complementary guarantee to [`Credential`]'s -- scans *arbitrary*
@@ -30,6 +35,7 @@
 //!   the full split between the pure/persistence-path redactor and [`SessionRedactor`]'s
 //!   in-memory-only local restore.
 
+mod codex_subscription;
 mod credential;
 mod device_code;
 mod entitlement;
@@ -38,6 +44,9 @@ mod error;
 mod keychain;
 pub mod redact;
 
+pub use codex_subscription::{
+    default_codex_home, CodexSubscriptionOAuth, CODEX_CLIENT_ID, CODEX_TOKEN_ENDPOINT,
+};
 pub use credential::Credential;
 pub use device_code::{
     DeviceAuthorizationResponse, DeviceCodeConfig, DeviceCodeOAuth, InMemoryTokenStore,

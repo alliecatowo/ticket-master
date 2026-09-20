@@ -430,7 +430,10 @@ impl DeviceCodeOAuth {
 /// in-flight work" failure `SPEC.md` §28.2 says an auth adapter must not produce. Pure (no I/O,
 /// no clock read beyond the `now` it's handed), so it's unit-testable without a mocked server —
 /// [`DeviceCodeOAuth::refresh`] itself can't be, since it makes a real HTTP call.
-fn tokens_from_refresh(
+///
+/// `pub(crate)` (not private) so `crate::codex_subscription::CodexSubscriptionOAuth::refresh` can
+/// reuse the exact same RFC 6749 §6 merge logic instead of re-deriving it.
+pub(crate) fn tokens_from_refresh(
     prior_refresh: Option<&str>,
     outcome: PollOutcome,
     status: u16,

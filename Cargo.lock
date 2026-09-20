@@ -3810,6 +3810,7 @@ dependencies = [
  "tm-events",
  "tm-types",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
