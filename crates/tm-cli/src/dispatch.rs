@@ -182,7 +182,7 @@ fn optional_acp_executor(
     Ok(Some((parsed.agent.role, executor)))
 }
 
-/// The human-authored approval policy (`SPEC.md` §4.4), per `docs/decisions/D-008-oversight-policy-wiring.md`.
+/// The human-authored approval policy (`SPEC.md` §4.4), per `docs/decisions/D-009-oversight-policy-wiring.md`.
 const OVERSIGHT_TOML_FILENAME: &str = "oversight.toml";
 
 /// Load and parse `project.root`'s `oversight.toml`, or [`Oversight::default`] — identical to
@@ -358,7 +358,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------------------------
-    // `oversight.toml` (`docs/decisions/D-008-oversight-policy-wiring.md`): the regression-safe
+    // `oversight.toml` (`docs/decisions/D-009-oversight-policy-wiring.md`): the regression-safe
     // default when absent, and real parsing when present — mirroring `optional_acp_executor`'s
     // tests immediately above, since `load_oversight` follows the same loader shape.
     // -----------------------------------------------------------------------------------------

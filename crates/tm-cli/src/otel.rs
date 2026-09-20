@@ -1,4 +1,4 @@
-//! OpenTelemetry span export (D-008), compiled in only behind the `otel` Cargo feature and,
+//! OpenTelemetry span export (D-010), compiled in only behind the `otel` Cargo feature and,
 //! even then, only active when [`TM_OTEL_ENDPOINT_VAR`] is set at process start. This module
 //! never changes what gets traced -- it adds an OTLP export layer alongside `main.rs`'s existing
 //! stderr `fmt` layer, on the same `tracing` call sites the rest of the workspace already has, so
@@ -10,7 +10,7 @@
 //! bare event with no enclosing span outright. As of this writing this workspace has zero
 //! `#[instrument]` or `*_span!` call sites (`rg '#\[instrument|_span!\('  crates/` -- every
 //! `tracing::info!`/`debug!`/`warn!`/`error!` call in the tree is a bare event), so with this
-//! feature on against a live collector, a `tm` invocation exports nothing yet. See D-008's "What
+//! feature on against a live collector, a `tm` invocation exports nothing yet. See D-010's "What
 //! this costs" for why that's a deliberate, separate follow-up rather than folded into this
 //! change: this module's job is the export plumbing being correct and inert-until-opted-in: what
 //! it carries is downstream instrumentation work. The stderr `fmt` layer is unaffected either way
@@ -182,7 +182,7 @@ mod tests {
     }
 
     /// Directly checks the "otherwise ... byte-for-byte identical" claim `install_tracing`'s doc
-    /// comment and D-008 both make: that adding the OTel layer alongside the stderr `fmt` layer
+    /// comment and D-010 both make: that adding the OTel layer alongside the stderr `fmt` layer
     /// (`install`'s composition) does not change what that `fmt` layer prints, compared to
     /// `main.rs`'s original stand-alone `tracing_subscriber::fmt()` builder for the *same*
     /// events. Both sides disable ANSI and timestamps (`.with_ansi(false)`/`.without_time()`) --
