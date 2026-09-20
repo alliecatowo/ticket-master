@@ -103,7 +103,9 @@ impl<'a> Drop for Tx<'a> {
     }
 }
 
-/// The append-only, hash-chained event log for one project's `.tm/project.db`.
+/// The append-only, hash-chained event log for one project's `project.db`, wherever its state
+/// directory lives (`<root>/.tm` in repo scope, `$TM_HOME/projects/<key>/` in global scope --
+/// see D-003).
 ///
 /// Cheap to clone-by-reference (wrap in `Arc` at the call site); internally, writers serialize
 /// through `write`'s mutex while reads open independent connections that run concurrently under

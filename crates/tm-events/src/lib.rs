@@ -1,7 +1,9 @@
 //! The event log: the single source of durable truth for a Ticketmaster project.
 //!
 //! Everything else in Ticketmaster — project state, indexes, docs — is a materialized view
-//! derived by replaying this log. It lives in SQLite at `<project>/.tm/project.db`, opened in
+//! derived by replaying this log. It lives in SQLite at `project.db` under the project's state
+//! directory (`<project>/.tm/project.db` in repo scope, `$TM_HOME/projects/<key>/project.db` in
+//! global scope -- see `docs/decisions/D-003-project-scope.md`), opened in
 //! WAL mode: one serialized write connection plus any number of concurrent read connections
 //! (`schema.rs`). Events are append-only, enforced by SQLite triggers that `RAISE` on
 //! `UPDATE`/`DELETE`, not just by application convention (`schema.rs`). Each event's `hash`
