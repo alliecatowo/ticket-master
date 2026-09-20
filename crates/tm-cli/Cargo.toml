@@ -15,6 +15,7 @@ tm-types = { workspace = true }
 tm-core = { workspace = true }
 tm-events = { workspace = true }
 tm-auth = { workspace = true }
+tm-acp = { workspace = true }
 async-trait = { workspace = true }
 tm-scheduler = { workspace = true }
 tm-provider = { workspace = true }

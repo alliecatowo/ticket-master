@@ -28,6 +28,7 @@ tm-tui = { path = "crates/tm-tui" }
 tm-pty = { path = "crates/tm-pty" }
 tm-templates = { path = "crates/tm-templates" }
 tm-auth = { path = "crates/tm-auth" }
+tm-acp = { path = "crates/tm-acp" }
 tm-wiki = { path = "crates/tm-wiki" }
 
 anyhow = "1"
