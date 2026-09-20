@@ -67,7 +67,7 @@ dirs = { workspace = true }
 crossterm = { workspace = true }
 ratatui-core = { workspace = true }
 
-# Behind the `otel` feature only (D-008: OpenTelemetry tracing export) -- not workspace deps
+# Behind the `otel` feature only (D-010: OpenTelemetry tracing export) -- not workspace deps
 # since nothing else in the tree touches OpenTelemetry. Pinned to the mutually-compatible line as
 # of 2026-09-20: tracing-opentelemetry 0.33.x depends on opentelemetry ^0.32 (its own 0.33 line
 # pairs with the *next* tracing-opentelemetry release, not yet out), so opentelemetry/
@@ -87,7 +87,7 @@ tracing-opentelemetry = { version = "0.33", default-features = false, optional =
 
 [features]
 default = []
-# OpenTelemetry span export (D-008), off by default: `install_tracing` only adds the OTLP layer
+# OpenTelemetry span export (D-010), off by default: `install_tracing` only adds the OTLP layer
 # when this feature is compiled in AND `TM_OTEL_ENDPOINT` is set at runtime. Enable with
 # `cargo build -p tm-cli --features otel`.
 otel = [

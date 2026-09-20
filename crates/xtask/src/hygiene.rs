@@ -5,6 +5,7 @@
 //! of `file:line: message` violation strings. An empty vec means the check
 //! passed.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,7 @@ pub fn run_all(root: &Path) -> Vec<String> {
     out.extend(check_unwrap_expect(root));
     out.extend(check_crate_descriptions(root));
     out.extend(check_dot_tm_literals(root));
+    out.extend(check_decision_doc_references(root));
     out
 }
 
@@ -463,6 +465,269 @@ pub fn check_dot_tm_literals(root: &Path) -> Vec<String> {
     violations
 }
 
+/// Every decision number that has a real `docs/decisions/D-NNN-*.md` file, as the zero-padded
+/// 3-digit number alone (`"008"`, `"014"`) — matching just the `D-NNN` prefix, since the rest of
+/// the filename (the slug) varies and this check only needs to know the *number* is real, not
+/// that a caller spelled the slug correctly (see [`check_decision_doc_references`]'s "Scope and
+/// why it's shaped this way" for the gap that leaves open).
+fn existing_decision_numbers(decisions_dir: &Path) -> HashSet<String> {
+    let mut numbers = HashSet::new();
+    let Ok(entries) = fs::read_dir(decisions_dir) else {
+        return numbers;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if let Some(rest) = name.strip_prefix("D-") {
+            let digits: String = rest.chars().take(3).collect();
+            if digits.len() == 3 && digits.bytes().all(|b| b.is_ascii_digit()) {
+                numbers.insert(digits);
+            }
+        }
+    }
+    numbers
+}
+
+/// True for an ASCII letter, digit, or underscore — the "this position is part of a longer word"
+/// test [`decision_id_tokens_in_line`] uses on both sides of a candidate `D-NNN` match.
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Every `D-NNN` token in `line`: exactly `D-` followed by 3 ASCII digits, not part of a longer
+/// digit run (so `D-000000000001`, a `DecisionId` fixture value elsewhere in this workspace, is
+/// not misread as containing `D-000`) and not immediately preceded by a letter, digit, or
+/// underscore (so a hypothetical `WEIRD-001` doesn't misread as `D-001`).
+///
+/// Hand-rolled rather than pulling in the `regex` crate, matching `drift.rs`'s own
+/// `contains_standalone_number`. Byte-indexed scanning of a `&str` is safe here even though the
+/// line may contain multi-byte UTF-8 (this repo's prose uses em-dashes freely): a UTF-8
+/// continuation byte always has its high bit set, so it can never equal the ASCII byte values
+/// (`b'D'`, `b'-'`, an ASCII digit) this loop compares against — meaning every position where a
+/// comparison succeeds is necessarily already a real `char` boundary, and slicing 5 bytes forward
+/// from `D` through 3 confirmed-ASCII digits always lands on another one.
+fn decision_id_tokens_in_line(line: &str) -> Vec<String> {
+    let bytes = line.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 5 <= bytes.len() {
+        if bytes[i] == b'D' && bytes[i + 1] == b'-' {
+            let before_ok = i == 0 || !is_word_byte(bytes[i - 1]);
+            let digits_ok = bytes[i + 2..i + 5].iter().all(u8::is_ascii_digit);
+            if before_ok && digits_ok {
+                let after_ok = i + 5 >= bytes.len() || !bytes[i + 5].is_ascii_digit();
+                if after_ok {
+                    out.push(line[i..i + 5].to_string());
+                    i += 5;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// `SPEC.md`, `CLAUDE.md`, and every `.md` file under `docs/` except `docs/wiki/**` — generated
+/// output (`tm wiki generate`, `SPEC.md` §26/B-14), not authored content, regenerated wholesale on
+/// its own cadence from live project state rather than hand-maintained. A stale cross-reference
+/// there is a generator-input problem (or an as-yet-unregenerated page), not this check's problem;
+/// see `CLAUDE.md`'s "Navigation" section for the same distinction stated for humans.
+fn doc_files_to_scan(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for top in ["SPEC.md", "CLAUDE.md"] {
+        let p = root.join(top);
+        if p.exists() {
+            files.push(p);
+        }
+    }
+    let docs_dir = root.join("docs");
+    if docs_dir.exists() {
+        for entry in WalkBuilder::new(&docs_dir).hidden(false).build() {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if relative.starts_with("docs/wiki/") {
+                continue;
+            }
+            files.push(path.to_path_buf());
+        }
+    }
+    files
+}
+
+/// Files where a `D-NNN`-shaped token with no matching `docs/decisions/D-NNN-*.md` file is a
+/// known, deliberate illustrative example, not a broken cross-reference — keyed by
+/// `(repo-root-relative path, exact token)`.
+///
+/// This codebase's own domain model has a *second*, unrelated `DecisionId` type
+/// (`crates/tm-types/src/id.rs`'s `IdKind::Decision`: prefix `D-`, 3-digit padding) for a
+/// `Store`-backed ticket-decision entity that has nothing to do with an architecture decision
+/// record under `docs/decisions/` — the two collide in string shape, not by design (see
+/// `docs/backlog.md`'s "Open decision: `docs/decisions/*.md` vs. `tm-wiki`'s `Decision` model",
+/// which names this exact ambiguity as unresolved). [`TestRegionTracker`] already keeps every
+/// quoted `DecisionId` fixture value out of this check's `.rs` scan — as of this check being
+/// written, `DecisionId::new("D-001")`-shaped construction only appears in `#[cfg(test)]` code
+/// across this workspace. The five entries below are the sole exceptions found outside test
+/// regions, and all five illustrate the identical `derived_from` free-text shape: `SPEC.md` §9's
+/// `derived_from = [..., "D-019", "D-027", ...]` worked example, echoed by §2.1's ID-format table
+/// and §26.3's wiki-staleness example using the same two sample values; `docs/backlog.md` quoting
+/// `SPEC.md`'s own `D-027` example back in its retelling; and `crates/tm-docs/src/provenance.rs`'s
+/// module doc comment (production code, not a test) illustrating the same shape with the same two
+/// ids. Confirmed by exhaustively scanning this workspace's current `D-\d{3}` occurrences before
+/// picking this design: these five are the *only* ones outside test regions with no real matching
+/// file.
+const DECISION_ID_EXAMPLE_ALLOWLIST: &[(&str, &str)] = &[
+    ("SPEC.md", "D-019"),
+    ("SPEC.md", "D-027"),
+    ("docs/backlog.md", "D-027"),
+    ("crates/tm-docs/src/provenance.rs", "D-019"),
+    ("crates/tm-docs/src/provenance.rs", "D-027"),
+];
+
+/// Appends one violation per `D-NNN` token in `text` that resolves to neither a real decision
+/// number nor an allowlisted illustrative example.
+fn record_decision_ref_violations(
+    path: &Path,
+    relative: &str,
+    line_no: usize,
+    text: &str,
+    real_numbers: &HashSet<String>,
+    violations: &mut Vec<String>,
+) {
+    for token in decision_id_tokens_in_line(text) {
+        let number = &token[2..5];
+        if real_numbers.contains(number) {
+            continue;
+        }
+        if DECISION_ID_EXAMPLE_ALLOWLIST
+            .iter()
+            .any(|(f, t)| *f == relative && *t == token)
+        {
+            continue;
+        }
+        violations.push(format!(
+            "{}:{}: reference to `{token}` but no docs/decisions/{token}-*.md file exists — \
+             renamed/renumbered without updating this cross-reference, or a typo? If this is a \
+             deliberate illustrative example rather than a document cross-reference, add it to \
+             DECISION_ID_EXAMPLE_ALLOWLIST in crates/xtask/src/hygiene.rs with a doc comment \
+             explaining why, rather than working around this check",
+            path.display(),
+            line_no
+        ));
+    }
+}
+
+/// (f) Every `D-NNN` reference — in Rust source (outside test regions) under `crates/*/src` and
+/// `crates/*/tests`, and in `SPEC.md`/`CLAUDE.md`/`docs/**.md` (excluding the generated
+/// `docs/wiki/`) — must have a matching `docs/decisions/D-NNN-*.md` file.
+///
+/// # Why this exists
+///
+/// A real, repeated incident this session: parallel background-agent tracks, each in its own git
+/// worktree, independently picked "the next free `docs/decisions/D-NNN-*.md` number" by listing
+/// their own worktree's directory — blind to a sibling track building concurrently in a different
+/// worktree. Five real collisions resulted (D-004, D-008 ×2, D-010 ×2, D-012), each requiring a
+/// human/orchestrator to renumber a file by hand and grep-and-fix every cross-reference across the
+/// tree — and that manual grep-and-fix step itself missed five bare `D-008` mentions in source
+/// comments (`crates/tm-cli/src/dispatch.rs`, `crates/tm-cli/src/otel.rs`), caught only later, by
+/// luck, during an unrelated wiki-regeneration spot-check. This check makes that mechanical: a
+/// reference to a decision number with no matching file on disk is flagged the same way any other
+/// structural-correctness hygiene violation is, rather than relying on someone remembering to
+/// grep for it by hand.
+///
+/// # Scope and why it's shaped this way
+///
+/// Matches just the `D-NNN` *number* against `docs/decisions/`'s real file list, not the full
+/// slug — a bare `D-008`, or even a full `docs/decisions/D-008-wrong-slug.md` path naming the
+/// wrong topic, is not flagged as long as *some* `D-008-*.md` file exists, since verifying the
+/// slug text matches the author's intent would need understanding what the reference is about,
+/// not just whether the number is real. That is a real, known gap: this check alone would not
+/// catch `docs/decisions/D-008-opentelemetry-tracing.md` naming the wrong topic (the real
+/// OpenTelemetry decision is `D-010`; `D-008` is `ticket-checkpoint-fork`) as long as `D-008`
+/// resolves to *some* file. It is deliberately narrow and mechanical, matching the brief this
+/// check was written against: "does this number that's referenced actually exist as a real
+/// decision doc" — no more.
+///
+/// `.rs` scanning skips test regions via [`TestRegionTracker`], the same one-way latch every other
+/// check in this file already uses. Closer to `check_dot_tm_literals`'s reasoning than the
+/// determinism/mutation checks' (a test fixture constructing a domain value by hand is not the
+/// thing being checked for, rather than "the test must issue the forbidden operation to prove it's
+/// forbidden"): a `DecisionId::new("D-001")`-shaped fixture value in a test asserting the ID
+/// parser's behavior is not a cross-reference to a decision *document*, and every current instance
+/// of that shape in this workspace lives in test code — see [`DECISION_ID_EXAMPLE_ALLOWLIST`]'s
+/// doc comment for the (small, enumerated) exceptions outside test regions. `SPEC.md`/
+/// `CLAUDE.md`/`docs/**.md` have no test-region concept and are scanned in full.
+pub fn check_decision_doc_references(root: &Path) -> Vec<String> {
+    let real_numbers = existing_decision_numbers(&root.join("docs/decisions"));
+    let mut violations = Vec::new();
+
+    let crates_dir = root.join("crates");
+    if let Ok(entries) = fs::read_dir(&crates_dir) {
+        for entry in entries.flatten() {
+            if entry.file_name() == "xtask" {
+                continue;
+            }
+            let crate_dir = entry.path();
+            for sub in ["src", "tests"] {
+                let dir = crate_dir.join(sub);
+                walk_rs_files(&dir, |path, contents| {
+                    let relative = path
+                        .strip_prefix(root)
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    let mut tracker = TestRegionTracker::new(path);
+                    for (i, line) in contents.lines().enumerate() {
+                        tracker.observe(line);
+                        if tracker.in_test() {
+                            continue;
+                        }
+                        record_decision_ref_violations(
+                            path,
+                            &relative,
+                            i + 1,
+                            line,
+                            &real_numbers,
+                            &mut violations,
+                        );
+                    }
+                });
+            }
+        }
+    }
+
+    for doc_path in doc_files_to_scan(root) {
+        let Ok(contents) = fs::read_to_string(&doc_path) else {
+            continue;
+        };
+        let relative = doc_path
+            .strip_prefix(root)
+            .unwrap_or(&doc_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (i, line) in contents.lines().enumerate() {
+            record_decision_ref_violations(
+                &doc_path,
+                &relative,
+                i + 1,
+                line,
+                &real_numbers,
+                &mut violations,
+            );
+        }
+    }
+
+    violations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,5 +998,124 @@ mod tests {
             "// state lives under \".tm\" in repo scope, see D-003\nfn scratch_ext() -> &'static str { \".tmp\" }\n",
         );
         assert!(check_dot_tm_literals(&root).is_empty());
+    }
+
+    #[test]
+    fn decision_doc_references_flags_the_real_d008_incident_shape() {
+        // Reproduces the exact real failure this check exists for: a source comment references a
+        // decision number that got renumbered elsewhere without this cross-reference following
+        // it. `docs/decisions/` here only has D-009 (the renamed target), not D-008.
+        let root = temp_root();
+        write(
+            &root.join("docs/decisions/D-009-oversight-policy-wiring.md"),
+            "# D-009 — oversight.toml\n",
+        );
+        write(
+            &root.join("crates/tm-cli/src/dispatch.rs"),
+            "/// The human-authored approval policy, per docs/decisions/D-008-oversight-policy-wiring.md.\nfn f() {}\n",
+        );
+        let violations = check_decision_doc_references(&root);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("crates/tm-cli/src/dispatch.rs:1"));
+        assert!(violations[0].contains("D-008"));
+    }
+
+    #[test]
+    fn decision_doc_references_allows_a_reference_with_a_matching_file() {
+        let root = temp_root();
+        write(
+            &root.join("docs/decisions/D-003-project-scope.md"),
+            "# D-003 — Project scope\n",
+        );
+        write(
+            &root.join("crates/tm-cli/src/project.rs"),
+            "// see docs/decisions/D-003-project-scope.md for the resolution order\nfn f() {}\n",
+        );
+        assert!(check_decision_doc_references(&root).is_empty());
+    }
+
+    #[test]
+    fn decision_doc_references_ignores_decisionid_fixtures_in_test_regions() {
+        // `DecisionId::new("D-999")`-shaped fixtures in tests are exercising the *domain* id
+        // parser (`crates/tm-types/src/id.rs`'s `IdKind::Decision`), not referencing a decision
+        // *document* — this must not be flagged even though no D-999 decision doc exists.
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-types/src/id.rs"),
+            "pub struct DecisionId;\n\n#[cfg(test)]\nmod tests {\n    use super::*;\n    #[test]\n    fn parses() {\n        assert_eq!(DecisionId::new(\"D-999\").unwrap().number(), Some(999));\n    }\n}\n",
+        );
+        assert!(check_decision_doc_references(&root).is_empty());
+    }
+
+    #[test]
+    fn decision_doc_references_flags_a_stale_reference_in_markdown_docs() {
+        let root = temp_root();
+        write(
+            &root.join("CLAUDE.md"),
+            "See docs/decisions/D-999-nonexistent.md for details.\n",
+        );
+        let violations = check_decision_doc_references(&root);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].contains("CLAUDE.md:1"));
+    }
+
+    #[test]
+    fn decision_doc_references_allows_the_documented_illustrative_examples() {
+        // SPEC.md's own ID-format table and `derived_from` worked example use D-019/D-027 as
+        // sample values for the unrelated `DecisionId` domain type, not as cross-references —
+        // see DECISION_ID_EXAMPLE_ALLOWLIST's doc comment.
+        let root = temp_root();
+        write(
+            &root.join("SPEC.md"),
+            "| Decision | `D-<n>` | `D-019` |\n\nderived_from = [\"crates/tm-core/src/**\", \"D-019\", \"D-027\"]\n",
+        );
+        assert!(check_decision_doc_references(&root).is_empty());
+    }
+
+    #[test]
+    fn decision_doc_references_skips_generated_wiki_docs() {
+        let root = temp_root();
+        write(
+            &root.join("docs/wiki/decisions.md"),
+            "Stale reference to D-999 here, but this page is generated output.\n",
+        );
+        assert!(check_decision_doc_references(&root).is_empty());
+    }
+
+    #[test]
+    fn decision_doc_references_scans_crate_tests_dirs_too() {
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-cli/tests/integration.rs"),
+            "// exercises the flow docs/decisions/D-999-nonexistent.md describes\nfn f() {}\n",
+        );
+        let violations = check_decision_doc_references(&root);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+    }
+
+    #[test]
+    fn decision_doc_references_allows_its_own_self_titled_file() {
+        // A decision doc's own title line (`# D-005 — ...`) is itself a `D-NNN` match, but it
+        // trivially resolves since the file it's found in is the match — no special-casing
+        // needed, it falls out of `existing_decision_numbers` reading the same directory.
+        let root = temp_root();
+        write(
+            &root.join("docs/decisions/D-005-devpass-default-provider.md"),
+            "# D-005 — DevPass as the default provider\n",
+        );
+        assert!(check_decision_doc_references(&root).is_empty());
+    }
+
+    #[test]
+    fn decision_id_tokens_in_line_respects_digit_run_and_word_boundaries() {
+        // "D-000000000001" is a real `DecisionId` fixture shape elsewhere in this workspace
+        // (`crates/tm-genesis/src/stages.rs`) and must not be misread as containing `D-000`; a
+        // hypothetical "WEIRD-001" must not be misread as `D-001` either.
+        assert!(decision_id_tokens_in_line("D-000000000001").is_empty());
+        assert!(decision_id_tokens_in_line("see WEIRD-001 over there").is_empty());
+        assert_eq!(
+            decision_id_tokens_in_line("(D-014) and D-008."),
+            vec!["D-014".to_string(), "D-008".to_string()]
+        );
     }
 }

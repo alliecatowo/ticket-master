@@ -12,15 +12,24 @@ never drift between sessions:
 - `mise run test` — `cargo test --workspace`.
 - `mise run test:crate -- <crate>` — one crate's tests.
 - `mise run test:otel` — clippy + test `tm-cli`'s opt-in OpenTelemetry export path
-  (`--features otel`, D-008). **Not** part of `verify`: enabling `otel` compiles a second full
-  `reqwest`/HTTP-client stack (`docs/decisions/D-008-opentelemetry-tracing.md`'s costs section),
+  (`--features otel`, D-010). **Not** part of `verify`: enabling `otel` compiles a second full
+  `reqwest`/HTTP-client stack (`docs/decisions/D-010-opentelemetry-tracing.md`'s costs section),
   and this machine's `-j 2`/disk constraints mean `verify` shouldn't grow a second dependency tree
   by default. Run this by hand after touching `crates/tm-cli/src/otel.rs`, `main.rs`'s
   `install_tracing`, or the `otel` feature's dependency pins in `crates/tm-cli/Cargo.toml`.
 - `mise run clippy` — workspace lint, `-D warnings`, matching CI.
 - `mise run fmt` — apply rustfmt everywhere (`cargo xtask fmt`).
 - `mise run hygiene` — the fast standalone hygiene scan (non-determinism, unwrap/expect,
-  network-in-tests, stray `.tm` literals — see `crates/xtask/src/hygiene.rs`).
+  network-in-tests, stray `.tm` literals, dangling `D-NNN` decision-doc cross-references — see
+  `crates/xtask/src/hygiene.rs`). The last of these catches a real, repeated failure mode: a
+  source comment or doc mentions `docs/decisions/D-NNN-*.md` (or bare `D-NNN`) for a number that
+  was renamed/renumbered elsewhere (see "Parallel tracks against a moving `main`" below) without
+  this cross-reference following it. It only checks that the *number* resolves to some real file
+  in `docs/decisions/` (not that the full slug matches the topic), and treats
+  `crates/xtask/src/hygiene.rs`'s `DECISION_ID_EXAMPLE_ALLOWLIST` as the escape hatch for the
+  handful of places (`SPEC.md`'s own ID-format table, mainly) that use a `D-NNN`-shaped string as
+  an illustrative example of the *other*, unrelated `DecisionId` domain type rather than as a
+  cross-reference — see that check's own doc comment for the full reasoning.
 - `mise run verify` — the full gate (fmt check + clippy + `cargo test --workspace` + hygiene).
   **Run this before considering any change done**, not just a crate-scoped test pass.
 - `mise run check-drift -- <sha>` — advisory, post-merge only, **not** part of `verify`: flags an
