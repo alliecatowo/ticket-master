@@ -446,9 +446,13 @@ pub fn check_dot_tm_literals(root: &Path) -> Vec<String> {
                 if code.contains("\".tm\"") {
                     violations.push(format!(
                         "{}:{}: hardcoded `.tm` literal outside the sanctioned D-003 resolution \
-                         path -- use an already-opened Project's `state_dir` (or an \
-                         `_at`-suffixed constructor) instead of joining `.tm` directly; see \
-                         docs/decisions/D-003-project-scope.md",
+                         path — use an already-opened Project's `state_dir` (or an \
+                         `_at`-suffixed constructor) instead of joining `.tm` directly (see \
+                         docs/decisions/D-003-project-scope.md); if this call site is itself a \
+                         sanctioned exception (a new back-compat shim alongside the ones \
+                         tm-core/tm-codeintel already have), add its file to \
+                         DOT_TM_LITERAL_ALLOWLIST in crates/xtask/src/hygiene.rs with a doc \
+                         comment explaining why, rather than working around this check",
                         path.display(),
                         i + 1
                     ));
@@ -708,7 +712,7 @@ mod tests {
     #[test]
     fn dot_tm_literal_ignores_test_regions_in_non_allowlisted_files() {
         // Fixtures across the workspace legitimately open a `.tm` dir by hand to drive the
-        // sanctioned shims under test -- flagging every one would be noise, not triage, the same
+        // sanctioned shims under test — flagging every one would be noise, not triage, the same
         // reasoning every other check in this file already applies via `TestRegionTracker`.
         let root = temp_root();
         write(
