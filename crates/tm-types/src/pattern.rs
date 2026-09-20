@@ -46,11 +46,53 @@ impl PathPattern {
         &self.0[..end]
     }
 
+    /// The distinct segment-lists this pattern's *compiled matcher* actually accepts a path
+    /// against.
+    ///
+    /// This has to mirror [`PatternSet::compiled`] exactly, not just [`PathPattern::segments`]:
+    /// a pattern ending in a trailing `**` component also matches its own bare prefix directly
+    /// (`src/**` covers a path literally named `src`, not just paths nested under `src/`) —
+    /// `compiled` implements that with a second, separately-registered glob for the pattern's
+    /// *source string* with one trailing `/**` stripped, applied once, not recursively (so
+    /// `src/**/**` gets the stripped form `src/**`, which itself does NOT further strip to
+    /// `src`). Any structural containment check has to reason about every disjunct a pattern's
+    /// real matcher accepts, or it can credit a pattern with covering more, or less, than it
+    /// really does.
+    ///
+    /// The gate below matches `compiled`'s own string-level `strip_suffix("/**")` exactly,
+    /// rather than slicing [`PathPattern::segments`] (which would be a *different*, unsound
+    /// operation): `segments` filters out empty components, so `segments("src//**")` and
+    /// `segments("src/**")` collapse to the same value even though `compiled` only registers a
+    /// bare-prefix matcher for the latter (`"src//**".strip_suffix("/**")` is `Some("src/")`,
+    /// and `compile_glob("src/")` does not match bare `"src"` — confirmed directly against
+    /// `globset` — while `segments("src/") == segments("src")` would wrongly suggest it does).
+    /// A pattern whose stripped prefix contains a leading, trailing, or doubled `/` is treated
+    /// conservatively as having no extra disjunct at all, rather than guessing at one.
+    fn match_disjuncts(&self) -> Vec<Vec<&str>> {
+        let full = self.segments();
+        match self.0.strip_suffix("/**") {
+            Some(stripped)
+                if !stripped.is_empty() && stripped.split('/').all(|s| !s.is_empty()) =>
+            {
+                vec![full, stripped.split('/').collect()]
+            }
+            _ => vec![full],
+        }
+    }
+
     /// True when every path this pattern matches is also matched by `other`.
     ///
-    /// Conservative: a `false` result means "not provably contained".
+    /// Conservative: a `false` result means "not provably contained". Checks every disjunct of
+    /// `self` (see [`PathPattern::match_disjuncts`]) against every disjunct of `other`, since a
+    /// path can reach `self` through either of its own disjuncts and has to be covered by
+    /// `other` regardless of which one.
     pub fn implied_by(&self, other: &PathPattern) -> bool {
-        segments_imply(&other.segments(), &self.segments())
+        self.match_disjuncts().iter().all(|dp| {
+            other
+                .match_disjuncts()
+                .iter()
+                .any(|dq| segments_imply(dq, dp))
+        })
     }
 
     /// True unless the two patterns are provably disjoint.
@@ -89,6 +131,21 @@ fn normalize(s: &str) -> String {
 }
 
 /// `q` implies `p`: every path matched by `p` is matched by `q`.
+///
+/// The `p.is_empty()` base case below (`q`'s remaining components are all `**`) is only sound
+/// when it is reached through `**`-driven absorption: a `**` genuinely can match zero further
+/// segments, so once `q` is nothing but `**`s and `p` has run out, there is nothing left to
+/// prove. It is NOT sound as a fallback for the plain (non-`**`) branch further down: matching a
+/// literal/`*`/`?` component of `q` against `p`'s *last* segment does not "open" a separator for
+/// any further `q` components — real, `?`/`*`, or `**` — to consume, because there is no more
+/// path content for them to correspond to. `globset` agrees: a compiled glob for `lit/**` does
+/// not match bare `lit`, which is exactly why [`PatternSet::compiled`] has to special-case
+/// stripping a trailing `/**` to also match the bare prefix for the *concrete-path* matcher. The
+/// old code let the plain branch recurse straight into this base case, so e.g. `q = ["*", "**",
+/// "**"]` (`*/**/**`) was structurally judged to imply `p = ["docs"]` — even though
+/// `PatternSet::matches` (real glob matching) confirms `*/**/**` does not match `"docs"`. The
+/// `pt.is_empty()` arm in the plain branch below closes that gap by requiring `q` to *also* be
+/// fully consumed at that point, rather than allowing a trailing `**`-only remainder through.
 fn segments_imply(q: &[&str], p: &[&str]) -> bool {
     if p.is_empty() {
         return q.iter().all(|s| *s == "**");
@@ -106,7 +163,17 @@ fn segments_imply(q: &[&str], p: &[&str]) -> bool {
         // A bounded pattern cannot cover an unbounded one.
         return false;
     }
-    segment_implies(qh.as_bytes(), ph.as_bytes()) && segments_imply(qt, pt)
+    if !segment_implies(qh.as_bytes(), ph.as_bytes()) {
+        return false;
+    }
+    if pt.is_empty() {
+        // `p` is exhausted right after this segment. Do NOT delegate to `segments_imply(qt,
+        // pt)`: that would hit the lenient `p.is_empty()` base case above and accept any
+        // leftover `**`-only `qt` as vacuously satisfied, which is exactly the unsound shortcut
+        // documented above. Require `q` to be exhausted too.
+        return qt.is_empty();
+    }
+    segments_imply(qt, pt)
 }
 
 /// Character-level implication inside one path segment.
@@ -325,6 +392,74 @@ mod tests {
         assert!(!set(&["../secrets"]).is_subset_of(&set(&["src/**"])));
     }
 
+    /// Regression for the bug caught by `tm-types`' `pattern_subset_is_matching_safe` proptest
+    /// (`crates/tm-types/tests/authority_laws.rs`): `is_subset_of` used to say `true` for cases
+    /// where a trailing, `**`-only remainder of `q` was left with nothing in `p` to correspond
+    /// to. `["docs"].is_subset_of(["*/**/**"])` was the minimal reproduction (seed
+    /// `cc96bc2cd4db31202b9de2cfe2c4d4bafc588bd3a9755afc655ac62a7c5b7500e2`): `"docs"` matches
+    /// `p`, and `"*/**/**"` — which requires an actual path separator that a bare one-segment
+    /// path does not have — does not match `"docs"`, so the subset claim was false.
+    #[test]
+    fn subset_does_not_vacuously_absorb_a_trailing_double_star() {
+        // The exact reported false positive.
+        assert!(!set(&["docs"]).is_subset_of(&set(&["*/**/**"])));
+        // Same shape with a literal (not `*`) leading component, and with only one trailing
+        // `**` instead of two remaining after the strippable one (see
+        // `subset_respects_the_trailing_double_star_bare_prefix_disjunct` below for why
+        // `["src"]).is_subset_of(["src/**"])` is legitimately `true`, not this shape).
+        assert!(!set(&["src"]).is_subset_of(&set(&["src/**/**"])));
+        // A `**` sandwiched between two real components that both have matching content in `p`
+        // still legitimately absorbs zero segments -- this must keep working.
+        assert!(set(&["a/b"]).is_subset_of(&set(&["a/**/b"])));
+        // A pattern that is *entirely* `**` still implies any path, short or long.
+        assert!(set(&["docs"]).is_subset_of(&set(&["**/**"])));
+    }
+
+    /// Regression for a second false-positive shape found by `exhaustive_differential` (an
+    /// exhaustive, not random, differential check against `PatternSet::matches`, below) while
+    /// validating the fix above: `PatternSet::compiled` special-
+    /// cases a pattern ending in `/**` to *also* match its own bare prefix named directly (so
+    /// `src/**` matches a path literally called `src`, per `matching_follows_glob_semantics`
+    /// above) -- but that special case is applied to the pattern's own source string exactly
+    /// once, not recursively, so `src/**/**` only reduces to `src/**` (which still needs a real
+    /// `/` in the path) and does NOT also match bare `src`. `implied_by`/`is_subset_of` has to
+    /// account for this real matcher asymmetry on *both* sides being compared
+    /// ([`PathPattern::match_disjuncts`]), not just structurally compare raw segment lists, or
+    /// it silently over- or under-claims containment whenever a trailing-`/**` pattern's bare-
+    /// prefix disjunct is involved.
+    #[test]
+    fn subset_respects_the_trailing_double_star_bare_prefix_disjunct() {
+        // `src/**` really does match bare `src` (the one-level-stripped hack), so it really is
+        // implied by an *identical* one-level-stripped bare pattern -- this must be `true`.
+        assert!(set(&["src"]).is_subset_of(&set(&["src/**"])));
+        assert!(set(&["docs"]).is_subset_of(&set(&["*/**"])));
+        // `src/**/**` only strips down to `src/**`, which does NOT also cover bare `src` -- the
+        // exhaustive check's originally-found false positive.
+        assert!(!set(&["src/**"]).is_subset_of(&set(&["src/**/**"])));
+        assert!(!set(&["src/**"]).is_subset_of(&set(&["*/**/**"])));
+        assert!(!set(&["*/**"]).is_subset_of(&set(&["*/**/**"])));
+    }
+
+    /// Regression for a third false-positive shape, caught by adversarial review of the
+    /// disjunct fix above rather than by any automated check: [`PathPattern::segments`] filters
+    /// out empty components, so it cannot distinguish a "clean" pattern from one with a
+    /// trailing or doubled `/` next to its final `**` -- but `PatternSet::compiled`'s own
+    /// `strip_suffix("/**")` gate very much can, and does not register a bare-prefix matcher
+    /// for either `"src/**/"` (does not end with the literal `"/**"`) or `"src//**"` (does, but
+    /// strips down to `"src/"`, and `compile_glob("src/")` -- confirmed directly -- does not
+    /// match bare `"src"` even though `segments("src/") == segments("src")`). A naive
+    /// disjunct built by slicing `segments()` would wrongly agree that `["src"]` is implied by
+    /// either pattern. `match_disjuncts` closes this by gating on the same string-level
+    /// `strip_suffix("/**")` check `compiled` uses, and additionally requiring the stripped
+    /// prefix to contain no empty `/`-separated component before trusting it as a disjunct.
+    #[test]
+    fn subset_does_not_trust_a_messy_stripped_prefix() {
+        assert!(!set(&["src"]).is_subset_of(&set(&["src/**/"])));
+        assert!(!set(&["src"]).is_subset_of(&set(&["src//**"])));
+        // The clean case must still work.
+        assert!(set(&["src"]).is_subset_of(&set(&["src/**"])));
+    }
+
     #[test]
     fn overlap_is_conservative_but_finds_disjointness() {
         assert!(set(&["src/auth/**"]).overlaps(&set(&["src/**"])));
@@ -356,5 +491,91 @@ mod tests {
     #[test]
     fn invalid_patterns_are_rejected() {
         assert!(PathPattern::new("src/[").is_err());
+    }
+}
+
+/// An exhaustive (not random) differential check of [`PathPattern::implied_by`]/
+/// [`PatternSet::is_subset_of`] against [`PatternSet::matches`] — the actual safety law
+/// `pattern_subset_is_matching_safe` in `crates/tm-types/tests/authority_laws.rs` checks with
+/// random sampling. This module exists because random sampling missed real bugs in practice:
+/// during development of the fix this module accompanies, ~22,000 random cases against the
+/// then-broken code found zero failures (the vulnerable pattern shapes are a narrow slice of
+/// the generator's space), while a deterministic, targeted repro found the bug immediately, and
+/// a full exhaustive sweep over this same bounded alphabet found a second, distinct false-
+/// positive shape random sampling had also missed. Exhaustive enumeration over a small alphabet
+/// is a strictly stronger check than random sampling over the same alphabet: it does not depend
+/// on luck to hit a narrow bug window.
+///
+/// Bounded to pattern/path length 2 here so it stays CI-fast (72 patterns × 72 patterns × 42
+/// paths). Length 3 (584 patterns × 584 patterns × 258 paths, ~88M triples, a few seconds in
+/// `--release`) was run by hand during development with zero violations post-fix and is not
+/// re-run automatically.
+#[cfg(test)]
+mod exhaustive_differential {
+    use super::*;
+
+    const ALPHABET: &[&str] = &[
+        "src", "tests", "docs", "auth", "parser", "mod.rs", "*", "**",
+    ];
+    const PATH_LITERALS: &[&str] = &["src", "tests", "docs", "auth", "parser", "mod.rs"];
+
+    fn strings_up_to(alphabet: &[&str], max_len: usize) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut frontier: Vec<String> = vec![String::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::new();
+            for prefix in &frontier {
+                for seg in alphabet {
+                    let s = if prefix.is_empty() {
+                        (*seg).to_string()
+                    } else {
+                        format!("{prefix}/{seg}")
+                    };
+                    out.push(s.clone());
+                    next.push(s);
+                }
+            }
+            frontier = next;
+        }
+        out
+    }
+
+    #[test]
+    fn exhaustive_no_false_positive_up_to_length_2() {
+        let patterns = strings_up_to(ALPHABET, 2);
+        let paths = strings_up_to(PATH_LITERALS, 2);
+
+        let path_patterns: Vec<PathPattern> = patterns
+            .iter()
+            .map(|s| PathPattern::new(s).unwrap())
+            .collect();
+
+        // Precompute p.matches(path) for every (pattern, path) pair once.
+        let match_matrix: Vec<Vec<bool>> = patterns
+            .iter()
+            .map(|p| {
+                let set = PatternSet::parse([p.clone()]).unwrap();
+                paths.iter().map(|path| set.matches(path)).collect()
+            })
+            .collect();
+
+        let mut violations: Vec<(String, String, String)> = Vec::new();
+        for (qi, q) in path_patterns.iter().enumerate() {
+            for (pi, p) in path_patterns.iter().enumerate() {
+                if !p.implied_by(q) {
+                    continue;
+                }
+                for (path_i, path) in paths.iter().enumerate() {
+                    if match_matrix[pi][path_i] && !match_matrix[qi][path_i] {
+                        violations.push((patterns[pi].clone(), patterns[qi].clone(), path.clone()));
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "is_subset_of lied for {} (pattern, pattern, path) triples: {violations:?}",
+            violations.len()
+        );
     }
 }
