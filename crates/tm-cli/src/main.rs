@@ -17,10 +17,14 @@ mod otel;
 
 /// Parse argv, dispatch, and translate the outcome into a process exit code.
 ///
-/// Install tracing first so `clap` errors print cleanly before running the command, route the
-/// parsed CLI to its execution module, and exit with the code the result maps to.
+/// Loads a `.env` file from the current directory first, if one exists, so provider credentials
+/// (`DEVPASS_API_KEY` and friends) don't need to be exported by hand every session -- see
+/// [`load_dotenv`]. Then installs tracing so `clap` errors print cleanly before running the
+/// command, routes the parsed CLI to its execution module, and exits with the code the result
+/// maps to.
 #[tokio::main]
 async fn main() {
+    load_dotenv();
     let tracing_guard = install_tracing();
 
     let cli = Cli::parse();
@@ -62,6 +66,20 @@ impl Drop for TracingGuard {
             }
         }
     }
+}
+
+/// Load a `.env` file from the current directory into this process's environment, if one exists.
+///
+/// Never overrides a variable already set in the real environment (`dotenvy::dotenv`'s own
+/// default) -- an explicit `export`/`env FOO=bar tm ...` always wins over `.env`, matching every
+/// other dotenv tool's convention. Looks only in the current directory, not upward through parent
+/// directories the way [`crate::project::locate`] walks for `.tm/` -- conflating the two search
+/// rules would make `.env` resolution as surprising as the `$HOME/.tm` collision D-003 exists to
+/// prevent, for a feature that is supposed to remove surprise, not add it. Absent file, a
+/// permission error, or malformed content are all silently ignored: `.env` support must never be
+/// the reason a real invocation (which has no need for one) fails to start.
+fn load_dotenv() {
+    let _ = dotenvy::dotenv();
 }
 
 /// Install the process-wide tracing subscriber.

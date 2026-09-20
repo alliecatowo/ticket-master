@@ -64,6 +64,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dirs = { workspace = true }
+dotenvy = { workspace = true }
 crossterm = { workspace = true }
 ratatui-core = { workspace = true }
 
