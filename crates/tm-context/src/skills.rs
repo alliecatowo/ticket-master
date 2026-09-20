@@ -38,9 +38,26 @@ pub struct SkillDoc {
     pub body: String,
 }
 
-/// Root-relative directory `.tm/skills/**` is discovered under. A single string literal (not a
-/// `.join(".tm")` chain) so this never trips the hygiene scan's D-003 `.tm`-literal check, which
-/// matches only the bare `".tm"` token.
+/// Directory `.tm/skills/**` is discovered under, relative to `root` — every function in this
+/// module takes `root` (a workspace root, `tm-cli::Project::root` or `CodeIntel::project_root`),
+/// never `state_dir` (`docs/decisions/D-003-project-scope.md`'s durable-state location, `<root>/
+/// .tm` in repo scope but `$TM_HOME/projects/<key>/` — outside the workspace entirely — in
+/// global scope). This is deliberate, not an oversight: a `SKILL.md` is workspace-authored
+/// config a human commits alongside their code, the same category as `AGENTS.md` and
+/// `hooks.toml` (both also resolved against `root`), not managed project state the way
+/// `index.db`/`project.db` are — and `CallContext` (this crate's `skill.load` caller's own input
+/// shape) carries `root`, not `state_dir`, so there is no state-dir-resolving alternative
+/// available at that call site anyway. The real cost: in global scope, `<root>/.tm` is a
+/// directory `tm` otherwise never creates or reads (state lives entirely under `$TM_HOME`
+/// instead), so `.tm/skills/**` there is a bare, disconnected directory a human has to know to
+/// create by hand next to a workspace `tm` isn't tracking state in at all — see
+/// `docs/decisions/D-012-hooks-agents-skills.md`'s "what this costs" for this stated plainly.
+///
+/// A single string literal (not a `.join(".tm")` chain) — this is not a workaround for the
+/// hygiene scan's D-003 `.tm`-literal check (that check exists to catch code that assumes the
+/// pre-D-003 "state always lives at `<root>/.tm`" shape; this module never reads or writes
+/// `state_dir` at all, so the check's concern does not apply here), it is simply how the literal
+/// is written.
 const SKILLS_ROOT: &str = ".tm/skills";
 
 /// How deep [`discover_skills`] will recurse under `.tm/skills/` before giving up — generous for

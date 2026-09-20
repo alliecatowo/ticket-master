@@ -155,8 +155,38 @@ directly, plus `UserPromptSubmit`/`SessionStart`/`Stop`.
 - **The SKILL.md frontmatter parser is not YAML.** A `SKILL.md` using anything beyond flat
   `key: value` scalars (nested maps, lists, multi-line strings) for `name`/`description` will not
   parse as intended — acceptable for two fields, not a general-purpose frontmatter reader.
-- **`AGENTS.md` discovery re-reads the filesystem on every `compile()` call** (once per claimed
-  path's ancestor chain), with no caching — consistent with every other section builder's "pure
-  function of `(ticket, view, ci)`" contract (`CodeIntel`'s own index is likewise consulted fresh
-  per call), but a project with many claimed paths sharing few ancestors pays a proportional
-  number of small `read_to_string` calls per pack compile.
+- **`AGENTS.md`/`.tm/skills/**` are a real, undeclared input to `compile()`'s determinism claim.**
+  `pack.rs`'s module doc comment previously said `compile` is byte-identical "given the same
+  `(ticket, view, codeintel-state, budget)`" — five inputs, all captured one way or another by
+  `ci`'s index or the explicit arguments. `build_conventions` reads `AGENTS.md`/`.tm/skills/**`
+  straight off disk, not through `ci`'s index, so editing either between two `compile` calls
+  changes the pack with none of those five inputs changing; both doc comments (`pack.rs`'s module
+  doc and `compile`'s own) now say so explicitly. Ordering within that content stays deterministic
+  (sorted skill paths, first-seen `AGENTS.md` dedup) — only the *input set* gained a filesystem
+  dependency, along with the same no-caching cost every `compile()` call already re-reads the
+  filesystem for (once per claimed path's ancestor chain; `CodeIntel`'s own index is likewise
+  consulted fresh per call).
+- **`.tm/skills/**` is a bare, disconnected directory in global scope.** `discover_skills`/
+  `load_skill` take `root` (a workspace root), never `state_dir`
+  (`docs/decisions/D-003-project-scope.md`) — deliberate, since a `SKILL.md` is workspace-authored
+  config like `AGENTS.md`/`hooks.toml`, not managed project state, and `CallContext` (the
+  `skill.load` tool's own input) carries `root`, not `state_dir`, anyway. In repo scope `<root>/
+  .tm` and `state_dir` are the same directory, so this distinction is invisible. In global scope
+  they are not: `state_dir` is `$TM_HOME/projects/<key>/`, entirely outside the workspace, so
+  `<root>/.tm` is a directory `tm` otherwise never creates or touches — a global-scope project's
+  `.tm/skills/**` is discoverable if a human creates it by hand, but disconnected from where that
+  project's actual state lives.
+- **The hook stdin envelope is unredacted.** `tool_envelope` writes a tool call's raw `input`
+  (e.g. `shell.run`'s literal `argv`) to a spawned hook process's stdin, with none of
+  `tm_auth::redact`'s secret-shaped-substring scrubbing the sibling commit on this branch added at
+  `Fabric::execute`/`compile`'s own boundaries. This is a deliberate, not accidental, gap: a
+  user-configured local hook already runs at the same trust level as `shell.run` itself (both are
+  argv a human's own `hooks.toml`/ticket authority chose to execute locally), and redacting the
+  envelope would break a hook that legitimately needs to inspect a real credential-shaped argument
+  (e.g. a policy hook checking which API key a command is about to use). Stated here so the next
+  reviewer doesn't have to re-derive it.
+- **`Stop` does not fire on every path out of `run_turn_streaming`.** The method's several early
+  `?`-propagating returns before `drive_turn_streaming` runs (ticket resolution, context
+  compilation, fabric construction) and the `UserPromptSubmit`-deny early return all skip `Stop` —
+  defensible, since no turn actually ran in any of those cases, but worth naming: `Stop` means "a
+  turn concluded", not "this method returned".
