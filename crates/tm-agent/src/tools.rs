@@ -415,11 +415,11 @@ fn action_ask_human(_input: &Value) -> Result<Action> {
 // panicking.
 // ---------------------------------------------------------------------------------------------
 
-fn missing(field: &str) -> TmError {
+pub(crate) fn missing(field: &str) -> TmError {
     TmError::parse(format!("missing or malformed field `{field}`"))
 }
 
-fn get_str<'a>(input: &'a Value, field: &str) -> Result<&'a str> {
+pub(crate) fn get_str<'a>(input: &'a Value, field: &str) -> Result<&'a str> {
     input
         .get(field)
         .and_then(Value::as_str)
@@ -1951,6 +1951,14 @@ pub struct ToolRegistry {
     /// See [`bound_result`]'s doc comment for why this lives on the registry rather than on any
     /// one provider.
     store: Arc<Store>,
+    /// `PreToolUse`/`PostToolUse` handlers from `hooks.toml` (`docs/audit-2026-09-18-fable.md`
+    /// M-04), consulted in [`ToolRegistry::dispatch`] before/after every call. `None` (the
+    /// default from every constructor below) means no `hooks.toml` was loaded — every existing
+    /// caller of [`ToolRegistry::new`]/[`ToolRegistry::standard`]/
+    /// [`ToolRegistry::with_capabilities`] gets this, so `dispatch`'s behavior for a caller that
+    /// has not opted in via [`ToolRegistry::with_hooks`] is unchanged. See [`crate::hooks`] for
+    /// the config shape and shell-hook execution contract.
+    hooks: Option<crate::hooks::HookConfig>,
 }
 
 impl ToolRegistry {
@@ -1971,7 +1979,17 @@ impl ToolRegistry {
             entries,
             index,
             store,
+            hooks: None,
         }
+    }
+
+    /// Attach `hooks.toml`-loaded [`crate::hooks::HookConfig`] to this registry, consulted by
+    /// [`ToolRegistry::dispatch`] from this point on. A builder (not a constructor argument) so
+    /// every existing call site keeps working unchanged; a caller that wants hooks calls this
+    /// once after construction (see `tm-cli`'s `run_turn_streaming`).
+    pub fn with_hooks(mut self, hooks: crate::hooks::HookConfig) -> Self {
+        self.hooks = Some(hooks);
+        self
     }
 
     /// The standard single-provider registry: [`BuiltinCapability`] alone (`SPEC.md` §11's 39
@@ -2113,7 +2131,26 @@ impl ToolRegistry {
         let (provider_idx, schema) = &self.entries[idx];
         let provider = &self.providers[*provider_idx];
 
-        let action = match provider.to_action(schema.name, &call.input) {
+        // `PreToolUse` (`docs/audit-2026-09-18-fable.md` M-04): evaluated before `to_action`/
+        // `permits` so a configured hook can deny or rewrite a call's input before authority is
+        // even consulted — see `crate::hooks`'s module doc comment for the wire contract and
+        // fail-closed behavior. `self.hooks` is `None` for every caller that hasn't opted in via
+        // `ToolRegistry::with_hooks`, so this is a no-op for them.
+        let mut effective_input = call.input.clone();
+        if let Some(hooks) = &self.hooks {
+            match hooks
+                .evaluate_pre_tool_use(call.name.as_str(), &effective_input, ctx)
+                .await
+            {
+                crate::hooks::HookDecision::Allow => {}
+                crate::hooks::HookDecision::Deny(reason) => return ToolOutcome::Denied { reason },
+                crate::hooks::HookDecision::Rewrite(new_input) => {
+                    effective_input = new_input;
+                }
+            }
+        }
+
+        let action = match provider.to_action(schema.name, &effective_input) {
             Ok(action) => action,
             Err(e) => {
                 return ToolOutcome::Errored {
@@ -2133,7 +2170,10 @@ impl ToolRegistry {
                 };
             }
         }
-        match provider.invoke(schema.name, call.input.clone(), ctx).await {
+        let outcome = match provider
+            .invoke(schema.name, effective_input.clone(), ctx)
+            .await
+        {
             Ok(value) => match bound_result(value, self.store.as_ref(), ctx.ticket, ctx.actor) {
                 Ok((result, artifact)) => ToolOutcome::Completed { result, artifact },
                 Err(e) => ToolOutcome::Errored {
@@ -2143,7 +2183,22 @@ impl ToolRegistry {
             Err(e) => ToolOutcome::Errored {
                 detail: e.to_string(),
             },
+        };
+
+        // `PostToolUse`: observational only (the call already happened) — see `crate::hooks`'s
+        // module doc comment for why this consumes no decision from the hook.
+        if let Some(hooks) = &self.hooks {
+            let summary = match &outcome {
+                ToolOutcome::Completed { .. } => "completed",
+                ToolOutcome::Denied { .. } => "denied",
+                ToolOutcome::Errored { .. } => "errored",
+            };
+            hooks
+                .run_post_tool_use(call.name.as_str(), &effective_input, summary, ctx)
+                .await;
         }
+
+        outcome
     }
 }
 
@@ -2606,6 +2661,61 @@ mod tests {
             .dispatch(&call("fs.read", json!({})), &h.ctx())
             .await;
         assert!(matches!(outcome, ToolOutcome::Errored { .. }));
+    }
+
+    /// `docs/audit-2026-09-18-fable.md` M-04's required test: a real `hooks.toml` `PreToolUse`
+    /// hook that denies a specific tool call actually blocks it through the real
+    /// `ToolRegistry::dispatch` path (not just `HookConfig::evaluate_pre_tool_use` in isolation,
+    /// which `crate::hooks`'s own test module already covers) — `Authority::permits` alone would
+    /// allow this call (`Authority::root()`), so a `Denied` outcome here can only be the hook.
+    #[tokio::test]
+    async fn dispatch_pre_tool_use_hook_denies_a_matching_call() {
+        let mut h = Harness::new();
+        let mut hooks = crate::hooks::HookConfig::default();
+        hooks.pre_tool_use.push(crate::hooks::HookEntry {
+            matcher: Some("fs.read".to_string()),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                r#"printf '{"decision":"deny","reason":"blocked by hooks.toml"}'"#.to_string(),
+            ],
+        });
+        h.registry = h.registry.with_hooks(hooks);
+
+        std::fs::write(h.root().join("hello.py"), "print(1)\n").unwrap();
+        let outcome = h
+            .registry
+            .dispatch(&call("fs.read", json!({"path": "hello.py"})), &h.ctx())
+            .await;
+        assert_eq!(
+            outcome,
+            ToolOutcome::Denied {
+                reason: "blocked by hooks.toml".to_string()
+            }
+        );
+    }
+
+    /// ...and one that allows does not.
+    #[tokio::test]
+    async fn dispatch_pre_tool_use_hook_allow_does_not_block() {
+        let mut h = Harness::new();
+        let mut hooks = crate::hooks::HookConfig::default();
+        hooks.pre_tool_use.push(crate::hooks::HookEntry {
+            matcher: Some("fs.read".to_string()),
+            command: vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                r#"printf '{"decision":"allow"}'"#.to_string(),
+            ],
+        });
+        h.registry = h.registry.with_hooks(hooks);
+
+        std::fs::write(h.root().join("hello.py"), "print(1)\n").unwrap();
+        let outcome = h
+            .registry
+            .dispatch(&call("fs.read", json!({"path": "hello.py"})), &h.ctx())
+            .await;
+        assert!(matches!(outcome, ToolOutcome::Completed { .. }));
     }
 
     #[tokio::test]

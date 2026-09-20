@@ -5,6 +5,7 @@
 //! is the only place that reconciles sections against a [`crate::tokens::TokenBudget`].
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 use tm_codeintel::hybrid::{Query, RetrievalContext, SignalWeights};
 use tm_codeintel::CodeIntel;
@@ -550,15 +551,116 @@ pub fn build_prior_failures(ticket: &Ticket) -> RawSection {
 
 /// Section 9 (lowest priority, dropped first on overflow): project conventions.
 ///
-/// Renders project conventions.
-pub fn build_conventions(conventions: &[String]) -> RawSection {
-    let body = conventions.join("\n");
+/// Renders `extra` (any caller-supplied conventions, e.g. from a future `providers.toml`-shaped
+/// source) followed by two discovered sources, `docs/audit-2026-09-18-fable.md` M-04's
+/// "Ecosystem table stakes":
+///
+/// - Every `AGENTS.md` found walking up from each of `ticket`'s claimed paths to `ci`'s project
+///   root (inclusive), root-to-leaf, so a more specific `AGENTS.md` reads after — and can be
+///   read as refining — a more general one closer to the repo root. A claimed path with no
+///   `AGENTS.md` anywhere in its ancestry contributes nothing.
+/// - Every discovered skill's metadata (name + one-line description only, never a body — see
+///   [`crate::skills`]'s doc comment) from `.tm/skills/**`, so a worker knows what skills exist
+///   and can call `skill.load` for the one it wants, without every skill's full body being paid
+///   for on every turn regardless of whether it's used.
+pub fn build_conventions(ticket: &Ticket, ci: &CodeIntel, extra: &[String]) -> RawSection {
+    let root = ci.project_root();
+    let mut body_lines: Vec<String> = extra.to_vec();
+    let mut provenance = Vec::new();
+
+    for (path, content) in discover_agents_md(root, &claimed_paths(ticket)) {
+        body_lines.push(format!("## {}\n{}", path, content.trim_end()));
+        provenance.push(ProvenanceRef {
+            locator: path,
+            detail: String::new(),
+        });
+    }
+
+    let skills = crate::skills::discover_skills(root);
+    if !skills.is_empty() {
+        body_lines
+            .push("## Skills (call skill.load with `name` to read the full body)".to_string());
+        for skill in &skills {
+            body_lines.push(format!("- {}: {}", skill.name, skill.description));
+            provenance.push(ProvenanceRef {
+                locator: skill.path.clone(),
+                detail: String::new(),
+            });
+        }
+    }
+
+    let body = body_lines.join("\n");
 
     RawSection {
         kind: SectionKind::Conventions,
         title: "Conventions".to_string(),
         body,
-        provenance: Vec::new(),
+        provenance,
+    }
+}
+
+/// Every `AGENTS.md` found for `claimed` paths, walking up from each path's directory to `root`
+/// (inclusive), deduplicated across paths that share an ancestor, in first-seen order. Pure
+/// aside from the filesystem reads themselves.
+fn discover_agents_md(root: &Path, claimed: &[String]) -> Vec<(String, String)> {
+    let mut seen = HashSet::new();
+    let mut found = Vec::new();
+    for pattern in claimed {
+        for dir in ancestor_dirs(root, pattern) {
+            let candidate = dir.join("AGENTS.md");
+            let Ok(content) = std::fs::read_to_string(&candidate) else {
+                continue;
+            };
+            let rel = candidate
+                .strip_prefix(root)
+                .unwrap_or(&candidate)
+                .to_string_lossy()
+                .replace('\\', "/");
+            if seen.insert(rel.clone()) {
+                found.push((rel, content));
+            }
+        }
+    }
+    found
+}
+
+/// Directories to check for an `AGENTS.md` for one claimed path pattern, root-to-leaf: the
+/// pattern's starting directory (see [`claimed_path_start_dir`]) walked up to `root` inclusive.
+fn ancestor_dirs(root: &Path, pattern: &str) -> Vec<PathBuf> {
+    let start_rel = claimed_path_start_dir(root, pattern);
+    let start = if start_rel.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(&start_rel)
+    };
+    let mut dirs: Vec<PathBuf> = start
+        .ancestors()
+        .take_while(|a| *a == root || a.starts_with(root))
+        .map(Path::to_path_buf)
+        .collect();
+    dirs.reverse();
+    dirs
+}
+
+/// The directory a claimed path pattern's `AGENTS.md` walk should start from, root-relative
+/// (empty string means `root` itself).
+///
+/// Claimed paths are technically glob patterns (`PatternSet`), not always concrete paths, but in
+/// practice (and per `docs/audit-2026-09-18-fable.md` M-04's own example) are usually a literal
+/// file path. This takes the pattern's non-wildcard prefix and:
+/// - if it names a real directory on disk (e.g. `crates/tm-foo`, no wildcard, no trailing
+///   slash), starts there — the single most likely place a crate-scoped `AGENTS.md` lives;
+/// - otherwise (a literal file path, or a wildcard prefix like `crates/tm-foo/**` or
+///   `crates/tm-foo/src/*.rs`) starts at its parent directory.
+fn claimed_path_start_dir(root: &Path, pattern: &str) -> String {
+    let end = pattern.find(['*', '?', '[']).unwrap_or(pattern.len());
+    let prefix = &pattern[..end];
+    if end == pattern.len() && root.join(prefix).is_dir() {
+        return prefix.trim_end_matches('/').to_string();
+    }
+    match prefix.rfind('/') {
+        Some(idx) => prefix[..idx].to_string(),
+        None => String::new(),
     }
 }
 
@@ -737,8 +839,11 @@ mod tests {
 
     #[test]
     fn build_conventions_empty() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let ci = CodeIntel::open(dir.path()).expect("open index");
+        let ticket = minimal_ticket("T-1", "Task");
         let conventions: Vec<String> = Vec::new();
-        let section = build_conventions(&conventions);
+        let section = build_conventions(&ticket, &ci, &conventions);
 
         assert_eq!(section.kind, SectionKind::Conventions);
         assert_eq!(section.title, "Conventions");
@@ -748,16 +853,94 @@ mod tests {
 
     #[test]
     fn build_conventions_with_items() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let ci = CodeIntel::open(dir.path()).expect("open index");
+        let ticket = minimal_ticket("T-1", "Task");
         let conventions = vec![
             "Use snake_case for variables".to_string(),
             "Always add doc comments".to_string(),
             "Write tests for public functions".to_string(),
         ];
 
-        let section = build_conventions(&conventions);
+        let section = build_conventions(&ticket, &ci, &conventions);
         assert!(section.body.contains("Use snake_case for variables"));
         assert!(section.body.contains("Always add doc comments"));
         assert!(section.body.contains("Write tests for public functions"));
+    }
+
+    /// `docs/audit-2026-09-18-fable.md` M-04: "AGENTS.md read as a SectionKind::Conventions
+    /// source walking up from the ticket's claimed paths" — a real `AGENTS.md` a couple of
+    /// directories above a ticket's claimed path must actually appear in the assembled section.
+    #[test]
+    fn build_conventions_includes_agents_md_walking_up_from_claimed_paths() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates/tm-foo/src")).expect("mkdir");
+        std::fs::write(
+            dir.path().join("crates/tm-foo/AGENTS.md"),
+            "SENTINEL-AGENTS-MD-CONTENT: use tabs in this crate\n",
+        )
+        .expect("write AGENTS.md");
+
+        let ci = CodeIntel::open(dir.path()).expect("open index");
+        let mut ticket = minimal_ticket("T-1", "Fix bar.rs");
+        ticket.resources = vec![tm_core::ResourceClaim {
+            paths: tm_types::PatternSet::parse(["crates/tm-foo/src/bar.rs".to_string()])
+                .expect("valid pattern"),
+            mode: tm_core::ResourceMode::Shared,
+        }];
+
+        let section = build_conventions(&ticket, &ci, &[]);
+        assert!(
+            section.body.contains("SENTINEL-AGENTS-MD-CONTENT"),
+            "expected AGENTS.md content in body, got: {}",
+            section.body
+        );
+        assert!(section
+            .provenance
+            .iter()
+            .any(|p| p.locator == "crates/tm-foo/AGENTS.md"));
+    }
+
+    #[test]
+    fn build_conventions_finds_no_agents_md_when_none_exists() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates/tm-foo/src")).expect("mkdir");
+
+        let ci = CodeIntel::open(dir.path()).expect("open index");
+        let mut ticket = minimal_ticket("T-1", "Fix bar.rs");
+        ticket.resources = vec![tm_core::ResourceClaim {
+            paths: tm_types::PatternSet::parse(["crates/tm-foo/src/bar.rs".to_string()])
+                .expect("valid pattern"),
+            mode: tm_core::ResourceMode::Shared,
+        }];
+
+        let section = build_conventions(&ticket, &ci, &[]);
+        assert_eq!(section.body, "");
+        assert_eq!(section.provenance.len(), 0);
+    }
+
+    /// `docs/audit-2026-09-18-fable.md` M-04: skill metadata (name/description) belongs in the
+    /// pack; the body does not, until `skill.load` is called (tested at the `tm-agent` layer,
+    /// which owns that tool).
+    #[test]
+    fn build_conventions_includes_skill_metadata_but_not_body() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".tm/skills/demo")).expect("mkdir");
+        std::fs::write(
+            dir.path().join(".tm/skills/demo/SKILL.md"),
+            "---\nname: demo-skill\ndescription: does a demo thing\n---\nSENTINEL-SKILL-BODY-SHOULD-NOT-APPEAR\n",
+        )
+        .expect("write SKILL.md");
+
+        let ci = CodeIntel::open(dir.path()).expect("open index");
+        let ticket = minimal_ticket("T-1", "Task");
+
+        let section = build_conventions(&ticket, &ci, &[]);
+        assert!(section.body.contains("demo-skill"));
+        assert!(section.body.contains("does a demo thing"));
+        assert!(!section
+            .body
+            .contains("SENTINEL-SKILL-BODY-SHOULD-NOT-APPEAR"));
     }
 
     #[test]

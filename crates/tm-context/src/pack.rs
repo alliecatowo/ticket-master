@@ -3,8 +3,16 @@
 //! priority order and admitted against a [`crate::tokens::TokenBudget`] via a
 //! [`crate::tokens::BudgetLedger`]; whatever doesn't fit is dropped starting from the
 //! lowest-priority section, and every drop is recorded in [`ContextPack::dropped`] rather than
-//! silently truncated. Given the same `(ticket, view, codeintel-state, budget)`, `compile`
-//! always produces byte-identical output, so the pack is snapshot-testable.
+//! silently truncated. Given the same `(ticket, view, codeintel-state, budget)` *and* the same
+//! on-disk `AGENTS.md`/`.tm/skills/**` content beneath `ci`'s project root, `compile` always
+//! produces byte-identical output, so the pack is snapshot-testable — but as of
+//! `docs/decisions/D-013-hooks-agents-skills.md`, `SectionKind::Conventions` reads those two
+//! filesystem sources directly (not through `ci`'s index, so `codeintel-state` does not capture
+//! them), making them a sixth real input this doc comment's parenthetical previously omitted:
+//! editing an `AGENTS.md` between two `compile` calls changes the pack with none of the other
+//! five inputs changing. Ordering within that content stays deterministic (sorted skill paths,
+//! first-seen-order `AGENTS.md` dedup) — only the input set itself gained a filesystem
+//! dependency.
 
 use std::fmt::Write as _;
 
@@ -180,8 +188,13 @@ impl ContextPack {
 /// a [`BudgetLedger`] derived from `budget`: on overflow the lowest-priority section is the
 /// first to lose out, and every drop is recorded in [`ContextPack::dropped`] rather than
 /// silently truncating a section's body. Deterministic given identical `(ticket, view,
-/// ci-index-state, budget, roles)`, since every section builder is a pure function of its
-/// inputs. `roles` prices [`SectionKind::Budget`]'s tier menu (`SPEC.md` §31.1,
+/// ci-index-state, budget, roles)` and identical on-disk `AGENTS.md`/`.tm/skills/**` content
+/// under `ci.project_root()` — see this module's doc comment for why that filesystem content is
+/// a sixth real input, not covered by `ci-index-state`, since [`crate::sections::
+/// build_conventions`] reads it directly rather than through `ci`'s index. Every section
+/// builder is still a pure function of its *declared* inputs; `build_conventions` is simply the
+/// one builder whose declared inputs include "whatever `AGENTS.md`/`.tm/skills/**` say right
+/// now". `roles` prices [`SectionKind::Budget`]'s tier menu (`SPEC.md` §31.1,
 /// `docs/audit-2026-09-18-fable.md` B-10) — pass `RoleTable::default_table()` when no
 /// project-specific `providers.toml` is loaded.
 ///
@@ -238,7 +251,7 @@ pub fn compile(
         ),
         (
             SectionKind::Conventions,
-            sections::build_conventions(conventions),
+            sections::build_conventions(ticket, ci, conventions),
         ),
     ];
 
@@ -567,6 +580,90 @@ mod tests {
             .find(|s| s.kind == SectionKind::Conventions)
             .expect("conventions section admitted under a generous budget");
         assert!(conventions.body.contains("use tabs"));
+    }
+
+    /// `docs/audit-2026-09-18-fable.md` M-04's "done looks like": AGENTS.md content in an
+    /// *assembled context pack*, not merely in `sections::build_conventions`'s raw output —
+    /// `compile` still budget-admits/drops and redacts every section, and `Conventions` is
+    /// `SectionKind::PRIORITY_ORDER`'s lowest-priority (first-dropped) entry, so a section-level
+    /// test alone would not catch a real AGENTS.md failing to survive that far. A generous
+    /// budget here isolates "does the content make it into the pack at all" from budget sizing,
+    /// which `sections::tests` already covers at the builder level.
+    #[test]
+    fn compile_includes_agents_md_content_in_the_assembled_pack() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("crates/tm-foo/src")).expect("mkdir");
+        std::fs::write(
+            dir.path().join("crates/tm-foo/AGENTS.md"),
+            "SENTINEL-AGENTS-MD-IN-ASSEMBLED-PACK: use tabs in this crate\n",
+        )
+        .expect("write AGENTS.md");
+
+        let mut ticket = base_ticket();
+        ticket.resources = vec![tm_core::ResourceClaim {
+            paths: tm_types::PatternSet::parse(["crates/tm-foo/src/bar.rs".to_string()])
+                .expect("valid pattern"),
+            mode: tm_core::ResourceMode::Shared,
+        }];
+        let view = ProjectView::empty();
+        let ci = open_empty_codeintel(dir.path());
+
+        let pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            TokenBudget::even(100_000),
+            SignalWeights::default(),
+            &[],
+            &RoleTable::default_table(),
+        )
+        .expect("compile succeeds");
+
+        let all_bodies: String = pack.sections.iter().map(|s| s.body.as_str()).collect();
+        assert!(
+            all_bodies.contains("SENTINEL-AGENTS-MD-IN-ASSEMBLED-PACK"),
+            "AGENTS.md content did not survive into the assembled pack: {all_bodies}"
+        );
+    }
+
+    /// Same bar as above, for SKILL.md: metadata (name/description) must reach the assembled
+    /// pack, and the body must not — checked against every section's body concatenated, not
+    /// just `Conventions`, so the assertion actually proves the body never leaked in via
+    /// `Retrieval`/`Wiki`/any other section, not merely that `Conventions` alone omits it.
+    #[test]
+    fn compile_includes_skill_metadata_but_not_body_in_the_assembled_pack() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join(".tm/skills/demo")).expect("mkdir");
+        std::fs::write(
+            dir.path().join(".tm/skills/demo/SKILL.md"),
+            "---\nname: demo-skill\ndescription: does a demo thing\n---\nSENTINEL-SKILL-BODY-MUST-NOT-LEAK-INTO-PACK\n",
+        )
+        .expect("write SKILL.md");
+
+        let ticket = base_ticket();
+        let view = ProjectView::empty();
+        let ci = open_empty_codeintel(dir.path());
+
+        let pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            TokenBudget::even(100_000),
+            SignalWeights::default(),
+            &[],
+            &RoleTable::default_table(),
+        )
+        .expect("compile succeeds");
+
+        let all_bodies: String = pack.sections.iter().map(|s| s.body.as_str()).collect();
+        assert!(
+            all_bodies.contains("demo-skill") && all_bodies.contains("does a demo thing"),
+            "skill metadata did not survive into the assembled pack: {all_bodies}"
+        );
+        assert!(
+            !all_bodies.contains("SENTINEL-SKILL-BODY-MUST-NOT-LEAK-INTO-PACK"),
+            "skill body leaked into the assembled pack before any skill.load call: {all_bodies}"
+        );
     }
 
     #[test]

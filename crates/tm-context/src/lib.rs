@@ -28,6 +28,7 @@ pub mod command;
 pub mod fingerprint;
 pub mod pack;
 pub mod sections;
+pub mod skills;
 pub mod tokens;
 
 pub use command::{
@@ -43,6 +44,7 @@ pub use sections::{
     build_conventions, build_decisions, build_dependencies, build_git_history, build_objective,
     build_prior_failures, build_retrieval, build_symbol_outlines, RawSection,
 };
+pub use skills::{discover_skills, load_skill, SkillDoc, SkillMetadata};
 pub use tokens::{
     estimate_tokens_prose, estimate_tokens_source, BudgetLedger, SectionAccount, SectionKind,
     TokenBudget,

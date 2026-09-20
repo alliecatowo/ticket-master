@@ -3789,6 +3789,7 @@ dependencies = [
  "tm-provider",
  "tm-types",
  "tokio",
+ "toml",
  "tracing",
 ]
 
