@@ -58,7 +58,12 @@ workspace it belongs to, since the sanitized name alone is lossy.
 1. `--project P` → `Repo { root: P, state_dir: P/.tm }`, always `exists: true` (unchanged:
    still creates-if-absent, exactly as `--project` always has).
 2. Walking up from `cwd` finds a `.tm/` directory (`locate`, unchanged) → `Repo` there,
-   `exists: true`.
+   `exists: true` — **except** when that `.tm/` is the real `$HOME/.tm` itself (the default global
+   `TM_HOME`), which `locate`'s generic walk-to-`/` would otherwise reach and misresolve as an
+   ordinary repo rooted at the user's home directory. This exclusion compares against
+   `dirs::home_dir()` directly, not `tm_home()` (which reads the overridable `TM_HOME` env var) —
+   a test that overrides `TM_HOME` to a hermetic tempdir doesn't change what `locate` actually
+   walks on disk, so the guard has to be anchored to the real home directory to still catch it.
 3. `$TM_HOME/projects/<key>/project.db` exists for this workspace → `Global`, `exists: true`.
 4. Otherwise → `Global`, `exists: false`.
 
@@ -73,12 +78,30 @@ Two openers consume that resolution differently:
   Otherwise it just opens whatever `resolve_scope` found. It never assimilates a git repository,
   never creates a `T-001` investigation ticket, and never writes into the workspace.
 
-**Promotion is deliberately not built here.** `tm init` currently keeps creating a fresh `.tm/`
-exactly as it always has — it does not yet notice or adopt an existing global project for the same
-workspace. The next track turns `tm init` into that promotion command: given an existing global
-project, move its state into `<root>/.tm` (or replay it there) instead of starting over. This
-decision's `Scope`/`resolve_scope`/`$TM_HOME` layout is what that track builds on; it is not itself
-promotion.
+**Promotion (Phase 1-C).** `tm init` (and `tm attach`/`tm genesis`'s creation path) now checks for
+an existing global session keyed by `workspace_root_for(dir)` before falling back to a fresh
+`create_project_dir`. When one exists, `promote_global` moves it into `<dir>/.tm` in three steps:
+verify the source's hash chain first (hard stop before anything destructive), copy `project.db` via
+SQLite's online backup API (`rusqlite::backup::Backup`, WAL-safe — never a raw `fs::copy` of a
+possibly-open database) plus an explicit allowlist of state extras (`artifacts/`, `harness.toml`,
+`mirror.toml`, `sched.paused`, `workflows/`, `bench/`), then independently re-verify the
+destination (chain, invariants, event/ticket-count equality against the source) before treating the
+promotion as real. On any failure past the copy step, the half-built destination is removed and the
+source is never touched. On success, the source's `project.db`/`index.db` and copied extras are
+deleted (leaving it `exists: false` for any future `resolve_scope` call against that workspace),
+but `workspace.json` survives alongside a new `promoted.json` marker so `tm project list` still
+shows the workspace with a `promoted: {to, at, events}` pointer instead of the row silently
+vanishing. `--fresh` on `tm init` skips promotion entirely and leaves the global session untouched,
+for the rare case of deliberately wanting a second, separate repo-scoped project.
+
+One `tm-core` gap this surfaced, not fixed by this track: `Store::rebuild()`'s doc-commented claim
+of byte-identical event-log replay does not hold for artifacts — `ArtifactCreated`'s `hash`/
+`bytes_len` are written via a side-channel raw-SQL update in the same transaction as the event
+append, and pure replay has no way to redo that. `verify_promotion` works around it by running
+`rebuild()`+`check_invariants()` against a throwaway scratch copy of the destination (proving the
+event log itself replays cleanly) and `check_invariants()` alone (non-mutating) against the real
+destination, rather than rebuilding the real store in place. Fixing `rebuild()` itself is separate,
+pre-existing `tm-core` work, independent of scope/promotion.
 
 **`tm attach` and `tm genesis` stay repo-level, unchanged.** Both are explicit, deliberate acts of
 creating a *repo-scoped* project — `attach` assimilates a specific repository, `genesis` seeds a
@@ -113,17 +136,17 @@ tool.
 **A relocated project's recorded artifact paths go stale, and there is no rewrite.** The event log
 is the one thing in this system that is never mutated after the fact (`SPEC.md`'s hash-chain
 invariant) — an `artifact.created` event's `OnDisk` storage path is whatever was true at write
-time, forever. Promotion (the next track) will move a project's `state_dir` from
-`$TM_HOME/projects/<key>/` into `<root>/.tm`, which makes every previously recorded absolute
-artifact path wrong the instant the move happens; there is no event to append that fixes history,
-and there should not be (rewriting the log to "correct" it would break the hash chain it exists to
-protect). Phase 1-A's kernel seam already anticipated this: `Store::view()` carries a read-time
-fallback — an `OnDisk` path that no longer exists on disk resolves instead to
-`<state_dir>/artifacts/<hash>`, recomputed from the artifact's content hash against the *current*
-`state_dir` rather than the one recorded at write time. That is a deliberate trade: a small,
-permanent bit of indirection on every artifact read, in exchange for never rewriting the durable
-log to paper over a directory move. Promotion, when it ships, is what actually exercises this path
-for real; this track's contribution is making sure the seam exists and this decision explains why.
+time, forever. Promotion (Phase 1-C) moves a project's `state_dir` from `$TM_HOME/projects/<key>/`
+into `<root>/.tm`, which makes every previously recorded absolute artifact path wrong the instant
+the move happens; there is no event to append that fixes history, and there should not be
+(rewriting the log to "correct" it would break the hash chain it exists to protect). Phase 1-A's
+kernel seam anticipated this: `Store::view()` carries a read-time fallback — an `OnDisk` path that
+no longer exists on disk resolves instead to `<state_dir>/artifacts/<hash>`, recomputed from the
+artifact's content hash against the *current* `state_dir` rather than the one recorded at write
+time. That is a deliberate trade: a small, permanent bit of indirection on every artifact read, in
+exchange for never rewriting the durable log to paper over a directory move. Phase 1-C's own tests
+exercise this path for real (a spilled artifact surviving a promotion and reading back correctly
+through the fallback).
 
 **Two things to remember, not one.** Every place in this codebase (and every place in a human's
 head) that used to say "the project directory" now has to say which of `root` or `state_dir` it
