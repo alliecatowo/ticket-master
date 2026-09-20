@@ -372,7 +372,7 @@ approval-required (by exact name or dotted-prefix), plus a `spend_over_micros` t
 `tm_types::action::Oversight`. `Authority::permits` alone only ever answers `Allow`/`Deny`;
 `Oversight::review(&self, action, base: Decision) -> Decision` is the separate step that escalates
 an already-`Allow` decision to `NeedsApproval` (never softening a `Deny`). The real caller —
-`docs/decisions/D-008-oversight-policy-wiring.md` — is `tm_agent::agent_loop::AgentLoop::drive`,
+`docs/decisions/D-009-oversight-policy-wiring.md` — is `tm_agent::agent_loop::AgentLoop::drive`,
 immediately before a tool call would dispatch: `NeedsApproval` there appends an
 `approval.requested` event and suspends the run (`AgentOutcome::AwaitingApproval`) for a human to
 resolve. Approvals are events.

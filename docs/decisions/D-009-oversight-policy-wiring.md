@@ -1,4 +1,4 @@
-# D-008 — `oversight.toml`: loading and wiring `Oversight::review` at a real effect boundary
+# D-009 — `oversight.toml`: loading and wiring `Oversight::review` at a real effect boundary
 
 **Status:** accepted · **Date:** 2026-09-20 · **Supersedes:** nothing
 
