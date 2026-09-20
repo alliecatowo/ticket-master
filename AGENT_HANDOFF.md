@@ -232,6 +232,30 @@ interaction is not allowed") because this session's shell is non-interactive and
 locked; that needs a GUI unlock only the user can do, not something to keep retrying
 programmatically. `.env` is the real, working store for now.
 
+## Personally verified live, at the very end of this session (not via a subagent report)
+
+Ran the real compiled binary myself, directly: `tm -p "..."` answered a real arithmetic question
+correctly via the live DevPass backend, and a real agentic task (create a file, read it back to
+verify) completed correctly with real `edit.create_file`/`fs.read` tool calls. This is what led to
+pinning down the `ticket.submit`-only-valid-from-`Running` root cause documented above.
+
+Also added, in direct response to live user feedback comparing the TUI's ticket-view entry point
+to `claude agents`: `crates/tm-cli/src/tui.rs`'s `is_tickets_command` — typing `/tickets` (or bare
+`tickets`) into the chat input and pressing Enter now opens the Kanban board too, not just the
+`Ctrl+T` chord, which nothing on screen hints exists. Real regression test added and passing
+(`crates/tm-cli/tests/tui_navigation.rs::typing_slash_tickets_and_enter_opens_kanban_without_spawning_a_turn`,
+deliberately runs with no mock provider configured, so it would hang instead of silently passing
+if `is_tickets_command` ever failed to intercept the submission before a real turn spawned).
+`docs/decisions/D-006-tui-navigation-shell.md` updated in place (§3b) with the same convention
+this repo already used once for a direct decision follow-up. **Confirm `cargo run -p xtask --
+verify` passed clean on this specific change before treating it as done** — it was still running
+in the background when this doc was last saved; check its result first if picking this up cold.
+
+Also confirmed, via a real screenshot the user shared from a live mobile SSH session: bare `tm`
+correctly opens directly into `Home` (chat input focused, ticket dashboard visible alongside) —
+this was a live, authentic real-world confirmation the default-screen design actually works as
+intended, not a report I have to take on faith.
+
 ## Open / pending — things a human needs to weigh in on, not yours to resolve unilaterally
 
 1. **The `resolve_genesis_provider` slug-ignoring bug** (in `crates/tm-cli/src/project.rs`) —
