@@ -82,12 +82,14 @@ fn verify() -> Result<()> {
             "clippy",
             "--workspace",
             "--all-targets",
+            "-j",
+            "2",
             "--",
             "-D",
             "warnings",
         ],
     )?;
-    run_cargo(&root, "test", &["test", "--workspace"])?;
+    run_cargo(&root, "test", &["test", "--workspace", "-j", "2"])?;
     hygiene_gate(&root)?;
     println!("==> verify: all checks passed");
     Ok(())
