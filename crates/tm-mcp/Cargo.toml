@@ -1,0 +1,29 @@
+[package]
+name = "tm-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ticketmaster MCP adapter: a Model Context Protocol client (stdio + SSE, one CapabilityProvider per connected server) and a read-only MCP server exposing ticket.*/search.*/symbol.* over stdio (docs/audit-2026-09-18-fable.md B-12)."
+
+[dependencies]
+tm-types = { workspace = true }
+tm-core = { workspace = true }
+tm-codeintel = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+# The client's SSE transport (out to an external MCP server over HTTP+SSE); `stream` is already
+# enabled workspace-wide for `bytes_stream()`.
+reqwest = { workspace = true }
+# `src/bin/tm-mcp-server.rs`'s `--project-root`/`--state-dir` argv parsing.
+clap = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Dev-only: proves `McpClientCapability` registers with `tm_agent::tools::ToolRegistry` exactly
+# like a built-in capability crate (`tests/capability_registers_like_builtin.rs`) — not a normal
+# dependency of this crate's own runtime behavior.
+tm-agent = { workspace = true }
