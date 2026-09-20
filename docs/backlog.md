@@ -420,44 +420,21 @@ behavior change for anything already scripting against today's exit codes), or d
 current split plainly in `args.rs`'s own `--help` text and `docs/` so a script author can't miss
 it. Not resolved yet — pick one deliberately before calling scripting support done.
 
-## Open decision: `docs/decisions/*.md` vs. `tm-wiki`'s `Decision` model — pick one
+## Resolved: `docs/decisions/*.md` vs. `tm-wiki`'s `Decision` model
 
-`SPEC.md` §26.2 specifies the wiki's "decision history" page as derived from `decisions, with
-supersession chains` — `tm_core::Decision`/`DecisionId`, a `Store`-backed entity created via
-`tm decision new`/`tm decision supersede`, with `supersedes`/`superseded_by` links
-(`crates/tm-wiki/src/decisions.rs`). §26.3's own staleness-banner example cites `D-027
-(superseded)` in exactly that structured sense. In practice, this entire session (and this repo's
-own `CLAUDE.md`, "A new/changed decision gets a `docs/decisions/D-NNN-*.md`") has used a completely
-different, disconnected convention: hand-authored markdown files under `docs/decisions/`, numbered
-by hand, with no `Store` entity backing them at all. The two have never been reconciled. Concrete
-result: `docs/wiki/decisions.md` renders "No decisions recorded yet" despite 14 real, substantive
-decision docs existing on disk — the page is derived from an empty `Store::view().decisions` map,
-since nothing in this repo has ever called `tm decision new` (doing so would require a real `.tm/`
-project in this repo itself, which D-003's whole design and the dispatch-agent SKILL.md playbook
-both treat as a contamination incident to avoid, not a normal workflow step).
+Was open: `SPEC.md` §26.2 specified the wiki's "decision history" page as derived from
+`tm_core::Decision`/`DecisionId` (a `Store`-backed entity via `tm decision new`), while this repo's
+actual, exclusively-used convention was hand-authored `docs/decisions/D-NNN-*.md` files — the two
+were never reconciled, and `docs/wiki/decisions.md` rendered "No decisions recorded yet" despite 14
+real decision docs existing on disk.
 
-This surfaced concretely, not hypothetically: this session hit five separate `D-NNN` numbering
-collisions (D-004, D-008 ×2, D-010 ×2, D-012) from parallel tracks each independently picking "the
-next free number" from a filesystem listing with no shared source of truth, plus five stale
-`D-NNN` cross-references in source comments that briefly went un-renumbered after a rename. Both
-are the direct, felt cost of an unstructured, unqueryable decision-numbering convention — exactly
-the kind of problem `tm_core::Decision`'s `DecisionId`/supersession machinery exists to prevent.
-
-Two candidate resolutions, genuinely different in cost and consequence — a product decision, not a
-cleanup:
-1. Make `tm-wiki`'s decisions page (and staleness-invalidation machinery) source from
-   `docs/decisions/D-NNN-*.md` directly (parse a small front-matter block — Status/Date/Supersedes
-   — already present in every existing doc) instead of `Store::view().decisions`, keeping the
-   markdown convention as the one real source of truth and correcting SPEC.md §26.2/§26.3 to match
-   reality.
-2. Migrate to real `tm_core::Decision` entities as SPEC.md actually specifies, and correct
-   `CLAUDE.md`'s "write a markdown file" convention to instead say "run `tm decision new`" —
-   accepting that this means decision-authoring now requires a project's real `.tm/` state to
-   exist, which is a bigger change to how (and where) decisions get written than it first sounds.
-
-Not resolved. Whoever picks a direction should also decide what happens to the 14 existing
-markdown docs (import them as `Decision` entities under resolution 2, or leave them as the
-permanent record under resolution 1).
+Resolved: keep the hand-authored markdown convention as the one real source of truth.
+`crates/tm-wiki/src/decisions.rs` now reads `docs/decisions/D-NNN-*.md` directly instead of
+`Store::view().decisions`; `SPEC.md` §26.2/§26.3 are corrected to match. `tm_core::Decision`/
+`DecisionId` and `tm decision new`/`tm decision supersede` are unchanged and still work — they are
+simply no longer the wiki's source for this page family, leaving open whether they still have a
+genuine separate use. Full reasoning, the rejected alternative, and what this trade costs:
+`docs/decisions/D-015-decision-docs-are-the-wiki-source.md`.
 
 ## Stretch
 

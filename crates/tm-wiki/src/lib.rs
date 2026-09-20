@@ -22,8 +22,10 @@
 //!
 //! - [`architecture::pages`] — `architecture/<crate>`: module tree + public symbols, from
 //!   [`tm_codeintel::CodeIntel::outline`].
-//! - [`decisions::pages`] — `decisions/<id>` (with the full supersession chain) plus a
-//!   `decisions.md` index, from `Store::view()`'s `decisions` map.
+//! - [`decisions::pages`] — `decisions/<file-stem>` (with the full supersession chain) plus a
+//!   `decisions.md` index, assembled directly from `docs/decisions/D-NNN-*.md` — this repo's one
+//!   real decision-doc convention, not `Store::view()`'s `decisions` map (see `decisions`'s own
+//!   module doc for why).
 //! - [`history::pages`] — `history/<path>`, from [`tm_codeintel::CodeIntel::history_why`].
 //! - [`tickets::page`] — `tickets.md`, from `Store::view()`'s `tickets`/`milestones` maps.
 //! - [`glossary::page`] — `glossary.md`, from ticket kinds in use and decision subjects.
@@ -38,7 +40,7 @@
 /// `architecture/<crate>` pages.
 pub mod architecture;
 
-/// `decisions/` pages, with supersession chains.
+/// `decisions/` pages, parsed from `docs/decisions/D-NNN-*.md`, with supersession chains.
 pub mod decisions;
 
 /// Wiki generation orchestration: assemble every family and write it to disk ([`generate::run`]),

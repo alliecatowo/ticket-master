@@ -1564,7 +1564,7 @@ Assembled from the authoritative sources, each page carrying its provenance and 
 |---|---|
 | Architecture and subsystem maps | crate/module structure, symbol graph, decisions |
 | API reference | public signatures and doc comments |
-| Decision history | `decisions`, with supersession chains |
+| Decision history | hand-authored `docs/decisions/D-NNN-*.md` files, with supersession chains parsed from each file's own `Supersedes:` field |
 | "Why is this like this" | git history, the commits and tickets that produced a file |
 | Ticket and milestone history | project state |
 | Conventions and onboarding | harness config, human-written prose |
@@ -1579,13 +1579,19 @@ A page renders its own state. A stale page says so, at the top, naming what inva
 
 ```
 architecture/provider-fabric        STALE
-  invalidated by T-512 (changed src/providers/**) and D-027 (superseded)
+  invalidated by T-512 (changed src/providers/**) and a change to docs/decisions/D-027-*.md
   last verified: 2026-09-14
 ```
 
 That is the whole point: a wiki that can be confidently wrong is worse than no wiki, so the system
 refuses to present knowledge as current when its basis has moved. `tm docs check` already fails on
 staleness; the wiki makes the same fact legible to a person skimming.
+
+Decision-history pages (`decisions/<file-stem>`, above) go stale exactly like any other file-derived
+page: each one's `derived_from` basis is the real path of every `docs/decisions/D-NNN-*.md` file in
+its supersession chain, so a page is invalidated by an edit to that file, not by a `Decision`/
+`DecisionId` entity's `superseded_by` event — see `docs/backlog.md`'s resolved "`docs/decisions/*.md`
+vs. `tm-wiki`'s `Decision` model" entry for why.
 
 ### 26.4 Access
 
