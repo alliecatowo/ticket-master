@@ -70,6 +70,14 @@ that rule is global, not repo-specific, and still applies here.
   an `ArtifactKind::WorkspaceSnapshot`) whenever a scheduler-dispatched turn produces a real patch —
   same decision doc, "What this costs" section has the real gaps (untracked files never captured,
   only one call site wired).
+- `tm run <ticket> --worktree` isolates one delegated run in a real `git worktree` (a fresh branch
+  off `HEAD`, under `<state_dir>/worktrees/<ticket>-<suffix>/`) instead of the main checkout —
+  requires a repo-scoped project backed by a real, non-bare git repository with at least one
+  commit (`docs/decisions/D-010-run-worktree-isolation.md`). The worktree is removed automatically
+  only once the run is *confirmed* to have reached a forward-progress ticket state
+  (`Submitted`/`Verifying`/`Auditing`/`Closed`); anything else — a retry, an escalation, a
+  `RUN_TICKET_MAX_WAIT` detach — leaves it on disk with the `git worktree remove --force` command
+  to clean it up by hand printed alongside.
 
 - **Real code intelligence via the `rust-analyzer-lsp` Claude Code plugin** (installed:
   `claude plugin install rust-analyzer-lsp@claude-plugins-official`, user scope) is the primary

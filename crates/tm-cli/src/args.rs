@@ -595,6 +595,12 @@ pub struct RunArgs {
     /// Role to execute as, overriding the ticket's `ExecutorRequirements`.
     #[arg(long)]
     pub role: Option<String>,
+    /// Isolate this run in a fresh `git worktree` (a new branch off `HEAD`, under
+    /// `<state_dir>/worktrees/<ticket>-<suffix>/`) instead of executing against the main
+    /// checkout — requires a repo-scoped project backed by a real git repository with at least
+    /// one commit (`docs/decisions/D-010-run-worktree-isolation.md`).
+    #[arg(long)]
+    pub worktree: bool,
 }
 
 /// The retrieval mode for `tm search`.

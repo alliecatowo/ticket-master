@@ -12,6 +12,7 @@
 //! the ceiling *and* the per-call scope from the same ticket authority, so a future call site
 //! that forgets to pass a per-task authority still fails safe instead of defaulting open.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -202,6 +203,11 @@ pub struct BuiltinExecutor {
     /// — a project with no `oversight.toml` still has a concrete policy,
     /// [`Oversight::default`] (asks nothing), rather than a `None` state to branch on.
     oversight: Oversight,
+    /// Threaded into every [`AgentLoop`] this executor builds via [`AgentLoop::with_root`], when
+    /// set — see [`BuiltinExecutor::with_root`]. `None` (the default, via [`BuiltinExecutor::new`])
+    /// preserves this executor's behavior before `--worktree` existed exactly: every tool call
+    /// resolves against the process's own current directory, the same as before.
+    root_override: Option<PathBuf>,
 }
 
 impl BuiltinExecutor {
@@ -239,7 +245,20 @@ impl BuiltinExecutor {
             browser,
             computer,
             oversight,
+            root_override: None,
         }
+    }
+
+    /// Point every run this executor drives at `root` instead of the process's own current
+    /// directory — the seam `tm-cli`'s `build_dispatcher` uses for `tm run <ticket> --worktree`
+    /// (`docs/decisions/D-010-run-worktree-isolation.md`) to run a ticket's `fs.*`/`edit.*`/
+    /// `git.*`/`shell.*` tool calls against an isolated `git worktree` checkout rather than the
+    /// main working tree. A builder rather than a `new()` parameter so every existing call site
+    /// (real and test) is unaffected — the default is `None`, byte-identical to this executor's
+    /// behavior before `--worktree` existed.
+    pub fn with_root(mut self, root: PathBuf) -> Self {
+        self.root_override = Some(root);
+        self
     }
 
     /// Build the [`AgentLoop`], [`AgentTask`] and [`SessionHandles`] `execute` would drive for
@@ -280,7 +299,7 @@ impl BuiltinExecutor {
             self.command_executor.clone(),
             extra,
         );
-        let agent_loop = AgentLoop::new(
+        let mut agent_loop = AgentLoop::new(
             self.fabric.clone(),
             tools,
             // The loop's own ceiling is the ticket's own authority/budget, not root()/
@@ -294,6 +313,9 @@ impl BuiltinExecutor {
             self.store.clone(),
         )
         .with_oversight(self.oversight.clone());
+        if let Some(root) = self.root_override.clone() {
+            agent_loop = agent_loop.with_root(root);
+        }
 
         let agent_task = AgentTask {
             ticket: task.ticket.clone(),
@@ -640,6 +662,64 @@ mod tests {
         assert_ne!(agent_loop.budget(), &Budget::unlimited());
         assert_eq!(agent_task.authority, restricted);
         assert_eq!(agent_task.budget, scoped_budget);
+    }
+
+    #[test]
+    fn with_root_overrides_the_built_loops_root_instead_of_the_process_cwd() {
+        // `docs/decisions/D-010-run-worktree-isolation.md`: `tm run <ticket> --worktree` needs
+        // `BuiltinExecutor::with_root` to actually reach the `AgentLoop` it constructs, not just
+        // be stored and ignored — this is the seam `AgentLoop::root()`'s own doc comment says it
+        // exists for.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let worktree_dir = tempfile::tempdir().expect("worktree tempdir");
+        let executor = test_executor(dir.path()).with_root(worktree_dir.path().to_path_buf());
+        let task = ExecutorTask {
+            ticket: TicketId::new("T-1").expect("ticket id"),
+            role: Role::CoderFast,
+            objective: "narrow work".to_string(),
+            context_pack: "pack text".to_string(),
+            authority: Authority::root(),
+            budget: Budget::unlimited(),
+            harness_epoch: 0,
+            actor: ParticipantId::new("agent:test-builtin/T-1").expect("participant"),
+            session: None,
+        };
+
+        let (agent_loop, _agent_task, _handles) = executor.build(&task);
+
+        assert_eq!(agent_loop.root(), worktree_dir.path());
+        assert_ne!(
+            agent_loop.root(),
+            std::env::current_dir().expect("cwd"),
+            "the override must actually take effect, not silently fall back to the process cwd"
+        );
+    }
+
+    #[test]
+    fn without_with_root_the_built_loop_falls_back_to_the_process_cwd_unchanged() {
+        // The zero-`--worktree` default path must stay byte-identical to this executor's
+        // behavior before `with_root` existed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let executor = test_executor(dir.path());
+        let task = ExecutorTask {
+            ticket: TicketId::new("T-1").expect("ticket id"),
+            role: Role::CoderFast,
+            objective: "narrow work".to_string(),
+            context_pack: "pack text".to_string(),
+            authority: Authority::root(),
+            budget: Budget::unlimited(),
+            harness_epoch: 0,
+            actor: ParticipantId::new("agent:test-builtin/T-1").expect("participant"),
+            session: None,
+        };
+
+        let (agent_loop, _agent_task, _handles) = executor.build(&task);
+
+        assert_eq!(
+            agent_loop.root(),
+            std::env::current_dir().expect("cwd"),
+            "with no override, the loop's root must be exactly the process cwd, unchanged"
+        );
     }
 
     #[test]
