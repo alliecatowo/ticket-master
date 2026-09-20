@@ -307,9 +307,10 @@ impl Runtime {
     /// every event `root` consumed and on every tick.
     pub async fn run(&mut self, root: &mut dyn ComponentParent) -> Result<(), RuntimeError> {
         // Compute tab order/focus before the first frame: without this, `self.focus.state()`
-        // stays empty forever (nothing ever calls `rebuild`), so every widget's
-        // `ctx.focus.is_focused(self.id)` check is always false and the whole tree is inert to
-        // input.
+        // stays empty forever until the loop below's own rebuild first runs (see its comment for
+        // why that one is positioned *after* dispatch), so the very first event this loop ever
+        // dispatches would find every widget's `ctx.focus.is_focused(self.id)` check false and
+        // the whole tree inert to input.
         self.focus.rebuild(&*root);
 
         let mut input = EventStream::new();
@@ -419,6 +420,24 @@ impl Runtime {
             }
 
             if needs_redraw {
+                // Rebuilt here, immediately before painting, rather than at the top of the loop:
+                // dispatch above may itself have changed which components `root` currently
+                // reports as focusable (e.g. `tm-cli`'s `App` switching which screen is on
+                // screen), and a frame painted from a stale `FocusTree` would draw the just-
+                // entered screen as if nothing on it held focus for one visible frame. Rebuilding
+                // right before the draw that reflects the change, rather than only at the top of
+                // the *next* iteration, closes that gap; the next iteration's own dispatch then
+                // starts from this same up-to-date tree, so no separate top-of-loop rebuild is
+                // needed. This relies on every call site that changes reachability also setting
+                // `needs_redraw` (every `tm-cli` navigation transition returns
+                // `Propagation::Consumed`, which does) — a future screen that could change its
+                // own `focusable_children()` while returning `Propagate` would need to force a
+                // redraw too, or this rebuild would be skipped along with it. `rebuild` resets
+                // `current` to the first entry in tab order each time, which is a no-op for
+                // anything that was already there (nothing in this crate yet calls
+                // `focus_next`/`focus_prev` at runtime — see `screens::home::Home`'s own docs)
+                // and is exactly the desired behavior for a screen that just became reachable.
+                self.focus.rebuild(&*root);
                 self.draw(root)?;
             }
         }
