@@ -224,3 +224,15 @@ slightly differently — as a signal to fix the harness itself, not just the imm
 That means: add the missing hygiene check, write the missing `SKILL.md`, add the missing mise
 task, correct this file, rather than only patching the one instance. This is a standing
 directive, not a one-time cleanup — it doesn't expire when the current backlog does.
+
+## Be liberal with research before asking
+
+You have `WebSearch`/`WebFetch` — use them proactively when a task depends on an external
+service's real, current details (an API's base URL, auth flow, request/response shape, a
+provider's model names) rather than defaulting to asking the user for something a few minutes of
+research could resolve. This applies concretely to this repo's own provider integrations
+(DevPass, the LLM-gateway credential added this session, any future one): if you're given a
+credential but not a base URL, or asked to wire up a named model you don't recognize, search for
+it first. Still ask when research genuinely can't resolve it (private/internal services, ambiguous
+naming with no authoritative source, anything where guessing wrong risks real cost or a security
+mistake) — the point is to not skip the cheap step, not to stop asking altogether.
