@@ -23,7 +23,7 @@ use tm_core::executor::{
 };
 use tm_core::{ArtifactKind, FailureClass, Store};
 use tm_provider::fabric::Fabric;
-use tm_types::{CapabilityProvider, Clock, IdKind, IdSource, ParticipantId, SessionId};
+use tm_types::{CapabilityProvider, Clock, IdKind, IdSource, Oversight, ParticipantId, SessionId};
 
 use crate::agent_loop::AgentLoop;
 use crate::outcome::{AgentOutcome, AgentTask};
@@ -197,6 +197,11 @@ pub struct BuiltinExecutor {
     /// B-02: always present — see [`ComputerWiring`]'s doc comment for why this has no `None`
     /// state the way [`BuiltinExecutor::browser`] does.
     computer: ComputerWiring,
+    /// The human-approval policy threaded into every [`AgentLoop`] this executor builds
+    /// (`docs/audit-2026-09-18-fable.md` M-16). Always present, like [`BuiltinExecutor::computer`]
+    /// — a project with no `oversight.toml` still has a concrete policy,
+    /// [`Oversight::default`] (asks nothing), rather than a `None` state to branch on.
+    oversight: Oversight,
 }
 
 impl BuiltinExecutor {
@@ -220,6 +225,7 @@ impl BuiltinExecutor {
         ids: Arc<dyn IdSource>,
         browser: Option<BrowserWiring>,
         computer: ComputerWiring,
+        oversight: Oversight,
     ) -> Self {
         BuiltinExecutor {
             id: id.into(),
@@ -232,6 +238,7 @@ impl BuiltinExecutor {
             ids,
             browser,
             computer,
+            oversight,
         }
     }
 
@@ -285,7 +292,8 @@ impl BuiltinExecutor {
             task.role,
             task.actor.clone(),
             self.store.clone(),
-        );
+        )
+        .with_oversight(self.oversight.clone());
 
         let agent_task = AgentTask {
             ticket: task.ticket.clone(),
@@ -600,6 +608,7 @@ mod tests {
             ids,
             None,
             ComputerWiring::default(),
+            Oversight::default(),
         )
     }
 

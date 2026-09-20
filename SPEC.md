@@ -348,7 +348,7 @@ impl Authority {
     pub fn attenuate(&self, requested: &Authority) -> Result<Authority, AuthorityDenied>;
     pub fn contains(&self, other: &Authority) -> bool;   // other ⊆ self, field-wise
     pub fn intersect(&self, other: &Authority) -> Authority;
-    pub fn permits(&self, action: &Action) -> Decision;  // Allow | Deny(reason) | NeedsApproval(scope)
+    pub fn permits(&self, action: &Action) -> Decision;  // Allow | Deny(reason); NeedsApproval comes from Oversight::review, not this method — see below
     pub const ROOT: fn() -> Authority;   // full
     pub const NONE: fn() -> Authority;   // empty
 }
@@ -365,9 +365,17 @@ Laws (property-tested with `proptest`):
 `Action` covers every gated operation: `ReadPath`, `WritePath`, `RunCommand`, `GitOp`,
 `NetFetch`, `TicketOp`, `ProjectOp`, `Spend`.
 
-Oversight config (`oversight.toml`, project state) maps actions to `Autonomous` /
-`ApprovalRequired`, plus a `spend_over` threshold. `permits` returns `NeedsApproval` accordingly;
-the caller must open an approval and block. Approvals are events.
+Oversight config (`oversight.toml`, loaded from a project's *root* — not `state_dir`; it is
+human-authored, version-controlled policy, the same category as `browser.toml`/`acp.toml`, per
+`docs/decisions/D-003-project-scope.md`'s root/state_dir split) maps action classes to
+approval-required (by exact name or dotted-prefix), plus a `spend_over_micros` threshold —
+`tm_types::action::Oversight`. `Authority::permits` alone only ever answers `Allow`/`Deny`;
+`Oversight::review(&self, action, base: Decision) -> Decision` is the separate step that escalates
+an already-`Allow` decision to `NeedsApproval` (never softening a `Deny`). The real caller —
+`docs/decisions/D-008-oversight-policy-wiring.md` — is `tm_agent::agent_loop::AgentLoop::drive`,
+immediately before a tool call would dispatch: `NeedsApproval` there appends an
+`approval.requested` event and suspends the run (`AgentOutcome::AwaitingApproval`) for a human to
+resolve. Approvals are events.
 
 ### 4.5 Leases
 

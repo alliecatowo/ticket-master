@@ -22,8 +22,8 @@ use tm_harness::config::PromptFragments;
 use tm_provider::fabric::{Fabric, FabricRecord};
 use tm_provider::{CompletionRequest, ContentBlock, Message, MessageRole};
 use tm_types::{
-    Authority, Budget, CallContext, Clock, Decision, Id, IdSource, ParticipantId, Result, Role,
-    Spend, TmError,
+    Authority, Budget, CallContext, Clock, Decision, Id, IdSource, Oversight, ParticipantId,
+    Result, Role, Spend, TmError,
 };
 
 use crate::outcome::{
@@ -93,6 +93,10 @@ pub struct AgentLoop {
     tools: ToolRegistry,
     authority: Authority,
     budget: Budget,
+    /// The human-approval policy `drive` applies to an otherwise-`Allow`ed action before
+    /// dispatching it — see [`AgentLoop::with_oversight`]. Defaults to [`Oversight::autonomous`]
+    /// (asks nothing), matching this loop's behavior before M-16 wired a real caller.
+    oversight: Oversight,
     cache: PromptCacheState,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdSource>,
@@ -136,6 +140,7 @@ impl AgentLoop {
             tools,
             authority,
             budget,
+            oversight: Oversight::autonomous(),
             cache: PromptCacheState::new(),
             clock,
             ids,
@@ -163,12 +168,26 @@ impl AgentLoop {
         self
     }
 
+    /// Override the default [`Oversight::autonomous`] policy — the caller-facing seam
+    /// `crates/tm-cli/src/dispatch.rs`'s `load_oversight` feeds a project's parsed
+    /// `oversight.toml` (or [`Oversight::default`] when absent) through.
+    pub fn with_oversight(mut self, oversight: Oversight) -> Self {
+        self.oversight = oversight;
+        self
+    }
+
     /// This loop's own authority ceiling, as constructed via [`AgentLoop::new`] — i.e. before
     /// intersecting with any particular [`AgentTask::authority`]. Exposed so a caller
     /// constructing the loop (e.g. `BuiltinExecutor`) can be tested for *what* it passed as the
     /// ceiling, not just inferred from run-time behaviour.
     pub fn authority(&self) -> &Authority {
         &self.authority
+    }
+
+    /// This loop's own oversight policy, as constructed via [`AgentLoop::new`]/
+    /// [`AgentLoop::with_oversight`]. See [`AgentLoop::authority`].
+    pub fn oversight(&self) -> &Oversight {
+        &self.oversight
     }
 
     /// This loop's own budget ceiling, as constructed via [`AgentLoop::new`]. See
@@ -729,7 +748,17 @@ impl AgentLoop {
 
             for (id, name, input) in &tool_uses {
                 if let Ok(action) = self.tools.to_action(name, input) {
-                    if let Decision::NeedsApproval(reason) = effective_authority.permits(&action) {
+                    // `Authority::permits` alone never yields `NeedsApproval` (only `Allow`/
+                    // `Deny` — see its own doc comment); `Oversight::review` is the layer that
+                    // escalates an `Allow` to `NeedsApproval` per `oversight.toml` (or leaves an
+                    // already-terminal decision untouched, never softening a `Deny` — see
+                    // `Oversight::review`'s own doc comment). This is the real effect boundary
+                    // `docs/audit-2026-09-18-fable.md` M-16 asked for: before any tool call
+                    // dispatches, not after.
+                    let decision = self
+                        .oversight
+                        .review(&action, effective_authority.permits(&action));
+                    if let Decision::NeedsApproval(reason) = decision {
                         self.store.append(vec![EventDraft::new(
                             self.actor.clone(),
                             Id::from(task.ticket.clone()),
@@ -2372,5 +2401,185 @@ mod tests {
         assert_eq!(find_events(&events, EventKind::TicketSubmitted).len(), 1);
         assert!(find_events(&events, EventKind::TicketVerified).is_empty());
         assert!(find_events(&events, EventKind::TicketVerificationFailed).is_empty());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // `Oversight` wired at the real effect boundary (`docs/audit-2026-09-18-fable.md` M-16,
+    // `docs/decisions/D-008-oversight-policy-wiring.md`): a policy requiring approval for a
+    // dispatched action's class actually suspends the run *before* `ToolRegistry::dispatch`
+    // executes it, and a run with no such policy (`Oversight::default`, what `load_oversight`
+    // returns when a project has no `oversight.toml`) dispatches exactly as it did before this
+    // wiring existed.
+    // -----------------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn run_suspends_for_approval_when_oversight_requires_it_for_the_dispatched_action() {
+        let h = LiveHarness::new();
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        // `Authority::root()` (this harness's task authority) grants `git.commit` outright —
+        // `Decision::Allow` — so any suspension below is provably `Oversight::review`'s doing,
+        // not an authority denial.
+        let oversight = Oversight {
+            approval_required: ["git.commit".to_string()].into_iter().collect(),
+            spend_over_micros: None,
+        };
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        )
+        .with_oversight(oversight);
+        let task = h.task();
+        let request = expected_request(&agent_loop, &task);
+        provider.script_response(
+            &request,
+            tool_call_completion(
+                model.clone(),
+                &h.clock,
+                "call-1",
+                "git.commit",
+                serde_json::json!({"message": "should never actually run"}),
+            ),
+        );
+
+        let outcome = agent_loop.run(task).await.expect("run completes");
+        match outcome {
+            AgentOutcome::AwaitingApproval { pending_call, .. } => {
+                assert_eq!(pending_call.tool_name, "git.commit");
+                assert_eq!(pending_call.reason, "git.commit");
+            }
+            other => panic!("expected AwaitingApproval, got {other:?}"),
+        }
+
+        // `approval.requested` is durable (`docs/decisions/D-007-desktop-notifications.md` reads
+        // exactly this event kind), and no `command.started`/`effect.journaled` landed — the real
+        // `git commit` this call would have shelled out to never ran.
+        let events = h.all_events();
+        let requested = find_events(&events, EventKind::ApprovalRequested);
+        assert_eq!(
+            requested.len(),
+            1,
+            "expected exactly one approval.requested"
+        );
+        assert_eq!(
+            requested[0]
+                .payload
+                .as_approval_requested()
+                .expect("approval.requested payload")
+                .note,
+            "git.commit"
+        );
+        assert!(find_events(&events, EventKind::CommandStarted).is_empty());
+        assert!(find_events(&events, EventKind::EffectJournaled).is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_dispatches_normally_with_the_default_oversight_policy_no_oversight_toml() {
+        // `crate::executor`/`crates/tm-cli/src/dispatch.rs`'s `load_oversight` returns
+        // `Oversight::default()` when a project has no `oversight.toml`, and `AgentLoop::new`
+        // defaults to the same policy when `with_oversight` is never called — this exercises
+        // that default through a full `run()`, proving it asks nothing and a dispatched action
+        // proceeds exactly as it did before `Oversight` had a real caller.
+        let h = LiveHarness::new();
+        h.store
+            .activate(&h.ticket, h.actor.clone())
+            .expect("activate");
+        h.store
+            .acquire_lease(
+                &h.ticket,
+                h.actor.clone(),
+                Authority::none(),
+                vec![],
+                60,
+                h.actor.clone(),
+            )
+            .expect("acquire_lease");
+        h.store
+            .transition(&h.ticket, tm_core::Trigger::WorkStarted, h.actor.clone())
+            .expect("work started");
+
+        let evidence_events = h
+            .store
+            .store_artifact(
+                tm_core::ArtifactKind::Patch,
+                "text/plain".to_string(),
+                b"diff --git a/x b/x\n".to_vec(),
+                serde_json::json!({}),
+                None,
+                h.actor.clone(),
+            )
+            .expect("store_artifact");
+        let evidence_id = evidence_events[0]
+            .payload
+            .as_artifact_created()
+            .expect("artifact.created payload")
+            .artifact
+            .clone();
+
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        // No `.with_oversight(..)` call: this is `AgentLoop::new`'s own default, deliberately.
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+        assert_eq!(agent_loop.oversight(), &Oversight::default());
+
+        let task = h.task();
+        let request = expected_request(&agent_loop, &task);
+        let submit_input = serde_json::json!({
+            "summary": "goal met",
+            "evidence": [evidence_id.as_str()],
+        });
+        provider.script_response(
+            &request,
+            tool_call_completion(
+                model.clone(),
+                &h.clock,
+                "call-1",
+                "ticket.submit",
+                submit_input,
+            ),
+        );
+
+        let outcome = agent_loop.run(task).await.expect("run completes");
+        assert!(
+            matches!(outcome, AgentOutcome::Submitted { .. }),
+            "no oversight.toml means nothing needs approval; expected Submitted, got {outcome:?}"
+        );
+
+        let events = h.all_events();
+        assert!(
+            find_events(&events, EventKind::ApprovalRequested).is_empty(),
+            "the default oversight policy must never ask for approval"
+        );
     }
 }

@@ -366,6 +366,7 @@ impl AgentSession {
             extra,
         );
 
+        let oversight = crate::dispatch::load_oversight(&self.project)?;
         let mut agent_loop = AgentLoop::new(
             fabric,
             tools,
@@ -376,7 +377,8 @@ impl AgentSession {
             AGENT_ROLE,
             self.project.actor.clone(),
             self.project.store.clone(),
-        );
+        )
+        .with_oversight(oversight);
 
         let task = AgentTask {
             ticket: ticket.id.clone(),
