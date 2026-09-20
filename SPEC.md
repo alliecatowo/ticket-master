@@ -41,7 +41,9 @@ Everything in the first list must be unit-testable with **no network and no mode
 - **Rust**, edition 2021, stable toolchain (pinned via `rust-toolchain.toml`).
 - Cargo workspace, one crate per architectural layer.
 - Single user-facing binary: `tm`.
-- Storage: SQLite (`rusqlite`, bundled) at `<project>/.tm/project.db`. No external services required.
+- Storage: SQLite (`rusqlite`, bundled) at a project's `state_dir/project.db` — `state_dir` is
+  `<root>/.tm` in repo scope, or `$TM_HOME/projects/<key>/` in global scope (see
+  `docs/decisions/D-003-project-scope.md`). No external services required.
 - Everything works **offline** except provider calls and mirror sync.
 
 ```
@@ -394,7 +396,7 @@ pub struct Lease { id, ticket, holder: ParticipantId, authority: Authority,
   `milestone.reopened` plus `ticket.reopened` for affected descendants.
 - `Artifact { id, kind: CommandOutput|Patch|File|Report|Index|Benchmark|Transcript,
   media_type, bytes_len, hash, storage: Inline(Vec<u8>)|OnDisk(PathBuf), meta: Json }`.
-  Artifacts ≤ 64 KiB inline in SQLite; larger spill to `.tm/artifacts/<hash>`.
+  Artifacts ≤ 64 KiB inline in SQLite; larger spill to `<state_dir>/artifacts/<hash>` (D-003).
 - `Evidence { ticket, kind: TestRun|Diff|CommandOutput|Review|HumanAttestation,
   artifact, produced_by, ts, summary }`. Verifiers read evidence; workers produce it.
 
@@ -510,7 +512,8 @@ No test in the workspace performs a real network call. A workspace test asserts 
 
 ## 7. Code intelligence (`tm-codeintel`)
 
-Index lives in `.tm/index.db` (separate file so it can be rebuilt/blown away independently).
+Index lives in `<state_dir>/index.db` (D-003; separate file so it can be rebuilt/blown away
+independently).
 
 ### 7.1 Ingestion
 
