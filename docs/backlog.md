@@ -1,5 +1,61 @@
 # Backlog
 
+## SECURITY: rotate the DevPass/LLM Gateway API key
+
+A diagnostic script (run by an agent verifying the real TUI against a live model) accidentally
+printed `LLM_GATEWAY_API_KEY`/`DEVPASS_API_KEY` in full into its own tool output while reading
+`.env` — the agent caught its own mistake and didn't repeat the value afterward, but the key was
+exposed in this session's transcript. **Treat it as compromised. Rotate/revoke it, then update
+`.env` with the new value** (`DEVPASS_API_KEY`/`LLM_GATEWAY_API_KEY`, same value both places per
+this session's own notes — they're the same credential under two names).
+
+## Real TUI + live model: confirmed working, with one structural UX finding
+
+The ratatui TUI was driven end-to-end with a real model for the first time this session (a real
+pty, a real typed prompt, a real streamed response) — confirmed via a rigorous test that caught
+and fixed its own false positive (the first prompt attempt echoed its own expected-output
+substring back before any network round trip completed; fixed by using a base64-decode task so a
+correct on-screen answer could only come from real model output). Confirmed the TUI and the plain
+`-p` loop share the exact same `build_fabric()` call (`crates/tm-cli/src/agent.rs:373`) — there is
+no separate, divergent provider-wiring path for the interactive TUI.
+
+**Structural finding, not a bug in any one code path**: a turn that ends with a correct
+conversational text answer (no submission-tool call) is always classified
+`AgentOutcome::Failed{class: Other}` and rendered to the user as `failed (Other): ...` — confirmed
+this is deliberate, existing behavior (`build_mock_fabric`'s own doc comment says the same),
+not new. The real chat experience works; the UX presents a correct answer as an error. Worth a
+real decision on whether "answered in text without submitting" should be a distinct, non-failure
+outcome class.
+
+## `tm-pty`'s agent tools are fully built, tested, and unreachable by any real agent turn
+
+`PtyCapability`/`pty.*` tools: built, unit-tested (23/23 passing), authority-gated per SPEC §22.4
+— and never registered anywhere a real agent turn can reach them. `crates/tm-cli/Cargo.toml` does
+not depend on `tm-pty` at all (compare `BrowserCapability`/`ComputerCapability`, both wired in at
+`crates/tm-cli/src/agent.rs:393`/`405-406` — no `PtyCapability` equivalent exists anywhere in the
+workspace outside the `tm-pty` crate itself, which only `tm-tui` depends on, as a dev/test seed).
+A real, complete feature sitting fully dark. Needs either wiring in for real or a decision that
+it's intentionally not agent-facing yet.
+
+## D-002 terminal-UI consequences: real, evidence-based gap list (not urgent, but concrete)
+
+A fact-finding pass (not a fix) against `docs/decisions/D-002-terminal-ui-stack.md`'s six explicit
+"Consequences" found: (1) SIGTERM/SIGHUP and (2) SIGTSTP/SIGCONT are real, signal-tested via
+`kill`/re-exec'd child processes, but no test asserts the tty was *actually* restored/re-entered
+afterward — `teardown_terminal`/`setup_terminal` errors are silently swallowed
+(`crates/tm-tui/src/runtime.rs:109-121`), and a real one was observed live during this testing
+pass: `"tm-tui: failed to re-enter the terminal after SIGCONT: Device not configured (os error
+6)"`, uncaught by the test suite because it only awaits a notification firing, not the `Result`.
+(3) truecolor detection exceeds the D-002 ask (a real OSC 11/DA1 probe, not just env trust). (4)
+synchronized-output enable/disable logic is tested; actual per-frame emission of the DEC 2026
+escape sequences is not. (5) grapheme-width handling is careful and well-tested at the unit level,
+but the "cross-emulator test matrix" D-002 explicitly asked for (vs. unit-level self-consistency)
+doesn't exist. (6) the PTY-harness test layer is genuinely strong; the `insta` snapshot layer is a
+declared dependency never actually invoked anywhere in `tm-tui` (zero `insta::` call sites); VHS
+tapes are honestly documented as out of scope, not silently missing. None of this blocks real
+usage (the live TUI test above passed), but it's real, itemized technical debt against a decision
+doc that framed these as explicit requirements "each with a test."
+
 Work that is specified and agreed but not yet built, in rough priority order. Anything here is
 real, scoped work — not aspiration. Items that turn out to be wrong get deleted, not quietly kept.
 
