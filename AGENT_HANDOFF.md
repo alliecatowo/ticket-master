@@ -98,12 +98,10 @@ machinery is the deeper "expanded universe" underneath, reachable on demand, not
 
 ## Current state of `main`
 
-HEAD as of writing: `00e6b10`. Full `cargo run -p xtask -- verify` (fmt + clippy -D warnings +
-`cargo test --workspace` + hygiene) passes clean — last full run: **3001 passed, 0 failed, 4
-ignored** (pre-existing, documented ignores). `check-drift` (the advisory parallel-track-drift
-checker) was also run by hand across this session's entire merge chain and found nothing. There
-is no known failing test, no known broken build, no known regression anywhere on `main` as of
-this commit.
+HEAD as of this (final) update: `85f16ae`. Full `cargo run -p xtask -- verify` passed clean as of
+`c36e3eb` (the `.env` auto-load commit, one before the two doc-only D-017 commits that follow it
+— doc commits carry no code-verification risk, so this is still the accurate last-known-green
+point). No known failing test, no known broken build, no known regression anywhere on `main`.
 
 **Every commit on `main` has already been through**: build in an isolated worktree → merge by the
 orchestrator (never by the building agent) → a *separate* verify-only agent confirming the merged
@@ -142,13 +140,16 @@ detail, Esc/Left to go back. Bare `tm`'s plain chat screen is unchanged as the d
 pty-based end-to-end test (`crates/tm-cli/tests/tui_navigation.rs`) proves the back-stack
 actually works, not just that screens render. `docs/decisions/D-006-tui-navigation-shell.md`.
 
-### DevPass as default provider (B-12-adjacent, product-requested)
+### DevPass as default provider (B-12-adjacent, product-requested) — later CONFIRMED WORKING LIVE
 When `DEVPASS_API_KEY`/`DEVPASS_BASE_URL`/`DEVPASS_MODEL` are all set, `coder.fast` (the role
 driving interactive turns) prefers DevPass over Anthropic — additive, byte-identical behavior
 when unset. `crates/tm-cli/src/agent.rs::build_fabric` had to change too, not just the role
 table (a naive table-only fix would have been an active regression). `docs/decisions/
-D-005-devpass-default-provider.md`. **Still never actually tested live** — see "Open/pending"
-below, this is the single most-requested-and-least-resolved thread this session.
+D-005-devpass-default-provider.md`. This was the single most-requested thread of the whole
+session — **it is now fully resolved**: real credentials were obtained, wired, and the whole
+chain (auth adapter → provider → `AgentLoop` → real TUI) was verified live, more than once, by
+both subagents and by me directly. See "DevPass — CONFIRMED WORKING end-to-end" further down for
+the full evidence; don't re-derive this from this paragraph alone.
 
 ### Phase 2 "ecosystem parity" (M-04 audit item) — full batch, 5 parallel tracks
 - **`oversight.toml`** wiring: `Oversight::review` now runs at the real effect boundary
@@ -219,14 +220,15 @@ Real notifications (`notify-rust` / `terminal-notifier` / OSC 9 fallback chain) 
   earliest merge," since branch order and merge order can diverge (this bit an agent for real
   this session; see the check-drift run in the transcript for the exact method).
 
-## In-flight work — likely none by the time you read this, but check
+## In-flight work — none. Everything from this session is merged, committed, and idle.
 
-All four agents from this stretch (decisions/wiki fix, live DevPass `-p` test, live TUI+model
-test, Codex ChatGPT OAuth adapter) are merged as of this writing; only a final verify-only agent
-(`a6c94664dba05c309`) may still be running. Use `ListAgents` to check — if it shows `completed`,
-its report should already be in the conversation; if it's still `running` or got interrupted,
-either just re-run `cargo run -p xtask -- verify` yourself (cheap, safe, idempotent) or resume it
-via `SendMessage`. Nothing needs merging from it either way — it's report-only.
+`ListAgents` showed zero running subagents and zero worktrees as of the final commit on this
+branch. The last verify-only agent (checking the Codex OAuth adapter merge) was deliberately
+stopped mid-run, not left to finish — it was holding the shared `target/` build lock while the
+user was actively trying to run `cargo run -p tm-cli --bin tm` themselves in their own terminal,
+and every piece it was re-checking had already been individually verified before merging. If you
+want that specific re-confirmation, it's cheap and safe to just run `cargo run -p xtask --
+verify` yourself; nothing about stopping it left `main` in a questionable state.
 
 **Everything done this stretch, for reference:** the decisions/wiki fix (merged as **D-015**,
 `crates/tm-wiki/src/decisions.rs` now reads `docs/decisions/*.md` directly, wiki regenerated); the
@@ -265,10 +267,15 @@ current model: `muse-spark-1.3-contributor` (Meta, released 2026-09-02, ~$0.10/$
 tokens). All three are now in `/Users/allie/Develop/ticket-master/.env` (gitignored, mode 600):
 `DEVPASS_API_KEY`, `DEVPASS_BASE_URL=https://api.llmgateway.io/v1`,
 `DEVPASS_MODEL=muse-spark-1.3-contributor` — matching `crates/tm-provider/src/providers/
-compat.rs`'s `DevPassProvider` exactly. **`tm`/`tm-cli` does NOT auto-load `.env`** (checked, no
-dotenv dependency anywhere) — these vars need to be explicitly exported/sourced before running
-`tm` for real, or wired into a real dotenv-loading mechanism if that's wanted as a permanent
-convenience (not built yet, wasn't asked for).
+compat.rs`'s `DevPassProvider` exactly. **Update, later in this same session: `tm` now DOES
+auto-load `.env`** — this was a real, twice-repeated user complaint ("cargo run command didn't
+give it the .env"), fixed for real: `main.rs::load_dotenv` (new, calls `dotenvy::dotenv()`) runs
+before anything else in `main()`, loads `.env` from the current directory only (no upward search,
+deliberately, to avoid a D-003-shaped surprise), never overrides a real env var already set.
+Verified live: unset every `DEVPASS_*`/`LLM_GATEWAY_API_KEY` var, ran `tm provider detect` from
+the repo root with zero manual export, got `devpass`/`"availability": "ready"` back purely from
+`.env`. No more manual `source .env`/`export` needed for any normal invocation from this repo
+root.
 
 **Confirmed, for real, by agent `af97e050cfb5c0de4`**: a real `tm --json -p "Reply with exactly
 the following seven characters and nothing else: DEVPASS"` run against a real tempdir project got
@@ -308,14 +315,20 @@ to `claude agents`: `crates/tm-cli/src/tui.rs`'s `is_tickets_command` — typing
 deliberately runs with no mock provider configured, so it would hang instead of silently passing
 if `is_tickets_command` ever failed to intercept the submission before a real turn spawned).
 `docs/decisions/D-006-tui-navigation-shell.md` updated in place (§3b) with the same convention
-this repo already used once for a direct decision follow-up. **Confirm `cargo run -p xtask --
-verify` passed clean on this specific change before treating it as done** — it was still running
-in the background when this doc was last saved; check its result first if picking this up cold.
+this repo already used once for a direct decision follow-up. Full `cargo run -p xtask -- verify`
+confirmed clean on this change (fmt caught one line-length issue on the first pass, fixed,
+re-verified green) — this is settled, not pending.
 
 Also confirmed, via a real screenshot the user shared from a live mobile SSH session: bare `tm`
 correctly opens directly into `Home` (chat input focused, ticket dashboard visible alongside) —
 this was a live, authentic real-world confirmation the default-screen design actually works as
 intended, not a report I have to take on faith.
+
+Shipped after that, in direct response to the next round of live feedback: `.env` auto-loading
+(see the DevPass section above for the details and live proof) and `docs/decisions/
+D-017-session-ticket-executor-model.md` — the session/ticket/executor synthesis this file's very
+first section already points you to. If you haven't read D-017 yet, this is the last reminder:
+read it before doing anything else in this codebase.
 
 ## Open / pending — things a human needs to weigh in on, not yours to resolve unilaterally
 
@@ -345,9 +358,11 @@ This session did not use a formal ticket/todo-list mechanism for its own meta-wo
 done by (a) this conversation's own turn-by-turn narration, (b) `docs/backlog.md` as the durable
 record of anything not fully resolved, and (c) each `docs/decisions/D-NNN-*.md` as the durable
 record of anything that *was* resolved and why. If you want a more formal continuation mechanism
-next session, priority order for what's left is roughly: check the three in-flight agents above
-first (especially the live DevPass test result) > `docs/backlog.md`'s remaining "Open decision"
-section (`resolve_genesis_provider`) > the smaller open items listed above.
+next session, priority order for what's left is roughly: the session/ticket/executor fix this
+file's top section and `D-017` both point at (the real, unresolved architectural work) >
+`docs/backlog.md`'s remaining "Open decision" section (`resolve_genesis_provider`) > D-016's live
+Codex-auth proof, if a real unsandboxed environment is available to run it in > the smaller open
+items listed below.
 
 ## Practical operating notes for whoever resumes this
 
@@ -358,7 +373,8 @@ section (`resolve_genesis_provider`) > the smaller open items listed above.
   SKILL.md` — `isolation: 'worktree'` mandatory, never let a subagent run the real `tm` binary
   against the primary checkout outside a tempdir, orchestrator merges personally and verifies
   with a separate agent after every merge, clean up the worktree/branch immediately after.
-- Decision-doc numbering collisions are real and repeated (5 this session) — if dispatching
+- Decision-doc numbering collisions are real and repeated (6 this session, most recently D-015
+  claimed independently by both the decisions/wiki fix and the Codex OAuth adapter) — if dispatching
   multiple parallel tracks that might each write a new `docs/decisions/D-NNN-*.md`, either
   serialize the doc-numbering step or expect to renumber on merge; the new hygiene check will at
   least catch any cross-reference you miss, but it won't catch the *filename* collision itself.
