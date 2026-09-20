@@ -137,7 +137,11 @@ shared root with variants: `NotFound`, `Conflict`, `InvalidTransition`, `Authori
   Implemented by pattern-implication: `p ⊑ q` iff `q` matches every literal prefix expansion of
   `p` under the rule set {`**` absorbs any segments, `*` absorbs one segment's characters,
   literal must equal literal}. Conservative = may answer `false` for an actually-safe subset;
-  must **never** answer `true` for an unsafe one. Property-tested.
+  must **never** answer `true` for an unsafe one. Property-tested. This rule set is incomplete as
+  stated: `matches` also treats a pattern ending in a trailing `/**` as covering its own bare
+  prefix named directly, and the containment check has to reason about that disjunct too, not
+  just raw segment structure — see `docs/decisions/D-014-pattern-subset-double-star-fix.md` for
+  the real rule and the false-positive bugs that gap caused.
 
 ---
 
