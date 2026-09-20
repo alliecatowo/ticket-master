@@ -226,3 +226,40 @@ fn a_bare_t_while_home_is_focused_types_into_the_chat_input_instead_of_navigatin
     pty.write(b"q").expect("send the quit key");
     let _ = pty.wait(Duration::from_secs(10));
 }
+
+#[test]
+fn typing_slash_tickets_and_enter_opens_kanban_without_spawning_a_turn() {
+    let (project, _ticket_id) = init_project_with_one_ticket();
+    let tm_home = tempfile::tempdir().expect("tempdir");
+
+    let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_tm"));
+    cmd.arg("--project");
+    cmd.arg(project.path());
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("TM_HOME", tm_home.path());
+    // Deliberately no `TM_TEST_MOCK_PROVIDER`: if `is_tickets_command` ever failed to intercept
+    // this submission before `App::spawn_turn`, this test would hang on a real network call
+    // instead of passing, which is the point -- a mock provider here would hide that failure mode.
+
+    let mut pty = support::Pty::spawn(cmd, 100, 30).expect("spawn `tm` inside a pty");
+    let _ = pty.wait_for("Tickets", Duration::from_secs(10));
+
+    // Typed, not a chord: the same chat input every prompt goes through.
+    pty.write(b"/tickets").expect("type the tickets command");
+    pty.write(b"\r").expect("submit with Enter");
+
+    let screen = pty.wait_for("Left/Right: columns", Duration::from_secs(10));
+    assert!(
+        screen
+            .iter()
+            .any(|line| line.contains("Left/Right: columns")),
+        "submitting `/tickets` must open the Kanban board, got: {screen:?}"
+    );
+    assert!(
+        !screen.iter().any(|line| line.contains("/tickets")),
+        "the command text must not remain visible as a leftover chat submission, got: {screen:?}"
+    );
+
+    pty.write(b"q").expect("send the quit key");
+    let _ = pty.wait(Duration::from_secs(10));
+}

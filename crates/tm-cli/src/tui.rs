@@ -292,6 +292,16 @@ fn is_tickets_chord(key: &crossterm::event::KeyEvent) -> bool {
     key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
+/// A typed alternative to [`is_tickets_chord`]: `/tickets` (or bare `tickets`, forgiving the slash
+/// a human typing fast might drop), submitted through the same chat input every prompt goes
+/// through. `Ctrl+T` alone is not discoverable the way a named command is — nothing on screen
+/// hints it exists, unlike `claude agents`, which a human finds by typing a plausible word. This
+/// is the same navigation, reached the way that command actually reads: typed, not a hidden chord.
+/// Checked before treating a submission as a real prompt, so it never reaches the model.
+fn is_tickets_command(prompt: &str) -> bool {
+    matches!(prompt.trim(), "/tickets" | "tickets")
+}
+
 /// True when `key` is a back-navigation chord for a screen currently showing `current`.
 ///
 /// `Esc` always means "back" on any non-`Home` screen (nothing in this crate ever binds `Esc` to
@@ -658,7 +668,11 @@ impl Component for App {
             ScreenId::Home => {
                 let propagation = self.home.handle_event(event, ctx);
                 if let Some(prompt) = self.home.take_submission() {
-                    self.spawn_turn(prompt);
+                    if is_tickets_command(&prompt) {
+                        self.push_screen(ScreenId::Kanban);
+                    } else {
+                        self.spawn_turn(prompt);
+                    }
                 }
                 propagation
             }

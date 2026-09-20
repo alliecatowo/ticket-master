@@ -51,6 +51,12 @@ built on top of yet.
    binding `Left` to both would make "leftmost column, press Left again" ambiguous between
    "nothing happens" and "leave the screen". This is a deliberately narrower reading of "Left/Esc
    goes back" for the one screen where `Left` already means something else, not an oversight.
+3b. **Typed `/tickets` (or bare `tickets`) is a second way in** (`is_tickets_command`, added after
+   this decision first shipped): a hidden `Ctrl+T` chord has nothing on screen hinting it exists,
+   unlike `claude agents`, which a human discovers by typing a plausible word into a chat box —
+   the same surface this product's own chat input already is. Checked on submission, before a
+   prompt would otherwise reach the model, so it never costs a real turn. `Ctrl+T` stays; this is
+   additive, not a replacement.
 4. **`FocusTree` is rebuilt twice around the event loop, not once before it.**
    `component::FocusTree::rebuild` walks `root.focusable_children()`, and until this change that
    ran exactly once, before the event loop started — meaning a component tree whose
