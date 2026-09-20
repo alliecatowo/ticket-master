@@ -24,6 +24,11 @@
 //!   `reqwest` (already a workspace dependency) rather than a dedicated OAuth crate.
 //! - [`Entitlement`] / [`QuotaClass`]: what an adapter reports itself entitled to, so the fabric
 //!   can route on subscription-vs-metered capacity per §28.2/§31.1.
+//! - [`redact`]: a distinct, complementary guarantee to [`Credential`]'s -- scans *arbitrary*
+//!   text for secret-*shaped* substrings this crate never resolved (a tool's stdout, a model's
+//!   echoed output) rather than redacting a known value. See [`redact` module docs][redact] for
+//!   the full split between the pure/persistence-path redactor and [`SessionRedactor`]'s
+//!   in-memory-only local restore.
 
 mod credential;
 mod device_code;
@@ -31,6 +36,7 @@ mod entitlement;
 mod env_api_key;
 mod error;
 mod keychain;
+pub mod redact;
 
 pub use credential::Credential;
 pub use device_code::{
@@ -41,6 +47,7 @@ pub use entitlement::{Entitlement, QuotaClass};
 pub use env_api_key::EnvApiKey;
 pub use error::AuthError;
 pub use keychain::KeychainApiKey;
+pub use redact::{redact, redact_json, SessionRedactor};
 
 use async_trait::async_trait;
 

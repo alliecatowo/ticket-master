@@ -184,6 +184,18 @@ impl ContextPack {
 /// inputs. `roles` prices [`SectionKind::Budget`]'s tier menu (`SPEC.md` §31.1,
 /// `docs/audit-2026-09-18-fable.md` B-10) — pass `RoleTable::default_table()` when no
 /// project-specific `providers.toml` is loaded.
+///
+/// Each section's rendered body is redacted for secret-shaped substrings (`tm_auth::redact`,
+/// the pure/keyless form — see its docs) before it is charged against the budget or admitted:
+/// a pack is both handed straight to a worker as prompt content (a `CompletionRequest` built
+/// from it reaches `Fabric::execute`'s own redaction, but only *after* whatever already leaked
+/// in here) and, when persisted (a snapshot artifact), goes through
+/// `Store::store_artifact`'s redaction too late to matter if the plaintext already made it this
+/// far. `docs/audit-2026-09-18-fable.md`'s "M-04" names "a context pack" explicitly as one of
+/// the durable-persistence redaction targets; this is that boundary. Redacting here rather than
+/// only downstream keeps this deterministic (`redact` is pure/keyless, so this does not break
+/// the byte-identical guarantee above) and means `rent_report`'s byte/token accounting reflects
+/// what a section actually costs once redacted, not its pre-redaction size.
 pub fn compile(
     ticket: &Ticket,
     view: &ProjectView,
@@ -235,7 +247,8 @@ pub fn compile(
     let mut provenance = Vec::new();
     let mut dropped = Vec::new();
 
-    for (kind, raw) in raw_sections {
+    for (kind, mut raw) in raw_sections {
+        raw.body = tm_auth::redact(&raw.body);
         let cost = estimate_tokens_prose(&raw.body);
         let byte_cost = raw.body.len();
         if ledger.spend(kind, cost) {
@@ -345,6 +358,93 @@ mod tests {
         assert_eq!(
             pack.tokens,
             pack.sections.iter().map(|s| s.tokens).sum::<usize>()
+        );
+        assert!(pack
+            .provenance
+            .iter()
+            .any(|p| p.locator == ticket.id.to_string()));
+    }
+
+    /// The regression gate for M-04's "secret redaction ... a context pack": a real
+    /// `ticket.objective` (the field a human most plausibly pastes a stray credential into)
+    /// carrying a known fake-secret-shaped canary, compiled through the real [`compile`], must
+    /// not reach any admitted section's body.
+    #[test]
+    fn compile_redacts_a_secret_shaped_substring_in_the_objective() {
+        const CANARY: &str = "sk-PACKCANARY0123456789abcdefghijklmnopqr";
+
+        let mut ticket = base_ticket();
+        ticket.objective = format!("Rotate the leaked key {CANARY} in the config");
+        let view = ProjectView::empty();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ci = open_empty_codeintel(dir.path());
+
+        let pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            TokenBudget::even(100_000),
+            SignalWeights::default(),
+            &[],
+            &RoleTable::default_table(),
+        )
+        .expect("compile succeeds");
+
+        for section in &pack.sections {
+            assert!(
+                !section.body.contains(CANARY),
+                "canary leaked into {:?} section body: {}",
+                section.kind,
+                section.body
+            );
+        }
+        let objective = pack
+            .sections
+            .iter()
+            .find(|s| s.kind == SectionKind::Objective)
+            .expect("objective section admitted");
+        assert!(
+            objective.body.contains("<redacted:api_key>"),
+            "{}",
+            objective.body
+        );
+    }
+
+    /// The false-positive half of the same gate: a legitimate long identifier this codebase
+    /// already generates (a blake3 content hash, with no `key`/`token`/`secret`/`password`
+    /// label nearby) must survive `compile` unredacted, and the ticket id in the objective
+    /// section's own provenance must survive too.
+    #[test]
+    fn compile_does_not_redact_a_real_content_hash_or_the_ticket_id() {
+        let content_hash = blake3::hash(b"some real file contents")
+            .to_hex()
+            .to_string();
+        let mut ticket = base_ticket();
+        ticket.objective = format!("Verify the build against content hash {content_hash}");
+        let view = ProjectView::empty();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ci = open_empty_codeintel(dir.path());
+
+        let pack = compile(
+            &ticket,
+            &view,
+            &ci,
+            TokenBudget::even(100_000),
+            SignalWeights::default(),
+            &[],
+            &RoleTable::default_table(),
+        )
+        .expect("compile succeeds");
+
+        let objective = pack
+            .sections
+            .iter()
+            .find(|s| s.kind == SectionKind::Objective)
+            .expect("objective section admitted");
+        assert!(
+            objective.body.contains(&content_hash),
+            "a real content hash must survive redaction unchanged: {}",
+            objective.body
         );
         assert!(pack
             .provenance
