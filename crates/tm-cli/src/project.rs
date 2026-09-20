@@ -284,13 +284,30 @@ pub fn resolve_scope(explicit: Option<&Path>, cwd: &Path) -> tm_types::Result<Re
             exists: true,
         });
     }
+    // The default `TM_HOME` is `$HOME/.tm` -- the exact shape `locate` searches for -- so once any
+    // global-scope project has ever been created anywhere (which is now `open_bare`'s default
+    // behavior), a plain `locate` walking up from any `cwd` under `$HOME` would eventually reach
+    // it and misresolve the user's entire home directory as an ordinary repo-scope project. This
+    // must be checked against the *real* home directory (`dirs::home_dir()`), not `tm_home()`:
+    // `tm_home()` reads the `TM_HOME` env var, which tests override to a hermetic tempdir
+    // specifically so they don't touch the real `$HOME/.tm` -- but `locate` still walks the real
+    // filesystem starting from the real `$HOME`, so an env-var-relative check would stop guarding
+    // the one path `locate` can actually reach. `$HOME/.tm` never contains `project.db` directly
+    // (only a `projects/<key>/` subdirectory), so it can never be a genuine repo-scope hit;
+    // exclude it explicitly rather than relying on that shape difference implicitly.
+    let real_home_tm = dirs::home_dir()
+        .and_then(|h| h.canonicalize().ok())
+        .map(|h| h.join(".tm"));
     if let Ok(found) = locate(cwd) {
-        return Ok(Resolved {
-            state_dir: found.join(".tm"),
-            root: found,
-            scope: Scope::Repo,
-            exists: true,
-        });
+        let is_real_home_tm = real_home_tm.as_deref() == Some(found.join(".tm").as_path());
+        if !is_real_home_tm {
+            return Ok(Resolved {
+                state_dir: found.join(".tm"),
+                root: found,
+                scope: Scope::Repo,
+                exists: true,
+            });
+        }
     }
     let root = workspace_root_for(cwd)?;
     let state_dir = global_project_dir(&root)?;
