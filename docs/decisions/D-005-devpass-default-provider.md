@@ -1,4 +1,4 @@
-# D-004 — DevPass as the default provider for interactive turns
+# D-005 — DevPass as the default provider for interactive turns
 
 **Status:** accepted · **Date:** 2026-09-19 · **Supersedes:** nothing
 

@@ -283,7 +283,7 @@ actually drive an agent-loop turn as. Concretely:
   DevPass-testing model is not guaranteed to.
 - Absent all three env vars, behavior is byte-for-byte unchanged from before this feature existed.
 
-See `docs/decisions/D-004-devpass-default-provider.md` for the reasoning and what this does not
+See `docs/decisions/D-005-devpass-default-provider.md` for the reasoning and what this does not
 cover.
 
 ## Free-tier summary
