@@ -311,8 +311,8 @@ fn parse_class(bytes: &[u8]) -> Option<(CharClass, &[u8])> {
 /// [`tokens_imply`] compares them; this is what fixes `segment_implies` treating `[ab]`'s four
 /// source bytes as four independent literal characters instead of the one actual character the
 /// class matches (`is_subset_of(["[ab]"], ["????"])` wrongly returned `true` — see
-/// `docs/decisions/D-014-pattern-subset-double-star-fix.md`'s "Known separate finding, not fixed
-/// here" section for the original report).
+/// `docs/decisions/D-014-pattern-subset-double-star-fix.md`'s "Bug 4 (follow-up)" section for the
+/// original report).
 enum SegTok {
     /// `*`: zero or more characters (never `/`; see [`CharClass`]'s doc comment).
     Star,
@@ -741,7 +741,7 @@ mod tests {
     }
 
     /// Regression for the false-positive class D-014 found but explicitly left unfixed (its
-    /// "Known separate finding, not fixed here" section): `segment_implies` treated a `[...]`
+    /// "Bug 4 (follow-up)" section): `segment_implies` treated a `[...]`
     /// character class as its raw source bytes (`[`, `a`, `b`, `]` — four literal characters)
     /// instead of the one actual character it matches. `[ab]` matches a single character ('a'
     /// or 'b'); `????` requires exactly four. The old byte-level code happened to line up `[ab]`'s
