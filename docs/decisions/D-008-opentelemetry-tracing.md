@@ -8,10 +8,11 @@
 a gap against the field; its "done looks like" is specific: "`tracing-opentelemetry` behind a
 feature flag with `TM_OTEL_ENDPOINT`". `crates/tm-cli/src/main.rs`'s `install_tracing` was, before
 this change, a fixed three-line `tracing_subscriber::fmt()` builder writing to stderr under
-`RUST_LOG` — the only tracing subscriber this codebase has ever installed. Every other crate
-already emits real `tracing::debug!`/`info!`/span-shaped instrumentation against that one
-subscriber (`CLAUDE.md`'s "Logging and debugging" section); the task was to add an export path
-*alongside* that, not to touch any of those call sites.
+`RUST_LOG` — the only tracing subscriber this codebase has ever installed. Other crates already
+emit real `tracing::debug!`/`info!` events against that one subscriber (`CLAUDE.md`'s "Logging and
+debugging" section) — bare events only, not span-shaped instrumentation; see "What this costs"
+for why that distinction turned out to matter. The task was to add an export path *alongside*
+whatever tracing already existed, not to touch any of those call sites.
 
 Two things had to be settled before writing code:
 
@@ -125,7 +126,10 @@ Two things had to be settled before writing code:
   and `reqwest 0.13.5` as separate `[[package]]` entries — which means two full HTTP-client stacks
   compile when the feature is on. Confirmed *not* to affect the default (no-flags) build: the only
   `Cargo.lock` changes from a plain `cargo build --workspace -j 2` are new entries reserved for the
-  optional deps (plus a few pre-existing entries' dependency-list lines relabelled from `"reqwest"`
+  four optional `otel`-gated deps and their own transitive dependencies, plus `serial_test`/
+  `serial_test_derive` (an existing `[workspace.dependencies]` entry with no prior real use
+  anywhere in the tree until this change's tests, added as a normal dev-dependency, not gated by
+  `otel`) (plus a few pre-existing entries' dependency-list lines relabelled from `"reqwest"`
   to `"reqwest 0.12.28"` for disambiguation now that a second version exists in the lock graph at
   all) — no existing crate's resolved version changed, and `cargo tree -p tm-cli` with default
   features shows zero `opentelemetry*` crates.
