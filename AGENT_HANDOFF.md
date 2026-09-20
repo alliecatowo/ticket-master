@@ -9,6 +9,65 @@ printed in full into an agent's tool output this session (caught by the agent it
 repeated afterward, but exposed regardless). If the user hasn't already rotated it, that's the
 very first thing to raise next session — see `docs/backlog.md`'s top section.
 
+**THE ACTUAL TOP PRIORITY, read this second:** a session should not always be a ticket. Read the
+next section before touching anything else in this file.
+
+## A real architectural gap, found live at the very end of this session — start here
+
+The user's own words, verbatim, because a paraphrase of this already drifted twice and cost real
+patience: *"tm=claude. tickets and shit is all in the background. right now home makes session =
+ticket. sessions can create tickets. have none. or have multiple tickets. they are not like one
+session = ticket."* And separately: *"then saying something makes a new ticket. thats not what I
+want."*
+
+**Confirmed, precisely, by reading the actual code (not guessing):** `crates/tm-cli/src/
+agent.rs`'s `AgentSession::resolve_ticket` eagerly creates a real, persisted scratch `Ticket` the
+*first* time any turn runs in a session with no `attached_ticket` — unconditionally, regardless of
+whether the prompt is real work or a trivial question. It does **not** re-create one per message
+(`self.attached_ticket` caches across the rest of that session's turns — so it's "one ticket per
+session," not "one ticket per message" — but "always exactly one, created eagerly, no way to have
+zero" is still exactly the bug the user is naming: a session's *identity* is a ticket right now,
+and it shouldn't be).
+
+**Do not "fix" this by making `AgentTask.ticket: Option<TicketId>`.** This was seriously
+considered and rejected within this session, with evidence, not just as a guess:
+`crates/tm-agent/src/outcome.rs`'s `AgentTask.ticket` is a required, non-optional field, and a
+grep of every real use in `crates/tm-agent/src/agent_loop.rs` confirms it is **not**
+attribution-only — `view.tickets.get(&task.ticket)` seeds the durable goal from the ticket's own
+`objective`, `store.goal_state(&task.ticket)` re-reads goal state, `store.event_count_for(...)`
+enforces a per-ticket event cap for budget purposes, and the ticket id is baked directly into the
+rendered prompt (`crate::prompt::render(&task.ticket, ...)`). Making this field optional means
+every one of those call sites grows a real "what does this mean with no ticket" branch, in the one
+part of this system supposed to be boring and correct. That's a multi-session change with real
+regression surface, not a quick decoupling — confirmed, not assumed.
+
+**The right-sized decomposition** (advisor-reviewed before writing this down):
+1. Stop `resolve_ticket` from eagerly creating. A turn with no attached ticket should run against
+   a session-level `Authority`/`Budget` — `AgentLoop` already carries its own baseline
+   independently of any task (`self.authority.intersect(&task.authority)` in `agent_loop.rs`), so
+   this part is more tractable than it first looks.
+2. **The open question, unresolved, is what a ticketless turn gives `AgentTask.ticket` given the
+   real Store reads found above** — a session-scoped synthetic id with no real `tickets` row would
+   work if those reads can be made to tolerate "no such ticket" gracefully; if they can't, this
+   step alone is the bulk of the work. Start here, concretely, next session.
+3. `ticket.create_child` (the one model-invocable ticket-creation tool that exists today) requires
+   a parent — so a ticketless session currently has no way to ever create its *first* ticket. That
+   gap is the real missing piece for "sessions can create tickets." Whether the mechanism is a new
+   model-callable tool, a `/ticket`-style typed command (see below), or both, is a product call for
+   the user, not something to decide unilaterally.
+
+**On the `/tickets` typed-command addition made just before this was written**: it's real, tested,
+and merged (`is_tickets_command` in `tui.rs`) — but don't treat it as settled. If `tm` is supposed
+to *be* Claude Code with tickets genuinely backgrounded, a command to open a Kanban board full of
+tickets might not be the right shape at all once the session/ticket decoupling above actually
+happens. Keep it; just don't build more on top of it as if the current ticket-surfacing model is
+final.
+
+**Also said, not yet actioned, needs the user's specifics before attempting anything:** *"the home
+screen is lack luster as fuck."* No further detail was given despite three separate corrections in
+this same stretch of conversation — guessing at a redesign here risks a fourth. Ask what
+specifically before changing anything about `Home`'s layout/visuals.
+
 ## What this project is
 
 Ticketmaster: a persistent software-engineering runtime with a deterministic, event-sourced
