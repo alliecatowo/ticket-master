@@ -27,6 +27,8 @@
 //!   between it and [`agent`]'s plain loop.
 //! - [`dispatch`] — builds the `tm_scheduler::ExecutorDispatcher` `sched::run_ticket` (`tm run`)
 //!   and `sched::sched_run` (`tm sched run`) both drive tickets through (`SPEC.md` §24).
+//! - [`worktree`] — `tm run <ticket> --worktree`'s real `git worktree add` isolation
+//!   (`docs/decisions/D-012-run-worktree-isolation.md`).
 //!
 //! `main.rs` is deliberately thin: parse, install tracing, open the project when needed, route
 //! to one of the modules above, render, exit with the mapped code.
@@ -49,3 +51,4 @@ pub mod tickets;
 pub mod tui;
 pub mod wiki;
 pub mod workflow;
+pub mod worktree;

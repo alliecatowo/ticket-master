@@ -4,7 +4,7 @@
 //! audit B-01/B-04).
 
 use std::io::{self, BufRead, Write as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -151,7 +151,16 @@ struct AcpAgentToml {
 /// `crate::drive::optional_browser_wiring`'s "absent config file means this optional executor is
 /// simply never registered" shape exactly, so a project with no `acp.toml` dispatches every
 /// ticket identically to how it did before this crate existed.
-fn optional_acp_executor(project: &Project) -> tm_types::Result<Option<(Role, Arc<AcpExecutor>)>> {
+///
+/// `exec_root` is the external agent's working directory (`AcpAgentConfig::cwd`) — `project.root`
+/// for a normal run, or a `tm run <ticket> --worktree` run's isolated checkout
+/// (`docs/decisions/D-012-run-worktree-isolation.md`); `acp.toml` itself is still always read
+/// from `project.root`, since it is human-authored, version-controlled project configuration,
+/// not something a per-run worktree carries its own copy of.
+fn optional_acp_executor(
+    project: &Project,
+    exec_root: &Path,
+) -> tm_types::Result<Option<(Role, Arc<AcpExecutor>)>> {
     let path = project.root.join(ACP_TOML_FILENAME);
     if !path.exists() {
         return Ok(None);
@@ -165,7 +174,7 @@ fn optional_acp_executor(project: &Project) -> tm_types::Result<Option<(Role, Ar
         "acp",
         AcpAgentConfig {
             command: parsed.agent.command,
-            cwd: project.root.clone(),
+            cwd: exec_root.to_path_buf(),
             timeout,
         },
         project.store.clone(),
@@ -202,10 +211,22 @@ pub(crate) fn load_oversight(project: &Project) -> tm_types::Result<Oversight> {
 /// role by an [`AcpExecutor`] when the project has an `acp.toml` (B-12 — `codex`/`pi`/`opencode`
 /// remain future adapters against the same [`tm_core::Executor`] trait), plus a stdin-driven
 /// [`HumanExecutor`] for `human_required` tickets, spawning background runs onto `handle`.
+///
+/// `exec_root`, when `Some`, overrides where the dispatched run's own file/git tool calls
+/// resolve against — `tm run <ticket> --worktree`'s isolated checkout
+/// (`docs/decisions/D-012-run-worktree-isolation.md`) instead of the main working tree. `None`
+/// (what `sched::sched_run`'s `tm sched run` always passes; `sched::run_ticket`'s `tm run`
+/// passes it only without `--worktree`) is byte-identical to this function's behavior before
+/// `--worktree` existed: [`BuiltinExecutor`] keeps resolving tool calls against the process's own
+/// current directory, [`AcpExecutor`]'s `cwd` and the dispatcher's snapshot `repo_root` both stay
+/// `project.root`. Retrieval (`ProjectContextPackSource`'s `CodeIntel`) is deliberately *not*
+/// affected either way — see that struct's construction below.
 pub fn build_dispatcher(
     project: &Project,
     handle: tokio::runtime::Handle,
+    exec_root: Option<&Path>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
+    let exec_root = exec_root.unwrap_or(project.root.as_path());
     let fabric = build_fabric(project.clock.clone())?;
     let ci = Arc::new(project.code_intel()?);
     let command_cache: Arc<dyn tm_context::CommandCache + Send + Sync> =
@@ -215,7 +236,7 @@ pub fn build_dispatcher(
 
     let browser = crate::drive::optional_browser_wiring(project)?;
     let oversight = load_oversight(project)?;
-    let builtin = Arc::new(BuiltinExecutor::new(
+    let mut builtin_executor = BuiltinExecutor::new(
         "builtin",
         fabric,
         ci,
@@ -227,7 +248,14 @@ pub fn build_dispatcher(
         browser,
         tm_agent::ComputerWiring::default(),
         oversight,
-    ));
+    );
+    // Only override when a caller actually asked for one (`exec_root` argument `Some`), not
+    // unconditionally to `project.root` — see this function's own doc comment on why "no
+    // override requested" and "override to project.root" must stay distinguishable.
+    if exec_root != project.root.as_path() {
+        builtin_executor = builtin_executor.with_root(exec_root.to_path_buf());
+    }
+    let builtin = Arc::new(builtin_executor);
 
     let human = Arc::new(HumanExecutor::new(
         "human",
@@ -240,7 +268,7 @@ pub fn build_dispatcher(
     for role in Role::ALL {
         registry.register(role, builtin.clone());
     }
-    if let Some((role, acp_executor)) = optional_acp_executor(project)? {
+    if let Some((role, acp_executor)) = optional_acp_executor(project, exec_root)? {
         registry.register(role, acp_executor);
     }
 
@@ -255,7 +283,7 @@ pub fn build_dispatcher(
         handle,
         context,
         registry,
-        Some(project.root.clone()),
+        Some(exec_root.to_path_buf()),
     )))
 }
 
@@ -277,7 +305,9 @@ mod tests {
     fn optional_acp_executor_is_none_without_an_acp_toml() {
         let dir = tempfile::tempdir().expect("tempdir");
         let project = test_project(dir.path());
-        assert!(optional_acp_executor(&project).expect("no error").is_none());
+        assert!(optional_acp_executor(&project, &project.root)
+            .expect("no error")
+            .is_none());
     }
 
     #[test]
@@ -290,7 +320,7 @@ mod tests {
         .expect("write acp.toml");
         let project = test_project(dir.path());
 
-        let (role, executor) = optional_acp_executor(&project)
+        let (role, executor) = optional_acp_executor(&project, &project.root)
             .expect("no error")
             .expect("acp.toml is present, so this must be Some");
         assert_eq!(role, Role::CoderFast);
@@ -307,7 +337,7 @@ mod tests {
         .expect("write acp.toml");
         let project = test_project(dir.path());
 
-        let (role, _executor) = optional_acp_executor(&project)
+        let (role, _executor) = optional_acp_executor(&project, &project.root)
             .expect("no error")
             .expect("acp.toml is present");
         assert_eq!(role, Role::ReviewerSemantic);
@@ -323,7 +353,7 @@ mod tests {
         // `AcpExecutor` (inside the `Ok(Some(..))` this would otherwise be) doesn't implement
         // `Debug`, so this matches the whole `Result` rather than using `expect_err`/`unwrap_err`
         // (both require `T: Debug`).
-        let result = optional_acp_executor(&project);
+        let result = optional_acp_executor(&project, &project.root);
         assert!(matches!(result, Err(tm_types::TmError::Parse(_))));
     }
 

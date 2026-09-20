@@ -154,7 +154,8 @@ pub async fn sched_run(
         .unwrap_or(u64::from(policy.tick_interval_seconds));
     let interval = Duration::from_secs(tick_interval_secs);
 
-    let dispatcher = crate::dispatch::build_dispatcher(project, tokio::runtime::Handle::current())?;
+    let dispatcher =
+        crate::dispatch::build_dispatcher(project, tokio::runtime::Handle::current(), None)?;
     let loop_driver =
         tm_scheduler::SchedulerLoop::new(&project.store, project.clock.clone(), policy)
             .with_dispatcher(dispatcher);
@@ -333,12 +334,29 @@ const RUN_TICKET_MAX_TTL_SECONDS: u32 = 3600;
 /// in the background; only the foreground CLI process stops waiting on it).
 const RUN_TICKET_MAX_WAIT: Duration = Duration::from_secs(1800);
 
+/// How long [`run_ticket`]'s `--worktree` cleanup waits for the spawned run's own completion
+/// signal once the ticket has visibly left `Leased`/`Running` — see
+/// [`tm_scheduler::dispatch::ExecutorDispatcher::dispatch_with_completion`]'s doc comment for why
+/// that visible state change is not itself proof the run (and, specifically, everything that
+/// still reads the worktree after it) is actually done. Generous but bounded: none of the work
+/// this waits on (patch/artifact storage, `git stash create`, session teardown) does network I/O.
+const WORKTREE_COMPLETION_GRACE: Duration = Duration::from_secs(30);
+
 /// `tm run <ticket>`: execute one ticket to completion in the foreground, outside the scheduler
 /// loop — the single-ticket path a human runs interactively or in CI. Dispatches through the
 /// same [`crate::dispatch::build_dispatcher`] `tm sched run` uses (`SPEC.md` §24, audit
 /// B-01/B-04), then blocks (polling, since [`tm_scheduler::ExecutorDispatcher::dispatch`] itself
 /// returns as soon as the lease is acquired) until the ticket leaves `Leased`/`Running`, or until
 /// [`RUN_TICKET_MAX_WAIT`] elapses.
+///
+/// `--worktree` (`docs/decisions/D-012-run-worktree-isolation.md`) additionally: creates a fresh
+/// `git worktree` for the ticket before dispatching (`crate::worktree::create`), points the
+/// dispatcher's [`BuiltinExecutor`]/[`AcpExecutor`]/snapshot `repo_root` at it instead of the main
+/// checkout, and — once the run is confirmed fully finished, not just the ticket's state — either
+/// removes it (a clean, forward-progress finish) or leaves it on disk for inspection (anything
+/// else: a retry/escalation, a `dispatch` failure before any work started keeps nothing to
+/// inspect and cleans up immediately, or a detach past [`RUN_TICKET_MAX_WAIT`] where the run may
+/// still be using it).
 pub async fn run_ticket(
     args: &RunArgs,
     project: &Project,
@@ -353,23 +371,57 @@ pub async fn run_ticket(
         .get(&ticket)
         .ok_or_else(|| tm_types::TmError::not_found("ticket", &ticket))?;
 
-    let dispatcher = crate::dispatch::build_dispatcher(project, tokio::runtime::Handle::current())?;
+    let worktree = if args.worktree {
+        Some(crate::worktree::create(project, &ticket)?)
+    } else {
+        None
+    };
+    let exec_root = worktree.as_ref().map(|w| w.path.as_path());
+
+    let dispatcher =
+        crate::dispatch::build_dispatcher(project, tokio::runtime::Handle::current(), exec_root)?;
     let ttl_seconds = u32::try_from(ticket_state.budget.wall_seconds)
         .unwrap_or(u32::MAX)
         .clamp(60, RUN_TICKET_MAX_TTL_SECONDS);
-    dispatcher.dispatch(&ticket, ticket_state, ttl_seconds, project.actor.clone())?;
+
+    let completion_rx = if worktree.is_some() {
+        match dispatcher.dispatch_with_completion(
+            &ticket,
+            ticket_state,
+            ttl_seconds,
+            project.actor.clone(),
+        ) {
+            Ok((_events, rx)) => Some(rx),
+            Err(e) => {
+                // Nothing ever ran in the worktree: dispatch failed synchronously (no executor
+                // for the role, a lease race, ...) before any work started, so there is nothing
+                // to inspect — remove it rather than leaving an empty, never-touched checkout
+                // behind.
+                if let Some(w) = worktree {
+                    w.cleanup();
+                }
+                return Err(e);
+            }
+        }
+    } else {
+        dispatcher.dispatch(&ticket, ticket_state, ttl_seconds, project.actor.clone())?;
+        None
+    };
     renderer.note(&format!("Ticket {ticket} dispatched for execution."));
 
     let deadline = project
         .clock
         .now()
         .plus_seconds(RUN_TICKET_MAX_WAIT.as_secs() as i64);
+    let mut detached = false;
+    let mut final_state = None;
     loop {
         if project.clock.now() >= deadline {
             renderer.note(&format!(
                 "Ticket {ticket} is still running after {}s; detaching (the run continues in the background).",
                 RUN_TICKET_MAX_WAIT.as_secs()
             ));
+            detached = true;
             break;
         }
         tokio::time::sleep(RUN_TICKET_POLL_INTERVAL).await;
@@ -382,11 +434,85 @@ pub async fn run_ticket(
             tm_core::ticket::TicketState::Leased | tm_core::ticket::TicketState::Running
         ) {
             renderer.note(&format!("Ticket {ticket} finished: {:?}", t.state));
+            final_state = Some(t.state);
             break;
         }
     }
 
+    if let Some(worktree) = worktree {
+        finish_worktree_run(
+            worktree,
+            detached,
+            final_state,
+            completion_rx,
+            renderer,
+            &ticket,
+        )
+        .await;
+    }
+
     Ok(())
+}
+
+/// The success set [`finish_worktree_run`] treats as "confirmed forward progress" — a submitted
+/// ticket, or anything further along its verification pipeline. Everything else (`Ready`/
+/// `Blocked` after a `RetryScheduled`, `Escalated`/`Cancelled` after `RetryExhausted`, `Rework`,
+/// `Replan`, or a poll that never observed a terminal state at all) is treated as "keep it" —
+/// deliberately the conservative default, not an exhaustive "which states truly indicate
+/// failure" enumeration (see `docs/decisions/D-012-run-worktree-isolation.md` for why).
+fn worktree_run_reached_success(state: tm_core::ticket::TicketState) -> bool {
+    use tm_core::ticket::TicketState;
+    matches!(
+        state,
+        TicketState::Submitted
+            | TicketState::Verifying
+            | TicketState::Auditing
+            | TicketState::Closed
+    )
+}
+
+/// [`run_ticket`]'s `--worktree` epilogue: decide whether to remove `worktree` or keep it for
+/// inspection, and tell the user which happened (and, if kept, how to remove it by hand).
+async fn finish_worktree_run(
+    worktree: crate::worktree::TicketWorktree,
+    detached: bool,
+    final_state: Option<tm_core::ticket::TicketState>,
+    completion_rx: Option<tokio::sync::oneshot::Receiver<()>>,
+    renderer: &Renderer,
+    ticket: &TicketId,
+) {
+    let run_confirmed_finished = if detached {
+        false
+    } else {
+        match completion_rx {
+            Some(rx) => matches!(
+                tokio::time::timeout(WORKTREE_COMPLETION_GRACE, rx).await,
+                Ok(Ok(()))
+            ),
+            None => false,
+        }
+    };
+
+    let succeeded = final_state.is_some_and(worktree_run_reached_success);
+
+    if run_confirmed_finished && succeeded {
+        let path = worktree.path.clone();
+        let branch = worktree.branch.clone();
+        worktree.cleanup();
+        renderer.note(&format!(
+            "Removed worktree for {ticket} at {} (the checkout only — its commits are still on \
+             branch {branch})",
+            path.display()
+        ));
+    } else {
+        renderer.note(&format!(
+            "Kept worktree for {ticket} at {} (branch {}) for inspection — remove with \
+             `git worktree remove --force {}` from the main checkout once you're done",
+            worktree.path.display(),
+            worktree.branch,
+            worktree.path.display()
+        ));
+    }
 }
 
 /// Convert a scheduler action to a summary for display.

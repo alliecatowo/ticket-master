@@ -9,6 +9,7 @@
 //! the same task produces byte-identical [`AgentOutcome`]s.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tm_core::{FailureClass, Store};
@@ -97,6 +98,12 @@ pub struct AgentLoop {
     /// dispatching it — see [`AgentLoop::with_oversight`]. Defaults to [`Oversight::autonomous`]
     /// (asks nothing), matching this loop's behavior before M-16 wired a real caller.
     oversight: Oversight,
+    /// Override for every tool call's [`tm_types::CallContext::root`] this run — see
+    /// [`AgentLoop::with_root`]. `None` (the default) falls back to [`project_root`] (the
+    /// process's own current directory), this loop's behavior before `--worktree` (`tm run
+    /// <ticket> --worktree`, `docs/decisions/D-012-run-worktree-isolation.md`) needed a way to
+    /// point a run's file/git tool calls at an isolated checkout instead.
+    root_override: Option<PathBuf>,
     cache: PromptCacheState,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdSource>,
@@ -141,6 +148,7 @@ impl AgentLoop {
             authority,
             budget,
             oversight: Oversight::autonomous(),
+            root_override: None,
             cache: PromptCacheState::new(),
             clock,
             ids,
@@ -174,6 +182,28 @@ impl AgentLoop {
     pub fn with_oversight(mut self, oversight: Oversight) -> Self {
         self.oversight = oversight;
         self
+    }
+
+    /// Point every tool call this loop dispatches (`fs.*`/`edit.*`/`git.*`/`shell.*`) at `root`
+    /// instead of the default [`project_root`] (the process's own current directory) — the seam
+    /// `crate::executor::BuiltinExecutor::with_root` uses to run a ticket against an isolated
+    /// `git worktree` checkout rather than the main working tree (`tm run <ticket> --worktree`,
+    /// `docs/decisions/D-012-run-worktree-isolation.md`). Deliberately *not* wired into
+    /// `AgentTask`/`ExecutorTask` (`tm-core`, shared by every [`tm_core::Executor`] impl):
+    /// this loop already owns `project_root()`'s fallback, so overriding it here composes with
+    /// the existing [`crate::executor::BuiltinExecutor`]/`AgentLoop` construction instead of
+    /// widening a trait every executor implements.
+    pub fn with_root(mut self, root: PathBuf) -> Self {
+        self.root_override = Some(root);
+        self
+    }
+
+    /// The root every tool call this loop dispatches resolves paths against: [`AgentLoop::with_root`]'s
+    /// override if set, else [`project_root`]. Exposed (mirroring [`AgentLoop::authority`]/
+    /// [`AgentLoop::oversight`]) so a caller constructing the loop can be tested for *what* root
+    /// it actually passed, not just inferred from where files land.
+    pub fn root(&self) -> PathBuf {
+        self.root_override.clone().unwrap_or_else(project_root)
     }
 
     /// This loop's own authority ceiling, as constructed via [`AgentLoop::new`] — i.e. before
@@ -231,7 +261,7 @@ impl AgentLoop {
         approved: bool,
     ) -> Result<AgentOutcome> {
         let effective_authority = self.authority.intersect(&task.authority);
-        let root = project_root();
+        let root = self.root();
 
         // The decision point itself: a human (or whatever resumed this suspended run) has
         // already decided `approved` by the time `resume` is called, independent of how the
@@ -560,7 +590,7 @@ impl AgentLoop {
             }
         }
 
-        let root = project_root();
+        let root = self.root();
         let fragments = PromptFragments {
             system_preamble: String::new(),
             closing_reminder: String::new(),

@@ -3797,7 +3797,9 @@ name = "tm-auth"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "parking_lot",
+ "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -3941,6 +3943,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "tm-auth",
  "tm-codeintel",
  "tm-core",
  "tm-events",
@@ -3962,6 +3965,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.20",
+ "tm-auth",
  "tm-events",
  "tm-types",
  "tracing",
@@ -4113,6 +4117,7 @@ name = "tm-provider"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "futures",
  "parking_lot",
  "reqwest 0.12.28",

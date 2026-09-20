@@ -138,6 +138,40 @@ impl ExecutorDispatcher {
         ttl_seconds: u32,
         actor: ParticipantId,
     ) -> tm_types::Result<Vec<Event>> {
+        self.dispatch_inner(ticket, t, ttl_seconds, actor, None)
+    }
+
+    /// Like [`ExecutorDispatcher::dispatch`], but also returns a receiver that resolves once the
+    /// spawned run — including [`report_outcome`]'s snapshot capture and patch-artifact storage,
+    /// and the executor's own session teardown — has fully finished, not just once the ticket's
+    /// own state visibly leaves `Leased`/`Running`. Those two moments differ for real: an
+    /// executor that calls `Store::submit` mid-run (`tm-agent`'s `BuiltinExecutor` does, via its
+    /// `ticket.submit` tool) can move the ticket to `Submitted` before `Executor::execute`
+    /// itself returns, let alone before `report_outcome` runs afterward. `tm run <ticket>
+    /// --worktree` needs this: removing the worktree the run executed inside as soon as the
+    /// ticket *looks* finished would race `report_outcome` still reading it
+    /// (`docs/decisions/D-012-run-worktree-isolation.md`). `dispatch` itself does not pay for an
+    /// unused channel — this is opt-in.
+    pub fn dispatch_with_completion(
+        &self,
+        ticket: &TicketId,
+        t: &Ticket,
+        ttl_seconds: u32,
+        actor: ParticipantId,
+    ) -> tm_types::Result<(Vec<Event>, tokio::sync::oneshot::Receiver<()>)> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let events = self.dispatch_inner(ticket, t, ttl_seconds, actor, Some(tx))?;
+        Ok((events, rx))
+    }
+
+    fn dispatch_inner(
+        &self,
+        ticket: &TicketId,
+        t: &Ticket,
+        ttl_seconds: u32,
+        actor: ParticipantId,
+        completion: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> tm_types::Result<Vec<Event>> {
         let executor = if t.executor.human_required {
             self.registry.human()
         } else {
@@ -175,14 +209,17 @@ impl ExecutorDispatcher {
             holder,
             lease_id,
             ttl_seconds,
+            completion,
         );
 
         Ok(events)
     }
 
     /// Hand the actual run to a background task: compile the pack, keep the lease's heartbeat
-    /// alive while `executor.execute` runs, and route the outcome to `Store::submit` /
-    /// `Store::record_failure` when it returns.
+    /// alive while `executor.execute` runs, route the outcome to `Store::submit` /
+    /// `Store::record_failure` when it returns, and — when `completion` is `Some` (see
+    /// [`ExecutorDispatcher::dispatch_with_completion`]) — signal it only after all of that is
+    /// done.
     #[allow(clippy::too_many_arguments)]
     fn spawn_run(
         &self,
@@ -192,6 +229,7 @@ impl ExecutorDispatcher {
         holder: ParticipantId,
         lease_id: LeaseId,
         ttl_seconds: u32,
+        completion: Option<tokio::sync::oneshot::Sender<()>>,
     ) {
         let store = self.store.clone();
         let context = self.context.clone();
@@ -209,6 +247,11 @@ impl ExecutorDispatcher {
                 repo_root,
             )
             .await;
+            if let Some(tx) = completion {
+                // The receiver may already be gone (e.g. a caller that dropped it after its own
+                // wait timed out); nothing to do about that, the run itself already finished.
+                let _ = tx.send(());
+            }
         });
     }
 }
