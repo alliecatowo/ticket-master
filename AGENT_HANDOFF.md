@@ -15,7 +15,16 @@ very first thing to raise next session — see `docs/backlog.md`'s top section.
    be a ticket. Full detail in "A real architectural gap" just below; don't skip it for the
    newer items that follow, they all assume it's either done or deliberately deferred, not
    forgotten.
-2. **Full, deliberate testing pass across every real surface — not just the ones touched live by
+2. **The chat screen's real design pass, now specified with actual detail** (see "The chat
+   screen's actual bar" section below for the user's own words in full) — a `?` help affordance,
+   a `/`-command popup, a genuinely designed status bar, and an explicit bar stated outright:
+   *more beautiful and more functional than Claude Code, Codex, and opencode's own chat
+   interfaces*, not "as good as." Budget real design time for this, not a quick pass between
+   other work — and note the screen-router navigation shape this session already built
+   (`Ctrl+T`/`/tickets` → Kanban) turns out to already match the intended model once these
+   specifics arrived, so this item is about the chat screen's own polish, not more navigation
+   rework.
+3. **Full, deliberate testing pass across every real surface — not just the ones touched live by
    accident this session.** What actually got exercised against a real backend so far: bare
    `tm -p` (twice, different prompts), the TUI's chat→Kanban→detail navigation (pty-driven,
    automated), and the TUI's chat path with a real streamed model response (once, via a base64
@@ -34,7 +43,7 @@ very first thing to raise next session — see `docs/backlog.md`'s top section.
    checklist next session, work through it deliberately, and log what's found the same way this
    session's live DevPass/TUI tests did — real commands, real output pasted into the record, not
    "should work."
-3. **The competitor benchmark** (`docs/backlog.md`, "A head-to-head benchmark: opencode vs. Codex
+4. **The competitor benchmark** (`docs/backlog.md`, "A head-to-head benchmark: opencode vs. Codex
    vs. Claude Code vs. Ticketmaster") **is now genuinely buildable, not a someday item.** Its own
    stated precondition — D-003 solid, a zero-cost credential available — is met: D-003 passed a
    full Reconciliation Gate, and DevPass is live, auto-loaded, and confirmed serving real
@@ -46,7 +55,7 @@ very first thing to raise next session — see `docs/backlog.md`'s top section.
    Ticketmaster's own kernel already gives for free: did tests pass, turn/tool-call count, tokens
    spent, wall time, did verification actually catch what it claimed to. Store results as real
    ticket/event state, not a bespoke report format — dogfood the product to measure the product.
-4. **"Where project state lives" is now consolidated below** (see that section) specifically
+5. **"Where project state lives" is now consolidated below** (see that section) specifically
    because it kept needing re-derivation mid-session — read it once, don't re-grep the codebase
    for it again.
 
@@ -126,17 +135,41 @@ regression surface, not a quick decoupling — confirmed, not assumed.
    model-callable tool, a `/ticket`-style typed command (see below), or both, is a product call for
    the user, not something to decide unilaterally.
 
-**On the `/tickets` typed-command addition made just before this was written**: it's real, tested,
-and merged (`is_tickets_command` in `tui.rs`) — but don't treat it as settled. If `tm` is supposed
-to *be* Claude Code with tickets genuinely backgrounded, a command to open a Kanban board full of
-tickets might not be the right shape at all once the session/ticket decoupling above actually
-happens. Keep it; just don't build more on top of it as if the current ticket-surfacing model is
-final.
+**On the `/tickets` typed-command addition made just before this was written**: real, tested,
+merged (`is_tickets_command` in `tui.rs`) — and the mapping it implements turns out to be exactly
+right, confirmed by the specifics given later in this same session (below). Keep it.
 
-**Also said, not yet actioned, needs the user's specifics before attempting anything:** *"the home
-screen is lack luster as fuck."* No further detail was given despite three separate corrections in
-this same stretch of conversation — guessing at a redesign here risks a fourth. Ask what
-specifically before changing anything about `Home`'s layout/visuals.
+## The chat screen's actual bar, finally given in specifics — the user's own words
+
+*"the home screen is lack luster as fuck"* got followed up, later in this session, with the real
+specifics — don't guess past what's written here, this is close to verbatim:
+
+> I don't want the home screen as the "home". theres the `claude agents` command. when you do
+> `claude` you get to normal chat screen. (im not seeing a `?` for help, a `/` command pop up,
+> etc, we need that, customized status bar, its gotta be more beautiful and functional then claude
+> code / codex / opencode). you do `<-` in a claude [session] and it goes to the cross-session
+> "agents" view, the same thing `claude agents` goes to. so I imagine "→ tickets" or some shit
+> going to that [agents-equivalent] view.
+
+Reading this precisely, not loosely: **the naming confusion is real and worth fixing, but the
+navigation mapping this session already built is correct, not wrong.** Claude Code's model is:
+bare `claude` → the plain chat screen (this *is* the real default, whatever it's internally
+called); `claude agents` (or `<-` in certain contexts) → a separate, cross-session view listing
+work across the whole project. Ticketmaster's own chat screen (`ScreenId::Home` in code — the
+*name* "Home" is what reads wrong here, not its role as the default) already *is* that default
+chat screen, and `Ctrl+T`/`/tickets` already routes to Kanban the same way `claude agents` routes
+to its cross-session view — so the screen-router shape built this session (D-006) turns out to
+already be the right shape. **What's actually missing, concretely, next session:**
+1. A `?` help affordance — nothing shows available keys/commands today.
+2. A `/`-command popup — typing `/` should surface a discoverable menu (of which `/tickets` would
+   be one entry), not require already knowing the exact string to type. Compare `claude` and
+   `codex`'s own `/`-triggered command palettes directly, live, before designing this — don't
+   guess at the interaction from memory.
+3. A genuinely customized status bar — the current one-line `project.scope_line()` note is
+   functional but was never designed as a real status bar.
+4. **The explicit bar stated outright: more beautiful and more functional than Claude Code, Codex,
+   *and* opencode's own chat interfaces — not "as good as."** This is a real design pass, not a
+   quick tweak — budget real time for it next session rather than fitting it in around other work.
 
 ## What this project is
 
