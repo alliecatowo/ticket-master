@@ -480,3 +480,11 @@ edges of that plan, not a competing priority order.
 - The user corrects direction directly and expects it to stick immediately, not be
   re-litigated — e.g. the Codex integration was very clearly "auth provider for our own executor,
   not Codex as an executor" after one correction; don't need it re-explained if it comes up again.
+- A recurring goal-check-in this session kept reporting a background shell task (id `buopfo6qg`,
+  command shape `until [ -s /private/tmp/.../tasks/<id>.output ] ...`) as still running, for over
+  three hours. Checked twice, both times found: no matching process anywhere on the machine (`ps
+  aux`, by command pattern and by task id), and it doesn't appear in `ListAgents` as a subagent
+  either mine or anyone else's. It was never dispatched by this session. Read as harness-internal
+  notification-delivery plumbing that outlived whatever it was originally polling for, not a real
+  hung task — nothing to fix or stop, and no corresponding action was ever needed. If it's still
+  showing up next session, it's the same finding, not a new one to re-investigate from scratch.
