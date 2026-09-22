@@ -40,13 +40,19 @@ empirically, not assumed:
   of it across every worktree would make that worse. `CLAUDE.md`'s "Background and parallel
   subagents" section now documents the one-off symlink command for the rare case a subagent
   genuinely needs live-provider access inside its worktree.
-- **This repo has no `origin` remote at all**, which makes `EnterWorktree`'s `fresh`/`head`
-  `worktree.baseRef` distinction a current no-op (verified with a second probe worktree: its
-  branch tip matched `main`'s exactly). Documented in `CLAUDE.md` so this doesn't get silently
-  wrong if an `origin` is ever added later — `fresh` would then start tracking the remote instead
-  of local `HEAD`, a real behavior change worth choosing deliberately.
+- **This repo now has a real `origin`**: a private GitHub repo, `alliecatowo/ticket-master`,
+  created and pushed this same pass (`gh repo create ... --private --source=. --remote=origin`;
+  `.env` verified never in git history before pushing, and the pushed tree checked for `target/`/
+  `.zvec-grep/`/`.tm/` — none present). This turned the earlier "`fresh`/`head` is currently a
+  no-op" finding into a real, live behavior difference, so `.claude/settings.json` now pins
+  `"worktree": {"baseRef": "head"}` explicitly — verified with a genuine divergence test (a
+  local-only unpushed commit, then a probe worktree confirmed to branch from *that* commit, not
+  the older `origin/main`). Without this, worktrees would silently branch from whatever was last
+  pushed rather than the actual local state, which is exactly wrong for how this repo is worked
+  in (commits land locally well before any push, all session).
 - Commits, in order: `fed4c97` (plugins to project scope), `3cad15c` (zvec-grep to project scope +
-  worktree base-ref finding), `8d5e70d` (mise dev-deps, shared `target/`, `.env` documentation).
+  worktree base-ref finding), `8d5e70d` (mise dev-deps, shared `target/`, `.env` documentation),
+  `d4a904e` (origin added, `worktree.baseRef` pinned to `head`).
 
 None of this touched product code. `mise run verify` was not re-run after these changes (no
 Rust source changed, only `mise.toml`/`.claude/settings.json`/`.mcp.json`/`CLAUDE.md`/
