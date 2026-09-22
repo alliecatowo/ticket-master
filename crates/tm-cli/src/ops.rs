@@ -517,7 +517,7 @@ pub async fn dispatch_provider(
     match cmd {
         ProviderCommand::List => provider_list(project, renderer).await,
         ProviderCommand::Detect => provider_detect(renderer).await,
-        ProviderCommand::Status => provider_status(project, renderer),
+        ProviderCommand::Status => provider_status(project, renderer).await,
         ProviderCommand::Test(args) => provider_test(args, project, renderer).await,
     }
 }
@@ -690,53 +690,398 @@ pub async fn provider_detect(renderer: &Renderer) -> tm_types::Result<()> {
     Ok(())
 }
 
+/// What this process can honestly say about live fabric state. A `Fabric`'s breaker/quota/EWMA
+/// state ([`tm_provider::FabricState`]) lives only in the memory of the process that built it and
+/// is never persisted or shared, so a standalone `tm provider status` has no call history to
+/// report — saying so is the truthful answer, not a placeholder.
+const PROVIDER_LIVE_STATE_NOTE: &str = "breaker/quota/latency state lives only inside a running \
+     tm process's fabric and is not persisted; this command has no call history to report. Use \
+     `tm provider test` for a real round-trip";
+
+/// Which roles in `table` name `provider_id` as a candidate, as role keys (`"coder.fast"`, ...).
+fn roles_routed_to(table: &tm_provider::RoleTable, provider_id: &str) -> Vec<&'static str> {
+    Role::ALL
+        .into_iter()
+        .filter(|role| {
+            table
+                .candidates_for(*role)
+                .iter()
+                .any(|c| c.provider == provider_id)
+        })
+        .map(|role| role.as_str())
+        .collect()
+}
+
 /// `tm provider status`
 ///
-/// # IMPL
-/// Snapshot the running `Fabric`'s `FabricState` (`Fabric::state_snapshot`) if this process has
-/// one wired (it won't outside a `tm serve`/`tm run` session — in that case, report each
-/// candidate's persisted `Breaker`/quota state from wherever the project records it, or state
-/// plainly that no live fabric is attached and status reflects last-known state only).
-pub fn provider_status(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
-    let _view = project.store.view()?;
+/// Reports, per provider [`tm_provider::Registry::known_providers`] lists (the same set and the
+/// same [`tm_provider::Availability`] logic as [`provider_detect`]): its availability, whether
+/// its required env vars are present, whether the fabric tm's real turn path builds
+/// ([`crate::agent::build_fabric`], over [`tm_provider::RoleTable::default_table`]) actually
+/// registers it, and which roles in that table route to it. Any provider the turn-path fabric
+/// registers that isn't in the known list (e.g. the test-only `mock`) gets a row too. If building
+/// that fabric fails (typically: neither DevPass nor `ANTHROPIC_API_KEY` configured), the error
+/// is reported rather than hidden.
+///
+/// It does **not** report breaker/quota/latency state: that lives only in a running process's
+/// in-memory fabric and is never persisted (see [`PROVIDER_LIVE_STATE_NOTE`]). No completion is
+/// sent; the only network I/O is [`tm_provider::Registry::availability`]'s short-timeout probe of
+/// the three local backends, exactly as `tm provider detect` does.
+pub async fn provider_status(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
+    let clock = project.clock.clone();
+    let table = tm_provider::RoleTable::default_table();
+    let (registered, fabric_error) = match crate::agent::build_fabric(clock.clone()) {
+        Ok(fabric) => (fabric.provider_ids(), None),
+        Err(e) => (Vec::new(), Some(e.to_string())),
+    };
+
+    let known = tm_provider::Registry::known_providers();
+    let mut rows = Vec::with_capacity(known.len());
+    for info in &known {
+        let availability = tm_provider::Registry::availability(info, clock.clone()).await;
+        rows.push(serde_json::json!({
+            "id": info.id,
+            "display_name": info.display_name,
+            "availability": availability_label(availability),
+            "env_vars_present": info.is_configured(),
+            "in_turn_fabric": registered.iter().any(|id| id == info.id),
+            "roles": roles_routed_to(&table, info.id),
+        }));
+    }
+    for id in registered
+        .iter()
+        .filter(|id| !known.iter().any(|info| info.id == id.as_str()))
+    {
+        rows.push(serde_json::json!({
+            "id": id,
+            "display_name": id,
+            "availability": "ready",
+            "env_vars_present": serde_json::Value::Null,
+            "in_turn_fabric": true,
+            "roles": roles_routed_to(&table, id),
+        }));
+    }
 
     if renderer.is_json() {
-        renderer.emit(&serde_json::json!({"status": "no_live_fabric"}), "")?;
-    } else {
-        renderer.note("No live fabric is attached; status reflects last-known state only");
+        renderer.emit(
+            &serde_json::json!({
+                "providers": rows,
+                "turn_fabric_error": fabric_error,
+                "live_state": serde_json::Value::Null,
+                "live_state_note": PROVIDER_LIVE_STATE_NOTE,
+            }),
+            "",
+        )?;
+        return Ok(());
     }
+
+    let table_rows = rows
+        .iter()
+        .map(|row| {
+            let roles = row["roles"]
+                .as_array()
+                .map(|r| {
+                    r.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            vec![
+                row["id"].as_str().unwrap_or_default().to_string(),
+                row["availability"].as_str().unwrap_or_default().to_string(),
+                if row["in_turn_fabric"].as_bool() == Some(true) {
+                    "yes".to_string()
+                } else {
+                    "no".to_string()
+                },
+                if roles.is_empty() {
+                    "-".to_string()
+                } else {
+                    roles
+                },
+            ]
+        })
+        .collect();
+    let rendered = Table::new(
+        vec![
+            "Id".to_string(),
+            "Availability".to_string(),
+            "In turn fabric".to_string(),
+            "Default-table roles".to_string(),
+        ],
+        table_rows,
+    )
+    .render();
+    let mut human = rendered;
+    if let Some(e) = &fabric_error {
+        human.push_str(&format!("\nturn-path fabric could not be built: {e}"));
+    }
+    human.push_str(&format!("\nnote: {PROVIDER_LIVE_STATE_NOTE}"));
+    renderer.emit(&(), &human)?;
     Ok(())
 }
 
-/// `tm provider test`
+/// The fixed, tiny request `tm provider test` sends to each provider. Non-streaming, matching
+/// what `tm-agent`'s turn loop sends, so a passing test exercises the same response-parsing path
+/// a real turn does. `max_tokens` is small to keep the probe cheap; a reasoning model that spends
+/// all of it thinking comes back as `stop_reason: max_tokens`, which still counts as a successful
+/// round-trip (the provider answered and the reply parsed).
+fn provider_probe_request() -> tm_provider::CompletionRequest {
+    tm_provider::CompletionRequest {
+        system: None,
+        messages: vec![tm_provider::Message {
+            role: tm_provider::MessageRole::User,
+            content: vec![tm_provider::ContentBlock::Text {
+                text: "Reply with the single word OK.".to_string(),
+            }],
+        }],
+        tools: vec![],
+        max_tokens: 64,
+        temperature: None,
+        stop_sequences: vec![],
+        stream: false,
+        n: 1,
+    }
+}
+
+/// One provider's `tm provider test` result: the `--json` array element shape.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub(crate) struct ProviderTestOutcome {
+    /// The provider slug tested.
+    pub provider: String,
+    /// `"ok"` or `"error"`.
+    pub status: &'static str,
+    /// Wall-clock time for the call, measured with the project's clock.
+    pub latency_ms: u64,
+    /// The model the provider reports actually serving the request (`Completion::model`); `None`
+    /// on failure.
+    pub model: Option<String>,
+    /// Why the reply stopped (`end_turn`, `max_tokens`, ...); `None` on failure.
+    pub stop_reason: Option<tm_provider::StopReason>,
+    /// The reply's text (possibly empty, e.g. a reasoning model cut off by `max_tokens`); `None`
+    /// on failure.
+    pub reply: Option<String>,
+    /// The provider error on failure; `None` on success.
+    pub error: Option<String>,
+}
+
+impl ProviderTestOutcome {
+    fn is_ok(&self) -> bool {
+        self.status == "ok"
+    }
+
+    /// One human-readable line for plain (non-`--json`) output.
+    fn human_line(&self) -> String {
+        match &self.error {
+            None => {
+                let stop = self
+                    .stop_reason
+                    .and_then(|s| serde_json::to_value(s).ok())
+                    .and_then(|v| v.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string());
+                format!(
+                    "{}: ok in {} ms (model {}, stop {}, reply {:?})",
+                    self.provider,
+                    self.latency_ms,
+                    self.model.as_deref().unwrap_or("unknown"),
+                    stop,
+                    self.reply.as_deref().unwrap_or_default()
+                )
+            }
+            Some(error) => format!(
+                "{}: error after {} ms: {}",
+                self.provider, self.latency_ms, error
+            ),
+        }
+    }
+}
+
+/// Send [`provider_probe_request`] to one provider and time it with `clock`.
+async fn test_one_provider(
+    id: &str,
+    provider: &dyn tm_provider::Provider,
+    clock: &dyn tm_types::Clock,
+) -> ProviderTestOutcome {
+    let started = clock.now();
+    let result = provider.complete(provider_probe_request()).await;
+    let latency_ms = u64::try_from(clock.now().millis_since(started).max(0)).unwrap_or(0);
+    match result {
+        Ok(completion) => {
+            let first = completion.candidates.first();
+            let reply = first
+                .map(|c| {
+                    c.content
+                        .iter()
+                        .filter_map(|b| match b {
+                            tm_provider::ContentBlock::Text { text } => Some(text.as_str()),
+                            _ => None,
+                        })
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            ProviderTestOutcome {
+                provider: id.to_string(),
+                status: "ok",
+                latency_ms,
+                model: Some(completion.model.model.clone()),
+                stop_reason: first.map(|c| c.stop_reason),
+                reply: Some(reply.trim().to_string()),
+                error: None,
+            }
+        }
+        Err(e) => ProviderTestOutcome {
+            provider: id.to_string(),
+            status: "error",
+            latency_ms,
+            model: None,
+            stop_reason: None,
+            reply: None,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
+/// Why `name` can't be tested: unknown to this build, known but not configured (naming the
+/// missing env vars, never their values), or configured but not something tm's turn-path fabric
+/// registers. `registered` is the turn-path fabric's provider ids (empty if it couldn't be built).
+fn untestable_provider_error(
+    name: &str,
+    known: &[tm_provider::ProviderInfo],
+    registered: &[String],
+    fabric_error: Option<&str>,
+) -> tm_types::TmError {
+    let Some(info) = known.iter().find(|info| info.id.eq_ignore_ascii_case(name)) else {
+        let names = known.iter().map(|info| info.id).collect::<Vec<_>>();
+        return tm_types::TmError::Provider(format!(
+            "unknown provider `{name}`; known providers: {}",
+            names.join(", ")
+        ));
+    };
+    if !info.is_configured() {
+        let missing = info
+            .env_vars
+            .iter()
+            .filter(|v| v.required && std::env::var(v.name).is_err())
+            .map(|v| v.name)
+            .collect::<Vec<_>>();
+        return tm_types::TmError::Provider(format!(
+            "provider `{}` is not configured: {} not set",
+            info.id,
+            missing.join(", ")
+        ));
+    }
+    let wired = if registered.is_empty() {
+        "none".to_string()
+    } else {
+        registered.join(", ")
+    };
+    let why = match fabric_error {
+        Some(e) => format!("the turn-path fabric could not be built: {e}"),
+        None => format!(
+            "tm's turn path does not use it (the turn-path fabric registers: {wired}), so there \
+             is nothing real to test"
+        ),
+    };
+    tm_types::TmError::Provider(format!("provider `{}` is configured but {why}", info.id))
+}
+
+/// Test every provider `fabric` has registered, or only `only`. Calls each [`tm_provider::Provider`]
+/// directly via [`tm_provider::Fabric::provider`], deliberately bypassing routing, breakers and
+/// quota: this tests the provider, not the role table. Per-provider failures are results, not
+/// errors; the `Err` cases are "nothing to test" (`only` not registered, or an empty fabric).
+/// `only` matches case-insensitively, like `tm auth`.
+pub(crate) async fn run_provider_tests(
+    fabric: &tm_provider::Fabric,
+    only: Option<&str>,
+    known: &[tm_provider::ProviderInfo],
+    clock: &dyn tm_types::Clock,
+) -> tm_types::Result<Vec<ProviderTestOutcome>> {
+    let registered = fabric.provider_ids();
+    let targets: Vec<String> = match only {
+        Some(name) => match registered.iter().find(|id| id.eq_ignore_ascii_case(name)) {
+            Some(id) => vec![id.clone()],
+            None => return Err(untestable_provider_error(name, known, &registered, None)),
+        },
+        None if registered.is_empty() => {
+            return Err(tm_types::TmError::Provider(
+                "no provider is registered in tm's turn-path fabric; nothing to test".to_string(),
+            ))
+        }
+        None => registered.clone(),
+    };
+
+    let mut outcomes = Vec::with_capacity(targets.len());
+    for id in &targets {
+        let Some(provider) = fabric.provider(id) else {
+            continue;
+        };
+        outcomes.push(test_one_provider(id, provider.as_ref(), clock).await);
+    }
+    Ok(outcomes)
+}
+
+/// `Err` naming how many of `outcomes` failed, if any did — what makes `tm provider test` exit
+/// non-zero after it has already printed every result.
+fn provider_test_verdict(outcomes: &[ProviderTestOutcome]) -> tm_types::Result<()> {
+    let failed: Vec<&str> = outcomes
+        .iter()
+        .filter(|o| !o.is_ok())
+        .map(|o| o.provider.as_str())
+        .collect();
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(tm_types::TmError::Provider(format!(
+            "{} of {} provider test(s) failed: {}",
+            failed.len(),
+            outcomes.len(),
+            failed.join(", ")
+        )))
+    }
+}
+
+/// `tm provider test [<provider>]`
 ///
-/// # IMPL
-/// Build a minimal `CompletionRequest` and send it through `AnthropicProvider` (or
-/// `args.provider`'s adapter) for each configured provider (or just `args.provider`), reporting
-/// success/latency or the `ProviderError` per provider. Never uses `MockProvider` here — this
-/// command's entire purpose is confirming the real network path works.
+/// Sends one tiny real completion ([`provider_probe_request`]) through each provider tm's real
+/// turn path registers ([`crate::agent::build_fabric`] — DevPass when fully configured, Anthropic
+/// when `ANTHROPIC_API_KEY` is set), or only `<provider>`, and reports per provider: ok/error, the
+/// measured latency, the model that actually served the reply, the stop reason, the reply text,
+/// and the error text on failure. `--json` emits an array of [`ProviderTestOutcome`]s.
+///
+/// This makes real, billed network calls. It exits non-zero if any tested provider failed, and
+/// errors (non-zero, nothing tested) for a provider name that is unknown, not configured, or not
+/// used by the turn path — never reporting such a name as reachable.
 pub async fn provider_test(
     args: &ProviderTestArgs,
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
-    let _view = project.store.view()?;
-    let results = vec![serde_json::json!({
-        "provider": args.provider.as_ref().unwrap_or(&"default".to_string()),
-        "status": "ok",
-        "latency_ms": 0,
-    })];
-
-    if renderer.is_json() {
-        renderer.emit(&results, "")?;
-    } else {
-        if let Some(provider) = &args.provider {
-            renderer.note(&format!("Provider {provider} is reachable"));
-        } else {
-            renderer.note("All configured providers are reachable");
+    let clock = project.clock.clone();
+    let known = tm_provider::Registry::known_providers();
+    let fabric = match crate::agent::build_fabric(clock.clone()) {
+        Ok(fabric) => fabric,
+        Err(e) => {
+            return Err(match &args.provider {
+                // Explain the named provider specifically (unknown / which env vars are missing)
+                // rather than only surfacing the turn path's generic construction error.
+                Some(name) => untestable_provider_error(name, &known, &[], Some(&e.to_string())),
+                None => tm_types::TmError::Provider(format!(
+                    "no provider is configured for tm's turn path, nothing to test: {e}"
+                )),
+            });
         }
-    }
-    Ok(())
+    };
+
+    let outcomes =
+        run_provider_tests(&fabric, args.provider.as_deref(), &known, clock.as_ref()).await?;
+    let human = outcomes
+        .iter()
+        .map(ProviderTestOutcome::human_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    renderer.emit(&outcomes, &human)?;
+    provider_test_verdict(&outcomes)
 }
 
 /// Dispatch one [`HarnessCommand`].
@@ -2128,9 +2473,203 @@ mod tests {
         // Provider list should render candidates
     }
 
+    // ---- tm provider test: per-provider logic against MockProvider, no network ----
+
+    fn mock_fabric(
+        clock: std::sync::Arc<dyn Clock>,
+        ids: &[&str],
+    ) -> (
+        tm_provider::Fabric,
+        Vec<std::sync::Arc<tm_provider::MockProvider>>,
+    ) {
+        let table = tm_provider::RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("static role table parses");
+        let fabric = tm_provider::Fabric::new(table, clock.clone());
+        let mut providers = Vec::new();
+        for id in ids {
+            let provider = std::sync::Arc::new(tm_provider::MockProvider::new(
+                *id,
+                tm_provider::ModelId::new(*id, "served-model"),
+                clock.clone(),
+            ));
+            fabric.register_provider(provider.clone());
+            providers.push(provider);
+        }
+        (fabric, providers)
+    }
+
+    fn scripted_ok(provider: &tm_provider::MockProvider, clock: &dyn Clock, text: &str) {
+        provider.script_default_response(tm_provider::Completion {
+            model: tm_provider::ModelId::new("mock", "served-model"),
+            candidates: vec![tm_provider::Candidate {
+                content: vec![tm_provider::ContentBlock::Text {
+                    text: text.to_string(),
+                }],
+                stop_reason: tm_provider::StopReason::EndTurn,
+            }],
+            usage: tm_provider::Usage::default(),
+            latency: std::time::Duration::ZERO,
+            received_at: clock.now(),
+        });
+    }
+
+    #[tokio::test]
+    async fn provider_test_reports_ok_with_served_model_and_reply() {
+        let clock: std::sync::Arc<dyn Clock> = std::sync::Arc::new(tm_types::FixedClock::epoch());
+        let (fabric, providers) = mock_fabric(clock.clone(), &["mock"]);
+        scripted_ok(&providers[0], clock.as_ref(), " OK\n");
+
+        let outcomes = run_provider_tests(&fabric, None, &[], clock.as_ref())
+            .await
+            .expect("one registered provider to test");
+        assert_eq!(
+            outcomes,
+            vec![ProviderTestOutcome {
+                provider: "mock".to_string(),
+                status: "ok",
+                latency_ms: 0,
+                model: Some("served-model".to_string()),
+                stop_reason: Some(tm_provider::StopReason::EndTurn),
+                reply: Some("OK".to_string()),
+                error: None,
+            }]
+        );
+        assert!(provider_test_verdict(&outcomes).is_ok());
+        // The provider really received the probe, exactly once.
+        assert_eq!(providers[0].call_log(), vec![provider_probe_request()]);
+    }
+
+    #[tokio::test]
+    async fn provider_test_reports_a_failing_provider_and_the_verdict_fails() {
+        let clock: std::sync::Arc<dyn Clock> = std::sync::Arc::new(tm_types::FixedClock::epoch());
+        let (fabric, providers) = mock_fabric(clock.clone(), &["bad", "good"]);
+        providers[0].script_failure(
+            &provider_probe_request(),
+            tm_provider::mock::ScriptedFailure {
+                times: None,
+                error: tm_provider::ProviderError::AuthFailed("key rejected".to_string()),
+            },
+        );
+        scripted_ok(&providers[1], clock.as_ref(), "OK");
+
+        let outcomes = run_provider_tests(&fabric, None, &[], clock.as_ref())
+            .await
+            .expect("two registered providers to test");
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(outcomes[0].provider, "bad");
+        assert_eq!(outcomes[0].status, "error");
+        assert_eq!(outcomes[0].model, None);
+        assert!(
+            outcomes[0]
+                .error
+                .as_deref()
+                .is_some_and(|e| e.contains("key rejected")),
+            "{:?}",
+            outcomes[0].error
+        );
+        assert_eq!(outcomes[1].status, "ok");
+
+        let err = provider_test_verdict(&outcomes).expect_err("one failure must fail the run");
+        assert_ne!(crate::render::exit_code(&err), 0);
+        assert!(err.to_string().contains("1 of 2"), "{err}");
+
+        let json = serde_json::to_value(&outcomes).expect("serializes");
+        assert_eq!(json[0]["status"], "error");
+        assert_eq!(json[0]["error"], "authentication failed: key rejected");
+        assert_eq!(json[1]["stop_reason"], "end_turn");
+        assert_eq!(json[1]["model"], "served-model");
+    }
+
+    #[tokio::test]
+    async fn provider_test_named_provider_tests_only_that_one_case_insensitively() {
+        let clock: std::sync::Arc<dyn Clock> = std::sync::Arc::new(tm_types::FixedClock::epoch());
+        let (fabric, providers) = mock_fabric(clock.clone(), &["alpha", "beta"]);
+        scripted_ok(&providers[0], clock.as_ref(), "OK");
+        scripted_ok(&providers[1], clock.as_ref(), "OK");
+
+        let outcomes = run_provider_tests(&fabric, Some("BETA"), &[], clock.as_ref())
+            .await
+            .expect("beta is registered");
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].provider, "beta");
+        assert!(
+            providers[0].call_log().is_empty(),
+            "alpha must not be called"
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_test_unknown_name_is_an_error_never_reachable() {
+        let clock: std::sync::Arc<dyn Clock> = std::sync::Arc::new(tm_types::FixedClock::epoch());
+        let (fabric, providers) = mock_fabric(clock.clone(), &["mock"]);
+        let known = tm_provider::Registry::known_providers();
+
+        let err = run_provider_tests(&fabric, Some("no-such-provider"), &known, clock.as_ref())
+            .await
+            .expect_err("an unknown name must not be reported as reachable");
+        assert_ne!(crate::render::exit_code(&err), 0);
+        let msg = err.to_string();
+        assert!(msg.contains("unknown provider `no-such-provider`"), "{msg}");
+        assert!(
+            msg.contains("devpass"),
+            "should list the known providers: {msg}"
+        );
+        assert!(providers[0].call_log().is_empty(), "nothing may be called");
+    }
+
+    #[tokio::test]
+    async fn provider_test_with_an_empty_fabric_is_an_error() {
+        let clock: std::sync::Arc<dyn Clock> = std::sync::Arc::new(tm_types::FixedClock::epoch());
+        let (fabric, _) = mock_fabric(clock.clone(), &[]);
+        let err = run_provider_tests(&fabric, None, &[], clock.as_ref())
+            .await
+            .expect_err("nothing to test is not success");
+        assert!(err.to_string().contains("nothing to test"), "{err}");
+    }
+
     #[test]
-    fn provider_status_no_fabric() {
-        // Without live fabric, status should report that
+    fn provider_test_human_lines_are_one_per_provider_and_readable() {
+        let ok = ProviderTestOutcome {
+            provider: "devpass".to_string(),
+            status: "ok",
+            latency_ms: 812,
+            model: Some("m".to_string()),
+            stop_reason: Some(tm_provider::StopReason::MaxTokens),
+            reply: Some(String::new()),
+            error: None,
+        };
+        assert_eq!(
+            ok.human_line(),
+            "devpass: ok in 812 ms (model m, stop max_tokens, reply \"\")"
+        );
+        let bad = ProviderTestOutcome {
+            provider: "anthropic".to_string(),
+            status: "error",
+            latency_ms: 5,
+            model: None,
+            stop_reason: None,
+            reply: None,
+            error: Some("authentication failed: nope".to_string()),
+        };
+        assert_eq!(
+            bad.human_line(),
+            "anthropic: error after 5 ms: authentication failed: nope"
+        );
+    }
+
+    #[test]
+    fn roles_routed_to_reads_the_table() {
+        let table = tm_provider::RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("static role table parses");
+        assert_eq!(
+            roles_routed_to(&table, "mock"),
+            vec![Role::CoderFast.as_str()]
+        );
+        assert!(roles_routed_to(&table, "anthropic").is_empty());
     }
 
     #[test]

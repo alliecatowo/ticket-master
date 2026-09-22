@@ -146,6 +146,22 @@ impl Fabric {
             .insert(id, ProviderRecord { provider });
     }
 
+    /// The ids of every registered provider, in sorted order.
+    pub fn provider_ids(&self) -> Vec<String> {
+        self.providers.read().keys().cloned().collect()
+    }
+
+    /// The registered provider with id `id`, if any. This bypasses routing, breakers, quota
+    /// accounting and redaction entirely: it is for diagnostics that want to address one
+    /// concrete backend (e.g. `tm provider test`), not for issuing real turn traffic, which must
+    /// go through [`Fabric::execute`].
+    pub fn provider(&self, id: &str) -> Option<Arc<dyn Provider>> {
+        self.providers
+            .read()
+            .get(id)
+            .map(|record| record.provider.clone())
+    }
+
     // When `role`'s candidates are all `Exhausted`, distinguish "every provider is registered
     // but out of quota/breaker-tripped" from "a candidate names a provider that was never
     // registered at all" (a caller configuration bug), so `execute`'s error is actionable.
@@ -869,5 +885,29 @@ mod tests {
             sent_json.contains(git_sha),
             "a real git commit sha must survive redaction unchanged: {sent_json}"
         );
+    }
+
+    #[test]
+    fn provider_accessors_expose_exactly_what_was_registered() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "mock", model = "m1", max_concurrency = 1 }"#,
+        );
+        let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
+        assert!(fabric.provider_ids().is_empty());
+        assert!(fabric.provider("mock").is_none());
+
+        fabric.register_provider(Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "m1"),
+            clock as Arc<dyn Clock>,
+        )));
+        assert_eq!(fabric.provider_ids(), vec!["mock".to_string()]);
+        assert_eq!(
+            fabric.provider("mock").map(|p| p.id().to_string()),
+            Some("mock".into())
+        );
+        assert!(fabric.provider("anthropic").is_none());
     }
 }

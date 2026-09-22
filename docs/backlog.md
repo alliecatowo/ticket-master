@@ -86,13 +86,21 @@ Gateway backend, `muse-spark-1.3-contributor`, confirmed by source-level elimina
 provider was ever registered given the env) and an independent `curl` against the same
 endpoint/key/model. Along the way, four real, pre-existing gaps surfaced, all still open:
 
-1. **`tm provider test`/`tm provider status` are unimplemented stubs whose doc comments lie.**
+1. **Fixed: `tm provider test`/`tm provider status` are unimplemented stubs whose doc comments lie.**
+   Fixed by: `provider test` now sends a real tiny completion through each provider the turn-path
+   fabric (`agent::build_fabric`) registers, reporting ok/error, latency, served model and stop
+   reason, and exits non-zero on any failure or an unknown/unconfigured name; `provider status`
+   reports per-provider availability/turn-fabric wiring and says plainly that no live breaker
+   state exists outside a running process. Original report:
    `crates/tm-cli/src/ops.rs:700-740` — `provider_test`'s doc comment claims it sends a real
    `CompletionRequest` and reports success/latency; the actual code unconditionally returns
    `{"status":"ok","latency_ms":0}` regardless of whether the named provider even exists.
    `provider_status` is an unconditional `{"status":"no_live_fabric"}`. Neither is real evidence
    of anything today.
-2. **`map_finish_reason` doesn't handle the gateway's `"incomplete"` finish_reason.**
+2. **Fixed: `map_finish_reason` doesn't handle the gateway's `"incomplete"` finish_reason.**
+   Fixed by: `"incomplete"` now maps to `StopReason::MaxTokens` like `"length"`, covering both the
+   non-streaming and streaming (`assemble_streamed_completion`) paths, with tests for each.
+   Original report:
    `crates/tm-provider/src/providers/compat.rs:911-920` — a real, reproduced failure mode:
    `muse-spark-1.3-contributor` returns `finish_reason: "incomplete"` (reasoning tokens exhausted
    `max_tokens` before visible output) on a real 200 OK, real-billed response, and the unmapped
@@ -512,7 +520,11 @@ pass, how many turns/tool calls, tokens spent, wall time, did verification actua
 claimed to. Store results as real event-log/ticket state (dogfood the product to measure the
 product) rather than a bespoke reporting format.
 
-## Known bug: `resolve_genesis_provider` ignores the candidate's provider slug
+## Fixed: Known bug: `resolve_genesis_provider` ignores the candidate's provider slug
+
+Fixed by: the candidate is now built via `tm_provider::Registry::build_provider` (so `anthropic`,
+`devpass`, and every other registered slug get their own provider), gated on that provider's own
+required env vars, with an unknown slug a hard error before any local-backend probing.
 
 `crates/tm-cli/src/project.rs::resolve_genesis_provider` (the provider construction for `tm
 genesis`'s three frontier bootstrap roles — `vision.frontier`/`planner.frontier`/
