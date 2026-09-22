@@ -480,11 +480,22 @@ edges of that plan, not a competing priority order.
 - The user corrects direction directly and expects it to stick immediately, not be
   re-litigated — e.g. the Codex integration was very clearly "auth provider for our own executor,
   not Codex as an executor" after one correction; don't need it re-explained if it comes up again.
-- A recurring goal-check-in this session kept reporting a background shell task (id `buopfo6qg`,
-  command shape `until [ -s /private/tmp/.../tasks/<id>.output ] ...`) as still running, for over
-  three hours. Checked twice, both times found: no matching process anywhere on the machine (`ps
-  aux`, by command pattern and by task id), and it doesn't appear in `ListAgents` as a subagent
-  either mine or anyone else's. It was never dispatched by this session. Read as harness-internal
-  notification-delivery plumbing that outlived whatever it was originally polling for, not a real
-  hung task — nothing to fix or stop, and no corresponding action was ever needed. If it's still
-  showing up next session, it's the same finding, not a new one to re-investigate from scratch.
+- **Correction to an earlier entry in this file**: a recurring goal-check-in kept reporting
+  background task `buopfo6qg` as still running — `ps aux`/`ListAgents` genuinely showed nothing
+  (it doesn't run as an inspectable OS process or subagent), which earlier led to guessing it was
+  harmless harness-internal plumbing. That guess was wrong, caught later via `TaskOutput`/
+  `TaskStop`, which *are* the right tools for this (not `ps`/`ListAgents` — a harness-tracked
+  background task isn't necessarily either). Its real command was `until [ -s
+  .../tasks/biqip6zpt.output ] && grep -q "Doc-tests tm_workflow" .../tasks/biqip6zpt.output; do
+  sleep 3; done` — a poller waiting on a *different*, much earlier `mise run verify` task
+  (`biqip6zpt`, launched 2026-09-20 11:49) to print a specific sentinel string. `biqip6zpt` had
+  already finished successfully (exit code 0) within seconds of being launched, but its doc-test
+  summary never contained the literal substring `"Doc-tests tm_workflow"` (most likely because
+  `tm-workflow` has zero doc-tests, so that header line never gets printed at all), so the `grep
+  -q` completion check could never match — the underlying work was fine; only the sentinel string
+  was wrong. It then polled every 3 seconds for about 43 hours before being noticed and stopped
+  with `TaskStop`. **Lesson for next time a check-in flags a stuck background task**: use
+  `TaskOutput(task_id, block: false)` first (it reports real status even when `ps`/`ListAgents`
+  show nothing), and if a task is a `until [ -s <file> ] && grep ... <file>` poller, read the file
+  it's actually waiting on before assuming either "it's fine, ignore it" or "it's hung, kill it" —
+  the target task may have already finished with a completion string that just doesn't match.
