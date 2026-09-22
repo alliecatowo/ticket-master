@@ -70,34 +70,34 @@ that rule is global, not repo-specific, and still applies here.
 The server itself is registered project-scope in `.mcp.json` (`zg server --stdio`) and
 pre-allowed in `.claude/settings.json`'s `permissions.allow` (`mcp__zvec_grep__*`) — both
 repo-tracked, so a fresh clone gets the tool without a manual `claude mcp add` and without a
-permission prompt on first use. It still needs the `zg` binary itself on `$PATH` — installed here
-via `npm install -g @zvec/zvec-grep` under mise's Node, same pattern as `typescript-lsp`'s
-language server below; nothing in this repo's own `mise.toml` installs it automatically yet, so a
-genuinely fresh machine needs that one command run by hand before the MCP server can start.
+permission prompt on first use. It still needs the `zg` binary itself on `$PATH`, which
+`mise.toml`'s `"npm:@zvec/zvec-grep"` tool entry now provides — `mise install` in a fresh clone
+gets it automatically, nothing to run by hand.
 
 ## Code intelligence: LSP plugins for every language in this repo
 
 This repo is polyglot — `crates/` (Rust, the primary surface), `clients/ts` + `clients/vscode` +
 `clients/web` (TypeScript/JavaScript), and `clients/macos` (Swift). Each has a matching Claude
-Code LSP plugin installed at user scope; once active (a fresh session, or `/reload-plugins` in an
-open one) each gives Claude a native LSP tool for that language — automatic diagnostics after
-every edit, plus go-to-definition/references/hover/call-hierarchy, sourced from the same language
-server an IDE would use — instead of falling back to grep-shaped heuristics for that language.
+Code LSP plugin enabled project-scope in `.claude/settings.json`'s `enabledPlugins` (repo-tracked,
+so a fresh clone gets all three without a manual `claude plugin install`/`enable`); once active (a
+fresh session, or `/reload-plugins` in an open one) each gives Claude a native LSP tool for that
+language — automatic diagnostics after every edit, plus go-to-definition/references/hover/
+call-hierarchy, sourced from the same language server an IDE would use — instead of falling back
+to grep-shaped heuristics for that language.
 
-- **`rust-analyzer-lsp`** (`claude plugin install rust-analyzer-lsp@claude-plugins-official`) —
-  covers `crates/`. Needs `rust-analyzer` in `$PATH` (`rustup component add rust-analyzer`, or
-  `mise install rust-analyzer` — this repo's `mise.toml` lists it as a tool for exactly this).
-  `mise run lsp` is the fallback/manual path when you want a one-shot full-workspace
-  `rust-analyzer diagnostics` CLI dump instead of the live plugin — informational only (it exits
-  non-zero on *any* diagnostic, including the benign `#[cfg(test)]` "inactive-code" note every
-  test module produces, so read the output, not the exit code).
-- **`typescript-lsp`** (`claude plugin install typescript-lsp@claude-plugins-official`) — covers
-  `clients/ts`, `clients/vscode`, `clients/web`. Needs `typescript-language-server` and
-  `typescript` on `$PATH` (`npm install -g typescript-language-server typescript`; already
-  installed globally under mise's Node on this machine).
-- **`swift-lsp`** (`claude plugin install swift-lsp@claude-plugins-official`) — covers
-  `clients/macos`. Needs `sourcekit-lsp` on `$PATH`, which ships with the Xcode toolchain
-  (already present on this machine at `/usr/bin/sourcekit-lsp`) — nothing extra to install for it.
+- **`rust-analyzer-lsp`** — covers `crates/`. Needs `rust-analyzer` in `$PATH`; `mise.toml`'s
+  `[tools]` already lists it, so `mise install` provides it. `mise run lsp` is the
+  fallback/manual path when you want a one-shot full-workspace `rust-analyzer diagnostics` CLI
+  dump instead of the live plugin — informational only (it exits non-zero on *any* diagnostic,
+  including the benign `#[cfg(test)]` "inactive-code" note every test module produces, so read the
+  output, not the exit code).
+- **`typescript-lsp`** — covers `clients/ts`, `clients/vscode`, `clients/web`. Needs
+  `typescript-language-server` and `typescript` on `$PATH`; `mise.toml`'s `"npm:typescript-
+  language-server"`/`"npm:typescript"` tool entries provide both via `mise install`.
+- **`swift-lsp`** — covers `clients/macos`. Needs `sourcekit-lsp` on `$PATH`, which ships with the
+  Xcode toolchain (already present on this machine at `/usr/bin/sourcekit-lsp`) — not something
+  mise can install, since it isn't a package-manager-distributed binary; a machine without Xcode
+  (or the Command Line Tools) needs that installed separately before this plugin can work.
 
 All three can be memory-heavy on a large workspace; if one causes trouble on this machine's 8GB,
 `/plugin disable <name>` for just that language and fall back to `tm-codeintel`'s heuristics
@@ -161,6 +161,28 @@ currently a no-op here, not a bug — nothing to configure today. If an `origin`
 added, revisit this: `fresh` would then track the remote's default branch instead of local `HEAD`,
 which is a real behavior change worth a deliberate choice given this file's own "Parallel tracks
 against a moving `main`" incident below, not something to leave on whatever the tool's default is.
+
+**`target/` is shared across every worktree, not rebuilt per worktree** — `mise.toml`'s `[env]`
+pins `CARGO_TARGET_DIR` to the primary checkout's absolute `target/` path. Checked empirically: a
+probe worktree's `cargo check` wrote into the primary checkout's `target/` and created no local
+`target/` of its own. This matters concretely, not just tidily: `target/` alone is already ~11GB
+and this machine has ~32GB free, so two or three worktrees each building their own independent
+copy would be a real disk-space incident, the same category this file already warns about
+elsewhere. Cargo's own file locking serializes concurrent access to the shared dir safely (one
+build waits, it doesn't corrupt); this composes with, not replaces, the existing `-j 2`/"don't
+dispatch more than ~2 concurrent heavy builds" guidance.
+
+**A worktree does not get `.env`, and nothing here auto-copies it in.** Git worktrees only ever
+contain tracked files (plus your own uncommitted changes on that branch) — a gitignored file like
+`.env` is invisible to `git worktree add` by design, confirmed empirically (a probe worktree had
+no `.env` at all). This is left deliberately manual, not automated: `.env` currently holds a real
+credential already flagged for rotation (see the top of `AGENT_HANDOFF.md`), and auto-copying it
+into every worktree would scatter more live copies of a secret that's already known-exposed rather
+than fewer. If a specific subagent genuinely needs a real provider credential inside its worktree
+(rare — most work doesn't touch a live provider at all), symlink it in deliberately for that one
+task — `ln -s "$(git rev-parse --git-common-dir)/../.env" .env` from inside the worktree — rather
+than copying it, so rotating the key once still invalidates every worktree's access rather than
+leaving stale copies behind.
 
 - **`isolation: 'worktree'` is mandatory** for any subagent that will edit files here. No
   exceptions for "it's a small change."

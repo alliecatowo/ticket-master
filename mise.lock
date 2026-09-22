@@ -68,6 +68,24 @@ url = "https://nodejs.org/dist/v24.21.0/node-v24.21.0-darwin-x64.tar.gz"
 checksum = "sha256:158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541"
 url = "https://nodejs.org/dist/v24.21.0/node-v24.21.0-win-x64.zip"
 
+[[tools."npm:@zvec/zvec-grep"]]
+version = "0.2.2"
+aube = { path = ".mise/locks/npm-zvec-zvec-grep/0.2.2", digest = "sha256:04ea7805d6661a0d34340c88f343f1d964638ba7c783e0526af9fb75e3c3c06d" }
+backend = "npm:@zvec/zvec-grep"
+specifiers = ["latest"]
+
+[[tools."npm:typescript"]]
+version = "7.0.2"
+aube = { path = ".mise/locks/npm-typescript/7.0.2", digest = "sha256:3d06b3b23564c68cdad7815c356edb1506fab1c42bfb8c54234134fd9650ec17" }
+backend = "npm:typescript"
+specifiers = ["latest"]
+
+[[tools."npm:typescript-language-server"]]
+version = "6.0.0"
+aube = { path = ".mise/locks/npm-typescript-language-server/6.0.0", digest = "sha256:df8016fc179bdf942026d39a79f313ca5bf515e470c5e68d93fe0783d635decf" }
+backend = "npm:typescript-language-server"
+specifiers = ["latest"]
+
 [[tools.pnpm]]
 version = "11.20.0"
 backend = "aqua:pnpm/pnpm"

@@ -1,4 +1,5 @@
 /target
+.mise/
 **/*.rs.bk
 .tm/
 *.db
