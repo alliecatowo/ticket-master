@@ -186,6 +186,8 @@ regression surface, not a quick decoupling — confirmed, not assumed.
    model-callable tool, a `/ticket`-style typed command (see below), or both, is a product call for
    the user, not something to decide unilaterally.
 
+**2026-09-22 update to step 2:** D-017 now has an addendum narrowing this. `Store::record_usage` already takes `Option<&TicketId>`, `event_count_for` takes a generic `Id`, and the prompt render only uses the ticket id as a display header. The real remaining question is what goal-tracking (`goal_state`/`set_goal`/`reorient_goal`/`claim_goal_complete`) and `budget_handoff` mean for a ticketless turn.
+
 **On the `/tickets` typed-command addition made just before this was written**: real, tested,
 merged (`is_tickets_command` in `tui.rs`) — and the mapping it implements turns out to be exactly
 right, confirmed by the specifics given later in this same session (below). Keep it.

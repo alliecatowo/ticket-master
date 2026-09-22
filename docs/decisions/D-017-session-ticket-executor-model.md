@@ -132,6 +132,35 @@ create; decide what a ticketless turn's `AgentTask.ticket` should be, given thos
 build the promotion path, since `ticket.create_child` requires a parent a ticketless session
 doesn't have).
 
+**2026-09-22 addendum — the cited evidence for "not attribution-only" is softer than recorded
+above, on a second, closer reading of the actual `tm-core` signatures (not the `agent_loop.rs`
+call sites alone).** This narrows the open question in step 2 below; it does not reverse the
+"don't quick-decouple this" conclusion, and no code changed for this addendum:
+
+- `tm_core::Store::record_usage`'s own signature is `record_usage(ticket: Option<&TicketId>,
+  session: Option<&SessionId>, ...)` — the store layer already anticipates a ticket-less usage
+  record (it falls back to session/project-level budget scopes when `ticket` is `None`). Passing
+  `None` here when `AgentTask` has no ticket is threading an existing capability through, not
+  inventing new store-side behavior.
+- `Store::event_count_for` takes a generic `subject: &Id`, not `&TicketId` — it works identically
+  whether that `Id` resolves to a real ticket row or not, so the event backstop needs no special
+  casing either way.
+- `crate::prompt::render_task_prompt(ticket: &TicketId, pack: &ContextPack)` — checked directly —
+  uses the ticket id *only* to print `"# Ticket {ticket}\n"` as a header. That one call site
+  genuinely is attribution-only, contrary to the blanket claim above.
+
+**What is still genuinely ticket-row-dependent, unchanged from the original finding**:
+`Store::goal_state`/`set_goal`/`reorient_goal` (all take `&TicketId`, not `Option`, and read a
+real row), `Store::claim_goal_complete` (called right before every `ticket.submit` dispatch), and
+`Store::budget_handoff` (hands off a specific ticket's lease — meaningless with no ticket to hand
+off). So the honest, narrower statement of step 2's open question: three of the four originally
+cited call sites are already ticket-optional or purely cosmetic; the real remaining design
+question is narrower than recorded — what should goal-tracking and budget-handoff *mean* for a
+ticketless turn (most likely: skip goal-tracking entirely, since there's no ticket `objective` to
+seed one from; on budget exhaustion, produce `AgentOutcome::BudgetExhausted` directly without a
+`budget_handoff` call, since there's no lease to release). Still not attempted in this pass — see
+`AGENT_HANDOFF.md`'s architectural-gap section for the pointer.
+
 ## What this costs, stated plainly
 
 Fixing the violation above properly costs real kernel-touching engineering effort across
