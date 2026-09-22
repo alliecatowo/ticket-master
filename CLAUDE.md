@@ -152,15 +152,19 @@ Full playbook: `.claude/skills/dispatch-background-agent/SKILL.md`. The rules be
 load-bearing subset, stated plainly because getting them wrong has already cost real time in this
 repo.
 
-**This repo has no `origin` remote** (`git remote -v` is empty). `EnterWorktree`'s own docs say
-its default `worktree.baseRef` setting (`fresh`) branches new worktrees from `origin/<default-
-branch>` — checked empirically (create a probe worktree, compare its branch tip to `main`'s, tear
-it down): with no `origin` to resolve, it falls back to branching from local `HEAD`, landing on
-the exact same commit `head` mode would have picked. So the `fresh`/`head` distinction is
-currently a no-op here, not a bug — nothing to configure today. If an `origin` remote is ever
-added, revisit this: `fresh` would then track the remote's default branch instead of local `HEAD`,
-which is a real behavior change worth a deliberate choice given this file's own "Parallel tracks
-against a moving `main`" incident below, not something to leave on whatever the tool's default is.
+**This repo has a real `origin` now** — a private GitHub repo, `git@github.com:alliecatowo/
+ticket-master.git`, created 2026-09-22 (`gh repo create alliecatowo/ticket-master --private
+--source=. --remote=origin`), with `main` pushed and tracked. Before this, `EnterWorktree`'s
+default `worktree.baseRef` (`fresh`, which branches new worktrees from `origin/<default-branch>`)
+was a checked no-op with no `origin` to resolve against. That's no longer true, and `fresh`'s real
+behavior would now be a problem for how this repo is actually worked in: commits land locally
+throughout a session well before any `git push` (this file's own history is full of that pattern),
+so `fresh` would silently branch new worktrees from a stale, already-behind `origin/main`, missing
+whatever's only local so far. `.claude/settings.json` now pins `"worktree": {"baseRef": "head"}`
+explicitly for exactly this reason — verified empirically (a local-only, not-yet-pushed commit,
+then a probe worktree confirmed to branch from it rather than from `origin/main`). If this project
+ever gains other collaborators pushing from elsewhere, revisit whether `head` is still the more
+correct default.
 
 **`target/` is shared across every worktree, not rebuilt per worktree** — `mise.toml`'s `[env]`
 pins `CARGO_TARGET_DIR` to the primary checkout's absolute `target/` path. Checked empirically: a

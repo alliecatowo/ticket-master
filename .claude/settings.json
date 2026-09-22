@@ -22,5 +22,8 @@
     "allow": [
       "mcp__zvec_grep__*"
     ]
+  },
+  "worktree": {
+    "baseRef": "head"
   }
 }
