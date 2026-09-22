@@ -346,6 +346,7 @@ impl BuiltinExecutor {
             budget: task.budget,
             harness_epoch: task.harness_epoch,
             session,
+            conversation: None,
         };
 
         let handles = SessionHandles {
@@ -458,6 +459,26 @@ impl Executor for BuiltinExecutor {
                              resolution available",
                             pending_call.tool_name, pending_call.reason
                         ),
+                    }),
+                }
+            }
+            AgentOutcome::Replied { steps, .. } => {
+                // Unreachable in practice: this executor never sets `AgentTask::conversation`, the
+                // only way the loop produces `Replied`. Mapped to the same failure a ticketed run
+                // that stops talking without submitting has always produced.
+                let usage = steps
+                    .iter()
+                    .fold(tm_types::Spend::default(), |acc, step| acc.plus(step.spend));
+                ExecutorOutcome {
+                    ticket,
+                    summary: String::new(),
+                    evidence: Vec::new(),
+                    patch: None,
+                    usage,
+                    decisions: Vec::new(),
+                    failure: Some(ExecutorFailure {
+                        class: FailureClass::Other,
+                        detail: "model ended turn without submitting".to_string(),
                     }),
                 }
             }

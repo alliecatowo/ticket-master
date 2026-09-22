@@ -89,9 +89,10 @@ pub(crate) enum TurnEvent {
     AwaitingApproval(PendingApproval),
 }
 
-/// The bare-`tm` interactive agent session: one readline loop, one [`tm_agent::agent_loop::AgentLoop`]
-/// reused across turns so its prompt cache carries over, and a running notion of which ticket
-/// (if any) the conversation is currently attached to.
+/// The bare-`tm` interactive agent session: one readline loop, the conversation so far (every
+/// earlier turn's message and steps, replayed to the model on each new turn), and a running notion
+/// of which ticket (if any) the conversation is currently attached to. A fresh
+/// [`tm_agent::agent_loop::AgentLoop`] is built per turn; continuity lives in `conversation`.
 pub struct AgentSession {
     /// The project the agent is operating in.
     project: Arc<Project>,
@@ -105,6 +106,11 @@ pub struct AgentSession {
     /// the lifetime of this `AgentSession` so a fresh worker reading the transcript back sees
     /// one coherent session rather than one per turn.
     session: SessionId,
+    /// Every completed turn of this session, oldest first — what makes turn N see turns 1..N-1.
+    conversation: Vec<tm_agent::ConversationTurn>,
+    /// A pre-built fabric to use instead of [`build_fabric`], for in-process tests that need to
+    /// script a provider and inspect exactly what it was sent.
+    fabric_override: Option<Arc<Fabric>>,
 }
 
 impl AgentSession {
@@ -122,7 +128,22 @@ impl AgentSession {
             attached_ticket: None,
             renderer,
             session,
+            conversation: Vec::new(),
+            fabric_override: None,
         }
+    }
+
+    /// Use `fabric` for every turn instead of building one from the environment.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn with_fabric(mut self, fabric: Arc<Fabric>) -> Self {
+        self.fabric_override = Some(fabric);
+        self
+    }
+
+    /// The completed turns of this session so far, oldest first.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn conversation(&self) -> &[tm_agent::ConversationTurn] {
+        &self.conversation
     }
 
     /// Attach the session's work to `ticket`, so subsequent turns compile context and submit
@@ -300,7 +321,10 @@ impl AgentSession {
                 |_pending| prompt_approval_decision(),
             )
             .await?;
-        self.renderer.note(&format_outcome_summary(&outcome));
+        let summary = format_outcome_summary(&outcome);
+        if !summary.is_empty() {
+            self.renderer.note(&summary);
+        }
         Ok(())
     }
 
@@ -370,7 +394,10 @@ impl AgentSession {
             &RoleTable::default_table(),
         )?;
 
-        let fabric = build_fabric(self.project.clock.clone())?;
+        let fabric = match &self.fabric_override {
+            Some(fabric) => Arc::clone(fabric),
+            None => build_fabric(self.project.clock.clone())?,
+        };
         let command_cache: Arc<dyn CommandCache + Send + Sync> =
             Arc::new(MemoryCommandCache::new(self.project.ids.clone()));
         let command_executor: Arc<dyn CommandExecutor + Send + Sync> =
@@ -442,6 +469,10 @@ impl AgentSession {
             budget: ticket.budget,
             harness_epoch: 0,
             session: self.session.clone(),
+            conversation: Some(tm_agent::Conversation {
+                user_message: prompt.to_string(),
+                prior_turns: self.conversation.clone(),
+            }),
         };
 
         let result = self
@@ -466,6 +497,15 @@ impl AgentSession {
         hooks
             .run_stop(&self.session, Some(ticket.id.as_str()))
             .await;
+
+        if let Ok(outcome) = &result {
+            if outcome.is_terminal() {
+                self.conversation.push(tm_agent::ConversationTurn {
+                    user_message: prompt.to_string(),
+                    steps: outcome.steps().to_vec(),
+                });
+            }
+        }
 
         result
     }
@@ -743,6 +783,8 @@ pub(crate) fn format_tool_call(call: &ToolCallRecord) -> String {
 pub(crate) fn format_outcome_summary(outcome: &AgentOutcome) -> String {
     match outcome {
         AgentOutcome::Submitted { evidence, .. } => format!("submitted: {}", evidence.summary),
+        // The reply text itself was already rendered as the turn's final step.
+        AgentOutcome::Replied { .. } => String::new(),
         AgentOutcome::BudgetExhausted { exhausted, .. } => {
             format!("budget exhausted: {}", format_budget_dimension(*exhausted))
         }
@@ -895,6 +937,109 @@ mod tests {
     fn new_session(dir: &Path) -> AgentSession {
         let project = Arc::new(open_test_project(dir));
         AgentSession::new(project, Renderer::from_flags(false, true, true))
+    }
+
+    /// A fabric whose only candidate is a `MockProvider` answering every request with `reply`,
+    /// plus a handle to that provider so a test can read back exactly what it was sent.
+    fn scripted_fabric(
+        clock: Arc<dyn Clock>,
+        reply: &str,
+    ) -> (Arc<Fabric>, Arc<tm_provider::MockProvider>) {
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("static role table parses");
+        let fabric = Fabric::new(table, clock.clone());
+        let model = ModelId::new("mock", "m1");
+        let received_at = clock.now();
+        let provider = Arc::new(tm_provider::MockProvider::new("mock", model.clone(), clock));
+        provider.script_default_response(tm_provider::Completion {
+            model,
+            candidates: vec![tm_provider::Candidate {
+                content: vec![tm_provider::ContentBlock::Text {
+                    text: reply.to_string(),
+                }],
+                stop_reason: tm_provider::StopReason::EndTurn,
+            }],
+            usage: tm_provider::Usage {
+                input_tokens: 10,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: std::time::Duration::from_millis(0),
+            received_at,
+        });
+        fabric.register_provider(provider.clone());
+        (Arc::new(fabric), provider)
+    }
+
+    /// Every text block of every message in `request`, joined, for substring assertions.
+    fn request_text(request: &tm_provider::CompletionRequest) -> String {
+        request
+            .messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|b| match b {
+                tm_provider::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn each_turn_sends_its_own_prompt_plus_every_earlier_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = Arc::new(open_test_project(dir.path()));
+        let (fabric, provider) = scripted_fabric(project.clock.clone(), "the answer is 42");
+        let mut session =
+            AgentSession::new(project, Renderer::from_flags(false, true, true)).with_fabric(fabric);
+
+        let first = session
+            .run_turn_streaming("first question alpha", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn 1 runs");
+        assert!(
+            matches!(&first, AgentOutcome::Replied { text, .. } if text == "the answer is 42"),
+            "a plain text reply is a successful chat turn, got {first:?}"
+        );
+        let second = session
+            .run_turn_streaming("second question beta", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn 2 runs");
+        assert!(matches!(second, AgentOutcome::Replied { .. }), "{second:?}");
+
+        let log = provider.call_log();
+        assert_eq!(log.len(), 2, "one provider call per turn");
+        let first_request = request_text(&log[0]);
+        assert!(first_request.contains("first question alpha"));
+        assert!(!first_request.contains("second question beta"));
+
+        let second_request = request_text(&log[1]);
+        assert!(
+            second_request.contains("second question beta"),
+            "turn 2's own message must reach the model: {second_request}"
+        );
+        assert!(
+            second_request.contains("first question alpha"),
+            "turn 1 is remembered"
+        );
+        assert!(
+            second_request.contains("the answer is 42"),
+            "turn 1's reply is remembered"
+        );
+
+        let roles: Vec<_> = log[1].messages.iter().map(|m| m.role).collect();
+        assert_eq!(
+            roles,
+            vec![
+                tm_provider::MessageRole::User,
+                tm_provider::MessageRole::Assistant,
+                tm_provider::MessageRole::User,
+            ]
+        );
+        assert_eq!(session.conversation().len(), 2);
     }
 
     #[test]

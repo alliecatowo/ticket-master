@@ -43,7 +43,9 @@ pub use executor::{
     HumanExecutor, StoreArtifactSink,
 };
 pub use hooks::{HookConfig, HookDecision, HookEntry};
-pub use outcome::{AgentOutcome, AgentTask, EvidenceBundle, StepRecord};
+pub use outcome::{
+    AgentOutcome, AgentTask, Conversation, ConversationTurn, EvidenceBundle, StepRecord,
+};
 pub use patch::{Edit, PatchEngine, PatchOutcome};
 pub use prompt::{render_system_prompt, render_task_prompt};
 pub use session::{DurablePromotion, Session};

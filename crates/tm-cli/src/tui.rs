@@ -576,7 +576,11 @@ impl App {
             };
             sender.send(AppMessage::StreamChunk {
                 session: session_id,
-                text: format!("{summary}\n"),
+                text: if summary.is_empty() {
+                    String::new()
+                } else {
+                    format!("{summary}\n")
+                },
                 final_chunk: true,
             });
             // The ticket's own state may have moved (e.g. a submitted turn transitions it), so

@@ -30,6 +30,30 @@ pub struct AgentTask {
     pub harness_epoch: u64,
     /// The session this task executes inside, for transcript/event attribution.
     pub session: SessionId,
+    /// Set for an interactive chat turn, `None` for ticket work dispatched by the scheduler or an
+    /// executor. When set, the loop sends the user's actual message and every earlier turn of the
+    /// same session, and a turn that ends with a plain reply (no tool call) is a successful
+    /// [`AgentOutcome::Replied`] instead of a failure to submit.
+    pub conversation: Option<Conversation>,
+}
+
+/// The chat framing of one interactive turn: what the human just said, plus everything said and
+/// done earlier in the same session.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Conversation {
+    /// This turn's user message, verbatim.
+    pub user_message: String,
+    /// Every earlier turn in the same session, oldest first.
+    pub prior_turns: Vec<ConversationTurn>,
+}
+
+/// One completed turn of a session's conversation.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversationTurn {
+    /// What the human said that turn.
+    pub user_message: String,
+    /// Every step the loop took answering it.
+    pub steps: Vec<StepRecord>,
 }
 
 /// The closed set of reasons an [`AgentLoop`](crate::agent_loop::AgentLoop) run ends.
@@ -68,6 +92,14 @@ pub enum AgentOutcome {
         /// once a decision lands.
         pending_call: PendingApproval,
     },
+    /// A chat turn ([`AgentTask::conversation`] set) ended with the model replying in text and
+    /// calling no further tools — the normal, successful end of a conversational turn.
+    Replied {
+        /// The model's final reply text.
+        text: String,
+        /// Every step of the turn, including the final reply step.
+        steps: Vec<StepRecord>,
+    },
     /// The task ended without submitting, for a reason other than budget exhaustion or
     /// approval suspension.
     Failed {
@@ -93,6 +125,7 @@ impl AgentOutcome {
     pub fn steps(&self) -> &[StepRecord] {
         match self {
             AgentOutcome::Submitted { steps, .. }
+            | AgentOutcome::Replied { steps, .. }
             | AgentOutcome::BudgetExhausted { steps, .. }
             | AgentOutcome::AwaitingApproval { steps, .. }
             | AgentOutcome::Failed { steps, .. } => steps,

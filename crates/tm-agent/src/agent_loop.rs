@@ -28,7 +28,8 @@ use tm_types::{
 };
 
 use crate::outcome::{
-    AgentOutcome, AgentTask, BudgetDimension, PendingApproval, StepRecord, ToolCallRecord,
+    AgentOutcome, AgentTask, BudgetDimension, Conversation, PendingApproval, StepRecord,
+    ToolCallRecord,
 };
 use crate::pruning;
 use crate::session::Session;
@@ -663,7 +664,12 @@ impl AgentLoop {
                     "context working set pruned stale tool results before this turn's request"
                 );
             }
-            let messages = rebuild_messages(&rendered.task, &steps);
+            let messages = match &task.conversation {
+                None => rebuild_messages(&rendered.task, &steps),
+                Some(conversation) => {
+                    rebuild_conversation(&rendered.task, Some(conversation), &steps)
+                }
+            };
 
             // Refuse to start an effect this loop cannot afford to finish (`SPEC.md` §31.2,
             // `docs/audit-2026-09-18-fable.md` B-10), rather than issuing the call and
@@ -759,6 +765,7 @@ impl AgentLoop {
             let served_by = completion.model.to_string();
 
             if tool_uses.is_empty() {
+                let reply = assistant_text.clone();
                 steps.push(StepRecord {
                     index: step_index,
                     served_by,
@@ -767,6 +774,12 @@ impl AgentLoop {
                     spend: step_spend,
                     at: self.clock.now(),
                 });
+                if task.conversation.is_some() {
+                    return Ok(AgentOutcome::Replied {
+                        text: reply.unwrap_or_default(),
+                        steps,
+                    });
+                }
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
@@ -970,14 +983,74 @@ fn project_root() -> std::path::PathBuf {
 /// single testable entry point with the exact name/shape `docs/audit-2026-09-18-fable.md` B-08
 /// asks for, rather than threading a working set through as an extra parameter.
 pub(crate) fn rebuild_messages(task_prompt: &str, steps: &[StepRecord]) -> Vec<Message> {
-    let working_set = pruning::working_set(steps);
-    let mut messages = vec![Message {
-        role: MessageRole::User,
-        content: vec![ContentBlock::Text {
-            text: task_prompt.to_string(),
-        }],
-    }];
+    rebuild_conversation(task_prompt, None, steps)
+}
 
+/// [`rebuild_messages`] generalized over a chat [`Conversation`]. With `None` it is exactly
+/// [`rebuild_messages`]: the task prompt, then this run's steps. With `Some`, every earlier turn is
+/// replayed first (its user message, then its steps) and this turn's own user message precedes
+/// `steps`; the task prompt (the compiled context) rides along only on the very first user message
+/// of the conversation, so it is sent once rather than repeated every turn.
+pub(crate) fn rebuild_conversation(
+    task_prompt: &str,
+    conversation: Option<&Conversation>,
+    steps: &[StepRecord],
+) -> Vec<Message> {
+    let mut messages = Vec::new();
+    match conversation {
+        None => {
+            push_user_text(&mut messages, task_prompt.to_string());
+            push_step_messages(&mut messages, steps);
+        }
+        Some(conversation) => {
+            let mut first = true;
+            for turn in &conversation.prior_turns {
+                push_user_text(
+                    &mut messages,
+                    chat_user_text(task_prompt, first, &turn.user_message),
+                );
+                first = false;
+                push_step_messages(&mut messages, &turn.steps);
+            }
+            push_user_text(
+                &mut messages,
+                chat_user_text(task_prompt, first, &conversation.user_message),
+            );
+            push_step_messages(&mut messages, steps);
+        }
+    }
+    messages
+}
+
+/// The text of one chat turn's user message: the compiled context prefixed only on the first.
+fn chat_user_text(task_prompt: &str, first: bool, user_message: &str) -> String {
+    if first && !task_prompt.is_empty() {
+        format!("{task_prompt}\n\n{user_message}")
+    } else {
+        user_message.to_string()
+    }
+}
+
+/// Append a user text block, folding it into the previous message when that one is already a user
+/// message (a prior turn that ended on tool results) so roles keep strictly alternating on the wire.
+fn push_user_text(messages: &mut Vec<Message>, text: String) {
+    let block = ContentBlock::Text { text };
+    if let Some(last) = messages.last_mut() {
+        if last.role == MessageRole::User {
+            last.content.push(block);
+            return;
+        }
+    }
+    messages.push(Message {
+        role: MessageRole::User,
+        content: vec![block],
+    });
+}
+
+/// Append the assistant/tool-result message pairs for `steps`, rendered from
+/// `pruning::working_set(steps)` (see [`rebuild_messages`]'s doc comment for why).
+fn push_step_messages(messages: &mut Vec<Message>, steps: &[StepRecord]) {
+    let working_set = pruning::working_set(steps);
     for step_ref in &working_set.steps {
         let step = step_ref.step;
         let mut assistant_content = Vec::new();
@@ -990,6 +1063,9 @@ pub(crate) fn rebuild_messages(task_prompt: &str, steps: &[StepRecord]) -> Vec<M
                 name: tc.tool_name.clone(),
                 input: tc.input.clone(),
             });
+        }
+        if assistant_content.is_empty() {
+            continue;
         }
         messages.push(Message {
             role: MessageRole::Assistant,
@@ -1021,8 +1097,6 @@ pub(crate) fn rebuild_messages(task_prompt: &str, steps: &[StepRecord]) -> Vec<M
             });
         }
     }
-
-    messages
 }
 
 /// Render one [`crate::outcome::ToolCallResolution`] as the text (and error flag) a provider's
@@ -1585,6 +1659,7 @@ mod tests {
                 budget: Budget::unlimited(),
                 harness_epoch: 0,
                 session: self.session.clone(),
+                conversation: None,
             }
         }
 
@@ -2675,6 +2750,7 @@ mod tests {
                 budget: Budget::unlimited(),
                 harness_epoch: 0,
                 session: h.session.clone(),
+                conversation: None,
             }
         }
 
