@@ -9,6 +9,51 @@ printed in full into an agent's tool output this session (caught by the agent it
 repeated afterward, but exposed regardless). If the user hasn't already rotated it, that's the
 very first thing to raise next session — see `docs/backlog.md`'s top section.
 
+## 2026-09-22 addendum: harness/environment setup, done deliberately before this restart
+
+The user explicitly asked to pause all product work and get the harness itself fully set up
+before starting a fresh session, so this landed instead of item 1 below — don't read its
+presence as a change in priority, item 1 is still the real next task. What changed, each verified
+empirically, not assumed:
+
+- **LSP plugins and zvec-grep MCP moved from user-scope to project-scope.** They were working but
+  only registered in `~/.claude/settings.json` — invisible to git, gone on a fresh clone or
+  container. Now: `.claude/settings.json`'s `enabledPlugins` has `rust-analyzer-lsp`,
+  `typescript-lsp`, `swift-lsp`; `.mcp.json` registers `zvec_grep`; `permissions.allow` pre-allows
+  `mcp__zvec_grep__*`. All three repo-tracked commits: `fed4c97`, `3cad15c`.
+- **The underlying binaries those plugins need are now real `mise.toml` dependencies, not things
+  installed by hand once and forgotten.** `"npm:typescript-language-server"`, `"npm:typescript"`,
+  and `"npm:@zvec/zvec-grep"` (provides `zg`) are in `[tools]` — verified by running `mise
+  install` in a scratch directory with nothing pre-installed and confirming all three binaries
+  resolved. `sourcekit-lsp` (Swift) is deliberately not listed: it ships with Xcode, not something
+  mise can install — a machine without Xcode/Command Line Tools needs that separately.
+- **Every worktree now shares the primary checkout's `target/` instead of building its own.**
+  `mise.toml`'s `[env]` pins `CARGO_TARGET_DIR` to the primary checkout's absolute path. This is
+  not cosmetic: `target/` is ~11GB and this machine has ~32GB free, so a couple of worktrees each
+  doing an independent full build would be a real disk-space incident. Verified empirically: built
+  `EnterWorktree` a probe worktree, ran `cargo check` in it, confirmed it wrote into the shared
+  `target/` and created no local one, then tore the probe down (`ExitWorktree remove`).
+- **`.env` does not exist in any worktree, and nothing auto-copies it there — confirmed, and left
+  that way on purpose.** Git worktrees only ever contain tracked files; a gitignored file like
+  `.env` never comes along. Verified with the same probe worktree. Deliberately not automated:
+  the key `.env` currently holds is already flagged for rotation above, and scattering more copies
+  of it across every worktree would make that worse. `CLAUDE.md`'s "Background and parallel
+  subagents" section now documents the one-off symlink command for the rare case a subagent
+  genuinely needs live-provider access inside its worktree.
+- **This repo has no `origin` remote at all**, which makes `EnterWorktree`'s `fresh`/`head`
+  `worktree.baseRef` distinction a current no-op (verified with a second probe worktree: its
+  branch tip matched `main`'s exactly). Documented in `CLAUDE.md` so this doesn't get silently
+  wrong if an `origin` is ever added later — `fresh` would then start tracking the remote instead
+  of local `HEAD`, a real behavior change worth choosing deliberately.
+- Commits, in order: `fed4c97` (plugins to project scope), `3cad15c` (zvec-grep to project scope +
+  worktree base-ref finding), `8d5e70d` (mise dev-deps, shared `target/`, `.env` documentation).
+
+None of this touched product code. `mise run verify` was not re-run after these changes (no
+Rust source changed, only `mise.toml`/`.claude/settings.json`/`.mcp.json`/`CLAUDE.md`/
+`.gitignore`) — worth a sanity `mise run build` early next session anyway, just to confirm the
+shared-`target/` change didn't do anything unexpected on a cold path this pass didn't exercise
+(e.g. `mise run build:all` or `mise run test`, which this pass never ran against the new config).
+
 ## Next session's plan, in priority order
 
 1. **The session/ticket architectural fix.** Still the top priority — a session should not always
