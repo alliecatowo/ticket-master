@@ -67,6 +67,34 @@ model — no network dependency). Use it exactly per the global routing rules in
 stays current across edits without a manual rebuild. Don't rebuild or drop it without asking —
 that rule is global, not repo-specific, and still applies here.
 
+## Code intelligence: LSP plugins for every language in this repo
+
+This repo is polyglot — `crates/` (Rust, the primary surface), `clients/ts` + `clients/vscode` +
+`clients/web` (TypeScript/JavaScript), and `clients/macos` (Swift). Each has a matching Claude
+Code LSP plugin installed at user scope; once active (a fresh session, or `/reload-plugins` in an
+open one) each gives Claude a native LSP tool for that language — automatic diagnostics after
+every edit, plus go-to-definition/references/hover/call-hierarchy, sourced from the same language
+server an IDE would use — instead of falling back to grep-shaped heuristics for that language.
+
+- **`rust-analyzer-lsp`** (`claude plugin install rust-analyzer-lsp@claude-plugins-official`) —
+  covers `crates/`. Needs `rust-analyzer` in `$PATH` (`rustup component add rust-analyzer`, or
+  `mise install rust-analyzer` — this repo's `mise.toml` lists it as a tool for exactly this).
+  `mise run lsp` is the fallback/manual path when you want a one-shot full-workspace
+  `rust-analyzer diagnostics` CLI dump instead of the live plugin — informational only (it exits
+  non-zero on *any* diagnostic, including the benign `#[cfg(test)]` "inactive-code" note every
+  test module produces, so read the output, not the exit code).
+- **`typescript-lsp`** (`claude plugin install typescript-lsp@claude-plugins-official`) — covers
+  `clients/ts`, `clients/vscode`, `clients/web`. Needs `typescript-language-server` and
+  `typescript` on `$PATH` (`npm install -g typescript-language-server typescript`; already
+  installed globally under mise's Node on this machine).
+- **`swift-lsp`** (`claude plugin install swift-lsp@claude-plugins-official`) — covers
+  `clients/macos`. Needs `sourcekit-lsp` on `$PATH`, which ships with the Xcode toolchain
+  (already present on this machine at `/usr/bin/sourcekit-lsp`) — nothing extra to install for it.
+
+All three can be memory-heavy on a large workspace; if one causes trouble on this machine's 8GB,
+`/plugin disable <name>` for just that language and fall back to `tm-codeintel`'s heuristics
+(Rust) or grep/zvec-grep (TypeScript/Swift) there — don't disable the others along with it.
+
 ## Logging and debugging
 
 - `RUST_LOG` controls `tracing` output on stderr (`tracing_subscriber::EnvFilter`, see
@@ -109,21 +137,6 @@ that rule is global, not repo-specific, and still applies here.
   (`Submitted`/`Verifying`/`Auditing`/`Closed`); anything else — a retry, an escalation, a
   `RUN_TICKET_MAX_WAIT` detach — leaves it on disk with the `git worktree remove --force` command
   to clean it up by hand printed alongside.
-
-- **Real code intelligence via the `rust-analyzer-lsp` Claude Code plugin** (installed:
-  `claude plugin install rust-analyzer-lsp@claude-plugins-official`, user scope) is the primary
-  mechanism, not a manual CLI wrapper — once active (a fresh session, or `/reload-plugins` in an
-  open one) this gives Claude a native LSP tool: automatic diagnostics after every edit, plus
-  go-to-definition/references/hover/call-hierarchy, sourced from the same `rust-analyzer` binary
-  as an IDE. It needs `rust-analyzer` in `$PATH` (`rustup component add rust-analyzer`, or
-  `mise install rust-analyzer` — this repo's `mise.toml` lists it as a tool for exactly this).
-  It can be memory-heavy on a large workspace; if it causes trouble on this machine's 8GB,
-  `/plugin disable rust-analyzer-lsp` and fall back to `tm-codeintel`'s heuristics.
-- `mise run lsp` is the fallback/manual path — a full-workspace `rust-analyzer diagnostics` CLI
-  dump, informational only (it exits non-zero on *any* diagnostic, including the benign
-  `#[cfg(test)]` "inactive-code" note every test module produces — read the output, not the exit
-  code). Prefer the plugin above; this is for when you specifically want a one-shot sweep outside
-  a live session.
 
 ## Background and parallel subagents
 
