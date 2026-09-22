@@ -52,6 +52,27 @@ fn session_turn_budget() -> Budget {
     Budget::new(4_000_000, 20_000_000, 3_600)
 }
 
+/// Persists a pty session's recordings as project artifacts (`tm_pty` defines its own sink trait,
+/// the same shape as `tm_agent::StoreArtifactSink`'s browser one).
+struct PtyArtifactSink(Arc<tm_core::Store>);
+
+impl tm_pty::ArtifactSink for PtyArtifactSink {
+    fn store(&self, bytes: &[u8], content_type: &str) -> tm_types::Result<ArtifactId> {
+        let events = self.0.store_artifact(
+            tm_core::ArtifactKind::Report,
+            content_type.to_string(),
+            bytes.to_vec(),
+            serde_json::json!({"source": "pty"}),
+            None,
+            tm_types::ParticipantId::system(),
+        )?;
+        events
+            .iter()
+            .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone()))
+            .ok_or_else(|| TmError::invariant("store_artifact did not emit artifact.created"))
+    }
+}
+
 /// One thing that happened while [`AgentSession::run_turn_streaming`] ran a turn, for a caller
 /// to reflect without owning [`AgentLoop`] itself. Deliberately small and independent of
 /// `tm-tui`'s own `tm_tui::event::AppMessage` (this crate is where `tm_agent`/`tm_core` types
@@ -262,6 +283,21 @@ impl AgentSession {
             })
     }
 
+    /// Where this session is running, for the chat system prompt.
+    fn chat_environment(&self, ticket: Option<&Ticket>) -> tm_agent::ChatEnvironment {
+        let date = self.project.clock.now().to_rfc3339();
+        tm_agent::ChatEnvironment {
+            root: self.project.root.display().to_string(),
+            platform: std::env::consts::OS.to_string(),
+            date: date.get(..10).unwrap_or(&date).to_string(),
+            scope: match self.project.scope {
+                crate::project::Scope::Repo => "repo".to_string(),
+                crate::project::Scope::Global => "global".to_string(),
+            },
+            attached_ticket: ticket.map(|t| t.id.to_string()),
+        }
+    }
+
     /// The ticket this turn executes against: the attached one, if any. A session with nothing
     /// attached runs ticketless — no ticket is created just because someone said something
     /// (`docs/decisions/D-017-session-ticket-executor-model.md`); the model creates tickets
@@ -423,6 +459,14 @@ impl AgentSession {
         let computer_handle = Arc::new(tm_computer::ComputerCapability::new(computer_registry));
         extra.push(computer_handle.clone() as Arc<dyn tm_types::CapabilityProvider>);
 
+        // `pty.*`: drive interactive programs (REPLs, TUIs, anything that prompts) in a real
+        // pseudo-terminal, authority-gated per `SPEC.md` §22.4. Torn down with the turn below.
+        let pty_handle = Arc::new(tm_pty::PtyCapability::new(tm_pty::SessionRegistry::new(
+            self.project.clock.clone(),
+            Arc::new(PtyArtifactSink(self.project.store.clone())),
+        )));
+        extra.push(pty_handle.clone() as Arc<dyn tm_types::CapabilityProvider>);
+
         // `skill.load` (`docs/audit-2026-09-18-fable.md` M-04): a standalone `CapabilityProvider`
         // rather than a `tm_agent::tools::ToolName` variant — see `tm_agent::skill_capability`'s
         // module doc comment for why.
@@ -451,7 +495,10 @@ impl AgentSession {
             self.project.actor.clone(),
             self.project.store.clone(),
         )
-        .with_oversight(oversight);
+        .with_oversight(oversight)
+        .with_prompt_fragments(tm_agent::chat_fragments(
+            &self.chat_environment(ticket.as_ref()),
+        ));
 
         let (authority, budget) = match &ticket {
             Some(ticket) => (ticket.authority.clone(), ticket.budget),
@@ -483,6 +530,9 @@ impl AgentSession {
         }
         if let Err(e) = computer_handle.close_all().await {
             tracing::warn!(error = %e, "failed to close one or more computer sessions after this turn");
+        }
+        if let Err(e) = pty_handle.close_all().await {
+            tracing::warn!(error = %e, "failed to close one or more pty sessions after this turn");
         }
 
         // `Stop`: this turn is about to hand control back (to the human at the readline prompt,
@@ -1202,6 +1252,24 @@ mod tests {
             !first.contains("# Ticket"),
             "no ticket header without a ticket: {first}"
         );
+        let system = provider.call_log()[0].system.clone().unwrap_or_default();
+        assert!(
+            system.contains("You are tm") && system.contains("has no attached ticket"),
+            "a chat turn must carry the chat system prompt, got {system:?}"
+        );
+        let log = provider.call_log();
+        let offered: Vec<&str> = log[0].tools.iter().map(|t| t.name.as_str()).collect();
+        for tool in [
+            "ticket.list",
+            "ticket.transition",
+            "ticket.create_child",
+            "pty.spawn",
+        ] {
+            assert!(
+                offered.contains(&tool),
+                "{tool} must be offered, got {offered:?}"
+            );
+        }
     }
 
     #[tokio::test]

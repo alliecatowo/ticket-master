@@ -35,6 +35,7 @@ tm-wiki = { workspace = true }
 # crate does not require editing the workspace root.
 tm-browser = { path = "../tm-browser" }
 tm-computer = { path = "../tm-computer" }
+tm-pty = { path = "../tm-pty" }
 tm-notify = { path = "../tm-notify" }
 
 # Already pulled in transitively via tm-codeintel; used directly here (project.rs's

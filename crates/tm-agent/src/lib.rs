@@ -47,7 +47,7 @@ pub use outcome::{
     AgentOutcome, AgentTask, Conversation, ConversationTurn, EvidenceBundle, StepRecord,
 };
 pub use patch::{Edit, PatchEngine, PatchOutcome};
-pub use prompt::{render_system_prompt, render_task_prompt};
+pub use prompt::{chat_fragments, render_system_prompt, render_task_prompt, ChatEnvironment};
 pub use session::{DurablePromotion, Session};
 pub use skill_capability::SkillCapability;
 pub use tools::{BuiltinCapability, ToolCall, ToolOutcome, ToolRegistry};

@@ -105,6 +105,9 @@ pub struct AgentLoop {
     /// <ticket> --worktree`, `docs/decisions/D-012-run-worktree-isolation.md`) needed a way to
     /// point a run's file/git tool calls at an isolated checkout instead.
     root_override: Option<PathBuf>,
+    /// The system-prompt fragments every request renders with; empty unless a caller sets them
+    /// via [`AgentLoop::with_prompt_fragments`].
+    prompt_fragments: PromptFragments,
     cache: PromptCacheState,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdSource>,
@@ -150,6 +153,11 @@ impl AgentLoop {
             budget,
             oversight: Oversight::autonomous(),
             root_override: None,
+            prompt_fragments: PromptFragments {
+                system_preamble: String::new(),
+                closing_reminder: String::new(),
+                extra: BTreeMap::new(),
+            },
             cache: PromptCacheState::new(),
             clock,
             ids,
@@ -196,6 +204,14 @@ impl AgentLoop {
     /// widening a trait every executor implements.
     pub fn with_root(mut self, root: PathBuf) -> Self {
         self.root_override = Some(root);
+        self
+    }
+
+    /// Render every request's system prompt from `fragments` (see
+    /// [`crate::prompt::render_system_prompt`]) instead of the empty default — e.g. an interactive
+    /// session's [`crate::prompt::chat_fragments`].
+    pub fn with_prompt_fragments(mut self, fragments: PromptFragments) -> Self {
+        self.prompt_fragments = fragments;
         self
     }
 
@@ -612,12 +628,11 @@ impl AgentLoop {
         }
 
         let root = self.root();
-        let fragments = PromptFragments {
-            system_preamble: String::new(),
-            closing_reminder: String::new(),
-            extra: BTreeMap::new(),
-        };
-        let rendered = crate::prompt::render(task.ticket.as_ref(), &task.context_pack, &fragments);
+        let rendered = crate::prompt::render(
+            task.ticket.as_ref(),
+            &task.context_pack,
+            &self.prompt_fragments,
+        );
 
         // Step 0 (`SPEC.md` §29, `docs/audit-2026-09-18-fable.md` B-09): seed the durable goal
         // from the ticket's own `objective` if this ticket has never had one set. Keyed off

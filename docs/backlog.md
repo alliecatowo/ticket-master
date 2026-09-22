@@ -50,7 +50,9 @@ and `shell.run -> error: io: No such file or directory (os error 2)` fired twice
 `shell.run`-adjacent step succeeded — worth a closer look at whether this is a real environment/
 working-directory issue or another wrong-guessed argument, not yet diagnosed.
 
-## `tm-pty`'s agent tools are fully built, tested, and unreachable by any real agent turn
+## Fixed (2026-09-22): `tm-pty`'s agent tools were fully built, tested, and unreachable
+
+Now registered for every interactive chat turn in `crates/tm-cli/src/agent.rs`, next to the browser and computer capabilities, with a store-backed recording sink and per-turn teardown. The background `BuiltinExecutor` still doesn't register it. The original note follows.
 
 `PtyCapability`/`pty.*` tools: built, unit-tested (23/23 passing), authority-gated per SPEC §22.4
 — and never registered anywhere a real agent turn can reach them. `crates/tm-cli/Cargo.toml` does

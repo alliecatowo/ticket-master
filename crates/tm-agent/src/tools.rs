@@ -142,6 +142,12 @@ pub(crate) enum ToolName {
     TicketSubmit,
     /// `ticket.comment`
     TicketComment,
+    /// `ticket.list`
+    TicketList,
+    /// `ticket.get`
+    TicketGet,
+    /// `ticket.transition`
+    TicketTransition,
     /// `decision.record`
     DecisionRecord,
     /// `artifact.store`
@@ -190,6 +196,9 @@ impl ToolName {
         ToolName::TicketDelegate,
         ToolName::TicketSubmit,
         ToolName::TicketComment,
+        ToolName::TicketList,
+        ToolName::TicketGet,
+        ToolName::TicketTransition,
         ToolName::DecisionRecord,
         ToolName::ArtifactStore,
         ToolName::EvidenceAttach,
@@ -234,6 +243,9 @@ impl ToolName {
             ToolName::TicketDelegate => "ticket.delegate",
             ToolName::TicketSubmit => "ticket.submit",
             ToolName::TicketComment => "ticket.comment",
+            ToolName::TicketList => "ticket.list",
+            ToolName::TicketGet => "ticket.get",
+            ToolName::TicketTransition => "ticket.transition",
             ToolName::DecisionRecord => "decision.record",
             ToolName::ArtifactStore => "artifact.store",
             ToolName::EvidenceAttach => "evidence.attach",
@@ -277,7 +289,10 @@ fn requirement_for(name: ToolName) -> AuthorityRequirement {
         | ToolName::FsRead
         | ToolName::FsReadRange
         | ToolName::FsList
-        | ToolName::FsStat => RepoRead,
+        | ToolName::FsStat
+        // Reading the project's own tickets is no more privileged than reading its files.
+        | ToolName::TicketList
+        | ToolName::TicketGet => RepoRead,
 
         // Write/edit/patch: dispatch through `Action::WritePath`.
         ToolName::EditApplyPatch
@@ -316,6 +331,7 @@ fn requirement_for(name: ToolName) -> AuthorityRequirement {
         // grouping here rather than inventing a finer split dispatch doesn't actually enforce.
         ToolName::TicketSubmit
         | ToolName::TicketComment
+        | ToolName::TicketTransition
         | ToolName::DecisionRecord
         | ToolName::ArtifactStore
         | ToolName::EvidenceAttach => Ticket(TicketOp::ModifySibling),
@@ -1217,6 +1233,78 @@ impl BuiltinCapability {
                 )?;
                 Ok(json!({"ticket": target.as_str(), "events": events.len()}))
             }
+            ToolName::TicketList => {
+                let include_closed = get_bool_or(input, "include_closed", false);
+                let state = get_opt_string(input, "state").map(|s| s.to_ascii_lowercase());
+                let limit = input
+                    .get("limit")
+                    .and_then(Value::as_u64)
+                    .map_or(50, |n| n.max(1) as usize);
+                let view = self.store.view()?;
+                let mut tickets: Vec<&tm_core::Ticket> = view
+                    .tickets
+                    .values()
+                    .filter(|t| {
+                        include_closed
+                            || !matches!(
+                                t.state,
+                                tm_core::TicketState::Closed | tm_core::TicketState::Cancelled
+                            )
+                    })
+                    .filter(|t| {
+                        state
+                            .as_ref()
+                            .is_none_or(|s| format!("{:?}", t.state).to_ascii_lowercase() == *s)
+                    })
+                    .collect();
+                tickets.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.id.cmp(&b.id)));
+                let total = tickets.len();
+                let listed: Vec<Value> = tickets
+                    .into_iter()
+                    .take(limit)
+                    .map(|t| {
+                        json!({
+                            "id": t.id.as_str(),
+                            "state": format!("{:?}", t.state),
+                            "objective": t.objective,
+                            "priority": t.priority,
+                            "parent": t.parent.as_ref().map(|p| p.as_str()),
+                        })
+                    })
+                    .collect();
+                Ok(json!({"tickets": listed, "total": total}))
+            }
+            ToolName::TicketGet => {
+                let id: TicketId = get_str(input, "ticket")?.parse()?;
+                let view = self.store.view()?;
+                let ticket = view
+                    .tickets
+                    .get(&id)
+                    .ok_or_else(|| TmError::not_found("ticket", id.as_str()))?;
+                Ok(serde_json::to_value(ticket)?)
+            }
+            ToolName::TicketTransition => {
+                let id: TicketId = get_str(input, "ticket")?.parse()?;
+                let reason = get_opt_string(input, "reason");
+                let events = match get_str(input, "to")? {
+                    "activate" => self.store.activate(&id, ctx.actor.clone())?,
+                    "cancel" => self.store.cancel(&id, reason, ctx.actor.clone())?,
+                    "reopen" => self.store.reopen(&id, reason, ctx.actor.clone())?,
+                    other => {
+                        return Err(TmError::parse(format!(
+                            "ticket.transition: unknown target `{other}` (expected activate, \
+                             cancel, or reopen)"
+                        )))
+                    }
+                };
+                let state = self
+                    .store
+                    .view()?
+                    .tickets
+                    .get(&id)
+                    .map(|t| format!("{:?}", t.state));
+                Ok(json!({"ticket": id.as_str(), "state": state, "events": events.len()}))
+            }
             ToolName::DecisionRecord => {
                 let subject = get_string(input, "subject")?;
                 let decision = get_string(input, "decision")?;
@@ -1765,6 +1853,51 @@ impl CapabilityProvider for BuiltinCapability {
                 requires: requirement_for(ToolName::TicketComment),
             },
             ToolSchema {
+                name: ToolName::TicketList.as_str(),
+                description: "List the project's tickets: the durable work items background \
+                              workers execute. Open tickets only unless include_closed is true; \
+                              optionally filtered to one state (e.g. \"Ready\", \"Running\").",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "state": {"type": "string"},
+                        "include_closed": {"type": "boolean"},
+                        "limit": {"type": "integer", "minimum": 1}
+                    }
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::TicketList),
+            },
+            ToolSchema {
+                name: ToolName::TicketGet.as_str(),
+                description: "Read one ticket in full: objective, state, parent/children, \
+                              dependencies, budget, attempts, and recorded failures.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {"ticket": {"type": "string"}},
+                    "required": ["ticket"]
+                }),
+                cost: CostClass::Cheap,
+                requires: requirement_for(ToolName::TicketGet),
+            },
+            ToolSchema {
+                name: ToolName::TicketTransition.as_str(),
+                description: "Steer a ticket's lifecycle. \"activate\" makes a draft ticket \
+                              ready for a background worker to pick up; \"cancel\" stops it; \
+                              \"reopen\" brings back a closed or cancelled one.",
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "ticket": {"type": "string"},
+                        "to": {"type": "string", "enum": ["activate", "cancel", "reopen"]},
+                        "reason": {"type": "string"}
+                    },
+                    "required": ["ticket", "to"]
+                }),
+                cost: CostClass::Mutating,
+                requires: requirement_for(ToolName::TicketTransition),
+            },
+            ToolSchema {
                 name: ToolName::DecisionRecord.as_str(),
                 description: "Record a decision.",
                 input_schema: json!({
@@ -1868,9 +2001,11 @@ impl CapabilityProvider for BuiltinCapability {
             ToolName::TicketDelegate => action_ticket_delegate(input),
             ToolName::TicketSubmit
             | ToolName::TicketComment
+            | ToolName::TicketTransition
             | ToolName::DecisionRecord
             | ToolName::ArtifactStore
             | ToolName::EvidenceAttach => action_ticket_modify(input),
+            ToolName::TicketList | ToolName::TicketGet => action_read_repo(input),
             ToolName::AskHuman => action_ask_human(input),
         }
     }
@@ -2560,7 +2695,12 @@ mod tests {
         assert!(!names.contains(&"search.exact"));
         assert!(!names.contains(&"symbol.outline"));
         assert!(names.contains(&"edit.write_file"));
-        assert_eq!(defs.len(), ToolName::ALL.len() - 17);
+        assert!(!names.contains(&"ticket.list"));
+        let read_scoped = ToolName::ALL
+            .iter()
+            .filter(|t| requirement_for(**t) == AuthorityRequirement::RepoRead)
+            .count();
+        assert_eq!(defs.len(), ToolName::ALL.len() - read_scoped);
     }
 
     #[test]
@@ -3147,6 +3287,143 @@ mod tests {
             ToolOutcome::Completed { result, .. } => assert!(result["child"].is_string()),
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    /// `h.ctx()` with no ticket: a chat session that has none attached.
+    fn ticketless(ctx: CallContext<'_>) -> CallContext<'_> {
+        CallContext {
+            ticket: None,
+            ..ctx
+        }
+    }
+
+    fn completed(outcome: ToolOutcome) -> Value {
+        match outcome {
+            ToolOutcome::Completed { result, .. } => result,
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ticket_create_child_from_a_ticketless_session_creates_a_root_ticket() {
+        let h = Harness::new();
+        let input =
+            json!({"kind": "work", "objective": "a new root", "authority": Authority::default()});
+        let result = completed(
+            h.registry
+                .dispatch(&call("ticket.create_child", input), &ticketless(h.ctx()))
+                .await,
+        );
+        let id: TicketId = result["child"]
+            .as_str()
+            .expect("child id")
+            .parse()
+            .expect("id");
+        let view = h.registry.store.view().expect("view");
+        assert_eq!(
+            view.tickets[&id].parent, None,
+            "no attached ticket means no parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn ticket_submit_refuses_clearly_without_a_ticket() {
+        let h = Harness::new();
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("ticket.submit", json!({"summary": "done", "evidence": []})),
+                &ticketless(h.ctx()),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Errored { detail } => {
+                assert!(detail.contains("needs a ticket"), "{detail}")
+            }
+            other => panic!("expected Errored, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn ticket_list_and_get_read_the_projects_tickets() {
+        let h = Harness::new();
+        let listed = completed(
+            h.registry
+                .dispatch(&call("ticket.list", json!({})), &ticketless(h.ctx()))
+                .await,
+        );
+        assert_eq!(listed["total"], 1);
+        assert_eq!(listed["tickets"][0]["id"], h.ticket.as_str());
+        assert_eq!(listed["tickets"][0]["objective"], "root");
+
+        let got = completed(
+            h.registry
+                .dispatch(
+                    &call("ticket.get", json!({"ticket": h.ticket.as_str()})),
+                    &ticketless(h.ctx()),
+                )
+                .await,
+        );
+        assert_eq!(got["objective"], "root");
+    }
+
+    #[tokio::test]
+    async fn ticket_transition_steers_the_lifecycle_and_list_hides_cancelled() {
+        let h = Harness::new();
+        let ticket = h.ticket.as_str();
+        let activated = completed(
+            h.registry
+                .dispatch(
+                    &call(
+                        "ticket.transition",
+                        json!({"ticket": ticket, "to": "activate"}),
+                    ),
+                    &ticketless(h.ctx()),
+                )
+                .await,
+        );
+        assert_eq!(activated["state"], "Ready");
+
+        let cancelled = completed(
+            h.registry
+                .dispatch(
+                    &call(
+                        "ticket.transition",
+                        json!({"ticket": ticket, "to": "cancel", "reason": "not needed"}),
+                    ),
+                    &ticketless(h.ctx()),
+                )
+                .await,
+        );
+        assert_eq!(cancelled["state"], "Cancelled");
+
+        let open = completed(
+            h.registry
+                .dispatch(&call("ticket.list", json!({})), &ticketless(h.ctx()))
+                .await,
+        );
+        assert_eq!(open["total"], 0, "cancelled tickets are not open");
+        let all = completed(
+            h.registry
+                .dispatch(
+                    &call("ticket.list", json!({"include_closed": true})),
+                    &ticketless(h.ctx()),
+                )
+                .await,
+        );
+        assert_eq!(all["total"], 1);
+
+        let bad = h
+            .registry
+            .dispatch(
+                &call(
+                    "ticket.transition",
+                    json!({"ticket": ticket, "to": "explode"}),
+                ),
+                &ticketless(h.ctx()),
+            )
+            .await;
+        assert!(matches!(bad, ToolOutcome::Errored { .. }), "{bad:?}");
     }
 
     #[test]
