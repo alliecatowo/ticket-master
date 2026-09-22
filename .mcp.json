@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "zvec_grep": {
+      "type": "stdio",
+      "command": "zg",
+      "args": [
+        "server",
+        "--stdio"
+      ],
+      "env": {}
+    }
+  }
+}

@@ -67,6 +67,14 @@ model — no network dependency). Use it exactly per the global routing rules in
 stays current across edits without a manual rebuild. Don't rebuild or drop it without asking —
 that rule is global, not repo-specific, and still applies here.
 
+The server itself is registered project-scope in `.mcp.json` (`zg server --stdio`) and
+pre-allowed in `.claude/settings.json`'s `permissions.allow` (`mcp__zvec_grep__*`) — both
+repo-tracked, so a fresh clone gets the tool without a manual `claude mcp add` and without a
+permission prompt on first use. It still needs the `zg` binary itself on `$PATH` — installed here
+via `npm install -g @zvec/zvec-grep` under mise's Node, same pattern as `typescript-lsp`'s
+language server below; nothing in this repo's own `mise.toml` installs it automatically yet, so a
+genuinely fresh machine needs that one command run by hand before the MCP server can start.
+
 ## Code intelligence: LSP plugins for every language in this repo
 
 This repo is polyglot — `crates/` (Rust, the primary surface), `clients/ts` + `clients/vscode` +
@@ -143,6 +151,16 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
 Full playbook: `.claude/skills/dispatch-background-agent/SKILL.md`. The rules below are the
 load-bearing subset, stated plainly because getting them wrong has already cost real time in this
 repo.
+
+**This repo has no `origin` remote** (`git remote -v` is empty). `EnterWorktree`'s own docs say
+its default `worktree.baseRef` setting (`fresh`) branches new worktrees from `origin/<default-
+branch>` — checked empirically (create a probe worktree, compare its branch tip to `main`'s, tear
+it down): with no `origin` to resolve, it falls back to branching from local `HEAD`, landing on
+the exact same commit `head` mode would have picked. So the `fresh`/`head` distinction is
+currently a no-op here, not a bug — nothing to configure today. If an `origin` remote is ever
+added, revisit this: `fresh` would then track the remote's default branch instead of local `HEAD`,
+which is a real behavior change worth a deliberate choice given this file's own "Parallel tracks
+against a moving `main`" incident below, not something to leave on whatever the tool's default is.
 
 - **`isolation: 'worktree'` is mandatory** for any subagent that will edit files here. No
   exceptions for "it's a small change."
