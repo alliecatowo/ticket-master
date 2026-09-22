@@ -108,25 +108,29 @@ fn get_string_array(input: &Value, field: &str) -> Result<Vec<String>> {
         .collect()
 }
 
-/// Resolve `env_allowlist` (a list of variable *names*, not values) against this process's real
-/// environment, mirroring `crates/tm-cli/src/agent.rs`'s `ProcessCommandExecutor::execute`
-/// exactly: the caller names which variables the child may see, but the *value* always comes
-/// from the trusted host environment, never from the tool call's input. Accepting arbitrary
-/// caller-supplied values here (an `env: {"PATH": "/tmp/evil"}`-shaped input) would let an agent
-/// spoof an allowlisted variable's content, not just choose which variables pass through —
-/// exactly the confusion `env_clear()` plus an allowlist exists to prevent.
+/// The environment a spawned pty child gets. By default: this process's environment minus
+/// Ticketmaster's own credentials (`tm_types::child_env`), so an interactive program finds the
+/// user's toolchain and home directory, plus `TERM=xterm-256color` when nothing set one (the pty
+/// renders through a vt100 parser, and full-screen programs need to know that). With an explicit
+/// `env_allowlist` (variable *names*), only those pass through, for a hermetic session. Values
+/// always come from the host environment, never from the tool call's input, so an agent can
+/// choose which variables pass but never spoof their content (an `env: {"PATH": "/tmp/evil"}`
+/// shape is not accepted).
 fn resolve_env(input: &Value) -> Vec<(String, String)> {
-    input
-        .get("env_allowlist")
-        .and_then(Value::as_array)
-        .map(|names| {
-            names
-                .iter()
-                .filter_map(Value::as_str)
-                .filter_map(|name| std::env::var(name).ok().map(|v| (name.to_string(), v)))
-                .collect()
-        })
-        .unwrap_or_default()
+    let mut env: Vec<(String, String)> = match input.get("env_allowlist").and_then(Value::as_array)
+    {
+        Some(names) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| !tm_types::child_env::is_credential_env_var(name))
+            .filter_map(|name| std::env::var(name).ok().map(|v| (name.to_string(), v)))
+            .collect(),
+        None => tm_types::child_env::inherited_child_env(),
+    };
+    if !env.iter().any(|(name, _)| name == "TERM") {
+        env.push(("TERM".to_string(), "xterm-256color".to_string()));
+    }
+    env
 }
 
 fn get_u16_or(input: &Value, field: &str, default: u16) -> u16 {
@@ -819,6 +823,38 @@ mod tests {
 
         cap.close_all().await.unwrap();
         assert_eq!(cap.sessions.live_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn spawn_without_an_allowlist_inherits_path_and_sets_term() {
+        let cap = PtyCapability::new(test_registry());
+        let authority = Authority::root();
+        let ticket: TicketId = "T-1".parse().unwrap();
+        let session: SessionId = "S-1".parse().unwrap();
+        let actor: ParticipantId = "agent:test/worker".parse().unwrap();
+        let clock = FixedClock::epoch();
+        let ids = tm_types::TestIds::new();
+        let root = std::env::temp_dir();
+        let ctx = test_ctx(&authority, &ticket, &session, &actor, &clock, &ids, &root);
+
+        // No env_allowlist: the way a model actually calls it. A bare program name must resolve.
+        cap.invoke(
+            "pty.spawn",
+            json!({"argv": ["sh", "-c", "echo term=${TERM:+set} path=${PATH:+set}"]}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+        let found = cap
+            .invoke(
+                "pty.expect",
+                json!({"pattern": "term=set path=set", "timeout_ms": 5000}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(found["matched"], true, "{found}");
+        cap.close_all().await.unwrap();
     }
 
     #[tokio::test]

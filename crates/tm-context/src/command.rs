@@ -233,66 +233,73 @@ impl CommandResult {
             ArtifactStream::Stderr => &self.stderr_artifact,
         };
         let bytes = cache.read_artifact(artifact)?;
-        let text = String::from_utf8_lossy(&bytes);
-        let lines: Vec<&str> = text.split('\n').collect();
+        query_output(&bytes, query)
+    }
+}
 
-        match query {
-            Query::Head(n) => {
-                if n == 0 {
-                    return Ok(QueryAnswer::NotFound);
-                }
-                let take = n.min(lines.len());
-                if take == 0 {
-                    return Ok(QueryAnswer::NotFound);
-                }
-                Ok(QueryAnswer::Lines(
-                    lines[..take].iter().map(|s| s.to_string()).collect(),
-                ))
+/// Answer `query` against one stream's raw captured bytes — what [`CommandResult::query`] does
+/// once it has read the artifact, exposed so a caller holding only an artifact id (e.g. one a
+/// previous tool result reported) can query it directly.
+pub fn query_output(bytes: &[u8], query: Query) -> Result<QueryAnswer> {
+    let text = String::from_utf8_lossy(bytes);
+    let lines: Vec<&str> = text.split('\n').collect();
+
+    match query {
+        Query::Head(n) => {
+            if n == 0 {
+                return Ok(QueryAnswer::NotFound);
             }
-            Query::Tail(n) => {
-                if n == 0 || lines.is_empty() {
-                    return Ok(QueryAnswer::NotFound);
-                }
-                let take = n.min(lines.len());
-                Ok(QueryAnswer::Lines(
-                    lines[lines.len() - take..]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                ))
+            let take = n.min(lines.len());
+            if take == 0 {
+                return Ok(QueryAnswer::NotFound);
             }
-            Query::Range(start, end) => {
-                if start == 0 || start > end || start > lines.len() {
-                    return Ok(QueryAnswer::NotFound);
-                }
-                let end = end.min(lines.len());
-                Ok(QueryAnswer::Lines(
-                    lines[start - 1..end]
-                        .iter()
-                        .map(|s| s.to_string())
-                        .collect(),
-                ))
+            Ok(QueryAnswer::Lines(
+                lines[..take].iter().map(|s| s.to_string()).collect(),
+            ))
+        }
+        Query::Tail(n) => {
+            if n == 0 || lines.is_empty() {
+                return Ok(QueryAnswer::NotFound);
             }
-            Query::Grep(pattern) => {
-                let re = regex::Regex::new(&pattern).map_err(|e| TmError::parse(e.to_string()))?;
-                let matches: Vec<String> = lines
+            let take = n.min(lines.len());
+            Ok(QueryAnswer::Lines(
+                lines[lines.len() - take..]
                     .iter()
-                    .filter(|line| re.is_match(line))
                     .map(|s| s.to_string())
-                    .collect();
-                if matches.is_empty() {
-                    Ok(QueryAnswer::NotFound)
-                } else {
-                    Ok(QueryAnswer::Lines(matches))
-                }
+                    .collect(),
+            ))
+        }
+        Query::Range(start, end) => {
+            if start == 0 || start > end || start > lines.len() {
+                return Ok(QueryAnswer::NotFound);
             }
-            Query::Json(pointer) => {
-                let value: serde_json::Value =
-                    serde_json::from_str(&text).map_err(|e| TmError::parse(e.to_string()))?;
-                match value.pointer(&pointer) {
-                    Some(v) => Ok(QueryAnswer::Json(v.clone())),
-                    None => Ok(QueryAnswer::NotFound),
-                }
+            let end = end.min(lines.len());
+            Ok(QueryAnswer::Lines(
+                lines[start - 1..end]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ))
+        }
+        Query::Grep(pattern) => {
+            let re = regex::Regex::new(&pattern).map_err(|e| TmError::parse(e.to_string()))?;
+            let matches: Vec<String> = lines
+                .iter()
+                .filter(|line| re.is_match(line))
+                .map(|s| s.to_string())
+                .collect();
+            if matches.is_empty() {
+                Ok(QueryAnswer::NotFound)
+            } else {
+                Ok(QueryAnswer::Lines(matches))
+            }
+        }
+        Query::Json(pointer) => {
+            let value: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| TmError::parse(e.to_string()))?;
+            match value.pointer(&pointer) {
+                Some(v) => Ok(QueryAnswer::Json(v.clone())),
+                None => Ok(QueryAnswer::NotFound),
             }
         }
     }

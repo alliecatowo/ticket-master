@@ -62,7 +62,7 @@ use crate::patch::{Edit, PatchEngine};
 
 /// Bytes past which a tool result is spilled to an artifact and referenced by id instead of
 /// being inlined into the model-visible transcript.
-pub const MAX_INLINE_RESULT_BYTES: usize = 8 * 1024;
+pub const MAX_INLINE_RESULT_BYTES: usize = 32 * 1024;
 
 /// One tool name from `SPEC.md` §11's fixed catalog. Variant names mirror the spec's dotted
 /// tool names (`Search*` = `search.*`, etc.) so [`ToolName::as_str`] round-trips exactly.
@@ -368,8 +368,25 @@ fn action_write_path_field(input: &Value) -> Result<Action> {
 
 fn action_run_argv(input: &Value) -> Result<Action> {
     Ok(Action::RunCommand {
-        command: get_string_vec(input, "argv")?,
+        command: command_argv(input)?,
     })
+}
+
+/// The argv a `shell.run`/`test.run`/`build.run` call actually executes. A `command` string (the
+/// natural form: pipes, redirects, `&&`) runs under `/bin/sh -c`; so does an `argv` whose only
+/// element is a whole command line, the most common way a model gets `argv` wrong. Any other
+/// `argv` executes exactly as given, with no shell. Authority checks see this effective argv, so
+/// an authority that doesn't allow `sh` can't be sidestepped by the string form.
+fn command_argv(input: &Value) -> Result<Vec<String>> {
+    let shell = |line: &str| vec!["/bin/sh".to_string(), "-c".to_string(), line.to_string()];
+    if let Some(line) = input.get("command").and_then(Value::as_str) {
+        return Ok(shell(line));
+    }
+    let argv = get_string_vec(input, "argv")?;
+    match argv.as_slice() {
+        [line] if line.trim().contains(char::is_whitespace) => Ok(shell(line)),
+        _ => Ok(argv),
+    }
 }
 
 fn action_git_status(_input: &Value) -> Result<Action> {
@@ -600,14 +617,68 @@ fn resolve_cwd(root: &Path, input: &Value) -> String {
     root.join(rel).to_string_lossy().into_owned()
 }
 
-fn command_result_json(result: &command::CommandResult) -> Value {
-    json!({
+/// How much of a command's stdout is returned inline: the first `HEAD` bytes and the last `TAIL`
+/// (a failure's cause is usually at the end). Stderr gets half of each. Sized so a full result
+/// stays under [`MAX_INLINE_RESULT_BYTES`]; the complete output is always in the artifacts.
+const INLINE_STDOUT_HEAD: usize = 4 * 1024;
+const INLINE_STDOUT_TAIL: usize = 12 * 1024;
+
+/// A command's result as the model sees it: exit code, the output itself (truncated in the middle
+/// when long), and artifact ids for the full streams (`shell.query_output` can query those).
+/// Output that can't be read back degrades to an empty string rather than failing the call.
+fn command_result_json(result: &command::CommandResult, cache: &dyn CommandCache) -> Value {
+    let read = |id: &ArtifactId| cache.read_artifact(id).unwrap_or_default();
+    let (stdout, stdout_truncated) = inline_output(
+        &read(&result.stdout_artifact),
+        INLINE_STDOUT_HEAD,
+        INLINE_STDOUT_TAIL,
+    );
+    let (stderr, stderr_truncated) = inline_output(
+        &read(&result.stderr_artifact),
+        INLINE_STDOUT_HEAD / 2,
+        INLINE_STDOUT_TAIL / 2,
+    );
+    let mut value = json!({
         "exit_code": result.exit_code,
+        "stdout": stdout,
+        "stderr": stderr,
         "duration_ms": result.duration_ms,
         "stdout_artifact": result.stdout_artifact.as_str(),
         "stderr_artifact": result.stderr_artifact.as_str(),
-        "from_cache": result.from_cache,
-    })
+    });
+    if stdout_truncated || stderr_truncated {
+        value["truncated"] = json!(true);
+    }
+    if result.from_cache {
+        value["from_cache"] = json!(true);
+    }
+    value
+}
+
+/// `bytes` as text, keeping the first `head` and last `tail` bytes (on char boundaries) with a
+/// marker between them when it is longer than both together. Returns whether anything was cut.
+fn inline_output(bytes: &[u8], head: usize, tail: usize) -> (String, bool) {
+    let text = String::from_utf8_lossy(bytes);
+    if text.len() <= head + tail {
+        return (text.into_owned(), false);
+    }
+    let mut head_end = head;
+    while !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = text.len() - tail;
+    while !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let omitted = tail_start - head_end;
+    (
+        format!(
+            "{}\n[... {omitted} bytes omitted; query the full output with shell.query_output ...]\n{}",
+            &text[..head_end],
+            &text[tail_start..]
+        ),
+        true,
+    )
 }
 
 fn parse_command_query(input: &Value) -> Result<CommandQuery> {
@@ -712,7 +783,7 @@ impl BuiltinCapability {
         ctx: &CallContext<'_>,
         patch_engine: &PatchEngine,
     ) -> Result<Value> {
-        let argv = get_string_vec(input, "argv")?;
+        let argv = command_argv(input)?;
         let cwd = resolve_cwd(patch_engine.root(), input);
         let cacheable = get_bool_or(input, "cacheable", false);
         let key = command_key(ctx, &argv, &cwd, cacheable);
@@ -743,7 +814,7 @@ impl BuiltinCapability {
         if !drafts.is_empty() {
             self.store.append(drafts)?;
         }
-        Ok(command_result_json(&result))
+        Ok(command_result_json(&result, self.command_cache.as_ref()))
     }
 
     fn run_fixed_git(
@@ -776,7 +847,7 @@ impl BuiltinCapability {
         if !drafts.is_empty() {
             self.store.append(drafts)?;
         }
-        Ok(command_result_json(&result))
+        Ok(command_result_json(&result, self.command_cache.as_ref()))
     }
 
     /// As [`BuiltinCapability::run_fixed_git`], but for the one `git.*` tool that is a genuine
@@ -1130,6 +1201,13 @@ impl BuiltinCapability {
             ToolName::TestRun => self.run_shell_like(input, ctx, patch_engine),
             ToolName::BuildRun => self.run_shell_like(input, ctx, patch_engine),
             ToolName::ShellQueryOutput => {
+                if let Some(artifact) = get_opt_string(input, "artifact") {
+                    let artifact: ArtifactId = artifact.parse()?;
+                    let bytes = self.command_cache.read_artifact(&artifact)?;
+                    let answer =
+                        tm_context::query_command_output(&bytes, parse_command_query(input)?)?;
+                    return Ok(query_answer_json(answer));
+                }
                 let argv = get_string_vec(input, "argv")?;
                 let cwd = resolve_cwd(patch_engine.root(), input);
                 let cacheable = get_bool_or(input, "cacheable", false);
@@ -1669,25 +1747,36 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::ShellRun.as_str(),
-                description: "Run a command (argv, never a shell string).",
+                description: "Run a command in the project directory and get back its exit code, stdout and stderr. Pass `command` (a shell command line) or `argv`.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "command": {
+                            "type": "string",
+                            "description": "A shell command line, run with /bin/sh -c in the project directory (pipes, redirects and && work)."
+                        },
+                        "argv": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Alternatively, an exact program and arguments, run with no shell."
+                        },
                         "cwd": {"type": "string"},
                         "cacheable": {"type": "boolean"}
-                    },
-                    "required": ["argv"]
+                    }
                 }),
                 cost: CostClass::Moderate,
                 requires: requirement_for(ToolName::ShellRun),
             },
             ToolSchema {
                 name: ToolName::ShellQueryOutput.as_str(),
-                description: "Answer a head/tail/grep/range/json query against a previously run command's stored output, without re-running it.",
+                description: "Query a previous command's full stored output without re-running it: \
+                              pass the stdout_artifact or stderr_artifact id its result reported, \
+                              and a head/tail/grep/range/json query. (Command results already \
+                              include the output inline; use this when it was truncated.)",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
+                        "artifact": {"type": "string"},
                         "argv": {"type": "array", "items": {"type": "string"}},
                         "cwd": {"type": "string"},
                         "cacheable": {"type": "boolean"},
@@ -1699,7 +1788,7 @@ impl CapabilityProvider for BuiltinCapability {
                         "end": {"type": "integer"},
                         "pointer": {"type": "string"}
                     },
-                    "required": ["argv", "stream", "query_type"]
+                    "required": ["query_type"]
                 }),
                 cost: CostClass::Cheap,
                 requires: requirement_for(ToolName::ShellQueryOutput),
@@ -1763,30 +1852,44 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::TestRun.as_str(),
-                description: "Run the project's test suite (argv, never a shell string).",
+                description: "Run the project's tests (e.g. `cargo test`, `pytest -q`, `npm test`) and get back the exit code and output. Pass `command` or `argv`.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "command": {
+                            "type": "string",
+                            "description": "A shell command line, run with /bin/sh -c in the project directory (pipes, redirects and && work)."
+                        },
+                        "argv": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Alternatively, an exact program and arguments, run with no shell."
+                        },
                         "cwd": {"type": "string"},
                         "cacheable": {"type": "boolean"}
-                    },
-                    "required": ["argv"]
+                    }
                 }),
                 cost: CostClass::Moderate,
                 requires: requirement_for(ToolName::TestRun),
             },
             ToolSchema {
                 name: ToolName::BuildRun.as_str(),
-                description: "Run the project's build (argv, never a shell string).",
+                description: "Run the project's build and get back the exit code and output. Pass `command` or `argv`.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "argv": {"type": "array", "items": {"type": "string"}},
+                        "command": {
+                            "type": "string",
+                            "description": "A shell command line, run with /bin/sh -c in the project directory (pipes, redirects and && work)."
+                        },
+                        "argv": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Alternatively, an exact program and arguments, run with no shell."
+                        },
                         "cwd": {"type": "string"},
                         "cacheable": {"type": "boolean"}
-                    },
-                    "required": ["argv"]
+                    }
                 }),
                 cost: CostClass::Moderate,
                 requires: requirement_for(ToolName::BuildRun),
@@ -1988,6 +2091,10 @@ impl CapabilityProvider for BuiltinCapability {
             | ToolName::EditWriteFile
             | ToolName::EditCreateFile
             | ToolName::EditDeleteFile => action_write_path_field(input),
+            // Querying an already-captured artifact runs nothing; it is a read.
+            ToolName::ShellQueryOutput if input.get("artifact").is_some() => {
+                action_read_repo(input)
+            }
             ToolName::ShellRun
             | ToolName::ShellQueryOutput
             | ToolName::TestRun
@@ -3095,6 +3202,87 @@ mod tests {
             ToolOutcome::Completed { result, .. } => assert_eq!(result["exit_code"], 0),
             other => panic!("expected Completed, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn shell_run_returns_the_commands_output_inline_and_query_output_reads_it_back() {
+        let h = Harness::new();
+        // Deliberately *not* cacheable: the default, and the case where looking the result up
+        // again by argv can never work (its cache key is unique per call).
+        let result = completed(
+            h.registry
+                .dispatch(
+                    &call("shell.run", json!({"argv": ["echo", "hi"]})),
+                    &h.ctx(),
+                )
+                .await,
+        );
+        assert_eq!(result["exit_code"], 0);
+        assert_eq!(
+            result["stdout"], "ran: echo hi",
+            "the model must see the output: {result}"
+        );
+        assert_eq!(result["stderr"], "");
+        assert!(result.get("truncated").is_none());
+
+        let artifact = result["stdout_artifact"].as_str().expect("artifact id");
+        let answer = completed(
+            h.registry
+                .dispatch(
+                    &call(
+                        "shell.query_output",
+                        json!({"artifact": artifact, "query_type": "head", "n": 1}),
+                    ),
+                    &h.ctx(),
+                )
+                .await,
+        );
+        assert!(answer.to_string().contains("ran: echo hi"), "{answer}");
+    }
+
+    #[test]
+    fn command_argv_runs_command_lines_through_the_shell_and_argv_exactly() {
+        let sh = |line: &str| vec!["/bin/sh".to_string(), "-c".to_string(), line.to_string()];
+        assert_eq!(
+            command_argv(&json!({"command": "pytest -q | tail -5"})).unwrap(),
+            sh("pytest -q | tail -5")
+        );
+        assert_eq!(
+            command_argv(&json!({"argv": ["python3 -m pytest -v"]})).unwrap(),
+            sh("python3 -m pytest -v"),
+            "a whole command line crammed into argv[0] is the common mistake"
+        );
+        assert_eq!(
+            command_argv(&json!({"argv": ["cargo", "test", "--workspace"]})).unwrap(),
+            vec!["cargo", "test", "--workspace"]
+        );
+        assert_eq!(command_argv(&json!({"argv": ["ls"]})).unwrap(), vec!["ls"]);
+        assert!(command_argv(&json!({})).is_err());
+    }
+
+    #[test]
+    fn inline_output_keeps_head_and_tail_of_long_output() {
+        let text = format!(
+            "{}{}{}",
+            "a".repeat(100),
+            "b".repeat(1_000),
+            "c".repeat(100)
+        );
+        let (shown, truncated) = inline_output(text.as_bytes(), 100, 100);
+        assert!(truncated);
+        assert!(shown.starts_with(&"a".repeat(100)));
+        assert!(shown.ends_with(&"c".repeat(100)));
+        assert!(shown.contains("1000 bytes omitted"), "{shown}");
+        assert!(!shown.contains("bbb"), "the middle is omitted: {shown}");
+
+        let (short, cut) = inline_output(b"ok", 100, 100);
+        assert_eq!((short.as_str(), cut), ("ok", false));
+
+        // Never split a multi-byte character.
+        let wide = "é".repeat(300);
+        let (shown, truncated) = inline_output(wide.as_bytes(), 101, 101);
+        assert!(truncated);
+        assert!(shown.starts_with('é') && shown.ends_with('é'));
     }
 
     // ---- git.commit idempotent-effect wrapping (SPEC.md §21.5, audit B-11) ----------------

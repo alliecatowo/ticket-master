@@ -14,6 +14,7 @@ pub mod action;
 pub mod authority;
 pub mod budget;
 pub mod capability;
+pub mod child_env;
 pub mod clock;
 pub mod error;
 pub mod id;

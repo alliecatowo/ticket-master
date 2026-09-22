@@ -328,6 +328,7 @@ impl AgentSession {
     #[allow(dead_code)]
     async fn run_turn(&mut self, prompt: &str) -> tm_types::Result<()> {
         let renderer = self.renderer;
+        let mut printed = 0usize;
         let outcome = self
             .run_turn_streaming(
                 prompt,
@@ -335,7 +336,13 @@ impl AgentSession {
                     // Ticket resolution prints nothing in the plain loop today; the TUI is the
                     // first caller that needs to react to it (refreshing its ticket pane).
                     TurnEvent::TicketResolved(_) => {}
-                    TurnEvent::Steps(steps) => renderer.note(&format_steps(&steps)),
+                    // Cumulative: print only the steps not shown yet, as they arrive.
+                    TurnEvent::Steps(steps) => {
+                        for step in steps.iter().skip(printed) {
+                            renderer.note(&format_step(step));
+                        }
+                        printed = steps.len();
+                    }
                     TurnEvent::AwaitingApproval(pending) => {
                         renderer.note(&format_pending_approval(&pending))
                     }
@@ -484,6 +491,7 @@ impl AgentSession {
         .with_hooks(hooks.clone());
 
         let oversight = crate::dispatch::load_oversight(&self.project)?;
+        let (step_tx, mut step_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut agent_loop = AgentLoop::new(
             fabric,
             tools,
@@ -498,7 +506,8 @@ impl AgentSession {
         .with_oversight(oversight)
         .with_prompt_fragments(tm_agent::chat_fragments(
             &self.chat_environment(ticket.as_ref()),
-        ));
+        ))
+        .with_step_sender(step_tx);
 
         let (authority, budget) = match &ticket {
             Some(ticket) => (ticket.authority.clone(), ticket.budget),
@@ -518,7 +527,13 @@ impl AgentSession {
         };
 
         let result = self
-            .drive_turn_streaming(&mut agent_loop, task, &mut on_event, &mut approve)
+            .drive_turn_streaming(
+                &mut agent_loop,
+                task,
+                &mut step_rx,
+                &mut on_event,
+                &mut approve,
+            )
             .await;
 
         // Torn down on every path (success or `?` propagation inside `drive_turn_streaming`),
@@ -565,12 +580,14 @@ impl AgentSession {
         &mut self,
         agent_loop: &mut AgentLoop,
         task: AgentTask,
+        step_rx: &mut tokio::sync::mpsc::UnboundedReceiver<StepRecord>,
         on_event: &mut impl FnMut(TurnEvent),
         approve: &mut impl FnMut(&PendingApproval) -> tm_types::Result<bool>,
     ) -> tm_types::Result<AgentOutcome> {
-        let mut outcome = agent_loop.run(task.clone()).await?;
+        let mut live = Vec::new();
+        let mut outcome =
+            report_steps_live(agent_loop.run(task.clone()), step_rx, &mut live, on_event).await?;
         loop {
-            on_event(TurnEvent::Steps(outcome.steps().to_vec()));
             match outcome {
                 AgentOutcome::AwaitingApproval {
                     steps,
@@ -578,12 +595,45 @@ impl AgentSession {
                 } => {
                     on_event(TurnEvent::AwaitingApproval(pending_call.clone()));
                     let approved = approve(&pending_call)?;
-                    outcome = agent_loop
-                        .resume(task.clone(), steps, pending_call, approved)
-                        .await?;
+                    outcome = report_steps_live(
+                        agent_loop.resume(task.clone(), steps, pending_call, approved),
+                        step_rx,
+                        &mut live,
+                        on_event,
+                    )
+                    .await?;
                     continue;
                 }
                 other => return Ok(other),
+            }
+        }
+    }
+}
+
+/// Drive `run` to completion while forwarding each step [`AgentLoop::with_step_sender`] reports
+/// as a cumulative [`TurnEvent::Steps`] the moment it arrives, so a front end shows progress
+/// while the turn is still going. `live` accumulates across an approval suspension and resume, so
+/// the whole turn reads as one growing transcript.
+async fn report_steps_live(
+    run: impl std::future::Future<Output = tm_types::Result<AgentOutcome>>,
+    step_rx: &mut tokio::sync::mpsc::UnboundedReceiver<StepRecord>,
+    live: &mut Vec<StepRecord>,
+    on_event: &mut impl FnMut(TurnEvent),
+) -> tm_types::Result<AgentOutcome> {
+    tokio::pin!(run);
+    loop {
+        tokio::select! {
+            biased;
+            Some(step) = step_rx.recv() => {
+                live.push(step);
+                on_event(TurnEvent::Steps(live.clone()));
+            }
+            outcome = &mut run => {
+                while let Ok(step) = step_rx.try_recv() {
+                    live.push(step);
+                    on_event(TurnEvent::Steps(live.clone()));
+                }
+                return outcome;
             }
         }
     }
@@ -755,15 +805,6 @@ fn build_mock_fabric(clock: Arc<dyn Clock>) -> Fabric {
     fabric
 }
 
-/// Render every step's assistant text and tool calls, in order.
-pub(crate) fn format_steps(steps: &[StepRecord]) -> String {
-    let mut out = Vec::new();
-    for step in steps {
-        out.push(format_step(step));
-    }
-    out.join("\n")
-}
-
 /// Render one step: the model's text (if any) plus one line per tool call.
 pub(crate) fn format_step(step: &StepRecord) -> String {
     let mut lines = Vec::new();
@@ -900,8 +941,14 @@ impl CommandCache for MemoryCommandCache {
     }
 }
 
-/// Runs a [`CommandSpec`]'s process via `std::process::Command`, honoring its working directory
-/// and environment allowlist (no other ambient environment leaks into the child).
+/// Runs a [`CommandSpec`]'s process via `std::process::Command` in its working directory.
+///
+/// Environment: a command the agent runs in someone's project needs that project's toolchain,
+/// so an ordinary (non-cacheable) command inherits this process's environment (`PATH`, `HOME`,
+/// locale, toolchain managers), minus [`tm_types::child_env::CREDENTIAL_ENV_VARS`]. A cacheable
+/// command runs
+/// hermetically instead: a cleared environment plus only `env_allowlist`, because its cached
+/// result is keyed on argv and cwd alone and must not depend on ambient state.
 pub(crate) struct ProcessCommandExecutor;
 
 impl CommandExecutor for ProcessCommandExecutor {
@@ -913,13 +960,21 @@ impl CommandExecutor for ProcessCommandExecutor {
         let mut cmd = StdCommand::new(program);
         cmd.args(&spec.argv[1..]);
         cmd.current_dir(&spec.cwd);
-        cmd.env_clear();
-        for key in &spec.env_allowlist {
-            if let Ok(value) = std::env::var(key) {
-                cmd.env(key, value);
+        if spec.cacheable {
+            cmd.env_clear();
+            for key in &spec.env_allowlist {
+                if let Ok(value) = std::env::var(key) {
+                    cmd.env(key, value);
+                }
+            }
+        } else {
+            for key in tm_types::child_env::CREDENTIAL_ENV_VARS {
+                cmd.env_remove(key);
             }
         }
-        let output = cmd.output().map_err(TmError::from)?;
+        let output = cmd.output().map_err(|e| {
+            TmError::Io(format!("failed to start `{program}` in {}: {e}", spec.cwd))
+        })?;
         Ok(ExecutionOutcome {
             exit_code: output.status.code().unwrap_or(-1),
             stdout: output.stdout,
@@ -1273,6 +1328,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn steps_are_reported_live_and_add_up_to_the_outcomes_transcript() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = Arc::new(open_test_project(dir.path()));
+        let (fabric, _provider) = scripted_fabric(project.clock.clone(), "hello");
+        let mut session =
+            AgentSession::new(project, Renderer::from_flags(false, true, true)).with_fabric(fabric);
+
+        let mut reported: Vec<Vec<StepRecord>> = Vec::new();
+        let outcome = session
+            .run_turn_streaming(
+                "hi",
+                |event| {
+                    if let TurnEvent::Steps(steps) = event {
+                        reported.push(steps);
+                    }
+                },
+                |_| Ok(false),
+            )
+            .await
+            .expect("turn runs");
+
+        assert_eq!(reported.len(), outcome.steps().len(), "one report per step");
+        assert_eq!(reported.last().map(Vec::as_slice), Some(outcome.steps()));
+    }
+
+    #[tokio::test]
     async fn a_turn_runs_against_the_attached_ticket_without_creating_another() {
         let dir = tempfile::tempdir().expect("tempdir");
         let project = Arc::new(open_test_project(dir.path()));
@@ -1346,6 +1427,51 @@ mod tests {
         let outcome = executor.execute(&spec).expect("execute");
         assert_eq!(outcome.exit_code, 0);
         assert_eq!(String::from_utf8_lossy(&outcome.stdout).trim(), "hello");
+    }
+
+    #[test]
+    fn process_executor_runs_ordinary_commands_with_the_users_path_but_no_credentials() {
+        std::env::set_var("DEVPASS_API_KEY", "sk-must-not-leak");
+        let spec = CommandSpec {
+            argv: vec![
+                "sh".to_string(),
+                "-c".to_string(),
+                "echo \"path=${PATH:+set} key=${DEVPASS_API_KEY:-absent}\"".to_string(),
+            ],
+            cwd: ".".to_string(),
+            env_allowlist: Vec::new(),
+            declared_inputs: Vec::new(),
+            cacheable: false,
+            ticket: None,
+            session: None,
+        };
+        let outcome = ProcessCommandExecutor.execute(&spec).expect("execute");
+        std::env::remove_var("DEVPASS_API_KEY");
+        assert_eq!(
+            String::from_utf8_lossy(&outcome.stdout).trim(),
+            "path=set key=absent"
+        );
+    }
+
+    #[test]
+    fn process_executor_names_the_program_it_could_not_start() {
+        let spec = CommandSpec {
+            argv: vec!["definitely-not-a-real-program-xyz".to_string()],
+            cwd: ".".to_string(),
+            env_allowlist: Vec::new(),
+            declared_inputs: Vec::new(),
+            cacheable: false,
+            ticket: None,
+            session: None,
+        };
+        let err = ProcessCommandExecutor
+            .execute(&spec)
+            .expect_err("no such program");
+        assert!(
+            err.to_string()
+                .contains("definitely-not-a-real-program-xyz"),
+            "{err}"
+        );
     }
 
     #[test]

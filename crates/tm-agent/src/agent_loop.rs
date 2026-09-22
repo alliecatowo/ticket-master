@@ -108,6 +108,9 @@ pub struct AgentLoop {
     /// The system-prompt fragments every request renders with; empty unless a caller sets them
     /// via [`AgentLoop::with_prompt_fragments`].
     prompt_fragments: PromptFragments,
+    /// Where each completed step is sent the moment it is recorded, for a caller that wants live
+    /// progress rather than the whole transcript at the end — see [`AgentLoop::with_step_sender`].
+    step_sender: Option<tokio::sync::mpsc::UnboundedSender<StepRecord>>,
     cache: PromptCacheState,
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdSource>,
@@ -158,6 +161,7 @@ impl AgentLoop {
                 closing_reminder: String::new(),
                 extra: BTreeMap::new(),
             },
+            step_sender: None,
             cache: PromptCacheState::new(),
             clock,
             ids,
@@ -213,6 +217,25 @@ impl AgentLoop {
     pub fn with_prompt_fragments(mut self, fragments: PromptFragments) -> Self {
         self.prompt_fragments = fragments;
         self
+    }
+
+    /// Send every step to `sender` as soon as it is recorded (a tool round finished, or the final
+    /// reply arrived), so a front end can show progress while the turn is still running. The
+    /// outcome still carries the full transcript; a closed receiver is ignored.
+    pub fn with_step_sender(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<StepRecord>,
+    ) -> Self {
+        self.step_sender = Some(sender);
+        self
+    }
+
+    /// Record `step` in `steps` and report it to [`AgentLoop::with_step_sender`]'s receiver.
+    fn push_step(&self, steps: &mut Vec<StepRecord>, step: StepRecord) {
+        if let Some(sender) = &self.step_sender {
+            let _ = sender.send(step.clone());
+        }
+        steps.push(step);
     }
 
     /// The root every tool call this loop dispatches resolves paths against: [`AgentLoop::with_root`]'s
@@ -350,7 +373,7 @@ impl AgentLoop {
             (pending.tool_name.as_str(), &resolution, &task.ticket)
         {
             {
-                steps.push(step);
+                self.push_step(&mut steps, step);
                 let evidence = self.build_evidence(&task, ticket, &steps, &pending.input);
                 let outcome = Ok(AgentOutcome::Submitted { evidence, steps });
                 self.finish_session(&task, &outcome)?;
@@ -358,7 +381,7 @@ impl AgentLoop {
             }
         }
 
-        steps.push(step);
+        self.push_step(&mut steps, step);
         let outcome = self.drive(&task, steps).await;
         self.finish_session(&task, &outcome)?;
         outcome
@@ -801,14 +824,17 @@ impl AgentLoop {
 
             if tool_uses.is_empty() {
                 let reply = assistant_text.clone();
-                steps.push(StepRecord {
-                    index: step_index,
-                    served_by,
-                    assistant_text,
-                    tool_calls: Vec::new(),
-                    spend: step_spend,
-                    at: self.clock.now(),
-                });
+                self.push_step(
+                    &mut steps,
+                    StepRecord {
+                        index: step_index,
+                        served_by,
+                        assistant_text,
+                        tool_calls: Vec::new(),
+                        spend: step_spend,
+                        at: self.clock.now(),
+                    },
+                );
                 if task.conversation.is_some() {
                     return Ok(AgentOutcome::Replied {
                         text: reply.unwrap_or_default(),
@@ -908,14 +934,17 @@ impl AgentLoop {
                     (name.as_str(), &resolution, &task.ticket)
                 {
                     {
-                        steps.push(StepRecord {
-                            index: step_index,
-                            served_by,
-                            assistant_text,
-                            tool_calls: tool_call_records,
-                            spend: step_spend,
-                            at: self.clock.now(),
-                        });
+                        self.push_step(
+                            &mut steps,
+                            StepRecord {
+                                index: step_index,
+                                served_by,
+                                assistant_text,
+                                tool_calls: tool_call_records,
+                                spend: step_spend,
+                                at: self.clock.now(),
+                            },
+                        );
                         let evidence = self.build_evidence(task, ticket, &steps, input);
                         return Ok(AgentOutcome::Submitted { evidence, steps });
                     }
@@ -941,14 +970,17 @@ impl AgentLoop {
             // tool uses on reconstruction). If a `thinking`-shaped variant is ever added to
             // `ContentBlock`, this reconstruction needs a matching field on `StepRecord`/
             // `ToolCallRecord` before that content can survive a rebuild.
-            steps.push(StepRecord {
-                index: step_index,
-                served_by,
-                assistant_text,
-                tool_calls: tool_call_records,
-                spend: step_spend,
-                at: self.clock.now(),
-            });
+            self.push_step(
+                &mut steps,
+                StepRecord {
+                    index: step_index,
+                    served_by,
+                    assistant_text,
+                    tool_calls: tool_call_records,
+                    spend: step_spend,
+                    at: self.clock.now(),
+                },
+            );
         }
     }
 

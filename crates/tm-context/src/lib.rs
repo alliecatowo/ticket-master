@@ -32,8 +32,8 @@ pub mod skills;
 pub mod tokens;
 
 pub use command::{
-    ArtifactStream, CommandCache, CommandExecutor, CommandResult, CommandSpec, ExecutionOutcome,
-    Query as CommandQuery, QueryAnswer,
+    query_output as query_command_output, ArtifactStream, CommandCache, CommandExecutor,
+    CommandResult, CommandSpec, ExecutionOutcome, Query as CommandQuery, QueryAnswer,
 };
 pub use fingerprint::{
     cache_key, repo_fingerprint, CacheKeyInputs, DeclaredInput, EnvAllowlist, GitInspector,
