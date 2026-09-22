@@ -279,7 +279,7 @@ mod tests {
         let root = std::env::temp_dir();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,

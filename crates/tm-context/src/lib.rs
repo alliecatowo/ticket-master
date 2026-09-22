@@ -39,7 +39,9 @@ pub use fingerprint::{
     cache_key, repo_fingerprint, CacheKeyInputs, DeclaredInput, EnvAllowlist, GitInspector,
     RepoFingerprint,
 };
-pub use pack::{compile, ContextPack, DroppedSection, ProvenanceRef, Section, ToolSurfaceCost};
+pub use pack::{
+    compile, compile_session, ContextPack, DroppedSection, ProvenanceRef, Section, ToolSurfaceCost,
+};
 pub use sections::{
     build_conventions, build_decisions, build_dependencies, build_git_history, build_objective,
     build_prior_failures, build_retrieval, build_symbol_outlines, RawSection,

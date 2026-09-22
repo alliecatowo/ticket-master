@@ -165,7 +165,15 @@ fn expect_outcome_json(outcome: PtyExpectOutcome) -> Value {
 /// `(ticket, session)` is the closest available substitute, matching
 /// `tm_browser::capability::SessionRegistry`/`tm_computer::capability::SessionRegistry`'s same
 /// choice.
-type SessionKey = (TicketId, SessionId);
+type SessionKey = (Option<TicketId>, SessionId);
+
+/// `<ticket>/<session>` for a ticketed call, `<session>` for a ticketless chat-session call.
+fn session_label(ctx: &CallContext<'_>) -> String {
+    match ctx.ticket {
+        Some(ticket) => format!("{ticket}/{}", ctx.session),
+        None => ctx.session.to_string(),
+    }
+}
 
 /// Explicitly spawns and tears down one [`PtySession`] per `(ticket, session)` key. See this
 /// module's doc comment for why this does not lazily launch on first use the way browser/computer
@@ -200,12 +208,12 @@ impl SessionRegistry {
         cols: u16,
         rows: u16,
     ) -> Result<()> {
-        let key = (ctx.ticket.clone(), ctx.session.clone());
+        let key = (ctx.ticket.cloned(), ctx.session.clone());
         let mut sessions = self.sessions.lock().await;
         if sessions.contains_key(&key) {
             return Err(TmError::conflict(format!(
-                "a pty session is already live for ticket {} session {}",
-                ctx.ticket, ctx.session
+                "a pty session is already live for {}",
+                session_label(ctx)
             )));
         }
         let session = PtySession::spawn(argv, cwd, env, cols, rows, Arc::clone(&self.clock))?;
@@ -216,19 +224,20 @@ impl SessionRegistry {
     /// Look up the session for `(ctx.ticket, ctx.session)`. Errors with [`TmError::NotFound`] if
     /// none has been spawned (or it was already closed).
     async fn get(&self, ctx: &CallContext<'_>) -> Result<Arc<AsyncMutex<Option<PtySession>>>> {
-        let key = (ctx.ticket.clone(), ctx.session.clone());
+        let key = (ctx.ticket.cloned(), ctx.session.clone());
         let sessions = self.sessions.lock().await;
-        sessions.get(&key).cloned().ok_or_else(|| {
-            TmError::not_found("pty_session", format!("{}/{}", ctx.ticket, ctx.session))
-        })
+        sessions
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| TmError::not_found("pty_session", session_label(ctx)))
     }
 
     /// Explicitly tear down the session for `(ticket, session)`, if one is live: kills its
     /// process group ([`PtySession::kill_process_group`]) before dropping it. A no-op if no
     /// session is live for that key.
-    pub async fn close(&self, ticket: &TicketId, session: &SessionId) -> Result<()> {
+    pub async fn close(&self, ticket: Option<&TicketId>, session: &SessionId) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
-        if let Some(slot) = sessions.remove(&(ticket.clone(), session.clone())) {
+        if let Some(slot) = sessions.remove(&(ticket.cloned(), session.clone())) {
             let mut guard = slot.lock().await;
             if let Some(mut s) = guard.take() {
                 let _ = s.kill_process_group();
@@ -634,7 +643,7 @@ mod tests {
     ) -> CallContext<'a> {
         CallContext {
             authority,
-            ticket,
+            ticket: Some(ticket),
             session,
             actor,
             clock,

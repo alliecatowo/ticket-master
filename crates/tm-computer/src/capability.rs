@@ -116,7 +116,7 @@ fn parse_button(input: &Value) -> MouseButton {
 /// A key identifying one live computer session. `CallContext` does not carry a lease id, so
 /// `(ticket, session)` is the closest available substitute, matching
 /// `tm_browser::capability::SessionRegistry`'s same choice.
-type SessionKey = (TicketId, SessionId);
+type SessionKey = (Option<TicketId>, SessionId);
 
 /// Lazily launches, reuses, and explicitly tears down one [`ComputerSession`] per
 /// `(ticket, session)` key, via [`crate::backend::open_selected`].
@@ -167,7 +167,7 @@ impl SessionRegistry {
         &self,
         ctx: &CallContext<'_>,
     ) -> Result<Arc<AsyncMutex<Option<ComputerSession>>>> {
-        let key = (ctx.ticket.clone(), ctx.session.clone());
+        let key = (ctx.ticket.cloned(), ctx.session.clone());
         let mut sessions = self.sessions.lock().await;
         if let Some(existing) = sessions.get(&key) {
             return Ok(existing.clone());
@@ -185,9 +185,9 @@ impl SessionRegistry {
 
     /// Explicitly tear down the session for `(ticket, session)`, if one is live. A no-op
     /// otherwise.
-    pub async fn close(&self, ticket: &TicketId, session: &SessionId) -> Result<()> {
+    pub async fn close(&self, ticket: Option<&TicketId>, session: &SessionId) -> Result<()> {
         let mut sessions = self.sessions.lock().await;
-        sessions.remove(&(ticket.clone(), session.clone()));
+        sessions.remove(&(ticket.cloned(), session.clone()));
         Ok(())
     }
 
@@ -723,7 +723,7 @@ mod tests {
         let root = std::env::temp_dir();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,
@@ -751,6 +751,6 @@ mod tests {
         let registry = test_registry();
         let ticket: TicketId = "T-1".parse().unwrap();
         let session: SessionId = "S-1".parse().unwrap();
-        registry.close(&ticket, &session).await.unwrap();
+        registry.close(Some(&ticket), &session).await.unwrap();
     }
 }

@@ -18,14 +18,14 @@ use tm_agent::outcome::{
 use tm_agent::{AgentLoop, ToolRegistry};
 use tm_codeintel::SignalWeights;
 use tm_context::{
-    compile, CommandCache, CommandExecutor, CommandResult, CommandSpec, ExecutionOutcome,
-    TokenBudget,
+    compile, compile_session, CommandCache, CommandExecutor, CommandResult, CommandSpec,
+    ExecutionOutcome, TokenBudget,
 };
-use tm_core::{ExecutorRequirements, RetryPolicy, Ticket, TicketKind, VerificationPolicy};
+use tm_core::Ticket;
 use tm_provider::{AnthropicProvider, DevPassProvider, Fabric, ModelId, RoleTable};
 use tm_types::{
-    ArtifactId, Authority, Budget, Clock, IdKind, IdSource, ParticipantId, Role, SessionId,
-    TicketId, Timestamp, TmError, Tolerance,
+    ArtifactId, Authority, Budget, Clock, IdKind, IdSource, Role, SessionId, TicketId, Timestamp,
+    TmError,
 };
 
 use crate::project::Project;
@@ -44,21 +44,12 @@ pub(crate) const AGENT_MODEL: &str = "claude-sonnet-5";
 /// work, the common case for a human driving `tm` directly.
 const AGENT_ROLE: Role = Role::CoderFast;
 
-/// Per-turn spend ceiling for a scratch (unattached) ticket's ephemeral ticket record. An
-/// attached ticket uses its own recorded budget instead.
-fn default_turn_budget() -> Budget {
-    Budget::new(200_000, 2_000_000, 600)
-}
-
-/// A minimal, effectively-inert retry policy for scratch tickets, which are never leased or
-/// retried by the scheduler.
-fn default_retry_policy() -> RetryPolicy {
-    RetryPolicy {
-        max_attempts: 1,
-        base_delay_seconds: 0,
-        backoff_multiplier: 1.0,
-        max_delay_seconds: 0,
-    }
+/// Per-turn spend ceiling for a chat turn with no attached ticket (an attached ticket uses its own
+/// recorded budget). Generous on purpose: sessions default to autonomous, and every step re-sends
+/// the whole conversation so far, so token spend grows with session length. It is a runaway guard,
+/// not a cost-control policy.
+fn session_turn_budget() -> Budget {
+    Budget::new(4_000_000, 20_000_000, 3_600)
 }
 
 /// One thing that happened while [`AgentSession::run_turn_streaming`] ran a turn, for a caller
@@ -271,24 +262,19 @@ impl AgentSession {
             })
     }
 
-    /// Resolve which ticket this turn executes against: the attached ticket if there is one,
-    /// else a fresh scratch ticket whose objective is `prompt`.
-    fn resolve_ticket(&mut self, prompt: &str) -> tm_types::Result<Ticket> {
-        if let Some(ticket_id) = &self.attached_ticket {
-            let view = self.project.store.view()?;
-            return view
-                .tickets
-                .get(ticket_id)
-                .cloned()
-                .ok_or_else(|| TmError::not_found("ticket", ticket_id.as_str()));
-        }
-
-        let ticket_id = create_scratch_ticket(&self.project.store, prompt, &self.project.actor)?;
-        self.attached_ticket = Some(ticket_id.clone());
+    /// The ticket this turn executes against: the attached one, if any. A session with nothing
+    /// attached runs ticketless — no ticket is created just because someone said something
+    /// (`docs/decisions/D-017-session-ticket-executor-model.md`); the model creates tickets
+    /// itself when the work warrants tracking.
+    fn attached_ticket_record(&self) -> tm_types::Result<Option<Ticket>> {
+        let Some(ticket_id) = &self.attached_ticket else {
+            return Ok(None);
+        };
         let view = self.project.store.view()?;
         view.tickets
-            .get(&ticket_id)
+            .get(ticket_id)
             .cloned()
+            .map(Some)
             .ok_or_else(|| TmError::not_found("ticket", ticket_id.as_str()))
     }
 
@@ -375,8 +361,10 @@ impl AgentSession {
         };
         let prompt = prompt_owned.as_str();
 
-        let ticket = self.resolve_ticket(prompt)?;
-        on_event(TurnEvent::TicketResolved(Box::new(ticket.clone())));
+        let ticket = self.attached_ticket_record()?;
+        if let Some(ticket) = &ticket {
+            on_event(TurnEvent::TicketResolved(Box::new(ticket.clone())));
+        }
 
         let view = self.project.store.view()?;
         // D-003: goes through `Project::code_intel` (`CodeIntel::open_at(state_dir, root)`)
@@ -384,15 +372,18 @@ impl AgentSession {
         // turn) from writing an index into the workspace when the project is global-scoped.
         let ci = self.project.code_intel()?;
         let budget = TokenBudget::even(8_000);
-        let context_pack = compile(
-            &ticket,
-            &view,
-            &ci,
-            budget,
-            SignalWeights::default(),
-            &[],
-            &RoleTable::default_table(),
-        )?;
+        let context_pack = match &ticket {
+            Some(ticket) => compile(
+                ticket,
+                &view,
+                &ci,
+                budget,
+                SignalWeights::default(),
+                &[],
+                &RoleTable::default_table(),
+            )?,
+            None => compile_session(prompt, &view, &ci, budget, SignalWeights::default(), &[])?,
+        };
 
         let fabric = match &self.fabric_override {
             Some(fabric) => Arc::clone(fabric),
@@ -462,11 +453,15 @@ impl AgentSession {
         )
         .with_oversight(oversight);
 
+        let (authority, budget) = match &ticket {
+            Some(ticket) => (ticket.authority.clone(), ticket.budget),
+            None => (Authority::root(), session_turn_budget()),
+        };
         let task = AgentTask {
-            ticket: ticket.id.clone(),
+            ticket: ticket.as_ref().map(|t| t.id.clone()),
             context_pack,
-            authority: ticket.authority.clone(),
-            budget: ticket.budget,
+            authority,
+            budget,
             harness_epoch: 0,
             session: self.session.clone(),
             conversation: Some(tm_agent::Conversation {
@@ -495,7 +490,7 @@ impl AgentSession {
         // so it fires identically for `run_turn`/`run_prompt`/the TUI's turn driver, all of
         // which call this method.
         hooks
-            .run_stop(&self.session, Some(ticket.id.as_str()))
+            .run_stop(&self.session, ticket.as_ref().map(|t| t.id.as_str()))
             .await;
 
         if let Ok(outcome) = &result {
@@ -710,41 +705,6 @@ fn build_mock_fabric(clock: Arc<dyn Clock>) -> Fabric {
     fabric
 }
 
-/// Create a fresh scratch ticket for a turn that arrives with no attached ticket: an
-/// `Investigation`-kind ticket (the one kind whose `VerificationPolicy::None` is legal to close
-/// unverified), so an unattached conversational turn never trips the closed-needs-evidence
-/// invariant just by existing.
-fn create_scratch_ticket(
-    store: &tm_core::Store,
-    objective: &str,
-    actor: &ParticipantId,
-) -> tm_types::Result<TicketId> {
-    let events = store.create_ticket(
-        TicketKind::Investigation,
-        objective.to_string(),
-        None,
-        None,
-        Authority::root(),
-        Vec::new(),
-        ExecutorRequirements {
-            role: AGENT_ROLE,
-            human_required: false,
-            min_capability: Tolerance::Preferred,
-        },
-        Vec::new(),
-        Vec::new(),
-        VerificationPolicy::None,
-        default_turn_budget(),
-        default_retry_policy(),
-        0,
-        actor.clone(),
-    )?;
-    events
-        .iter()
-        .find_map(|e| e.payload.as_ticket_created().map(|p| p.ticket.clone()))
-        .ok_or_else(|| TmError::Invariant("create_ticket did not emit ticket.created".to_string()))
-}
-
 /// Render every step's assistant text and tool calls, in order.
 pub(crate) fn format_steps(steps: &[StepRecord]) -> String {
     let mut out = Vec::new();
@@ -922,7 +882,8 @@ impl CommandExecutor for ProcessCommandExecutor {
 mod tests {
     use super::*;
     use std::path::Path;
-    use tm_types::{CounterIds, FixedClock, Timestamp};
+    use tm_core::{ExecutorRequirements, RetryPolicy, TicketKind, VerificationPolicy};
+    use tm_types::{CounterIds, FixedClock, ParticipantId, Timestamp, Tolerance};
 
     fn open_test_project(dir: &Path) -> Project {
         let store = Arc::new(tm_core::Store::open(dir).expect("open store"));
@@ -932,6 +893,48 @@ mod tests {
             Arc::new(FixedClock::epoch()),
             Arc::new(CounterIds::new()),
         )
+    }
+
+    /// A real, persisted ticket for tests that need one to attach to: an
+    /// `Investigation`-kind ticket (the one kind whose `VerificationPolicy::None` is legal to close
+    /// unverified), so an unattached conversational turn never trips the closed-needs-evidence
+    /// invariant just by existing.
+    fn create_scratch_ticket(
+        store: &tm_core::Store,
+        objective: &str,
+        actor: &ParticipantId,
+    ) -> tm_types::Result<TicketId> {
+        let events = store.create_ticket(
+            TicketKind::Investigation,
+            objective.to_string(),
+            None,
+            None,
+            Authority::root(),
+            Vec::new(),
+            ExecutorRequirements {
+                role: AGENT_ROLE,
+                human_required: false,
+                min_capability: Tolerance::Preferred,
+            },
+            Vec::new(),
+            Vec::new(),
+            VerificationPolicy::None,
+            Budget::new(200_000, 2_000_000, 600),
+            RetryPolicy {
+                max_attempts: 1,
+                base_delay_seconds: 0,
+                backoff_multiplier: 1.0,
+                max_delay_seconds: 0,
+            },
+            0,
+            actor.clone(),
+        )?;
+        events
+            .iter()
+            .find_map(|e| e.payload.as_ticket_created().map(|p| p.ticket.clone()))
+            .ok_or_else(|| {
+                TmError::Invariant("create_ticket did not emit ticket.created".to_string())
+            })
     }
 
     fn new_session(dir: &Path) -> AgentSession {
@@ -1168,33 +1171,61 @@ mod tests {
         assert!(decision.affected_tickets.is_empty());
     }
 
-    #[test]
-    fn resolve_ticket_creates_and_attaches_a_scratch_ticket_when_none_is_attached() {
+    #[tokio::test]
+    async fn a_trivial_question_in_a_fresh_session_creates_no_ticket() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut session = new_session(dir.path());
-        let ticket = session
-            .resolve_ticket("investigate the flaky test")
-            .expect("resolve");
-        assert_eq!(ticket.objective, "investigate the flaky test");
-        assert_eq!(session.attached_ticket, Some(ticket.id));
+        let project = Arc::new(open_test_project(dir.path()));
+        let (fabric, provider) = scripted_fabric(project.clock.clone(), "Paris.");
+        let mut session =
+            AgentSession::new(project.clone(), Renderer::from_flags(false, true, true))
+                .with_fabric(fabric);
+
+        let outcome = session
+            .run_turn_streaming("what is the capital of France?", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+
+        assert!(
+            matches!(outcome, AgentOutcome::Replied { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(session.attached_ticket, None, "a session is not a ticket");
+        let view = project.store.view().expect("view");
+        assert!(
+            view.tickets.is_empty(),
+            "saying something must not create a ticket, found {:?}",
+            view.tickets.keys().collect::<Vec<_>>()
+        );
+        let first = request_text(&provider.call_log()[0]);
+        assert!(first.contains("what is the capital of France?"));
+        assert!(
+            !first.contains("# Ticket"),
+            "no ticket header without a ticket: {first}"
+        );
     }
 
-    #[test]
-    fn resolve_ticket_reuses_the_attached_ticket() {
+    #[tokio::test]
+    async fn a_turn_runs_against_the_attached_ticket_without_creating_another() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let mut session = new_session(dir.path());
-        let ticket_id = create_scratch_ticket(
-            &session.project.store,
-            "original objective",
-            &session.project.actor,
-        )
-        .expect("create ticket");
+        let project = Arc::new(open_test_project(dir.path()));
+        let (fabric, provider) = scripted_fabric(project.clock.clone(), "on it");
+        let mut session =
+            AgentSession::new(project.clone(), Renderer::from_flags(false, true, true))
+                .with_fabric(fabric);
+        let ticket_id = create_scratch_ticket(&project.store, "original objective", &project.actor)
+            .expect("create ticket");
         session.attach_ticket(ticket_id.clone()).expect("attach");
-        let ticket = session
-            .resolve_ticket("a different prompt")
-            .expect("resolve");
-        assert_eq!(ticket.id, ticket_id);
-        assert_eq!(ticket.objective, "original objective");
+
+        session
+            .run_turn_streaming("a different prompt", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+
+        assert_eq!(project.store.view().expect("view").tickets.len(), 1);
+        let first = request_text(&provider.call_log()[0]);
+        assert!(first.contains(&format!("# Ticket {ticket_id}")), "{first}");
+        assert!(first.contains("original objective"));
+        assert!(first.contains("a different prompt"));
     }
 
     #[test]

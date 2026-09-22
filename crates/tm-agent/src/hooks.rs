@@ -256,7 +256,7 @@ fn tool_envelope(event: &str, tool: &str, input: &Value, ctx: &CallContext<'_>) 
         "event": event,
         "tool": tool,
         "input": input,
-        "ticket": ctx.ticket.as_str(),
+        "ticket": ctx.ticket.map(|t| t.as_str()),
         "session": ctx.session.as_str(),
     })
 }
@@ -427,7 +427,7 @@ mod tests {
         let (authority, ticket, session, actor, clock, ids) = test_ctx_pieces();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,
@@ -448,7 +448,7 @@ mod tests {
         let (authority, ticket, session, actor, clock, ids) = test_ctx_pieces();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,
@@ -475,7 +475,7 @@ mod tests {
         let (authority, ticket, session, actor, clock, ids) = test_ctx_pieces();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,
@@ -498,7 +498,7 @@ mod tests {
         let (authority, ticket, session, actor, clock, ids) = test_ctx_pieces();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,
@@ -524,7 +524,7 @@ mod tests {
         let (authority, ticket, session, actor, clock, ids) = test_ctx_pieces();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,
@@ -556,7 +556,7 @@ mod tests {
         let (authority, ticket, session, actor, clock, ids) = test_ctx_pieces();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,
@@ -577,7 +577,7 @@ mod tests {
         let (authority, ticket, session, actor, clock, ids) = test_ctx_pieces();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,
@@ -643,7 +643,7 @@ mod tests {
         let (authority, ticket, session, actor, clock, ids) = test_ctx_pieces();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,

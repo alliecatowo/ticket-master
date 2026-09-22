@@ -184,8 +184,11 @@ pub struct ToolSchema {
 pub struct CallContext<'a> {
     /// The authority this call was already checked against.
     pub authority: &'a Authority,
-    /// The ticket this call happens on behalf of.
-    pub ticket: &'a TicketId,
+    /// The ticket this call happens on behalf of, or `None` for a call made from a chat session
+    /// with no attached ticket (`docs/decisions/D-017-session-ticket-executor-model.md`: a
+    /// session is not a ticket and may have none). A tool that inherently acts on a ticket
+    /// (`ticket.submit`, `evidence.attach`) must refuse cleanly when this is `None`.
+    pub ticket: Option<&'a TicketId>,
     /// The session this call happens inside.
     pub session: &'a SessionId,
     /// Who/what is issuing this call, for event/evidence attribution.

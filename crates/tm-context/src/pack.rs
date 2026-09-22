@@ -255,7 +255,97 @@ pub fn compile(
         ),
     ];
 
-    let mut ledger = BudgetLedger::new(&budget);
+    Ok(assemble(raw_sections, &budget))
+}
+
+/// Compile the context for a chat turn that has no ticket
+/// (`docs/decisions/D-017-session-ticket-executor-model.md`): retrieval and wiki hits for `query`
+/// (the human's message), the project's conventions (every `AGENTS.md`, discovered skills, and
+/// `conventions`), and an index of the project's open tickets — the tickets running in the
+/// background that this session can steer. Sections that only mean something for a specific
+/// ticket (its objective, budget, dependencies, prior failures, path-scoped decisions, claimed-path
+/// outlines and history) are left out rather than rendered empty.
+pub fn compile_session(
+    query: &str,
+    view: &ProjectView,
+    ci: &CodeIntel,
+    budget: TokenBudget,
+    weights: SignalWeights,
+    conventions: &[String],
+) -> Result<ContextPack> {
+    let carrier = query_carrier(query)?;
+    let raw_sections: Vec<(SectionKind, sections::RawSection)> = vec![
+        (
+            SectionKind::Dependencies,
+            sections::build_open_tickets(view),
+        ),
+        (
+            SectionKind::Retrieval,
+            sections::build_retrieval(&carrier, ci, weights)?,
+        ),
+        (
+            SectionKind::Wiki,
+            sections::build_wiki(&carrier, ci, weights)?,
+        ),
+        (
+            SectionKind::Conventions,
+            sections::build_conventions(&carrier, ci, conventions),
+        ),
+    ];
+    let raw_sections = raw_sections
+        .into_iter()
+        .filter(|(_, raw)| !raw.body.trim().is_empty())
+        .collect();
+    Ok(assemble(raw_sections, &budget))
+}
+
+/// A never-persisted [`Ticket`] whose only meaningful field is `objective = query`, so the
+/// query-driven section builders (retrieval, wiki, conventions) can be reused verbatim for a
+/// ticketless turn. It claims no paths and is never written to the store.
+fn query_carrier(query: &str) -> Result<Ticket> {
+    use tm_core::{ExecutorRequirements, RetryPolicy, TicketKind, TicketState, VerificationPolicy};
+    Ok(Ticket {
+        id: tm_types::TicketId::new("T-0")?,
+        kind: TicketKind::Investigation,
+        objective: query.to_string(),
+        state: TicketState::Draft,
+        parent: None,
+        children: Vec::new(),
+        dependencies: Vec::new(),
+        milestone: None,
+        authority: tm_types::Authority::none(),
+        resources: Vec::new(),
+        executor: ExecutorRequirements {
+            role: tm_types::Role::CoderFast,
+            human_required: false,
+            min_capability: tm_types::Tolerance::Any,
+        },
+        context_refs: Vec::new(),
+        success: Vec::new(),
+        verification: VerificationPolicy::None,
+        budget: tm_types::Budget::none(),
+        retry: RetryPolicy {
+            max_attempts: 1,
+            base_delay_seconds: 0,
+            backoff_multiplier: 1.0,
+            max_delay_seconds: 0,
+        },
+        cycle: None,
+        attempts: 0,
+        failures: Vec::new(),
+        priority: 0,
+        created: tm_types::Timestamp::from_unix_nanos(0),
+        updated: tm_types::Timestamp::from_unix_nanos(0),
+    })
+}
+
+/// Spend `budget` across `raw_sections` in order, keeping each section that fits and recording
+/// each one that doesn't as dropped. Shared by [`compile`] and [`compile_session`].
+fn assemble(
+    raw_sections: Vec<(SectionKind, sections::RawSection)>,
+    budget: &TokenBudget,
+) -> ContextPack {
+    let mut ledger = BudgetLedger::new(budget);
     let mut sections_out = Vec::with_capacity(raw_sections.len());
     let mut provenance = Vec::new();
     let mut dropped = Vec::new();
@@ -287,13 +377,13 @@ pub fn compile(
     let tokens = ledger.total_used();
     let bytes = sections_out.iter().map(|s| s.bytes).sum();
 
-    Ok(ContextPack {
+    ContextPack {
         sections: sections_out,
         tokens,
         bytes,
         provenance,
         dropped,
-    })
+    }
 }
 
 #[cfg(test)]

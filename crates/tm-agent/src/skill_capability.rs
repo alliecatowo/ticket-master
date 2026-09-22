@@ -157,7 +157,7 @@ mod tests {
         let ids = TestIds::new();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,
@@ -188,7 +188,7 @@ mod tests {
         let ids = TestIds::new();
         let ctx = CallContext {
             authority: &authority,
-            ticket: &ticket,
+            ticket: Some(&ticket),
             session: &session,
             actor: &actor,
             clock: &clock,

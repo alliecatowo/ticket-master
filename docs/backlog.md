@@ -9,7 +9,7 @@ exposed in this session's transcript. **Treat it as compromised. Rotate/revoke i
 `.env` with the new value** (`DEVPASS_API_KEY`/`LLM_GATEWAY_API_KEY`, same value both places per
 this session's own notes — they're the same credential under two names).
 
-## Real TUI + live model: confirmed working, with one structural UX finding
+## Resolved for chat (2026-09-22, D-017): Real TUI + live model, structural UX finding
 
 The ratatui TUI was driven end-to-end with a real model for the first time this session (a real
 pty, a real typed prompt, a real streamed response) — confirmed via a rigorous test that caught
@@ -18,6 +18,10 @@ substring back before any network round trip completed; fixed by using a base64-
 correct on-screen answer could only come from real model output). Confirmed the TUI and the plain
 `-p` loop share the exact same `build_fabric()` call (`crates/tm-cli/src/agent.rs:373`) — there is
 no separate, divergent provider-wiring path for the interactive TUI.
+
+**Resolved for the chat path:** chat turns now end as `AgentOutcome::Replied` and no longer
+create a scratch ticket (see D-017's "Implemented" section). The `Submit`-from-`Draft` gap still
+applies to a ticket that is `/attach`ed while in `Draft`. The original analysis follows.
 
 **Structural finding, root cause now confirmed precisely**: a turn that ends without a successful
 `ticket.submit` is always classified `AgentOutcome::Failed{class: Other}` and rendered as

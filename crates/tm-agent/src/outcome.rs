@@ -17,8 +17,11 @@ use tm_types::{ArtifactId, Authority, Budget, DecisionId, SessionId, TicketId, T
 /// pinning guarantee that a session's harness policy never changes mid-run.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentTask {
-    /// The ticket this task executes.
-    pub ticket: TicketId,
+    /// The ticket this task executes, or `None` for a chat turn in a session with no attached
+    /// ticket. Ticket-scoped bookkeeping (durable goal tracking, the per-ticket event backstop's
+    /// subject, budget lease handoff) is skipped or re-scoped to the session when this is `None`;
+    /// usage is still recorded, against the session and project budgets.
+    pub ticket: Option<TicketId>,
     /// The compiled, bounded context pack the worker sees instead of raw files.
     pub context_pack: tm_context::ContextPack,
     /// The authority this task's tool calls are checked against.
@@ -35,6 +38,17 @@ pub struct AgentTask {
     /// same session, and a turn that ends with a plain reply (no tool call) is a successful
     /// [`AgentOutcome::Replied`] instead of a failure to submit.
     pub conversation: Option<Conversation>,
+}
+
+impl AgentTask {
+    /// The durable subject this task's own events are recorded against: its ticket, or its
+    /// session when it has none.
+    pub fn subject(&self) -> tm_types::Id {
+        match &self.ticket {
+            Some(ticket) => tm_types::Id::from(ticket.clone()),
+            None => tm_types::Id::from(self.session.clone()),
+        }
+    }
 }
 
 /// The chat framing of one interactive turn: what the human just said, plus everything said and

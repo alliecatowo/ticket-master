@@ -287,6 +287,48 @@ pub fn build_decisions(ticket: &Ticket, view: &ProjectView) -> RawSection {
     }
 }
 
+/// Most open tickets listed in [`build_open_tickets`]; the rest are summarized as a count.
+const OPEN_TICKETS_LISTED: usize = 30;
+
+/// An index of the project's open tickets (everything not `Closed`/`Cancelled`), for a chat turn
+/// with no ticket of its own: the work running in the background that the session can inspect,
+/// steer, attach to, or add to. Highest priority first, then by id; each line is
+/// `- <id> [<state>] <first line of objective>`. Empty when there are no open tickets, in which
+/// case `tm_context::compile_session` leaves the section out entirely.
+pub fn build_open_tickets(view: &ProjectView) -> RawSection {
+    use tm_core::TicketState;
+    let mut open: Vec<&Ticket> = view
+        .tickets
+        .values()
+        .filter(|t| !matches!(t.state, TicketState::Closed | TicketState::Cancelled))
+        .collect();
+    open.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.id.cmp(&b.id)));
+
+    let mut body_lines = Vec::new();
+    let mut provenance = Vec::new();
+    for ticket in open.iter().take(OPEN_TICKETS_LISTED) {
+        let summary = ticket.objective.lines().next().unwrap_or_default();
+        body_lines.push(format!("- {} [{:?}] {}", ticket.id, ticket.state, summary));
+        provenance.push(ProvenanceRef {
+            locator: ticket.id.to_string(),
+            detail: String::new(),
+        });
+    }
+    if open.len() > OPEN_TICKETS_LISTED {
+        body_lines.push(format!(
+            "- ... and {} more (see ticket.list)",
+            open.len() - OPEN_TICKETS_LISTED
+        ));
+    }
+
+    RawSection {
+        kind: SectionKind::Dependencies,
+        title: "Open tickets".to_string(),
+        body: body_lines.join("\n"),
+        provenance,
+    }
+}
+
 /// Section 4: parent/dependency outputs and evidence.
 ///
 /// Renders dependency/parent ticket summaries + matching evidence from view.evidence.

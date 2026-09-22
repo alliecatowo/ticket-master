@@ -651,7 +651,9 @@ fn command_key(ctx: &CallContext<'_>, argv: &[String], cwd: &str, cacheable: boo
     } else {
         format!(
             "noncacheable-{}-{}",
-            ctx.ticket.as_str(),
+            ctx.ticket
+                .map(|t| t.as_str())
+                .unwrap_or_else(|| ctx.session.as_str()),
             ctx.ids.random_hex(16)
         )
     }
@@ -704,7 +706,7 @@ impl BuiltinCapability {
             env_allowlist: Vec::new(),
             declared_inputs: Vec::new(),
             cacheable,
-            ticket: Some(ctx.ticket.clone()),
+            ticket: ctx.ticket.cloned(),
             session: Some(ctx.session.clone()),
         };
         // `command::run`'s own `command.started`/`command.completed` event drafts previously had
@@ -743,7 +745,7 @@ impl BuiltinCapability {
             env_allowlist: Vec::new(),
             declared_inputs: Vec::new(),
             cacheable: false,
-            ticket: Some(ctx.ticket.clone()),
+            ticket: ctx.ticket.cloned(),
             session: Some(ctx.session.clone()),
         };
         let (result, drafts) = command::run(
@@ -791,6 +793,12 @@ impl BuiltinCapability {
         ctx: &CallContext<'_>,
         patch_engine: &PatchEngine,
     ) -> Result<Value> {
+        // The effect journal is keyed per ticket attempt so a resumed scheduler run can't
+        // double-apply; a ticketless chat session never resumes from that journal, so it simply
+        // runs the command.
+        let Some(ticket) = ctx.ticket else {
+            return self.run_fixed_git(argv, ctx, patch_engine);
+        };
         let argv_owned: Vec<String> = argv.iter().map(|s| s.to_string()).collect();
         let cwd = patch_engine.root().to_string_lossy().into_owned();
         let canonical_args = deterministic_command_key(&argv_owned, &cwd);
@@ -798,13 +806,13 @@ impl BuiltinCapability {
             .store
             .view()?
             .tickets
-            .get(ctx.ticket)
+            .get(ticket)
             .map(|t| t.attempts)
             .unwrap_or(0);
-        let key = tm_core::EffectKey::compute(ctx.ticket, attempt, effect_kind, &canonical_args);
+        let key = tm_core::EffectKey::compute(ticket, attempt, effect_kind, &canonical_args);
         let guard = self.store.begin_effect(
             key,
-            ctx.ticket.clone(),
+            ticket.clone(),
             attempt,
             effect_kind,
             ctx.actor.clone(),
@@ -1154,7 +1162,7 @@ impl BuiltinCapability {
                 let events = self.store.create_ticket(
                     parsed.kind,
                     parsed.objective,
-                    Some(ctx.ticket.clone()),
+                    ctx.ticket.cloned(),
                     None,
                     parsed.authority,
                     Vec::new(),
@@ -1190,15 +1198,16 @@ impl BuiltinCapability {
                     .into_iter()
                     .map(|s| s.parse::<ArtifactId>())
                     .collect::<Result<Vec<ArtifactId>>>()?;
+                let ticket = require_ticket(ctx, "ticket.submit")?;
                 let events = self
                     .store
-                    .submit(ctx.ticket, summary, evidence, ctx.actor.clone())?;
-                Ok(json!({"ticket": ctx.ticket.as_str(), "events": events.len()}))
+                    .submit(ticket, summary, evidence, ctx.actor.clone())?;
+                Ok(json!({"ticket": ticket.as_str(), "events": events.len()}))
             }
             ToolName::TicketComment => {
                 let target: TicketId = match get_opt_string(input, "ticket") {
                     Some(s) => s.parse()?,
-                    None => ctx.ticket.clone(),
+                    None => require_ticket(ctx, "this tool")?.clone(),
                 };
                 let body = get_string(input, "body")?;
                 let events = self.store.update_ticket(
@@ -1244,7 +1253,7 @@ impl BuiltinCapability {
                 let meta = input.get("meta").cloned().unwrap_or_else(|| json!({}));
                 let ticket = match get_opt_string(input, "ticket") {
                     Some(s) => Some(s.parse()?),
-                    None => Some(ctx.ticket.clone()),
+                    None => ctx.ticket.cloned(),
                 };
                 let events = self.store.store_artifact(
                     kind,
@@ -1262,7 +1271,7 @@ impl BuiltinCapability {
             ToolName::EvidenceAttach => {
                 let target: TicketId = match get_opt_string(input, "ticket") {
                     Some(s) => s.parse()?,
-                    None => ctx.ticket.clone(),
+                    None => require_ticket(ctx, "this tool")?.clone(),
                 };
                 let kind: EvidenceKind =
                     serde_json::from_value(Value::String(get_string(input, "kind")?))?;
@@ -1892,10 +1901,21 @@ impl CapabilityProvider for BuiltinCapability {
 /// transcript-size budget this bounds is a property of the dispatch loop, not of any one
 /// capability, so [`ToolRegistry`] — not [`BuiltinCapability`] — owns the `Store` handle this
 /// needs.
+/// The ticket a ticket-scoped tool acts on, or a clear refusal when the calling session has none
+/// attached (`docs/decisions/D-017-session-ticket-executor-model.md`).
+fn require_ticket<'a>(ctx: &CallContext<'a>, tool: &str) -> Result<&'a TicketId> {
+    ctx.ticket.ok_or_else(|| {
+        TmError::conflict(format!(
+            "{tool} needs a ticket, but this session has none attached; pass an explicit \"ticket\", \
+             or create one with ticket.create_child first"
+        ))
+    })
+}
+
 fn bound_result(
     value: Value,
     store: &Store,
-    ticket: &TicketId,
+    ticket: Option<&TicketId>,
     actor: &ParticipantId,
 ) -> Result<(Value, Option<ArtifactId>)> {
     let bytes = serde_json::to_vec(&value)?;
@@ -1907,7 +1927,7 @@ fn bound_result(
         "application/json".to_string(),
         bytes.clone(),
         json!({"tool_result": true}),
-        Some(ticket.clone()),
+        ticket.cloned(),
         actor.clone(),
     )?;
     let artifact = events
@@ -2373,7 +2393,7 @@ mod tests {
         fn ctx(&self) -> CallContext<'_> {
             CallContext {
                 authority: &self.authority,
-                ticket: &self.ticket,
+                ticket: Some(&self.ticket),
                 session: &self.session,
                 actor: &self.actor,
                 clock: &self.clock,
@@ -3380,7 +3400,7 @@ mod tests {
     ) -> CallContext<'a> {
         CallContext {
             authority,
-            ticket,
+            ticket: Some(ticket),
             session,
             actor,
             clock,

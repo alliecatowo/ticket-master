@@ -47,7 +47,14 @@ pub fn render_system_prompt(fragments: &PromptFragments) -> String {
 /// `"- <kind> (needed <tokens_needed> tokens): <reason>"`. This makes an agent aware that
 /// material existed but didn't fit, rather than silently working from a partial picture.
 pub fn render_task_prompt(ticket: &TicketId, pack: &ContextPack) -> String {
-    let mut output = format!("# Ticket {}\n", ticket);
+    format!("# Ticket {}\n{}", ticket, render_context_sections(pack))
+}
+
+/// [`render_task_prompt`] without its `# Ticket <id>` header line: each of `pack.sections` as
+/// `"## <title>\n<body>\n"`, then the `## Omitted` list if anything was dropped. What a chat turn
+/// with no ticket sends as its context.
+pub fn render_context_sections(pack: &ContextPack) -> String {
+    let mut output = String::new();
 
     for section in &pack.sections {
         output.push_str(&format!("## {}\n{}\n", section.title, section.body));
@@ -69,13 +76,16 @@ pub fn render_task_prompt(ticket: &TicketId, pack: &ContextPack) -> String {
 /// Render both prompts for a task in one call, the common entry point
 /// [`crate::agent_loop::AgentLoop`] uses to build its first `tm_provider::CompletionRequest`.
 pub fn render(
-    ticket: &TicketId,
+    ticket: Option<&TicketId>,
     pack: &ContextPack,
     fragments: &PromptFragments,
 ) -> RenderedPrompt {
     RenderedPrompt {
         system: render_system_prompt(fragments),
-        task: render_task_prompt(ticket, pack),
+        task: match ticket {
+            Some(ticket) => render_task_prompt(ticket, pack),
+            None => render_context_sections(pack),
+        },
     }
 }
 
@@ -328,7 +338,7 @@ mod tests {
             extra: Default::default(),
         };
 
-        let rendered = render(&ticket, &pack, &fragments);
+        let rendered = render(Some(&ticket), &pack, &fragments);
 
         assert_eq!(
             rendered.system,

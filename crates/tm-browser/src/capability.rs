@@ -111,7 +111,7 @@ fn ax_ref(input: &Value) -> Result<AxRef> {
 
 /// A key identifying one live browser session. `CallContext` does not carry a lease id, so
 /// `(ticket, session)` is the closest available substitute — see this module's doc comment.
-type SessionKey = (TicketId, SessionId);
+type SessionKey = (Option<TicketId>, SessionId);
 
 /// Lazily launches, reuses, and explicitly tears down one [`BrowserSession`] per
 /// `(ticket, session)` key, via the existing [`ProviderRegistry`]/`browser.toml` machinery.
@@ -155,7 +155,7 @@ impl SessionRegistry {
         &self,
         ctx: &CallContext<'_>,
     ) -> Result<Arc<AsyncMutex<Option<BrowserSession>>>> {
-        let key = (ctx.ticket.clone(), ctx.session.clone());
+        let key = (ctx.ticket.cloned(), ctx.session.clone());
         let mut sessions = self.sessions.lock().await;
         if let Some(existing) = sessions.get(&key) {
             return Ok(existing.clone());
@@ -184,10 +184,10 @@ impl SessionRegistry {
 
     /// Explicitly tear down the session for `(ticket, session)`, if one is live. A no-op when
     /// none exists (closing twice, or closing a key that never launched, is not an error).
-    pub async fn close(&self, ticket: &TicketId, session: &SessionId) -> Result<()> {
+    pub async fn close(&self, ticket: Option<&TicketId>, session: &SessionId) -> Result<()> {
         let slot = {
             let mut sessions = self.sessions.lock().await;
-            sessions.remove(&(ticket.clone(), session.clone()))
+            sessions.remove(&(ticket.cloned(), session.clone()))
         };
         let Some(slot) = slot else {
             return Ok(());
@@ -696,7 +696,7 @@ mod tests {
     ) -> CallContext<'a> {
         CallContext {
             authority,
-            ticket,
+            ticket: Some(ticket),
             session,
             actor,
             clock,
@@ -830,6 +830,6 @@ mod tests {
         let registry = test_registry();
         let ticket: TicketId = "T-1".parse().unwrap();
         let session: TmSessionId = "S-1".parse().unwrap();
-        registry.close(&ticket, &session).await.unwrap();
+        registry.close(Some(&ticket), &session).await.unwrap();
     }
 }

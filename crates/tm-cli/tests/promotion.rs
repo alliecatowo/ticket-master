@@ -70,9 +70,10 @@ fn run_tm_in(
         .expect("`tm` must run to completion on a piped invocation")
 }
 
-/// The full promotion story: a global session gains a ticket via bare `tm`, `tm init` promotes
-/// it into a real repo-scoped project without losing that ticket, and the resulting project is
-/// healthy per `tm doctor`.
+/// The full promotion story: bare `tm` chats in global scope (creating no ticket — D-017), a
+/// ticket is then created in that same global project, `tm init` promotes it into a real
+/// repo-scoped project without losing that ticket, and the resulting project is healthy per
+/// `tm doctor`.
 #[test]
 fn tm_init_promotes_a_global_session_into_a_repo_scoped_project_with_its_ticket_intact() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -101,6 +102,39 @@ fn tm_init_promotes_a_global_session_into_a_repo_scoped_project_with_its_ticket_
          only the bare turn"
     );
 
+    // Step 1b: chatting created no ticket (a session is not a ticket, D-017); create one
+    // explicitly in the same global project so there is real state for `tm init` to carry over.
+    let listed = run_tm_in(
+        tmp.path(),
+        tm_home.path(),
+        &["ticket", "list", "--json"],
+        false,
+        "",
+    );
+    let listed: serde_json::Value =
+        serde_json::from_slice(&listed.stdout).expect("ticket list --json must be JSON");
+    assert_eq!(
+        listed.as_array().map(Vec::len),
+        Some(0),
+        "a chat turn must not create a ticket, got {listed:?}"
+    );
+    let created = run_tm_in(
+        tmp.path(),
+        tm_home.path(),
+        &["ticket", "new", "say hello"],
+        false,
+        "",
+    );
+    assert!(
+        created.status.success(),
+        "tm ticket new must succeed in global scope, got stderr {:?}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(
+        !tmp.path().join(".tm").exists(),
+        "creating a ticket in global scope must not write a .tm/ into the workspace either"
+    );
+
     // Step 2: `tm init` in the same directory/`TM_HOME` must promote that global session rather
     // than starting fresh.
     let init = run_tm_in(tmp.path(), tm_home.path(), &["init"], false, "");
@@ -122,8 +156,8 @@ fn tm_init_promotes_a_global_session_into_a_repo_scoped_project_with_its_ticket_
     );
 
     // Step 3: `tm ticket list --json` now resolves repo scope (Phase 1-B's resolution order:
-    // a located `.tm/` always wins) and shows exactly the one ticket the mock-provider turn
-    // created, objective intact.
+    // a located `.tm/` always wins) and shows exactly the one ticket created in global scope,
+    // objective intact.
     let tickets = run_tm_in(
         tmp.path(),
         tm_home.path(),

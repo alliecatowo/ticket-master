@@ -340,7 +340,7 @@ impl BuiltinExecutor {
         }
 
         let agent_task = AgentTask {
-            ticket: task.ticket.clone(),
+            ticket: Some(task.ticket.clone()),
             context_pack: wrap_context_pack(&task.context_pack),
             authority: task.authority.clone(),
             budget: task.budget,

@@ -24,7 +24,7 @@ use tm_provider::fabric::{Fabric, FabricRecord};
 use tm_provider::{CompletionRequest, ContentBlock, Message, MessageRole};
 use tm_types::{
     Authority, Budget, CallContext, Clock, Decision, Id, IdSource, Oversight, ParticipantId,
-    Result, Role, Spend, TmError,
+    Result, Role, Spend, TicketId, TmError,
 };
 
 use crate::outcome::{
@@ -269,9 +269,9 @@ impl AgentLoop {
         // dispatch below resolves — see `docs/audit-2026-09-18-fable.md` B-07.
         self.store.append(vec![EventDraft::new(
             self.actor.clone(),
-            Id::from(task.ticket.clone()),
+            task.subject(),
             Payload::from(ApprovalDecidedPayload {
-                ticket: Some(task.ticket.clone()),
+                ticket: task.ticket.clone(),
                 decided_by: self.actor.clone(),
                 approved,
                 note: None,
@@ -290,16 +290,16 @@ impl AgentLoop {
             // `docs/audit-2026-09-18-fable.md` B-09) — see `drive`'s matching call site for the
             // full rationale: the claim records the loop's belief at the moment it decided to
             // submit, independent of whether the dispatch below actually succeeds.
-            if pending.tool_name == TICKET_SUBMIT {
+            if let (TICKET_SUBMIT, Some(ticket)) = (pending.tool_name.as_str(), &task.ticket) {
                 self.store.claim_goal_complete(
-                    &task.ticket,
+                    ticket,
                     submit_summary(&pending.input),
                     self.actor.clone(),
                 )?;
             }
             let ctx = CallContext {
                 authority: &effective_authority,
-                ticket: &task.ticket,
+                ticket: task.ticket.as_ref(),
                 session: &task.session,
                 actor: &self.actor,
                 clock: self.clock.as_ref(),
@@ -330,10 +330,12 @@ impl AgentLoop {
             at: self.clock.now(),
         };
 
-        if pending.tool_name == TICKET_SUBMIT {
-            if let ToolOutcome::Completed { .. } = &resolution {
+        if let (TICKET_SUBMIT, ToolOutcome::Completed { .. }, Some(ticket)) =
+            (pending.tool_name.as_str(), &resolution, &task.ticket)
+        {
+            {
                 steps.push(step);
-                let evidence = self.build_evidence(&task, &steps, &pending.input);
+                let evidence = self.build_evidence(&task, ticket, &steps, &pending.input);
                 let outcome = Ok(AgentOutcome::Submitted { evidence, steps });
                 self.finish_session(&task, &outcome)?;
                 return outcome;
@@ -416,7 +418,7 @@ impl AgentLoop {
     /// [`AgentLoop::budget_handoff_outcome`]).
     fn record_usage(&self, task: &AgentTask, spend: Spend) -> Result<()> {
         match self.store.record_usage(
-            Some(&task.ticket),
+            task.ticket.as_ref(),
             Some(&task.session),
             spend,
             self.actor.clone(),
@@ -452,12 +454,16 @@ impl AgentLoop {
         steps: Vec<StepRecord>,
         exhausted: BudgetDimension,
     ) -> Result<AgentOutcome> {
+        let Some(ticket) = &task.ticket else {
+            // No ticket, no lease to hand back: a ticketless chat turn just ends here.
+            return Ok(AgentOutcome::BudgetExhausted { steps, exhausted });
+        };
         if let Err(e) =
             self.store
-                .budget_handoff(&task.ticket, format!("{exhausted:?}"), self.actor.clone())
+                .budget_handoff(ticket, format!("{exhausted:?}"), self.actor.clone())
         {
             tracing::warn!(
-                ticket = %task.ticket,
+                ticket = %ticket,
                 error = %e,
                 "budget handoff failed; the ticket's lease will still expire on its own"
             );
@@ -505,7 +511,7 @@ impl AgentLoop {
                         })
                     }
                 };
-                EventDraft::new(self.actor.clone(), Id::from(task.ticket.clone()), payload)
+                EventDraft::new(self.actor.clone(), task.subject(), payload)
                     .with_session(task.session.clone())
             })
             .collect();
@@ -524,17 +530,21 @@ impl AgentLoop {
     /// [`AgentLoop::drive`] call without becoming a new way for an existing, unrelated test to
     /// fail.
     fn ensure_goal_set(&self, task: &AgentTask) -> Result<()> {
-        if self.store.goal_state(&task.ticket)?.is_some() {
+        // A ticketless chat turn has no ticket objective to seed a durable goal from.
+        let Some(ticket_id) = &task.ticket else {
+            return Ok(());
+        };
+        if self.store.goal_state(ticket_id)?.is_some() {
             return Ok(());
         }
         let Ok(view) = self.store.view() else {
             return Ok(());
         };
-        let Some(ticket) = view.tickets.get(&task.ticket) else {
+        let Some(ticket) = view.tickets.get(ticket_id) else {
             return Ok(());
         };
         self.store
-            .set_goal(&task.ticket, ticket.objective.clone(), self.actor.clone())?;
+            .set_goal(ticket_id, ticket.objective.clone(), self.actor.clone())?;
         Ok(())
     }
 
@@ -550,11 +560,14 @@ impl AgentLoop {
     /// `SectionKind::Goal` in the context pack) has a typed value to work from rather than needing
     /// to re-derive this same read.
     fn reorient_goal(&self, task: &AgentTask, at_step: u32) -> Result<Option<tm_core::GoalState>> {
-        let Some(state) = self.store.goal_state(&task.ticket)? else {
+        let Some(ticket) = &task.ticket else {
+            return Ok(None);
+        };
+        let Some(state) = self.store.goal_state(ticket)? else {
             return Ok(None);
         };
         self.store
-            .reorient_goal(&task.ticket, at_step, self.actor.clone())?;
+            .reorient_goal(ticket, at_step, self.actor.clone())?;
         Ok(Some(state))
     }
 
@@ -562,12 +575,19 @@ impl AgentLoop {
     /// once `task.ticket`'s total recorded event count has reached [`AgentLoop::
     /// max_events_per_ticket`], naming the exact counts in the returned detail string for
     /// [`AgentOutcome::Failed::detail`]; `None` while there is still room.
+    ///
+    /// A ticketless chat turn is exempt: the backstop guards runaway accumulation on one ticket
+    /// across many resumes, while a chat session legitimately accumulates events for as long as a
+    /// human keeps talking, and each of its turns is already bounded by [`AgentLoop::max_steps`].
     fn event_backstop_tripped(&self, task: &AgentTask) -> Result<Option<String>> {
-        let count = self.store.event_count_for(&Id::from(task.ticket.clone()))?;
+        let Some(ticket) = &task.ticket else {
+            return Ok(None);
+        };
+        let count = self.store.event_count_for(&Id::from(ticket.clone()))?;
         if count >= u64::from(self.max_events_per_ticket) {
             return Ok(Some(format!(
-                "event backstop tripped: {count} events already recorded against {} (ceiling {})",
-                task.ticket, self.max_events_per_ticket
+                "event backstop tripped: {count} events already recorded against {ticket} (ceiling {})",
+                self.max_events_per_ticket
             )));
         }
         Ok(None)
@@ -597,7 +617,7 @@ impl AgentLoop {
             closing_reminder: String::new(),
             extra: BTreeMap::new(),
         };
-        let rendered = crate::prompt::render(&task.ticket, &task.context_pack, &fragments);
+        let rendered = crate::prompt::render(task.ticket.as_ref(), &task.context_pack, &fragments);
 
         // Step 0 (`SPEC.md` §29, `docs/audit-2026-09-18-fable.md` B-09): seed the durable goal
         // from the ticket's own `objective` if this ticket has never had one set. Keyed off
@@ -804,9 +824,9 @@ impl AgentLoop {
                     if let Decision::NeedsApproval(reason) = decision {
                         self.store.append(vec![EventDraft::new(
                             self.actor.clone(),
-                            Id::from(task.ticket.clone()),
+                            task.subject(),
                             Payload::from(ApprovalRequestedPayload {
-                                ticket: Some(task.ticket.clone()),
+                                ticket: task.ticket.clone(),
                                 requested_of: self.actor.clone(),
                                 note: reason.clone(),
                             }),
@@ -836,9 +856,9 @@ impl AgentLoop {
                 // separation means a worker never marks its own work verified), means the claim
                 // stands even if the submission attempt itself then fails (e.g. empty evidence),
                 // which is honest: a claim is a claim, independent of whether it was accepted.
-                if name == TICKET_SUBMIT {
+                if let (TICKET_SUBMIT, Some(ticket)) = (name.as_str(), &task.ticket) {
                     self.store.claim_goal_complete(
-                        &task.ticket,
+                        ticket,
                         submit_summary(input),
                         self.actor.clone(),
                     )?;
@@ -852,7 +872,7 @@ impl AgentLoop {
                 let resolution = {
                     let ctx = CallContext {
                         authority: &effective_authority,
-                        ticket: &task.ticket,
+                        ticket: task.ticket.as_ref(),
                         session: &task.session,
                         actor: &self.actor,
                         clock: self.clock.as_ref(),
@@ -869,8 +889,10 @@ impl AgentLoop {
                     resolution: resolution.clone(),
                 });
 
-                if name == TICKET_SUBMIT {
-                    if let ToolOutcome::Completed { .. } = &resolution {
+                if let (TICKET_SUBMIT, ToolOutcome::Completed { .. }, Some(ticket)) =
+                    (name.as_str(), &resolution, &task.ticket)
+                {
+                    {
                         steps.push(StepRecord {
                             index: step_index,
                             served_by,
@@ -879,7 +901,7 @@ impl AgentLoop {
                             spend: step_spend,
                             at: self.clock.now(),
                         });
-                        let evidence = self.build_evidence(task, &steps, input);
+                        let evidence = self.build_evidence(task, ticket, &steps, input);
                         return Ok(AgentOutcome::Submitted { evidence, steps });
                     }
                 }
@@ -921,12 +943,13 @@ impl AgentLoop {
     fn build_evidence(
         &self,
         task: &AgentTask,
+        ticket: &TicketId,
         steps: &[StepRecord],
         submit_input: &serde_json::Value,
     ) -> crate::outcome::EvidenceBundle {
         let mut session = Session::new(
             task.session.clone(),
-            task.ticket.clone(),
+            ticket.clone(),
             task.harness_epoch,
             self.clock.now(),
         );
@@ -934,7 +957,7 @@ impl AgentLoop {
         let promotion = session.promote();
         let summary = submit_summary(submit_input);
         crate::outcome::EvidenceBundle {
-            ticket: task.ticket.clone(),
+            ticket: ticket.clone(),
             artifacts: promotion.artifacts,
             decisions: promotion.decisions,
             summary,
@@ -988,9 +1011,10 @@ pub(crate) fn rebuild_messages(task_prompt: &str, steps: &[StepRecord]) -> Vec<M
 
 /// [`rebuild_messages`] generalized over a chat [`Conversation`]. With `None` it is exactly
 /// [`rebuild_messages`]: the task prompt, then this run's steps. With `Some`, every earlier turn is
-/// replayed first (its user message, then its steps) and this turn's own user message precedes
-/// `steps`; the task prompt (the compiled context) rides along only on the very first user message
-/// of the conversation, so it is sent once rather than repeated every turn.
+/// replayed verbatim first (its user message, then its steps), then this turn's user message with
+/// the freshly compiled context (`task_prompt`) in front of it, then `steps`. Earlier turns are
+/// replayed without the context they were sent with: the history stays byte-stable from turn to
+/// turn (a cacheable prefix), and the context always matches what was just asked.
 pub(crate) fn rebuild_conversation(
     task_prompt: &str,
     conversation: Option<&Conversation>,
@@ -1003,32 +1027,20 @@ pub(crate) fn rebuild_conversation(
             push_step_messages(&mut messages, steps);
         }
         Some(conversation) => {
-            let mut first = true;
             for turn in &conversation.prior_turns {
-                push_user_text(
-                    &mut messages,
-                    chat_user_text(task_prompt, first, &turn.user_message),
-                );
-                first = false;
+                push_user_text(&mut messages, turn.user_message.clone());
                 push_step_messages(&mut messages, &turn.steps);
             }
-            push_user_text(
-                &mut messages,
-                chat_user_text(task_prompt, first, &conversation.user_message),
-            );
+            let current = if task_prompt.trim().is_empty() {
+                conversation.user_message.clone()
+            } else {
+                format!("{task_prompt}\n# Message\n{}", conversation.user_message)
+            };
+            push_user_text(&mut messages, current);
             push_step_messages(&mut messages, steps);
         }
     }
     messages
-}
-
-/// The text of one chat turn's user message: the compiled context prefixed only on the first.
-fn chat_user_text(task_prompt: &str, first: bool, user_message: &str) -> String {
-    if first && !task_prompt.is_empty() {
-        format!("{task_prompt}\n\n{user_message}")
-    } else {
-        user_message.to_string()
-    }
 }
 
 /// Append a user text block, folding it into the previous message when that one is already a user
@@ -1647,7 +1659,7 @@ mod tests {
                 provenance: Vec::new(),
             };
             AgentTask {
-                ticket: self.ticket.clone(),
+                ticket: Some(self.ticket.clone()),
                 context_pack: ContextPack {
                     sections: vec![section],
                     tokens: body.len() / 4,
@@ -1707,7 +1719,7 @@ mod tests {
             closing_reminder: String::new(),
             extra: BTreeMap::new(),
         };
-        let rendered = crate::prompt::render(&task.ticket, &task.context_pack, &fragments);
+        let rendered = crate::prompt::render(task.ticket.as_ref(), &task.context_pack, &fragments);
         let messages = rebuild_messages(&rendered.task, steps);
         CompletionRequest {
             system: Some(rendered.system),
@@ -2076,7 +2088,7 @@ mod tests {
         let effective_authority = agent_loop.authority().intersect(&task.authority);
         let ctx = CallContext {
             authority: &effective_authority,
-            ticket: &task.ticket,
+            ticket: task.ticket.as_ref(),
             session: &task.session,
             actor: &h.actor,
             clock: h.clock.as_ref(),
@@ -2242,7 +2254,7 @@ mod tests {
         let effective_authority = agent_loop.authority().intersect(&task.authority);
         let ctx = CallContext {
             authority: &effective_authority,
-            ticket: &task.ticket,
+            ticket: task.ticket.as_ref(),
             session: &task.session,
             actor: &h.actor,
             clock: h.clock.as_ref(),
@@ -2738,7 +2750,7 @@ mod tests {
                 provenance: Vec::new(),
             };
             AgentTask {
-                ticket: h.ticket.clone(),
+                ticket: Some(h.ticket.clone()),
                 context_pack: ContextPack {
                     sections: vec![section],
                     tokens: body.len() / 4,

@@ -161,6 +161,39 @@ seed one from; on budget exhaustion, produce `AgentOutcome::BudgetExhausted` dir
 `budget_handoff` call, since there's no lease to release). Still not attempted in this pass — see
 `AGENT_HANDOFF.md`'s architectural-gap section for the pointer.
 
+## Implemented, 2026-09-22
+
+The violation above is fixed, along with two worse bugs found on the way that the original
+write-up missed:
+
+- **Every message after the first was silently dropped.** `run_turn_streaming` only used the
+  prompt to create the scratch ticket, so turn 2+ re-sent turn 1's objective. The model never saw
+  what the user just said, and there was no conversation memory at all.
+- **A normal reply was reported as a failure.** With no `ticket.submit` possible from a `Draft`
+  scratch ticket, every everyday chat turn ended `failed (Other)`.
+
+What changed:
+- `AgentTask.conversation: Option<Conversation>` carries the turn's user message plus every prior
+  turn's message and steps. With it set, a turn that ends in plain text is
+  `AgentOutcome::Replied`. With it unset (scheduler and executor ticket work), behavior is
+  byte-for-byte unchanged.
+- `AgentTask.ticket` and `CallContext.ticket` are `Option`. Per the addendum above, usage records
+  against session and project scopes, and goal tracking and the per-ticket event backstop are
+  skipped. Budget exhaustion ends the turn without a lease handoff. Events land on the session as
+  their subject. Tools that inherently act on a ticket (`ticket.submit`, `evidence.attach`,
+  `ticket.comment` without an explicit id) refuse with a clear message. `ticket.create_child`
+  with no attached ticket creates a root ticket, which is how a session creates its first one.
+  The browser, computer, and pty session registries key on `(Option<TicketId>, SessionId)`.
+- `AgentSession` no longer creates a scratch ticket. It runs against the attached ticket if there
+  is one, and otherwise against `tm_context::compile_session`: retrieval and wiki hits for the
+  message, `AGENTS.md` conventions and skills, and an index of open tickets.
+- Acceptance test, as this document asked: `a_trivial_question_in_a_fresh_session_creates_no_ticket`
+  (`crates/tm-cli/src/agent.rs`). The pty-driven `tui_turn.rs` asserts the same through the real
+  binary.
+
+Still open: the plan-to-tickets decision point is guidance to the model, not a mechanism. The
+detach and reattach flow is unchanged.
+
 ## What this costs, stated plainly
 
 Fixing the violation above properly costs real kernel-touching engineering effort across
