@@ -31,7 +31,12 @@ fn discover_names(project: &Project) -> tm_types::Result<Vec<String>> {
         return Ok(vec![]);
     }
     let mut names: Vec<String> = fs::read_dir(&dir)
-        .map_err(|e| TmError::storage(format!("Failed to read {}: {e}", dir.display())))?
+        .map_err(|e| {
+            TmError::storage(format!(
+                "Couldn't read workflows directory {}: {e}",
+                dir.display()
+            ))
+        })?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
         .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
@@ -48,7 +53,7 @@ fn load(project: &Project, name: &str) -> tm_types::Result<(String, tm_workflow:
     let path = workflows_dir(project).join(format!("{name}.toml"));
     let source = fs::read_to_string(&path).map_err(|e| {
         TmError::storage(format!(
-            "Failed to read workflow {name:?} at {}: {e}",
+            "Couldn't read workflow {name:?} at {}: {e}",
             path.display()
         ))
     })?;
@@ -63,7 +68,7 @@ fn parse_params(entries: &[String]) -> tm_types::Result<BTreeMap<String, String>
     for entry in entries {
         let Some((key, value)) = entry.split_once('=') else {
             return Err(TmError::parse(format!(
-                "Invalid --param {entry:?}: expected KEY=VALUE"
+                "Invalid --param {entry:?}: expected KEY=VALUE, e.g. --param target=src/lib.rs"
             )));
         };
         out.insert(key.to_string(), value.to_string());
@@ -248,7 +253,7 @@ pub fn workflow_show(
         )?;
     } else {
         let pretty = toml::to_string_pretty(&def)
-            .map_err(|e| TmError::storage(format!("Failed to format workflow: {e}")))?;
+            .map_err(|e| TmError::storage(format!("Couldn't format workflow: {e}")))?;
         let mut human = pretty;
         if def.is_one_by_one() {
             human.push_str(
@@ -308,7 +313,7 @@ pub fn workflow_run(
             .collect::<Vec<_>>()
             .join("; ");
         return Err(TmError::invariant(format!(
-            "workflow {:?} expansion violates tm-core invariants: {detail}",
+            "Workflow {:?} can't run: {detail}",
             def.name
         )));
     }
