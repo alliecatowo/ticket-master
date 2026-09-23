@@ -783,7 +783,7 @@ impl App {
     /// the UI thread.
     fn provider_env_status(info: &tm_provider::ProviderInfo) -> String {
         if tm_provider::LOCAL_PROVIDER_IDS.contains(&info.id) {
-            "local (unprobed)".to_string()
+            "local, not checked".to_string()
         } else if info.is_configured() {
             "configured".to_string()
         } else {
@@ -835,8 +835,8 @@ impl App {
             self.chat.push_notice(
                 NoticeLevel::Success,
                 format!(
-                    "{} is already connected — the next turn can route to it. \
-                     Verify with `tm provider test {}` (one tiny billed call).",
+                    "{} is already connected. Run `tm provider test {}` to check it \
+                     (one small billed call).",
                     info.display_name, info.id
                 ),
             );
@@ -879,7 +879,7 @@ impl App {
         if configured.is_empty() && local.is_empty() {
             self.chat.push_notice(
                 NoticeLevel::Warning,
-                "No provider environment is set — /connect to add one.".to_string(),
+                "No provider is set up. Run /connect to add one.".to_string(),
             );
         } else {
             let mut line = String::new();
@@ -891,7 +891,7 @@ impl App {
                     line.push(' ');
                 }
                 line.push_str(&format!(
-                    "Local (unprobed — nothing here confirms a server is listening): {}.",
+                    "Local (not checked for a running server): {}.",
                     local.join(", ")
                 ));
             }
