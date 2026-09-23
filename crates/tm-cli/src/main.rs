@@ -135,15 +135,31 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
             let opened = project::open_bare(cli.global.project.as_deref(), renderer)?;
             let project = Arc::new(opened);
 
+            let resumed = match cli.resume.as_deref() {
+                Some("") => return agent::print_sessions(&project, renderer),
+                Some(id) => Some(agent::AgentSession::resume(
+                    project.clone(),
+                    *renderer,
+                    &tm_types::SessionId::new(id)?,
+                )?),
+                None if cli.continue_session => Some(agent::AgentSession::resume_latest(
+                    project.clone(),
+                    *renderer,
+                )?),
+                None => None,
+            };
+
             if let Some(prompt) = cli.prompt {
-                let mut session = agent::AgentSession::new(project, *renderer);
+                let mut session =
+                    resumed.unwrap_or_else(|| agent::AgentSession::new(project.clone(), *renderer));
                 return session.run_prompt(&prompt).await;
             }
 
             if tui::should_launch(&cli.global) {
-                tui::run(project).await
+                tui::run(project, resumed).await
             } else {
-                let mut session = agent::AgentSession::new(project, *renderer);
+                let mut session =
+                    resumed.unwrap_or_else(|| agent::AgentSession::new(project.clone(), *renderer));
                 session.run_interactive().await
             }
         }
@@ -317,6 +333,8 @@ mod tests {
                 project: None,
             },
             prompt: None,
+            continue_session: false,
+            resume: None,
             // `fresh: true` bypasses the D-003 Phase 1-C promotion check entirely (it never reads
             // `$TM_HOME`), keeping this test hermetic without an explicit `TM_HOME` override —
             // promotion itself is covered by `project.rs`'s own tests.
@@ -364,6 +382,8 @@ mod tests {
                 project: None,
             },
             prompt: None,
+            continue_session: false,
+            resume: None,
             command: Some(Command::Ticket(tm_cli::args::TicketCommand::List(
                 tm_cli::args::TicketListArgs {
                     state: None,
@@ -400,6 +420,8 @@ mod tests {
                 project: None,
             },
             prompt: None,
+            continue_session: false,
+            resume: None,
             command: Some(Command::Search(tm_cli::args::SearchArgs {
                 query: "test".to_string(),
                 mode: tm_cli::args::SearchMode::Hybrid,

@@ -644,22 +644,36 @@ pub fn build_conventions(ticket: &Ticket, ci: &CodeIntel, extra: &[String]) -> R
 /// Every `AGENTS.md` found for `claimed` paths, walking up from each path's directory to `root`
 /// (inclusive), deduplicated across paths that share an ancestor, in first-seen order. Pure
 /// aside from the filesystem reads themselves.
+/// Instruction files read from each directory, in this order: `AGENTS.md` (the cross-tool
+/// convention) and `CLAUDE.md`, so a repository set up for Claude Code works in `tm` unchanged
+/// (D-019).
+const INSTRUCTION_FILES: &[&str] = &["AGENTS.md", "CLAUDE.md"];
+
 fn discover_agents_md(root: &Path, claimed: &[String]) -> Vec<(String, String)> {
+    // Nothing claimed (a chat turn with no ticket) still means the project root's instructions.
+    let root_only = [String::new()];
+    let patterns: &[String] = if claimed.is_empty() {
+        &root_only
+    } else {
+        claimed
+    };
     let mut seen = HashSet::new();
     let mut found = Vec::new();
-    for pattern in claimed {
+    for pattern in patterns {
         for dir in ancestor_dirs(root, pattern) {
-            let candidate = dir.join("AGENTS.md");
-            let Ok(content) = std::fs::read_to_string(&candidate) else {
-                continue;
-            };
-            let rel = candidate
-                .strip_prefix(root)
-                .unwrap_or(&candidate)
-                .to_string_lossy()
-                .replace('\\', "/");
-            if seen.insert(rel.clone()) {
-                found.push((rel, content));
+            for name in INSTRUCTION_FILES {
+                let candidate = dir.join(name);
+                let Ok(content) = std::fs::read_to_string(&candidate) else {
+                    continue;
+                };
+                let rel = candidate
+                    .strip_prefix(root)
+                    .unwrap_or(&candidate)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if seen.insert(rel.clone()) {
+                    found.push((rel, content));
+                }
             }
         }
     }
@@ -941,6 +955,33 @@ mod tests {
             .provenance
             .iter()
             .any(|p| p.locator == "crates/tm-foo/AGENTS.md"));
+    }
+
+    #[test]
+    fn build_conventions_reads_root_agents_and_claude_md_even_with_no_claimed_paths() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(dir.path().join("AGENTS.md"), "ROOT-AGENTS: run cargo fmt\n")
+            .expect("write AGENTS.md");
+        std::fs::write(
+            dir.path().join("CLAUDE.md"),
+            "ROOT-CLAUDE: prefer small commits\n",
+        )
+        .expect("write CLAUDE.md");
+
+        let ci = CodeIntel::open(dir.path()).expect("open index");
+        // A chat turn with no ticket claims nothing at all.
+        let ticket = minimal_ticket("T-0", "what does this repo do?");
+        let section = build_conventions(&ticket, &ci, &[]);
+
+        assert!(section.body.contains("ROOT-AGENTS"), "{}", section.body);
+        assert!(
+            section.body.contains("ROOT-CLAUDE"),
+            "a Claude Code repository's CLAUDE.md applies too: {}",
+            section.body
+        );
+        let agents = section.body.find("ROOT-AGENTS").expect("agents");
+        let claude = section.body.find("ROOT-CLAUDE").expect("claude");
+        assert!(agents < claude, "AGENTS.md first, then CLAUDE.md");
     }
 
     #[test]

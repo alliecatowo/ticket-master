@@ -61,8 +61,9 @@ pub struct Conversation {
     pub prior_turns: Vec<ConversationTurn>,
 }
 
-/// One completed turn of a session's conversation.
-#[derive(Debug, Clone, PartialEq)]
+/// One completed turn of a session's conversation. Serializable so a conversation can be saved
+/// and resumed (`tm --continue`, `/resume`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConversationTurn {
     /// What the human said that turn.
     pub user_message: String,
@@ -114,6 +115,12 @@ pub enum AgentOutcome {
         /// Every step of the turn, including the final reply step.
         steps: Vec<StepRecord>,
     },
+    /// The human interrupted the turn (Esc in the TUI). Every step completed before the
+    /// interruption is kept; the step that was in flight is not.
+    Interrupted {
+        /// Steps completed before the interruption.
+        steps: Vec<StepRecord>,
+    },
     /// The task ended without submitting, for a reason other than budget exhaustion or
     /// approval suspension.
     Failed {
@@ -140,6 +147,7 @@ impl AgentOutcome {
         match self {
             AgentOutcome::Submitted { steps, .. }
             | AgentOutcome::Replied { steps, .. }
+            | AgentOutcome::Interrupted { steps }
             | AgentOutcome::BudgetExhausted { steps, .. }
             | AgentOutcome::AwaitingApproval { steps, .. }
             | AgentOutcome::Failed { steps, .. } => steps,
@@ -211,7 +219,7 @@ pub struct PendingApproval {
 /// This is the promoted, durable shape a fresh worker (or a human reviewing the run) can read
 /// without replaying the raw `tm_provider::Completion`; [`crate::session::Session`] is what
 /// turns a live conversation into a sequence of these.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StepRecord {
     /// 1-based index of this step within the run.
     pub index: u32,
@@ -229,7 +237,7 @@ pub struct StepRecord {
 }
 
 /// How one tool call within a [`StepRecord`] was resolved.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallRecord {
     /// The provider-assigned id correlating this call to its result.
     pub tool_use_id: String,
@@ -242,7 +250,8 @@ pub struct ToolCallRecord {
 }
 
 /// The outcome of one tool call, as recorded in the transcript.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
 pub enum ToolCallResolution {
     /// The tool ran and returned a result, inlined if small or referenced as an artifact if
     /// large.

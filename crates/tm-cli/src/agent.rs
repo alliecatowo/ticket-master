@@ -73,6 +73,273 @@ impl tm_pty::ArtifactSink for PtyArtifactSink {
     }
 }
 
+/// How far tm may go without asking. Shift+Tab in the TUI cycles these (D-019); `oversight.toml`
+/// still applies on top of every mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// The default: tm acts on its own and asks about nothing beyond `oversight.toml`.
+    #[default]
+    Auto,
+    /// Read-only: tm researches and proposes a plan, but can't edit files or run commands.
+    Plan,
+    /// tm asks before every edit, command, git operation, or keystroke into a pty.
+    Ask,
+}
+
+impl PermissionMode {
+    /// The next mode in the Shift+Tab cycle: auto, plan, ask, then auto again.
+    pub fn next(self) -> Self {
+        match self {
+            PermissionMode::Auto => PermissionMode::Plan,
+            PermissionMode::Plan => PermissionMode::Ask,
+            PermissionMode::Ask => PermissionMode::Auto,
+        }
+    }
+
+    /// Lowercase display name (`"auto"`, `"plan"`, `"ask"`).
+    pub fn label(self) -> &'static str {
+        match self {
+            PermissionMode::Auto => "auto",
+            PermissionMode::Plan => "plan",
+            PermissionMode::Ask => "ask",
+        }
+    }
+}
+
+/// Action classes [`PermissionMode::Ask`] asks about (prefixes, as in `oversight.toml`).
+const ASK_MODE_CLASSES: &[&str] = &["repository.write", "shell", "git", "pty", "computer"];
+
+/// What [`PermissionMode::Plan`] tells the model, appended to its system prompt.
+const PLAN_MODE_NOTE: &str = "Plan mode is on. You can read and search, but you cannot edit \
+files or run commands, and you should not try. Investigate what the request needs, then present \
+a concise, concrete plan (the files and changes, and how you will verify them) and stop. The user \
+will switch out of plan mode when they want it carried out.";
+
+/// A human's answer to a permission prompt, in Claude Code's three-choice form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalAnswer {
+    /// "Yes".
+    Yes,
+    /// "Yes, and don't ask again this session" (for this action class).
+    YesForSession,
+    /// "No, and tell tm what to do differently": `feedback` is what the model is told.
+    No {
+        /// The human's instruction, if they gave one.
+        feedback: Option<String>,
+    },
+}
+
+/// Answers permission prompts while a turn runs: the plain loop reads stdin, the TUI shows a
+/// prompt and waits for the human.
+#[async_trait::async_trait]
+pub trait Approver: Send {
+    /// Decide `pending`. `Err` aborts the turn.
+    async fn decide(&mut self, pending: &PendingApproval) -> tm_types::Result<ApprovalAnswer>;
+}
+
+/// An [`Approver`] over a plain yes/no function.
+pub struct SyncApprover<F>(pub F);
+
+#[async_trait::async_trait]
+impl<F> Approver for SyncApprover<F>
+where
+    F: FnMut(&PendingApproval) -> tm_types::Result<bool> + Send,
+{
+    async fn decide(&mut self, pending: &PendingApproval) -> tm_types::Result<ApprovalAnswer> {
+        Ok(if (self.0)(pending)? {
+            ApprovalAnswer::Yes
+        } else {
+            ApprovalAnswer::No { feedback: None }
+        })
+    }
+}
+
+/// Interrupts whatever turn a session is running (Esc in the TUI). Cloneable and usable without
+/// the session itself, which is locked for the whole turn; a no-op when nothing is running.
+#[derive(Debug, Clone, Default)]
+pub struct TurnInterrupter(Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>);
+
+impl TurnInterrupter {
+    /// Stop the running turn after the step in flight: its completed steps are kept and it ends
+    /// as `AgentOutcome::Interrupted`.
+    pub fn interrupt(&self) {
+        if let Ok(slot) = self.0.lock() {
+            if let Some(notify) = slot.as_ref() {
+                notify.notify_one();
+            }
+        }
+    }
+
+    fn arm(&self) -> Arc<tokio::sync::Notify> {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = Some(Arc::clone(&notify));
+        }
+        notify
+    }
+
+    fn disarm(&self) {
+        if let Ok(mut slot) = self.0.lock() {
+            *slot = None;
+        }
+    }
+}
+
+/// A shell command the human ran directly (`!` in the TUI), and what it printed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellRun {
+    /// The command line, as typed.
+    pub command: String,
+    /// Exit code (-1 when killed by a signal).
+    pub exit_code: i32,
+    /// Captured stdout.
+    pub stdout: String,
+    /// Captured stderr.
+    pub stderr: String,
+}
+
+/// One saved conversation, as `/resume` and `tm --resume` list them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SessionSummary {
+    /// The session id (`S-12`).
+    pub id: SessionId,
+    /// When it started.
+    pub started: Timestamp,
+    /// When its last turn finished.
+    pub updated: Timestamp,
+    /// How many turns it has.
+    pub turns: usize,
+    /// The first thing the human said.
+    pub first_message: String,
+    /// The last thing the human said.
+    pub last_message: String,
+}
+
+/// The on-disk form of a conversation: `<state_dir>/sessions/<id>.json`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct SavedSession {
+    schema: u32,
+    session: SessionId,
+    started: Timestamp,
+    updated: Timestamp,
+    #[serde(default)]
+    attached_ticket: Option<TicketId>,
+    #[serde(default)]
+    mode: PermissionMode,
+    turns: Vec<tm_agent::ConversationTurn>,
+}
+
+/// Every saved conversation in `project`, most recently active first.
+pub fn list_sessions(project: &Project) -> tm_types::Result<Vec<SessionSummary>> {
+    let dir = sessions_dir(project);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(saved) = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<SavedSession>(&bytes).ok())
+        else {
+            continue;
+        };
+        let message = |turn: Option<&tm_agent::ConversationTurn>| {
+            turn.map(|t| {
+                t.user_message
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .unwrap_or_default()
+        };
+        out.push(SessionSummary {
+            id: saved.session.clone(),
+            started: saved.started,
+            updated: saved.updated,
+            turns: saved.turns.len(),
+            first_message: message(saved.turns.first()),
+            last_message: message(saved.turns.last()),
+        });
+    }
+    out.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
+    Ok(out)
+}
+
+/// `tm --resume` with no id: the saved conversations, newest first, one line each (or JSON).
+pub fn print_sessions(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
+    let sessions = list_sessions(project)?;
+    let now = project.clock.now();
+    let human = if sessions.is_empty() {
+        "No saved conversations in this project yet.".to_string()
+    } else {
+        let mut lines: Vec<String> = sessions
+            .iter()
+            .map(|s| {
+                format!(
+                    "{:<6} {:>8}  {:>3} turn{}  {}",
+                    s.id.as_str(),
+                    format_age(now.seconds_since(s.updated)),
+                    s.turns,
+                    if s.turns == 1 { " " } else { "s" },
+                    s.first_message
+                )
+            })
+            .collect();
+        lines.push(String::new());
+        lines
+            .push("Resume one with `tm --resume <id>`, or the latest with `tm --continue`.".into());
+        lines.join("\n")
+    };
+    renderer.emit(&sessions, &human)
+}
+
+/// A compact "how long ago" (`12s`, `5m`, `3h`, `2d`).
+fn format_age(seconds: i64) -> String {
+    let s = seconds.max(0);
+    match s {
+        0..=59 => format!("{s}s ago"),
+        60..=3_599 => format!("{}m ago", s / 60),
+        3_600..=86_399 => format!("{}h ago", s / 3_600),
+        _ => format!("{}d ago", s / 86_400),
+    }
+}
+
+fn sessions_dir(project: &Project) -> std::path::PathBuf {
+    project.state_dir.join("sessions")
+}
+
+/// The message a direct shell command becomes in the conversation, so the next turn sees what
+/// the human ran and what it printed (Claude Code's `!` bash mode does the same).
+fn shell_context_message(run: &ShellRun) -> String {
+    let mut out = format!("<bash-input>{}</bash-input>\n", run.command);
+    out.push_str(&format!(
+        "<bash-exit-code>{}</bash-exit-code>\n",
+        run.exit_code
+    ));
+    if !run.stdout.is_empty() {
+        out.push_str(&format!(
+            "<bash-stdout>{}</bash-stdout>\n",
+            run.stdout.trim_end()
+        ));
+    }
+    if !run.stderr.is_empty() {
+        out.push_str(&format!(
+            "<bash-stderr>{}</bash-stderr>\n",
+            run.stderr.trim_end()
+        ));
+    }
+    out
+}
+
+/// What the conversation shows the model after a turn the human interrupted.
+const INTERRUPTED_MARKER: &str = "[Request interrupted by user]";
+
 /// One thing that happened while [`AgentSession::run_turn_streaming`] ran a turn, for a caller
 /// to reflect without owning [`AgentLoop`] itself. Deliberately small and independent of
 /// `tm-tui`'s own `tm_tui::event::AppMessage` (this crate is where `tm_agent`/`tm_core` types
@@ -123,6 +390,14 @@ pub struct AgentSession {
     /// A pre-built fabric to use instead of [`build_fabric`], for in-process tests that need to
     /// script a provider and inspect exactly what it was sent.
     fabric_override: Option<Arc<Fabric>>,
+    /// How far tm may go without asking.
+    mode: PermissionMode,
+    /// Action classes the human approved for the rest of this session.
+    approved_for_session: std::collections::BTreeSet<String>,
+    /// Stops the running turn from outside the session.
+    interrupter: TurnInterrupter,
+    /// When this conversation started (kept across `--resume`).
+    started: Timestamp,
 }
 
 impl AgentSession {
@@ -135,14 +410,157 @@ impl AgentSession {
         // panicking.
         let session = SessionId::new(session_id.as_str())
             .unwrap_or_else(|_| SessionId::new("S-0").expect("S-0 is a valid SessionId"));
+        let started = project.clock.now();
         AgentSession {
+            started,
             project,
             attached_ticket: None,
             renderer,
             session,
             conversation: Vec::new(),
             fabric_override: None,
+            mode: PermissionMode::default(),
+            approved_for_session: std::collections::BTreeSet::new(),
+            interrupter: TurnInterrupter::default(),
         }
+    }
+
+    /// Reopen a saved conversation (`tm --resume`, `/resume`): same session id, every earlier
+    /// turn replayed to the model, the same attached ticket and permission mode.
+    pub fn resume(
+        project: Arc<Project>,
+        renderer: Renderer,
+        session: &SessionId,
+    ) -> tm_types::Result<Self> {
+        let path = sessions_dir(&project).join(format!("{session}.json"));
+        let bytes =
+            std::fs::read(&path).map_err(|_| TmError::not_found("session", session.as_str()))?;
+        let saved: SavedSession = serde_json::from_slice(&bytes)?;
+        let mut resumed = AgentSession::new(project, renderer);
+        resumed.session = saved.session;
+        resumed.started = saved.started;
+        resumed.conversation = saved.turns;
+        resumed.mode = saved.mode;
+        resumed.attached_ticket = saved.attached_ticket;
+        Ok(resumed)
+    }
+
+    /// The most recently active saved conversation (`tm --continue`), if there is one.
+    pub fn resume_latest(project: Arc<Project>, renderer: Renderer) -> tm_types::Result<Self> {
+        let latest = list_sessions(&project)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| TmError::not_found("session", "(no saved conversations yet)"))?;
+        AgentSession::resume(project, renderer, &latest.id)
+    }
+
+    /// The permission mode turns run under.
+    pub fn mode(&self) -> PermissionMode {
+        self.mode
+    }
+
+    /// Change the permission mode for the following turns.
+    pub fn set_mode(&mut self, mode: PermissionMode) {
+        self.mode = mode;
+    }
+
+    /// A handle that interrupts this session's running turn (see [`TurnInterrupter`]). Take it
+    /// before the turn starts; it keeps working while the session is locked.
+    pub fn interrupter(&self) -> TurnInterrupter {
+        self.interrupter.clone()
+    }
+
+    /// The ticket the conversation is attached to, if any.
+    pub fn attached_ticket(&self) -> Option<&TicketId> {
+        self.attached_ticket.as_ref()
+    }
+
+    /// Stop working against the attached ticket; the conversation continues ticketless.
+    pub fn detach_ticket(&mut self) {
+        self.attached_ticket = None;
+        self.save_best_effort();
+    }
+
+    /// Run `command` directly in the project root (`!` in the TUI) and put the command and its
+    /// output into the conversation, so the next turn can refer to it.
+    pub async fn run_shell(&mut self, command: &str) -> tm_types::Result<ShellRun> {
+        let spec = CommandSpec {
+            argv: vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()],
+            cwd: self.project.root.display().to_string(),
+            env_allowlist: Vec::new(),
+            declared_inputs: Vec::new(),
+            cacheable: false,
+            ticket: self.attached_ticket.clone(),
+            session: Some(self.session.clone()),
+        };
+        let outcome = tokio::task::spawn_blocking(move || ProcessCommandExecutor.execute(&spec))
+            .await
+            .map_err(|e| TmError::Io(format!("shell command task failed: {e}")))??;
+        let run = ShellRun {
+            command: command.to_string(),
+            exit_code: outcome.exit_code,
+            stdout: String::from_utf8_lossy(&outcome.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&outcome.stderr).into_owned(),
+        };
+        self.conversation.push(tm_agent::ConversationTurn {
+            user_message: shell_context_message(&run),
+            steps: Vec::new(),
+        });
+        self.save_best_effort();
+        Ok(run)
+    }
+
+    /// Hand the conversation's work to a background worker (`/bg`): a ticket whose objective is
+    /// `instruction` (or, without one, the latest request) plus the recent conversation for
+    /// context, queued so the scheduler picks it up. The conversation itself carries on.
+    pub fn background(&mut self, instruction: Option<&str>) -> tm_types::Result<TicketId> {
+        let request = instruction
+            .map(str::to_string)
+            .or_else(|| {
+                self.conversation
+                    .iter()
+                    .rev()
+                    .find(|t| !t.user_message.starts_with('<') && !t.user_message.starts_with('['))
+                    .map(|t| t.user_message.clone())
+            })
+            .ok_or_else(|| {
+                TmError::conflict("nothing to hand off yet: say what the background work is")
+            })?;
+        let objective = background_objective(&request, &self.conversation);
+        let ticket = crate::tickets::create_worker_ticket(&self.project, &objective)?;
+        self.project
+            .store
+            .activate(&ticket, self.project.actor.clone())?;
+        Ok(ticket)
+    }
+
+    /// Save the conversation, logging rather than failing the turn if the disk write fails.
+    fn save_best_effort(&self) {
+        if let Err(e) = self.save() {
+            tracing::warn!(error = %e, session = %self.session, "failed to save the conversation");
+        }
+    }
+
+    fn save(&self) -> tm_types::Result<()> {
+        if self.conversation.is_empty() {
+            return Ok(());
+        }
+        let dir = sessions_dir(&self.project);
+        std::fs::create_dir_all(&dir)?;
+        let saved = SavedSession {
+            schema: 1,
+            session: self.session.clone(),
+            started: self.started,
+            updated: self.project.clock.now(),
+            attached_ticket: self.attached_ticket.clone(),
+            mode: self.mode,
+            turns: self.conversation.clone(),
+        };
+        let path = dir.join(format!("{}.json", self.session));
+        let tmp = dir.join(format!("{}.json.tmp", self.session));
+        std::fs::write(&tmp, serde_json::to_vec(&saved)?)?;
+        std::fs::rename(&tmp, &path)?;
+        Ok(())
     }
 
     /// Use `fabric` for every turn instead of building one from the environment.
@@ -401,8 +819,23 @@ impl AgentSession {
     pub(crate) async fn run_turn_streaming(
         &mut self,
         prompt: &str,
+        on_event: impl FnMut(TurnEvent),
+        approve: impl FnMut(&PendingApproval) -> tm_types::Result<bool> + Send,
+    ) -> tm_types::Result<AgentOutcome> {
+        self.run_turn_with(prompt, on_event, &mut SyncApprover(approve))
+            .await
+    }
+
+    /// [`AgentSession::run_turn_streaming`] with an async [`Approver`], so a UI can put a
+    /// permission prompt on screen and answer it with any of [`ApprovalAnswer`]'s three choices.
+    /// The turn honors the session's [`PermissionMode`] and can be stopped with
+    /// [`AgentSession::interrupter`]. Every finished turn (interrupted ones too) is appended to
+    /// the conversation and saved.
+    pub(crate) async fn run_turn_with(
+        &mut self,
+        prompt: &str,
         mut on_event: impl FnMut(TurnEvent),
-        mut approve: impl FnMut(&PendingApproval) -> tm_types::Result<bool>,
+        approver: &mut dyn Approver,
     ) -> tm_types::Result<AgentOutcome> {
         // `hooks.toml` is loaded once per turn and threaded through: `UserPromptSubmit` here,
         // `PreToolUse`/`PostToolUse` via `ToolRegistry::with_hooks` below, `Stop` at the end
@@ -518,7 +951,15 @@ impl AgentSession {
         )
         .with_hooks(hooks.clone());
 
-        let oversight = crate::dispatch::load_oversight(&self.project)?;
+        let mut oversight = crate::dispatch::load_oversight(&self.project)?;
+        if self.mode == PermissionMode::Ask {
+            oversight
+                .approval_required
+                .extend(ASK_MODE_CLASSES.iter().map(|c| c.to_string()));
+        }
+        oversight
+            .approved_for_session
+            .extend(self.approved_for_session.iter().cloned());
         let (step_tx, mut step_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut agent_loop = AgentLoop::new(
             fabric,
@@ -532,14 +973,22 @@ impl AgentSession {
             self.project.store.clone(),
         )
         .with_oversight(oversight)
-        .with_prompt_fragments(tm_agent::chat_fragments(
-            &self.chat_environment(ticket.as_ref()),
-        ))
+        .with_prompt_fragments({
+            let mut fragments = tm_agent::chat_fragments(&self.chat_environment(ticket.as_ref()));
+            if self.mode == PermissionMode::Plan {
+                fragments.closing_reminder = PLAN_MODE_NOTE.to_string();
+            }
+            fragments
+        })
         .with_step_sender(step_tx);
 
         let (authority, budget) = match &ticket {
             Some(ticket) => (ticket.authority.clone(), ticket.budget),
             None => (Authority::root(), session_turn_budget()),
+        };
+        let authority = match self.mode {
+            PermissionMode::Plan => authority.intersect(&plan_mode_authority()),
+            PermissionMode::Auto | PermissionMode::Ask => authority,
         };
         let task = AgentTask {
             ticket: ticket.as_ref().map(|t| t.id.clone()),
@@ -554,15 +1003,18 @@ impl AgentSession {
             }),
         };
 
+        let interrupt = self.interrupter.arm();
         let result = self
             .drive_turn_streaming(
                 &mut agent_loop,
                 task,
                 &mut step_rx,
+                &interrupt,
                 &mut on_event,
-                &mut approve,
+                approver,
             )
             .await;
+        self.interrupter.disarm();
 
         // Torn down on every path (success or `?` propagation inside `drive_turn_streaming`),
         // not just the happy one — see this method's doc comment.
@@ -592,6 +1044,13 @@ impl AgentSession {
                     user_message: prompt.to_string(),
                     steps: outcome.steps().to_vec(),
                 });
+                if matches!(outcome, AgentOutcome::Interrupted { .. }) {
+                    self.conversation.push(tm_agent::ConversationTurn {
+                        user_message: INTERRUPTED_MARKER.to_string(),
+                        steps: Vec::new(),
+                    });
+                }
+                self.save_best_effort();
             }
         }
 
@@ -609,12 +1068,19 @@ impl AgentSession {
         agent_loop: &mut AgentLoop,
         task: AgentTask,
         step_rx: &mut tokio::sync::mpsc::UnboundedReceiver<StepRecord>,
+        interrupt: &tokio::sync::Notify,
         on_event: &mut impl FnMut(TurnEvent),
-        approve: &mut impl FnMut(&PendingApproval) -> tm_types::Result<bool>,
+        approver: &mut dyn Approver,
     ) -> tm_types::Result<AgentOutcome> {
         let mut live = Vec::new();
-        let mut outcome =
-            report_steps_live(agent_loop.run(task.clone()), step_rx, &mut live, on_event).await?;
+        let mut outcome = report_steps_live(
+            agent_loop.run(task.clone()),
+            step_rx,
+            interrupt,
+            &mut live,
+            on_event,
+        )
+        .await?;
         loop {
             match outcome {
                 AgentOutcome::AwaitingApproval {
@@ -622,10 +1088,27 @@ impl AgentSession {
                     pending_call,
                 } => {
                     on_event(TurnEvent::AwaitingApproval(pending_call.clone()));
-                    let approved = approve(&pending_call)?;
+                    let denial = match approver.decide(&pending_call).await? {
+                        ApprovalAnswer::Yes => None,
+                        ApprovalAnswer::YesForSession => {
+                            // `reason` is the action class `Oversight::review` asked about.
+                            self.approved_for_session
+                                .insert(pending_call.reason.clone());
+                            agent_loop.approve_for_session(pending_call.reason.clone());
+                            None
+                        }
+                        ApprovalAnswer::No { feedback } => Some(match feedback {
+                            Some(feedback) if !feedback.trim().is_empty() => format!(
+                                "The user declined this action and said: {}",
+                                feedback.trim()
+                            ),
+                            _ => "The user declined this action.".to_string(),
+                        }),
+                    };
                     outcome = report_steps_live(
-                        agent_loop.resume(task.clone(), steps, pending_call, approved),
+                        agent_loop.resume_with(task.clone(), steps, pending_call, denial),
                         step_rx,
+                        interrupt,
                         &mut live,
                         on_event,
                     )
@@ -642,9 +1125,13 @@ impl AgentSession {
 /// as a cumulative [`TurnEvent::Steps`] the moment it arrives, so a front end shows progress
 /// while the turn is still going. `live` accumulates across an approval suspension and resume, so
 /// the whole turn reads as one growing transcript.
+///
+/// `interrupt` firing ends the turn as [`AgentOutcome::Interrupted`] with the steps completed so
+/// far; the in-flight provider call or tool dispatch is dropped at its next await point.
 async fn report_steps_live(
     run: impl std::future::Future<Output = tm_types::Result<AgentOutcome>>,
     step_rx: &mut tokio::sync::mpsc::UnboundedReceiver<StepRecord>,
+    interrupt: &tokio::sync::Notify,
     live: &mut Vec<StepRecord>,
     on_event: &mut impl FnMut(TurnEvent),
 ) -> tm_types::Result<AgentOutcome> {
@@ -656,6 +1143,12 @@ async fn report_steps_live(
                 live.push(step);
                 on_event(TurnEvent::Steps(live.clone()));
             }
+            _ = interrupt.notified() => {
+                while let Ok(step) = step_rx.try_recv() {
+                    live.push(step);
+                }
+                return Ok(AgentOutcome::Interrupted { steps: live.clone() });
+            }
             outcome = &mut run => {
                 while let Ok(step) = step_rx.try_recv() {
                     live.push(step);
@@ -665,6 +1158,54 @@ async fn report_steps_live(
             }
         }
     }
+}
+
+/// The objective `/bg` gives the ticket it creates: the request, then enough of the conversation
+/// for a worker with no other context to pick it up.
+fn background_objective(request: &str, conversation: &[tm_agent::ConversationTurn]) -> String {
+    const RECENT_TURNS: usize = 4;
+    const EXCERPT_CHARS: usize = 600;
+    let excerpt = |text: &str| -> String {
+        let text = text.trim();
+        if text.chars().count() <= EXCERPT_CHARS {
+            text.to_string()
+        } else {
+            let cut: String = text.chars().take(EXCERPT_CHARS).collect();
+            format!("{cut}…")
+        }
+    };
+    let mut out = request.trim().to_string();
+    let recent: Vec<&tm_agent::ConversationTurn> = conversation
+        .iter()
+        .rev()
+        .take(RECENT_TURNS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if !recent.is_empty() {
+        out.push_str("\n\nHanded off from an interactive conversation. Recent exchange:");
+        for turn in recent {
+            out.push_str(&format!("\n- user: {}", excerpt(&turn.user_message)));
+            if let Some(reply) = turn
+                .steps
+                .iter()
+                .rev()
+                .find_map(|s| s.assistant_text.as_deref())
+            {
+                out.push_str(&format!("\n- tm: {}", excerpt(reply)));
+            }
+        }
+    }
+    out
+}
+
+/// The authority [`PermissionMode::Plan`] narrows a turn to: read and search the repository,
+/// nothing else.
+fn plan_mode_authority() -> Authority {
+    let mut authority = Authority::none();
+    authority.repository.read = tm_types::PatternSet::all();
+    authority
 }
 
 /// A locally-parsed line from the interactive readline loop.
@@ -843,6 +1384,7 @@ fn outcome_result(outcome: &AgentOutcome) -> tm_types::Result<()> {
         AgentOutcome::BudgetExhausted { exhausted, .. } => Err(TmError::BudgetExhausted(
             format_budget_dimension(*exhausted).to_string(),
         )),
+        AgentOutcome::Interrupted { .. } => Err(TmError::TurnFailed("interrupted".to_string())),
         AgentOutcome::Replied { .. }
         | AgentOutcome::Submitted { .. }
         | AgentOutcome::AwaitingApproval { .. } => Ok(()),
@@ -875,6 +1417,7 @@ pub(crate) fn turn_result_json(
         AgentOutcome::Failed { class, detail, .. } => {
             ("failed", None, Some(format!("{class:?}: {detail}")))
         }
+        AgentOutcome::Interrupted { .. } => ("interrupted", None, None),
     };
     let tool_status = |r: &ToolCallResolution| match r {
         ToolCallResolution::Completed { .. } => ("ok", None),
@@ -940,6 +1483,7 @@ pub(crate) fn format_outcome_summary(outcome: &AgentOutcome) -> String {
             format!("budget exhausted: {}", format_budget_dimension(*exhausted))
         }
         AgentOutcome::Failed { class, detail, .. } => format!("failed ({class:?}): {detail}"),
+        AgentOutcome::Interrupted { .. } => "interrupted".to_string(),
         AgentOutcome::AwaitingApproval { pending_call, .. } => {
             format_pending_approval(pending_call)
         }
@@ -1496,6 +2040,376 @@ mod tests {
         );
     }
 
+    /// One scripted provider reply: text, or a single tool call. `Hang` never answers, so a test
+    /// can interrupt a turn while a provider call is in flight.
+    enum Scripted {
+        Text(&'static str),
+        Tool(&'static str, serde_json::Value),
+        Hang,
+    }
+
+    /// A provider that plays `script` in order (then answers "done" forever) and records every
+    /// request it was sent.
+    struct SequenceProvider {
+        script: std::sync::Mutex<std::collections::VecDeque<Scripted>>,
+        log: std::sync::Mutex<Vec<tm_provider::CompletionRequest>>,
+        clock: Arc<dyn Clock>,
+    }
+
+    #[async_trait::async_trait]
+    impl tm_provider::fabric::Provider for SequenceProvider {
+        fn id(&self) -> &str {
+            "mock"
+        }
+
+        async fn complete(
+            &self,
+            req: tm_provider::CompletionRequest,
+        ) -> Result<tm_provider::Completion, tm_provider::ProviderError> {
+            self.log.lock().unwrap().push(req);
+            let next = self.script.lock().unwrap().pop_front();
+            let (content, stop_reason) = match next {
+                Some(Scripted::Hang) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+                    unreachable!("a hanging call is always interrupted first")
+                }
+                Some(Scripted::Tool(name, input)) => {
+                    let n = self.log.lock().unwrap().len();
+                    (
+                        vec![tm_provider::ContentBlock::ToolUse {
+                            id: format!("call-{n}"),
+                            name: name.to_string(),
+                            input,
+                        }],
+                        tm_provider::StopReason::ToolUse,
+                    )
+                }
+                Some(Scripted::Text(text)) => (
+                    vec![tm_provider::ContentBlock::Text {
+                        text: text.to_string(),
+                    }],
+                    tm_provider::StopReason::EndTurn,
+                ),
+                None => (
+                    vec![tm_provider::ContentBlock::Text {
+                        text: "done".to_string(),
+                    }],
+                    tm_provider::StopReason::EndTurn,
+                ),
+            };
+            Ok(tm_provider::Completion {
+                model: ModelId::new("mock", "m1"),
+                candidates: vec![tm_provider::Candidate {
+                    content,
+                    stop_reason,
+                }],
+                usage: tm_provider::Usage {
+                    input_tokens: 10,
+                    output_tokens: 10,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                latency: std::time::Duration::from_millis(0),
+                received_at: self.clock.now(),
+            })
+        }
+
+        async fn embed(
+            &self,
+            _req: tm_provider::EmbedRequest,
+        ) -> Result<tm_provider::Embeddings, tm_provider::ProviderError> {
+            Err(tm_provider::ProviderError::MalformedResponse(
+                "embeddings are not scripted".into(),
+            ))
+        }
+    }
+
+    fn sequence_fabric(
+        clock: Arc<dyn Clock>,
+        script: Vec<Scripted>,
+    ) -> (Arc<Fabric>, Arc<SequenceProvider>) {
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("static role table parses");
+        let fabric = Fabric::new(table, clock.clone());
+        let provider = Arc::new(SequenceProvider {
+            script: std::sync::Mutex::new(script.into_iter().collect()),
+            log: std::sync::Mutex::new(Vec::new()),
+            clock,
+        });
+        fabric.register_provider(provider.clone());
+        (Arc::new(fabric), provider)
+    }
+
+    /// Every tool-result text block in `request`, joined.
+    fn tool_results(request: &tm_provider::CompletionRequest) -> String {
+        request
+            .messages
+            .iter()
+            .flat_map(|m| m.content.iter())
+            .filter_map(|b| match b {
+                tm_provider::ContentBlock::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .flat_map(|content| content.iter())
+            .filter_map(|b| match b {
+                tm_provider::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// An [`Approver`] that answers every prompt with `answer` and counts how often it was asked.
+    struct CountingApprover {
+        answer: ApprovalAnswer,
+        asked: Vec<PendingApproval>,
+    }
+
+    #[async_trait::async_trait]
+    impl Approver for CountingApprover {
+        async fn decide(&mut self, pending: &PendingApproval) -> tm_types::Result<ApprovalAnswer> {
+            self.asked.push(pending.clone());
+            Ok(self.answer.clone())
+        }
+    }
+
+    fn session_with(dir: &Path, script: Vec<Scripted>) -> (AgentSession, Arc<SequenceProvider>) {
+        let project = Arc::new(open_test_project(dir));
+        let (fabric, provider) = sequence_fabric(project.clock.clone(), script);
+        let session =
+            AgentSession::new(project, Renderer::from_flags(false, true, true)).with_fabric(fabric);
+        (session, provider)
+    }
+
+    #[tokio::test]
+    async fn ask_mode_asks_before_a_command_and_a_no_with_feedback_reaches_the_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut session, provider) = session_with(
+            dir.path(),
+            vec![
+                Scripted::Tool("shell.run", serde_json::json!({"command": "echo hi"})),
+                Scripted::Text("understood"),
+            ],
+        );
+        session.set_mode(PermissionMode::Ask);
+        let mut approver = CountingApprover {
+            answer: ApprovalAnswer::No {
+                feedback: Some("use printf instead".into()),
+            },
+            asked: Vec::new(),
+        };
+        let outcome = session
+            .run_turn_with("say hi", |_| {}, &mut approver)
+            .await
+            .expect("turn runs");
+
+        assert!(
+            matches!(outcome, AgentOutcome::Replied { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(approver.asked.len(), 1, "one command, one question");
+        assert!(
+            approver.asked[0].reason.starts_with("shell"),
+            "{:?}",
+            approver.asked[0]
+        );
+        let log = provider.log.lock().unwrap();
+        assert!(
+            tool_results(&log[1]).contains("use printf instead"),
+            "the human's words are what the model sees: {}",
+            tool_results(&log[1])
+        );
+    }
+
+    #[tokio::test]
+    async fn yes_for_the_session_stops_asking_about_that_kind_of_action() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut session, _provider) = session_with(
+            dir.path(),
+            vec![
+                Scripted::Tool("shell.run", serde_json::json!({"command": "echo one"})),
+                Scripted::Tool("shell.run", serde_json::json!({"command": "echo two"})),
+                Scripted::Text("ran both"),
+            ],
+        );
+        session.set_mode(PermissionMode::Ask);
+        let mut approver = CountingApprover {
+            answer: ApprovalAnswer::YesForSession,
+            asked: Vec::new(),
+        };
+        let outcome = session
+            .run_turn_with("run two things", |_| {}, &mut approver)
+            .await
+            .expect("turn runs");
+
+        assert_eq!(approver.asked.len(), 1, "asked once, then remembered");
+        let completed = outcome
+            .steps()
+            .iter()
+            .flat_map(|s| s.tool_calls.iter())
+            .filter(|c| matches!(c.resolution, ToolCallResolution::Completed { .. }))
+            .count();
+        assert_eq!(completed, 2, "both commands ran");
+    }
+
+    #[tokio::test]
+    async fn plan_mode_offers_only_read_tools_and_says_so() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut session, provider) = session_with(dir.path(), vec![Scripted::Text("a plan")]);
+        session.set_mode(PermissionMode::Plan);
+        session
+            .run_turn_streaming("plan the refactor", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+
+        let log = provider.log.lock().unwrap();
+        let offered: Vec<&str> = log[0].tools.iter().map(|t| t.name.as_str()).collect();
+        assert!(offered.contains(&"fs.read"), "{offered:?}");
+        for write in [
+            "edit.write_file",
+            "edit.apply_patch",
+            "shell.run",
+            "git.commit",
+        ] {
+            assert!(
+                !offered.contains(&write),
+                "{write} must not be offered in plan mode"
+            );
+        }
+        assert!(log[0]
+            .system
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Plan mode is on"));
+    }
+
+    #[tokio::test]
+    async fn interrupting_keeps_the_finished_steps_and_tells_the_model_next_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut session, provider) = session_with(
+            dir.path(),
+            vec![
+                Scripted::Tool("fs.list", serde_json::json!({"path": "."})),
+                Scripted::Hang,
+                Scripted::Text("ok"),
+            ],
+        );
+        let interrupter = session.interrupter();
+        let outcome = session
+            .run_turn_streaming(
+                "look around",
+                |event| {
+                    if let TurnEvent::Steps(steps) = event {
+                        if steps.len() == 1 {
+                            interrupter.interrupt();
+                        }
+                    }
+                },
+                |_| Ok(false),
+            )
+            .await
+            .expect("turn runs");
+
+        match &outcome {
+            AgentOutcome::Interrupted { steps } => assert_eq!(steps.len(), 1),
+            other => panic!("expected Interrupted, got {other:?}"),
+        }
+        session
+            .run_turn_streaming("never mind", |_| {}, |_| Ok(false))
+            .await
+            .expect("next turn runs");
+        let log = provider.log.lock().unwrap();
+        let last = request_text(log.last().expect("a request"));
+        assert!(last.contains(INTERRUPTED_MARKER), "{last}");
+        assert!(last.contains("never mind"));
+    }
+
+    #[tokio::test]
+    async fn conversations_are_saved_and_resume_exactly_where_they_left_off() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut session, _) = session_with(dir.path(), vec![Scripted::Text("noted")]);
+        session.set_mode(PermissionMode::Plan);
+        session
+            .run_turn_streaming("remember the word pelican", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+        let id = session.session_id().clone();
+        let project = session.project.clone();
+
+        let sessions = list_sessions(&project).expect("list");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, id);
+        assert_eq!(sessions[0].first_message, "remember the word pelican");
+
+        let resumed = AgentSession::resume(
+            project.clone(),
+            Renderer::from_flags(false, true, true),
+            &id,
+        )
+        .expect("resume");
+        assert_eq!(resumed.session_id(), &id);
+        assert_eq!(resumed.mode(), PermissionMode::Plan);
+        assert_eq!(resumed.conversation().len(), 1);
+
+        let (fabric, provider) =
+            sequence_fabric(project.clock.clone(), vec![Scripted::Text("pelican")]);
+        let mut resumed = resumed.with_fabric(fabric);
+        resumed
+            .run_turn_streaming("what was the word?", |_| {}, |_| Ok(false))
+            .await
+            .expect("resumed turn runs");
+        let log = provider.log.lock().unwrap();
+        assert!(request_text(&log[0]).contains("remember the word pelican"));
+    }
+
+    #[tokio::test]
+    async fn a_direct_shell_command_joins_the_conversation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut session, provider) = session_with(dir.path(), vec![Scripted::Text("seen it")]);
+        let run = session
+            .run_shell("echo tm-shell-check")
+            .await
+            .expect("shell runs");
+        assert_eq!(run.exit_code, 0);
+        assert_eq!(run.stdout.trim(), "tm-shell-check");
+
+        session
+            .run_turn_streaming("what did that print?", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+        let text = request_text(&provider.log.lock().unwrap()[0]);
+        assert!(
+            text.contains("<bash-input>echo tm-shell-check</bash-input>"),
+            "{text}"
+        );
+        assert!(text.contains("tm-shell-check</bash-stdout>"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn bg_hands_the_latest_request_to_a_queued_ticket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut session, _) = session_with(dir.path(), vec![Scripted::Text("sure")]);
+        assert!(session.background(None).is_err(), "nothing to hand off yet");
+        session
+            .run_turn_streaming("refactor the parser into modules", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+
+        let ticket = session.background(None).expect("handed off");
+        let view = session.project.store.view().expect("view");
+        let queued = &view.tickets[&ticket];
+        assert_eq!(queued.state, tm_core::TicketState::Ready);
+        assert!(queued
+            .objective
+            .starts_with("refactor the parser into modules"));
+        assert!(queued
+            .objective
+            .contains("Handed off from an interactive conversation"));
+        assert_eq!(queued.authority, Authority::worker());
+    }
+
     #[tokio::test]
     async fn a_turn_runs_against_the_attached_ticket_without_creating_another() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -1684,6 +2598,44 @@ mod tests {
     // No other test in this crate touches `DEVPASS_*`, but this lock guards against a future one
     // racing this test's env mutation under `cargo test`'s default multi-threaded runner (the
     // same convention `tm-provider`'s `frontier.rs` tests use).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_background_runner_works_queued_tickets_without_anything_else_running() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = Arc::new(open_test_project(dir.path()));
+        let ticket = crate::tickets::create_worker_ticket(&project, "write the changelog")
+            .expect("create ticket");
+        project
+            .store
+            .activate(&ticket, project.actor.clone())
+            .expect("activate");
+
+        let runner = {
+            let _guard = devpass_build_fabric_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            std::env::set_var(TEST_MOCK_PROVIDER_ENV, "1");
+            let runner = crate::sched::spawn_background_runner(
+                project.clone(),
+                std::time::Duration::from_millis(20),
+            );
+            std::env::remove_var(TEST_MOCK_PROVIDER_ENV);
+            runner.expect("runner starts")
+        };
+
+        // The mock model only ever replies in text, so the attempt ends without a submission
+        // and is retried; what matters here is that it was leased and attempted at all.
+        let mut attempts = 0;
+        for _ in 0..250 {
+            attempts = project.store.view().expect("view").tickets[&ticket].attempts;
+            if attempts >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        runner.abort();
+        assert!(attempts >= 1, "the queued ticket was never picked up");
+    }
+
     fn devpass_build_fabric_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))

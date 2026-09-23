@@ -266,6 +266,11 @@ pub struct Oversight {
     /// Spending more than this many micros in one action requires approval.
     #[serde(default)]
     pub spend_over_micros: Option<u64>,
+    /// Action classes a human has already approved for the rest of a session ("Yes, and don't
+    /// ask again"). Matched exactly or as a prefix, like `approval_required`; never persisted
+    /// in `oversight.toml`.
+    #[serde(default, skip_serializing)]
+    pub approved_for_session: BTreeSet<String>,
 }
 
 impl Oversight {
@@ -303,6 +308,7 @@ impl Oversight {
             .map(String::from)
             .collect(),
             spend_over_micros: Some(10_000_000),
+            approved_for_session: BTreeSet::new(),
         }
     }
 
@@ -315,10 +321,9 @@ impl Oversight {
             return base;
         }
         let class = action.class();
-        if self
-            .approval_required
-            .iter()
-            .any(|c| class == *c || class.starts_with(&format!("{c}.")))
+        let matches = |c: &String| class == *c || class.starts_with(&format!("{c}."));
+        if self.approval_required.iter().any(matches)
+            && !self.approved_for_session.iter().any(matches)
         {
             return Decision::NeedsApproval(class);
         }

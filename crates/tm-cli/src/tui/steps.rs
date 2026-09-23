@@ -223,6 +223,10 @@ pub(crate) fn outcome_notice(outcome: &AgentOutcome) -> (Option<(NoticeLevel, St
             )),
             true,
         ),
+        AgentOutcome::Interrupted { .. } => (
+            Some((NoticeLevel::Warning, "Interrupted.".to_string())),
+            false,
+        ),
         AgentOutcome::AwaitingApproval { pending_call, .. } => (
             Some((
                 NoticeLevel::Warning,

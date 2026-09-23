@@ -87,7 +87,7 @@ pub fn should_launch(global: &GlobalOpts) -> bool {
 ///
 /// Every submitted prompt runs through the exact same turn logic the plain `tm`/`tm -p` loop uses
 /// (`AgentSession::run_turn_streaming`) — see [`App::spawn_turn`].
-pub async fn run(project: Arc<Project>) -> tm_types::Result<()> {
+pub async fn run(project: Arc<Project>, resumed: Option<AgentSession>) -> tm_types::Result<()> {
     let view = project
         .store
         .view()
@@ -99,7 +99,9 @@ pub async fn run(project: Arc<Project>) -> tm_types::Result<()> {
 
     // `--quiet`/`--no-color`: the TUI never renders through `Renderer` (its own widgets own
     // presentation), but `AgentSession::new` still needs one to construct.
-    let agent_session = AgentSession::new(project.clone(), Renderer::from_flags(false, true, true));
+    let agent_session = resumed.unwrap_or_else(|| {
+        AgentSession::new(project.clone(), Renderer::from_flags(false, true, true))
+    });
     let session_id = agent_session.session_id().clone();
 
     let chat = ChatScreen::new(

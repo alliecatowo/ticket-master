@@ -85,6 +85,35 @@ to adopt; an unfamiliar one is a reason to leave. The ticket system is Ticketmas
 underneath, but the owner's bar is explicit: even with tickets ignored, `tm` has to be the best
 terminal coding harness, and that starts with parity with the one people already use.
 
+## Implemented: core (2026-09-22)
+
+These are the pieces the UI is built on, all in `crates/tm-cli/src/agent.rs` unless noted, and
+each has its own test.
+- **Interrupt.** `AgentSession::interrupter()` gives a `TurnInterrupter` that works while the
+  session is locked. The turn ends as `AgentOutcome::Interrupted` with its completed steps, and
+  the conversation records "[Request interrupted by user]" for the next turn.
+  `tm_provider::Fabric` now releases a cancelled call's concurrency slot. Before this, a single
+  interrupt wedged a long-lived fabric.
+- **Approvals answered from a UI.** `run_turn_with(prompt, on_event, &mut dyn Approver)` takes an
+  `ApprovalAnswer`: `Yes`, `YesForSession` (via `Oversight::approved_for_session` and
+  `AgentLoop::approve_for_session`), or `No { feedback }`. On `No`, the human's words are exactly
+  what the model sees, through `AgentLoop::resume_with`.
+- **Permission modes.** `PermissionMode::{Auto, Plan, Ask}` and `set_mode`. Plan narrows
+  authority to read-only and adds a plan-mode note to the system prompt; Ask requires approval for
+  writes, shell, git, pty, and computer use.
+- **Saved conversations.** Each conversation saves after every turn to
+  `<state_dir>/sessions/<id>.json`. `list_sessions` lists them, `AgentSession::resume` and
+  `resume_latest` reopen one, and on the CLI that's `tm -c/--continue` and `tm -r/--resume
+  [ID]` (no id lists them).
+- **`!` shell.** `run_shell` runs the command and adds it, with its output, to the conversation.
+- **`/bg`.** `background` creates and queues a worker ticket carrying the recent conversation.
+- **Background runner.** `crates/tm-cli/src/sched.rs::spawn_background_runner` runs the scheduler
+  inside the process.
+- **`CLAUDE.md` honored.** Every directory's `AGENTS.md` then `CLAUDE.md` is read. Separately, a
+  ticketless turn now gets the project root's instructions at all: before this, instructions were
+  only discovered from paths a ticket claimed, so chat saw none.
+- `-p` is no longer a global flag, so subcommand `--help` output stays uncluttered.
+
 ## What this costs, stated plainly
 
 - It's a lot of surface. Several items need new core support: cancelling a turn mid-flight,

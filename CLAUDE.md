@@ -142,6 +142,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   feature and the env var are required. As of D-010, this exports nothing yet in practice: the
   OTel layer is span-shaped and this workspace has zero `#[instrument]`/`*_span!` call sites, only
   bare `tracing::info!`/`debug!` events — adding real instrumentation is a separate follow-up.
+- Conversations are saved per project: `tm -c` continues the latest, `tm -r` lists saved ones,
+  `tm -r S-12` resumes one (D-019). The TUI runs the scheduler in-process while open
+  (`sched::spawn_background_runner`), so tickets it queues get worked.
 - `tm -p "<prompt>"` is the scriptable one-shot chat turn: exit 0 on a reply, 2 when the agent
   failed the task (`TmError::TurnFailed`), 4 when it ran out of budget; `--json -p` prints one
   result object (outcome, text, model, tokens, steps). Chatting never creates a ticket (D-017).

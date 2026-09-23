@@ -196,6 +196,49 @@ pub async fn sched_run(
     Ok(())
 }
 
+/// Run the scheduler inside this process, the way `tm`'s TUI does while it is open, so tickets
+/// dispatched from it actually get worked without anyone starting `tm sched run` (D-019; Claude
+/// Code's agent view has a supervisor daemon for the same reason). It ticks every `interval`,
+/// honors `tm sched pause`, and logs through `tracing` only, never the terminal a TUI is drawing
+/// on. Leases keep it from double-working a ticket a separate `tm sched run` or `tm serve` is
+/// also running. Stops when the returned handle is aborted or the runtime shuts down.
+///
+/// # Errors
+/// Fails up front if the dispatcher can't be built (typically: no provider configured).
+pub fn spawn_background_runner(
+    project: std::sync::Arc<Project>,
+    interval: Duration,
+) -> tm_types::Result<tokio::task::JoinHandle<()>> {
+    let dispatcher =
+        crate::dispatch::build_dispatcher(&project, tokio::runtime::Handle::current(), None)?;
+    Ok(tokio::spawn(async move {
+        let mut policy = tm_scheduler::SchedulingPolicy::conservative_default();
+        policy.available_roles = tm_types::Role::ALL.iter().copied().collect();
+        let loop_driver =
+            tm_scheduler::SchedulerLoop::new(&project.store, project.clock.clone(), policy)
+                .with_dispatcher(dispatcher);
+        let mut timer = tokio::time::interval(interval);
+        loop {
+            timer.tick().await;
+            match is_scheduler_paused(&project) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "background runner could not read the pause flag");
+                    continue;
+                }
+            }
+            match loop_driver.tick(project.actor.clone()) {
+                Ok(events) if !events.is_empty() => {
+                    tracing::debug!(events = events.len(), "background runner tick");
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "background runner tick failed"),
+            }
+        }
+    }))
+}
+
 /// `tm sched pause`: stop granting new leases; admitted work continues.
 pub fn sched_pause(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let paused_path = pause_flag_path(project);
