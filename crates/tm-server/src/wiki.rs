@@ -30,7 +30,9 @@ pub const WIKI_DIR: &str = "docs/wiki";
 fn resolve_rel_path(requested: &str) -> Result<PathBuf, ServerError> {
     let requested = requested.trim_start_matches('/');
     if requested.is_empty() {
-        return Err(ServerError::BadRequest("empty wiki path".to_string()));
+        return Err(ServerError::BadRequest(
+            "Wiki path is required.".to_string(),
+        ));
     }
 
     let mut rel = PathBuf::new();
@@ -39,7 +41,7 @@ fn resolve_rel_path(requested: &str) -> Result<PathBuf, ServerError> {
             Component::Normal(part) => rel.push(part),
             _ => {
                 return Err(ServerError::BadRequest(format!(
-                    "invalid wiki path: {requested}"
+                    "Invalid wiki path: {requested}"
                 )))
             }
         }
