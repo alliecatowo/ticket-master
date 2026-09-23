@@ -66,7 +66,8 @@ fn config_table(project: &Project) -> Result<toml::Table, String> {
     let config = load_harness_config(project)?;
     let serialized =
         toml::to_string(&config).map_err(|e| format!("Could not serialize config: {e}"))?;
-    toml::from_str::<toml::Table>(&serialized).map_err(|e| format!("Bad config shape: {e}"))
+    toml::from_str::<toml::Table>(&serialized)
+        .map_err(|e| format!("Could not read the config: {e}"))
 }
 
 /// Look `dotted` up in `doc`.
@@ -125,7 +126,7 @@ pub fn dashboard(
             out.push((
                 NoticeLevel::Info,
                 if fast.is_empty() {
-                    "coder.fast routes nowhere.".to_string()
+                    "coder.fast has no route configured.".to_string()
                 } else {
                     format!("coder.fast → {}", fast.join(", "))
                 },
@@ -219,7 +220,10 @@ pub fn config_set(project: &Project, key: &str, value: &str) -> (NoticeLevel, St
     match tm_harness::HarnessConfig::parse(&reserialized) {
         Ok(updated) => {
             if let Err(e) = updated.validate() {
-                return (NoticeLevel::Warning, format!("Validation failed: {e:?}"));
+                return (
+                    NoticeLevel::Warning,
+                    format!("{key} failed validation: {e:?}"),
+                );
             }
             (
                 NoticeLevel::Success,
