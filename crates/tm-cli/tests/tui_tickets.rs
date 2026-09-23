@@ -355,7 +355,7 @@ fn ctrl_x_twice_cancels_the_selected_ticket() {
 }
 
 #[test]
-fn a_accepts_and_r_rejects_a_ready_for_review_ticket() {
+fn a_review_tickets_peek_accepts_with_1_and_rejects_with_2() {
     let s = seed();
     let tm_home = tempfile::tempdir().expect("tempdir");
     let mut pty = spawn_tickets(s.dir.path(), tm_home.path(), true);
@@ -365,16 +365,18 @@ fn a_accepts_and_r_rejects_a_ready_for_review_ticket() {
     // omega), then the next (alpha).
     pty.write(DOWN).expect("Down");
     pty.write(DOWN).expect("Down");
-    let screen = pty.wait_for("a to accept", Duration::from_secs(10));
-    assert!(has(&screen, "r to reject"), "{screen:#?}");
-    pty.write(b"a").expect("a");
+    let _ = pty.wait_for("space to review", Duration::from_secs(10));
+    pty.write(b" ").expect("Space");
+    let screen = pty.wait_for("1 to accept", Duration::from_secs(10));
+    assert!(has(&screen, "2. Reject"), "{screen:#?}");
+    pty.write(b"1").expect("1");
     let state = wait_state(s.dir.path(), &s.second_review, |st| {
         st == TicketState::Closed
     });
     assert_eq!(
         state,
         TicketState::Closed,
-        "`a` accepts the selected submission"
+        "`1` accepts the selected submission"
     );
     let _ = pty.wait_for("Accepted T-", Duration::from_secs(10));
 
@@ -390,13 +392,20 @@ fn a_accepts_and_r_rejects_a_ready_for_review_ticket() {
     for _ in 0..10 {
         pty.write(b"\x1b[A").expect("Up");
         let screen = pty.settle(Duration::from_millis(200), Duration::from_secs(2));
-        if has(&screen, "a to accept") {
+        // The peek may still be open from the accept above.
+        if has(&screen, "space to review") {
+            pty.write(b" ").expect("Space");
+            on_review = true;
+            break;
+        }
+        if has(&screen, "2 to reject") {
             on_review = true;
             break;
         }
     }
     assert!(on_review, "walking up reaches the remaining review row");
-    pty.write(b"r").expect("r");
+    let _ = pty.wait_for("2 to reject", Duration::from_secs(10));
+    pty.write(b"2").expect("2");
     let screen = pty.wait_for("Why reject", Duration::from_secs(10));
     assert!(
         has(&screen, &format!("Why reject {}?", s.review)),
@@ -406,7 +415,7 @@ fn a_accepts_and_r_rejects_a_ready_for_review_ticket() {
     let _ = pty.wait_for("tests skip the flaky path", Duration::from_secs(5));
     pty.write(b"\r").expect("Enter");
     let state = wait_state(s.dir.path(), &s.review, |st| st != TicketState::Submitted);
-    assert_ne!(state, TicketState::Submitted, "`r` + reason rejects it");
+    assert_ne!(state, TicketState::Submitted, "`2` + reason rejects it");
     let store = Store::open(s.dir.path()).expect("reopen");
     let ticket = store.view().expect("view").tickets[&s.review].clone();
     assert!(
