@@ -221,10 +221,14 @@ pub(crate) fn load_oversight(project: &Project) -> tm_types::Result<Oversight> {
 /// current directory, [`AcpExecutor`]'s `cwd` and the dispatcher's snapshot `repo_root` both stay
 /// `project.root`. Retrieval (`ProjectContextPackSource`'s `CodeIntel`) is deliberately *not*
 /// affected either way — see that struct's construction below.
+///
+/// `steps`, when `Some`, receives every step of every builtin-executed run as it happens (`tm
+/// run`'s live progress).
 pub fn build_dispatcher(
     project: &Project,
     handle: tokio::runtime::Handle,
     exec_root: Option<&Path>,
+    steps: Option<tokio::sync::mpsc::UnboundedSender<tm_agent::StepRecord>>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
     let exec_root = exec_root.unwrap_or(project.root.as_path());
     let fabric = build_fabric(project.clock.clone())?;
@@ -254,6 +258,9 @@ pub fn build_dispatcher(
     // override requested" and "override to project.root" must stay distinguishable.
     if exec_root != project.root.as_path() {
         builtin_executor = builtin_executor.with_root(exec_root.to_path_buf());
+    }
+    if let Some(steps) = steps {
+        builtin_executor = builtin_executor.with_step_sender(steps);
     }
     let builtin = Arc::new(builtin_executor);
 
