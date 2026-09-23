@@ -53,6 +53,7 @@ pub struct Price {
 /// One entry in a role's ordered candidate list: a concrete `(provider, model)` plus its
 /// operating envelope for this role.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RoleCandidate {
     /// The provider slug, matching a [`crate::fabric::Fabric`] registration, e.g. `"anthropic"`.
     pub provider: String,
@@ -319,10 +320,11 @@ impl RoleTable {
 
             let candidates = match role {
                 Role::Embedder => {
-                    // Embedding model: single candidate, no fallback
+                    // Anthropic has no embedding endpoint. Use a provider whose declared
+                    // capabilities match this role instead of advertising a fictitious model.
                     vec![RoleCandidate {
-                        provider: "anthropic".to_string(),
-                        model: "claude-embed-v1".to_string(),
+                        provider: "openai".to_string(),
+                        model: "text-embedding-3-small".to_string(),
                         max_concurrency: 100,
                         degraded_ok: false,
                         price: None,
@@ -561,6 +563,14 @@ mod tests {
     }
 
     #[test]
+    fn embedder_default_uses_a_real_embedding_backend() {
+        let table = RoleTable::default_table_with(None);
+        let candidate = &table.candidates_for(Role::Embedder)[0];
+        assert_eq!(candidate.provider, "openai");
+        assert_eq!(candidate.model, "text-embedding-3-small");
+    }
+
+    #[test]
     fn unknown_role_is_rejected() {
         let err = RoleTable::parse("[not_a_role]\ncandidates = []\n").unwrap_err();
         assert!(matches!(err, RoleConfigError::UnknownRole(_)));
@@ -627,6 +637,20 @@ candidates = [
     fn malformed_toml_rejected() {
         let toml = "[invalid toml";
         let err = RoleTable::parse(toml).unwrap_err();
+        assert!(matches!(err, RoleConfigError::InvalidToml(_)));
+    }
+
+    #[test]
+    fn typoed_candidate_policy_is_rejected_instead_of_ignored() {
+        let err = RoleTable::parse(
+            r#"
+[coder.fast]
+candidates = [
+  { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1, degraded_okk = true }
+]
+"#,
+        )
+        .expect_err("unknown policy keys must not silently take defaults");
         assert!(matches!(err, RoleConfigError::InvalidToml(_)));
     }
 
@@ -767,9 +791,12 @@ candidates = [
         assert_eq!(coder_fast[1].model, "claude-haiku-4-5");
         assert!(coder_fast[1].degraded_ok);
 
-        // Broader invariant: with no DevPass model, *every* candidate of *every* role is still
-        // Anthropic — nothing else about `default_table` moved.
+        // All non-embedding roles retain their Anthropic defaults; embeddings use OpenAI because
+        // Anthropic does not expose the embedding capability.
         for role in Role::ALL {
+            if role == Role::Embedder {
+                continue;
+            }
             for candidate in table.candidates_for(role) {
                 assert_eq!(
                     candidate.provider, "anthropic",
@@ -798,7 +825,7 @@ candidates = [
 
         // Every other role is completely unaffected: still all-Anthropic.
         for role in Role::ALL {
-            if role == Role::CoderFast {
+            if matches!(role, Role::CoderFast | Role::Embedder) {
                 continue;
             }
             for candidate in table.candidates_for(role) {

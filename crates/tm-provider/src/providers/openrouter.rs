@@ -220,6 +220,11 @@ impl GithubModelsProvider {
                         "GitHub PAT or Actions token scoped for GitHub Models (or GITHUB_MODELS_TOKEN)",
                 },
                 EnvVarRequirement {
+                    name: "GITHUB_MODELS_TOKEN",
+                    required: false,
+                    description: "Alternative token name when GITHUB_TOKEN is unset",
+                },
+                EnvVarRequirement {
                     name: "GITHUB_MODELS_BASE_URL",
                     required: false,
                     description: "Override the default https://models.github.ai/inference",

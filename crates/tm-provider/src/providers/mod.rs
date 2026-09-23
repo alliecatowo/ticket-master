@@ -120,10 +120,16 @@ impl ProviderInfo {
             let alias = std::env::var("GITHUB_MODELS_TOKEN").ok();
             return openrouter::github_models_token(primary.as_deref(), alias.as_deref()).is_some();
         }
+        // Gemini's constructor deliberately accepts a common alternate credential name too. Keep
+        // detection in sync so a valid alias is not reported as missing configuration.
+        if self.id == "gemini" && std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty())
+        {
+            return true;
+        }
         self.env_vars
             .iter()
             .filter(|v| v.required)
-            .all(|v| std::env::var(v.name).is_ok())
+            .all(|v| std::env::var(v.name).is_ok_and(|value| !value.trim().is_empty()))
     }
 }
 
@@ -153,6 +159,9 @@ pub enum Availability {
     /// listening. Only reachable for the three [`LOCAL_PROVIDER_IDS`] backends today — every
     /// other backend has no probe, so it can never land here.
     ConfiguredButUnreachable,
+    /// Configuration exists, but this backend cannot currently construct a usable provider.
+    /// Used by integrations for explicitly stubbed backends such as Bedrock before SigV4 exists.
+    Unusable,
     /// Configured, and reachable when a probe applies.
     Ready,
 }
@@ -255,10 +264,12 @@ mod availability_tests {
     fn local_probe_reachable_is_true_for_anything_but_unreachable() {
         assert!(!LocalProbe::Unreachable.reachable());
         assert!(LocalProbe::ReachableNoModels.reachable());
-        assert!(LocalProbe::Ready {
-            first_model: "llama3".to_string()
-        }
-        .reachable());
+        assert!(
+            LocalProbe::Ready {
+                first_model: "llama3".to_string()
+            }
+            .reachable()
+        );
     }
 
     #[test]
