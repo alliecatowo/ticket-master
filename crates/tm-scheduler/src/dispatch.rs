@@ -292,6 +292,13 @@ async fn run_and_report(
     ttl_seconds: u32,
     repo_root: Option<PathBuf>,
 ) {
+    let harness_epoch = match store.harness_epochs() {
+        Ok(epochs) => epochs.last().map_or(0, |epoch| epoch.epoch),
+        Err(error) => {
+            tracing::warn!(%ticket, error = %error, "could not read promoted harness epoch; using genesis epoch");
+            0
+        }
+    };
     let pack = match context.compile(&ticket) {
         Ok(pack) => pack,
         Err(e) => {
@@ -340,7 +347,7 @@ async fn run_and_report(
         context_pack: pack,
         authority: t.authority.clone(),
         budget: t.budget,
-        harness_epoch: 0,
+        harness_epoch,
         actor: holder.clone(),
         session: None,
     };

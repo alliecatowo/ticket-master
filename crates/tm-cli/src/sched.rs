@@ -364,7 +364,7 @@ pub fn lease_list(
             .collect(),
     );
 
-    renderer.emit(&leases, &table.render())
+    renderer.emit(&leases, &table.render_colored(renderer.color_enabled()))
 }
 
 /// `tm lease acquire`
@@ -454,6 +454,11 @@ pub async fn run_ticket(
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
+    if let Some(role) = &args.role {
+        return Err(tm_types::TmError::InvalidTransition(format!(
+            "--role is not supported yet (requested `{role}`); ticket executor requirements remain authoritative"
+        )));
+    }
     start_notification_watcher(project);
 
     let ticket = TicketId::new(&args.ticket)?;
