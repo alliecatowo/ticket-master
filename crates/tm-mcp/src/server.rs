@@ -190,7 +190,7 @@ fn get_limit(args: &Value) -> usize {
 fn get_str<'a>(args: &'a Value, field: &str) -> Result<&'a str> {
     args.get(field)
         .and_then(Value::as_str)
-        .ok_or_else(|| TmError::parse(format!("missing or non-string field `{field}`")))
+        .ok_or_else(|| TmError::parse(format!("`{field}` is required and must be a string")))
 }
 
 /// One opened Ticketmaster project, exposed as an MCP server.
@@ -270,7 +270,9 @@ impl McpServer {
         if let Some(state_str) = args.get("state").and_then(Value::as_str) {
             let target: tm_core::TicketState =
                 serde_json::from_value(Value::String(state_str.to_string())).map_err(|_| {
-                    TmError::parse(format!("unrecognized ticket state {state_str:?}"))
+                    TmError::parse(format!(
+                        "unknown ticket state `{state_str}`: expected one of draft, blocked, ready, leased, running, submitted, verifying, auditing, rework, replan, recovery, escalated, closed, cancelled"
+                    ))
                 })?;
             tickets.retain(|t| t.state == target);
         }
@@ -308,7 +310,7 @@ impl McpServer {
     fn ticket_dispatch(&self, args: &Value) -> Result<Value> {
         let objective = get_str(args, "objective")?.trim();
         if objective.is_empty() {
-            return Err(TmError::parse("`objective` must not be empty"));
+            return Err(TmError::parse("`objective` can't be empty"));
         }
         let actor = self.dispatch_actor();
         let events = self.store.create_ticket(
@@ -432,7 +434,7 @@ impl McpServer {
             "symbol_def" => self.symbol_def(args),
             "symbol_outline" => self.symbol_outline(args),
             other => Err(TmError::invariant(format!(
-                "execute_tool called with unvalidated tool name `{other}`"
+                "internal error: tool `{other}` was dispatched without being validated first"
             ))),
         }
     }
