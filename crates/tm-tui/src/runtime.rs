@@ -115,19 +115,19 @@ fn teardown_terminal(mouse_enabled: bool) {
     let mut stdout = io::stdout();
     if mouse_enabled {
         if let Err(err) = execute!(stdout, DisableMouseCapture) {
-            eprintln!("tm-tui: failed to disable mouse capture during teardown: {err}");
+            eprintln!("tm: couldn't turn off mouse capture while closing: {err}");
         }
     }
     // Always sent, whether or not enabling it succeeded: disabling an already-disabled mode is a
     // no-op on every terminal, and leaving it on would wrap the shell's next paste in markers.
     if let Err(err) = execute!(stdout, DisableBracketedPaste) {
-        eprintln!("tm-tui: failed to disable bracketed paste during teardown: {err}");
+        eprintln!("tm: couldn't turn off bracketed paste while closing: {err}");
     }
     if let Err(err) = execute!(stdout, LeaveAlternateScreen) {
-        eprintln!("tm-tui: failed to leave alternate screen during teardown: {err}");
+        eprintln!("tm: couldn't restore your normal terminal screen: {err}");
     }
     if let Err(err) = terminal::disable_raw_mode() {
-        eprintln!("tm-tui: failed to disable raw mode during teardown: {err}");
+        eprintln!("tm: couldn't restore normal terminal mode: {err}");
     }
 }
 
@@ -294,7 +294,7 @@ impl Runtime {
             let resume = Arc::clone(&resume);
             tokio::spawn(async move {
                 if let Err(err) = install_signal_handlers(shutdown, resume, mouse_enabled).await {
-                    eprintln!("tm-tui: signal handler task exited: {err}");
+                    eprintln!("tm: signal handling stopped working: {err}");
                 }
             });
         }
@@ -591,12 +591,12 @@ pub async fn install_signal_handlers(
                 // resume, which the `sigcont` branch below picks up to redraw; there is
                 // deliberately no redraw/setup logic here to avoid doing it twice.
                 if let Err(err) = send_signal_to_self(SIGSTOP) {
-                    eprintln!("tm-tui: failed to stop the process for SIGTSTP: {err}");
+                    eprintln!("tm: couldn't suspend (Ctrl+Z): {err}");
                 }
             }
             _ = sigcont.recv() => {
                 if let Err(err) = setup_terminal(mouse_enabled) {
-                    eprintln!("tm-tui: failed to re-enter the terminal after SIGCONT: {err}");
+                    eprintln!("tm: couldn't resume the terminal after Ctrl+Z: {err}");
                 }
                 // Same `notify_one` reasoning as `shutdown` above: `resume`'s listener is also
                 // rebuilt every loop iteration.
