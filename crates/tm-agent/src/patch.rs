@@ -17,8 +17,10 @@ use tm_core::artifact::hash_bytes;
 use tm_types::{Authority, Result, TmError};
 
 /// One requested edit. Every variant that touches existing content carries an
-/// `expected_hash`: the blake3 hex hash of the content the caller last read, used to detect a
-/// conflicting change made since.
+/// `expected_hash`: the blake3 hex hash ([`tm_core::artifact::hash_bytes`]) of the content the
+/// caller last read, used to detect a conflicting change made since. The tool layer hands this
+/// exact value to the model as the `hash` field of `fs.read`/`fs.read_range`/`fs.stat`, so a
+/// model never has to (and never should) compute it itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Edit {
     /// Create a new file. Fails as a conflict if the path already exists.
@@ -193,7 +195,7 @@ impl PatchEngine {
                 if existing.is_some() {
                     return Err(PatchError::Conflict {
                         path: p.clone(),
-                        detail: "file already exists".to_string(),
+                        detail: CREATE_OVER_EXISTING.to_string(),
                     });
                 }
                 self.write_atomic(&abs, path, content.as_bytes())?;
@@ -230,7 +232,7 @@ impl PatchEngine {
                 check_expectation(p, existing.as_deref(), expected_hash)?;
                 let before = existing.ok_or_else(|| PatchError::Conflict {
                     path: p.clone(),
-                    detail: "file no longer exists".to_string(),
+                    detail: NOTHING_TO_EDIT.to_string(),
                 })?;
                 self.remove_file(&abs, path)?;
                 let diff = TextDiff::from_lines(before.as_str(), "");
@@ -252,7 +254,7 @@ impl PatchEngine {
                 check_expectation(p, existing.as_deref(), expected_hash)?;
                 let before = existing.ok_or_else(|| PatchError::Conflict {
                     path: p.clone(),
-                    detail: "file no longer exists".to_string(),
+                    detail: NOTHING_TO_EDIT.to_string(),
                 })?;
                 if *byte_start > *byte_end
                     || *byte_end > before.len()
@@ -372,6 +374,16 @@ impl PatchEngine {
     }
 }
 
+/// Conflict detail for creating over a file that already exists. Every conflict detail below
+/// says how to recover, not just what went wrong: the reader is a model, and a bare "hash
+/// mismatch" once sent one hashing the file with sha256, md5 and sha1 for ~175k tokens trying to
+/// guess the format, when the fix was one `fs.read` away.
+const CREATE_OVER_EXISTING: &str = "file already exists. To change it, read it with fs.read and \
+use edit.write_file or edit.apply_patch with the `hash` fs.read returns as expected_hash";
+
+/// Conflict detail for deleting or range-editing a path with no file at it.
+const NOTHING_TO_EDIT: &str = "file does not exist. Check the path with fs.list";
+
 /// Check an edit's `expected_hash`/existence claim against what's actually on disk right now.
 /// `None` means "I never observed this path", which is only consistent with the path not
 /// currently existing; `Some(hash)` must match the current content's hash exactly.
@@ -384,11 +396,16 @@ fn check_expectation(
         (None, None) => Ok(()),
         (None, Some(_)) => Err(PatchError::Conflict {
             path: path.to_string(),
-            detail: "file already exists but no expected hash was supplied".to_string(),
+            detail: "file already exists but no expected_hash was supplied. Read it with fs.read \
+                     (or fs.stat) and pass the `hash` it returns as expected_hash"
+                .to_string(),
         }),
         (Some(_), None) => Err(PatchError::Conflict {
             path: path.to_string(),
-            detail: "file no longer exists".to_string(),
+            detail: "file no longer exists, though an expected_hash was supplied. Check the path \
+                     (fs.list); to create the file, use edit.create_file, or edit.write_file \
+                     without expected_hash"
+                .to_string(),
         }),
         (Some(expected), Some(content)) => {
             let actual = hash_bytes(content.as_bytes());
@@ -397,7 +414,13 @@ fn check_expectation(
             } else {
                 Err(PatchError::Conflict {
                     path: path.to_string(),
-                    detail: format!("expected hash {expected}, found {actual}"),
+                    detail: format!(
+                        "expected hash {expected}, found {actual}. The file changed since it was \
+                         read, or the hash did not come from fs.read/fs.stat (it is tm's own \
+                         content hash; never compute it yourself). Re-read the file with fs.read \
+                         and retry with the `hash` it returns, working out any byte offsets \
+                         against the fresh content"
+                    ),
                 })
             }
         }

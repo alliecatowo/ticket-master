@@ -113,6 +113,10 @@ const HOW_TO_WORK: &str = "# How to work
 for concepts, search.exact or search.regex for known names) before editing.
 - Make changes with the edit.* tools, keeping edits minimal and in the style of the surrounding \
 code. Never invent file contents you have not read.
+- Read a file with fs.read before editing it. Its result carries a `hash`: pass that as the edit \
+tool's `expected_hash`, and after an edit use the result's `hash_after` (or read again). Never \
+compute a hash yourself. A conflict means the file changed since you read it: read it again and \
+redo the edit against the fresh content.
 - Run commands with shell.run (a `command` string runs in the project directory under sh). \
 Results include the command's output.
 - Verify your work: run the project's build and tests after changing code, and fix what you broke.
