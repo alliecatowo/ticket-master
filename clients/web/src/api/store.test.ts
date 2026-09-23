@@ -1,60 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { ProjectStore } from "./store";
-import type { StateSnapshot, Ticket, WireEvent } from "./types";
+import { event, stateSnapshot } from "../test/fixtures";
 
-function ticket(overrides: Partial<Ticket> = {}): Ticket {
-  return {
-    id: "T-1",
-    kind: "work",
-    objective: "seed a store",
-    state: "ready",
-    parent: null,
-    children: [],
-    dependencies: [],
-    milestone: null,
-    authority: null,
-    resources: [],
-    executor: {},
-    context_refs: [],
-    success: [],
-    verification: null,
-    budget: null,
-    retry: null,
-    cycle: null,
-    attempts: 0,
-    failures: [],
-    priority: 0,
-    created: "2026-01-01T00:00:00Z",
-    updated: "2026-01-01T00:00:00Z",
-    ...overrides,
-  };
-}
-
-function event(overrides: Partial<WireEvent>): WireEvent {
-  return {
-    seq: 1,
-    ts: "2026-01-01T00:00:01Z",
-    kind: "ticket.state_changed",
-    subject: "T-1",
-    actor: "human:allie",
-    session: null,
-    causation: null,
-    correlation: null,
-    payload: { ticket: "T-1", from: "ready", to: "leased" },
-    ...overrides,
-  };
-}
-
-const snapshot: StateSnapshot = {
-  head: 0,
-  tickets: [ticket()],
-  leases: [],
-  decisions: [],
-  milestones: [],
-  artifacts: [],
-  evidence: [],
-  budgets: [],
-};
+const snapshot = stateSnapshot();
 
 describe("ProjectStore", () => {
   it("seeds tickets from a GET /state snapshot", () => {
@@ -74,12 +22,69 @@ describe("ProjectStore", () => {
     expect(store.snapshot().head).toBe(1);
   });
 
-  it("ignores an event whose seq is not newer than head (reconnect overlap)", () => {
+  it("folds an event at or below the snapshot head into history only, never the projection", () => {
     const store = new ProjectStore();
     store.seed({ ...snapshot, head: 5 });
+    // The snapshot already includes seq 3; the replay still delivers it for the timeline.
     const applied = store.apply(event({ seq: 3 }));
-    expect(applied).toBe(false);
-    expect(store.snapshot().tickets.get("T-1")?.state).toBe("ready");
+    expect(applied).toBe(true);
+    const view = store.snapshot();
+    expect(view.tickets.get("T-1")?.state).toBe("ready");
+    expect(view.head).toBe(5);
+    expect(view.timelines.get("T-1")?.map((e) => e.seq)).toEqual([3]);
+    expect(store.cursor()).toBe(3);
+  });
+
+  it("reports history ready only once the replay reaches the first snapshot's head", () => {
+    const store = new ProjectStore();
+    expect(store.snapshot().historyReady).toBe(false);
+    store.seed({ ...snapshot, head: 2 });
+    expect(store.snapshot().historyReady).toBe(false);
+    store.apply(event({ seq: 1 }));
+    expect(store.snapshot().historyReady).toBe(false);
+    store.apply(event({ seq: 2, payload: { ticket: "T-1", from: "leased", to: "running" } }));
+    expect(store.snapshot().historyReady).toBe(true);
+    // An empty log has nothing to read.
+    const empty = new ProjectStore();
+    empty.seed({ ...snapshot, head: 0 });
+    expect(empty.snapshot().historyReady).toBe(true);
+  });
+
+  it("never folds the same event twice (a replayed overlap after a reconnect)", () => {
+    const store = new ProjectStore();
+    store.seed(snapshot);
+    expect(store.apply(event({ seq: 1 }))).toBe(true);
+    // Reconnect: a fresh snapshot, then the stream resumes from the cursor and may overlap.
+    store.seed({ ...snapshot, head: 1, tickets: [{ ...snapshot.tickets[0], state: "leased" }] });
+    expect(store.apply(event({ seq: 1 }))).toBe(false);
+    expect(store.snapshot().timelines.get("T-1")).toHaveLength(1);
+  });
+
+  it("clears history when the server's log is behind the cursor (a different or reset project)", () => {
+    const store = new ProjectStore();
+    store.seed(snapshot);
+    store.apply(event({ seq: 1 }));
+    store.apply(event({ seq: 2, payload: { ticket: "T-1", from: "leased", to: "running" } }));
+    expect(store.seed({ ...snapshot, head: 1 })).toBe("replay");
+    expect(store.cursor()).toBe(0);
+    expect(store.snapshot().timelines.size).toBe(0);
+  });
+
+  it("folds submission, escalation and approval activity from the log", () => {
+    const store = new ProjectStore();
+    store.seed(snapshot);
+    store.apply(event({ seq: 1, kind: "ticket.submitted", payload: { ticket: "T-1", summary: "did it" } }));
+    store.apply(
+      event({ seq: 2, kind: "approval.requested", payload: { ticket: "T-1", requested_of: "agent:w", note: "rm -rf" } }),
+    );
+    let act = store.snapshot().activity.get("T-1");
+    expect(act?.submission).toBe("did it");
+    expect(act?.pendingApproval?.note).toBe("rm -rf");
+    store.apply(event({ seq: 3, kind: "approval.decided", payload: { ticket: "T-1", approved: true } }));
+    store.apply(event({ seq: 4, kind: "ticket.escalated", payload: { ticket: "T-1", reason: "out of attempts" } }));
+    act = store.snapshot().activity.get("T-1");
+    expect(act?.pendingApproval).toBeUndefined();
+    expect(act?.escalation?.reason).toBe("out of attempts");
   });
 
   it("applies events strictly in increasing seq order and keeps head monotonic", () => {

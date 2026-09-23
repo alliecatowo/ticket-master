@@ -5,8 +5,8 @@
  */
 export function NotBuilt({ view, contents }: { view: string; contents: string }) {
   return (
-    <section className="not-built" data-testid="not-built">
-      <h1>{view}</h1>
+    <section className="page not-built" data-testid="not-built">
+      <h1 className="page__title">{view}</h1>
       <p className="not-built__notice">
         This view is <strong>not built yet</strong>. It is routed as a placeholder only.
       </p>

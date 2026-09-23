@@ -17,11 +17,11 @@ export function StatusView() {
   const report = useMemo(() => buildStatusReport(store.recentEvents), [store.recentEvents]);
 
   return (
-    <section data-testid="status-view">
-      <h1>Status</h1>
-      <p className="hint">
-        Since you left, at event #{store.head} ({status}). Built from the {store.recentEvents.length}{" "}
-        most recent events this session has seen — restart the client to see further back.
+    <section className="page" data-testid="status-view">
+      <h1 className="page__title">Status</h1>
+      <p className="page__subtitle">
+        At event #{store.head} ({status}). Built from the {store.recentEvents.length} events seen
+        since this page connected (the last 200 at most); reloading the page starts over.
       </p>
       <PresenceBar />
       {SECTIONS.map(({ key, label }) => (

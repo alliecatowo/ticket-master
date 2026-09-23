@@ -1,114 +1,154 @@
-# `clients/web` — the project canvas
+# `clients/web`: the project canvas
 
-Vite + React + TypeScript, per `SPEC.md` §18.2. This is a **scaffolding-depth** V0: a real,
-working vertical slice against the real `tm-server` API, not feature parity with the CLI.
-Everything in this file is accurate as of this commit — run the commands yourself to re-verify.
+Vite + React + TypeScript, per `SPEC.md` §18.2. A browser surface for working a project end to
+end against the real `tm-server` API: dispatch work, watch it move, review and accept it, retry
+what escalated. Everything here was checked against a live `tm serve`. Run the commands below to
+check it again.
 
 ## Deviation from SPEC.md §18.1: no `clients/ts/` yet
 
-`SPEC.md` §18.1 describes a generated, shared `@ticketmaster/client` package at `clients/ts/`
-that both the web app and the VS Code extension would consume as a `file:../ts` workspace
-dependency. **That package does not exist in this repository** — there is no `clients/ts/`
-directory, no `pnpm-workspace.yaml`, and no `GET /schema`-driven codegen wired up anywhere yet.
+`SPEC.md` §18.1 describes a generated `@ticketmaster/client` package at `clients/ts/`, shared with
+the VS Code extension. This app doesn't consume it. It carries its own hand-written, framework-agnostic REST +
+SSE client in `src/api/` (`client.ts`, `live.ts`, `store.ts`, `types.ts`, `identity.ts`), laid
+out so that moving it into a shared package later is a copy, not a rewrite. Only `client.ts`
+calls `fetch`. The wire types are written by hand from `crates/tm-server/src/routes.rs` and
+`crates/tm-events/src/payload.rs`. There is no `pnpm gen` step and no drift check, because
+`GET /schema` is itself only a partial, hand-written document.
 
-This task was scoped to `clients/web/` only ("only create/edit files under
-`clients/web/`... never touch... another client"), so rather than create `clients/ts/` myself
-(out of scope) or silently hand-roll `fetch` calls all over the app (against the spirit of
-§18.1), I wrote a single, self-contained REST + SSE client and a pure `ProjectStore` inside
-`src/api/` (`client.ts`, `store.ts`, `types.ts`). It is deliberately framework-agnostic (no React
-imports) and structured the way `clients/ts/src/index.ts` would be, so extracting it into a real
-`clients/ts/` package later is a copy, not a rewrite. Every mutation in this app goes through
-`TicketmasterClient` in `src/api/client.ts` — nothing else calls `fetch` directly.
+## The model: the TUI's tickets screen, in a browser
 
-The wire types in `src/api/types.ts` are **hand-written**, not generated from `GET /schema`
-(`tm-server`'s schema endpoint is itself only a hand-written partial document today — see
-`crates/tm-server/src/routes.rs`'s `get_schema`). There is no `pnpm gen` step and no drift check.
+The home screen is the same model as the terminal tickets screen (D-019 §2, "Implemented: tickets
+screen"): Claude Code's agent view, with tickets as its rows. `src/views/ticketsModel.ts` is a
+port of `crates/tm-cli/src/tickets/overview.rs` (`group_for`, `summary_for`) and of the peek's
+`choices` in `crates/tm-cli/src/tui/tickets_view.rs`, so both surfaces group and word a ticket
+the same way:
+
+| Group | States |
+| --- | --- |
+| Needs input | `escalated`; `leased`/`running` while an approval request is open |
+| Working | `leased`, `running`, `verifying`, `auditing` |
+| Ready for review | `submitted` |
+| Queued | `draft`, `blocked`, `ready`, `rework`, `replan`, `recovery` |
+| Completed | `closed`, `cancelled` |
+
+| State | Actions (numbered as in the TUI) |
+| --- | --- |
+| `submitted` | 1 Accept · 2 Reject (requires a reason) |
+| `escalated` | 1 Retry · 2 Retry with guidance (requires guidance) |
+| `draft` | 1 Queue it |
+| any non-terminal state | Cancel ticket… (asks for confirmation; the reason is optional) |
+
+Differences from the TUI, on purpose:
+- Row titles get 44 columns instead of 32.
+- A queued ticket always reads "waiting for a worker". The client can't tell whether `tm serve`
+  was started with `--no-workers`.
 
 ## What is built
 
-- **Status** (`src/views/StatusView.tsx`) — a "since you left" report (closed / repaired /
-  reconciled / benchmarked / needs-you), built client-side from the live event log
-  (`src/views/statusModel.ts`, unit-tested). `tm-server` has no dedicated report endpoint, so
-  this is a heuristic grouping over `EventKind`s seen since the client connected — it does not
-  see history from before that.
-- **Backlog** (`src/views/BacklogView.tsx`) — ready / blocked / active groups, filterable by
-  milestone, kind, and executor role (`src/views/backlogModel.ts`, unit-tested).
-- **Ticket** (`src/views/TicketView.tsx`) — objective, state, authority, milestone, priority,
-  attempts, failures, and this session's event history for the ticket. Presence and path leases
-  scoped to the ticket via `PresenceBar`. Exposes the one live mutation (see below).
-- **Live data**: on load, seeds a `ProjectStore` from `GET /state`, then keeps it live via
-  `TicketmasterClient.subscribe(fromSeq)` — an async generator over `GET /events?from=`, parsing
-  raw SSE frames (not the `EventSource` API, since that can't set an `Authorization` header) and
-  reconnecting with the last-seen `seq` on any stream error.
-- **One real mutation**: the Ticket view's Activate / Close / Reopen buttons call
-  `POST /tickets/:id/transition` through `TicketmasterClient.transition`. The optimistic path is
-  "do nothing locally, let the SSE stream's resulting `ticket.state_changed` event reconcile the
-  store" — i.e. reconciliation is real (the same event-log path every other client update takes),
-  there is no separate speculative local-state branch to accidentally diverge from it.
-- **Presence and path leases** (`src/components/PresenceBar.tsx`) are rendered on both Status
-  (project-wide) and Ticket (scoped to that ticket), polling `GET /presence` every 5s — presence
-  is a TTL-swept snapshot server-side, not an event-sourced projection, so polling (not the event
-  stream) is the correct source for it.
-- **Routing** via `react-router-dom`; an actor id (`human:web` by default, editable in the nav and
-  persisted to `localStorage`) is attached to every mutation as `actor`.
+- **Tickets** (`/`, `src/views/TicketsView.tsx`): the five groups, each row showing its worker
+  glyph, id, title, one-line summary, state and age. Completed folds after five.
+- **Dispatch box**: "Describe a task for a background worker". Enter sends; Shift+Enter adds a
+  newline.
+  - It `POST /tickets` with only `{kind: "work", objective, actor}`, then activates the ticket.
+  - If the ticket is created but activation fails, the box says so and links the draft. The
+    ticket isn't lost.
+- **Ticket** (`/ticket/:id`, `src/views/TicketView.tsx`): the full page for one ticket.
+  - The state's actions come first, in a panel, with `1`/`2` as keyboard shortcuts when no text
+    field has focus.
+  - Then: the objective, state and attempts (`n of max`), each failure with its class and
+    detail, and the submission summary with its evidence.
+  - The event timeline hides bookkeeping events unless you ask for all of them.
+  - Details (worker, waiting time, parent, children, dependencies) and presence sit alongside.
+- **Review** (`/review`, `src/views/ReviewView.tsx`): every submission waiting for a human,
+  oldest first. Each shows its summary, evidence and objective, with Accept and Reject inline.
+  Escalated tickets are listed underneath with links. The nav shows a count badge.
+- **Identity** (`src/api/identity.ts`):
+  - The client acts as `human:web` by default. Click the "acting as" chip to set a name, which
+    is kept in `localStorage` under `tm.web.actor`.
+  - `normalizeHandle` strips a pasted `human:` prefix and control characters, joins words with
+    `-`, and caps the handle at 40 characters.
+  - `TicketmasterClient` is the only place that turns the handle into an actor, so every body it
+    sends is `human:<handle>`. Accept, reject and retry are human-only on the server, and the web
+    client can't send them as anyone else.
+- **Live updates** (`src/api/live.ts`, `src/api/store.ts`):
+  - `LiveProject` reads `GET /state`, then streams `GET /events?from=<cursor>`. It uses `fetch`
+    and parses SSE frames itself, because `EventSource` can't send a bearer token.
+  - When the stream drops or ends, the connection pill turns to "Reconnecting". A banner
+    appears with a countdown (backoff 1s, 2s, 3s, then every 5s) and a "Retry now" button.
+  - Each reconnect re-reads `/state` and resumes from the last event it applied.
+  - `ProjectStore` keeps two cursors. Tickets, leases and evidence come from the snapshot and
+    are patched only by events after it. History (the timeline, submission summaries, escalation
+    reasons) is folded from the log exactly once, so a reconnect never duplicates a timeline
+    row. Until the replay reaches the first snapshot's head (`historyReady`), an empty timeline or
+    missing summary reads "Reading the event log…", not "none".
+  - Mutations don't update local state optimistically. The resulting events arrive over the
+    stream.
+- **Errors**:
+  - A refused action shows the server's own sentence next to the button, e.g. "Not allowed: …"
+    for a 403 or "Can't do that now: …" for a 409.
+  - A network failure reads "Couldn't reach tm serve".
+- **Kept from before**:
+  - **Status**: "since you left", built from events seen since the client connected.
+  - **Backlog**: ready, blocked and active tickets, with filters.
+  - **Presence bar**: polls `GET /presence` every 5s.
 
-## What is explicitly NOT built
+## Not built
 
-Routed as placeholders (`src/views/NotBuilt.tsx`) that state plainly they are not built, per
-`SPEC.md` §18.2's table:
-
-- **Graph** — dependency/parent-child graph, milestones as cuts, loop edges.
-- **Rooms** — per-milestone activity, comments, live presence beyond the ticket-scoped bar above.
-- **Review** — diffs and evidence awaiting audit, approve/reject.
-- **Decisions** — decision log with supersession chains (`GET /decisions` is not called anywhere
-  in this app).
-- **Providers** — role→model routing, quota headroom, breaker state, spend
-  (`GET /providers`/`GET /harness` are not called anywhere in this app).
-
-Also not built, called out because it's easy to assume otherwise:
-
-- No ticket creation, dependency editing, lease acquisition, evidence attachment, milestone,
-  decision, or approval mutations — only the ticket lifecycle transitions listed above.
-- No generated types / `clients/ts/` package (see the deviation note above).
-- `ProjectStore.apply` only understands `ticket.created`, `ticket.state_changed`,
-  `ticket.closed`, `ticket.cancelled`, and `ticket.escalated`; every other event kind is recorded
-  in the recent-events buffer (for Status/history) but does not mutate a ticket's materialized
-  fields. A `ticket.created` event for a ticket the store hasn't seen yet produces a minimal
-  partial record (id/objective/state only) until the next full `GET /state` refetch.
-- No offline/error UI beyond a connection-status dot and a generic mutation-error message.
-- No auth UI: the client will send a bearer token if one is supplied via
-  `new TicketmasterClient({ token })`, but nothing in the app currently prompts for or stores one
-  (fine for the default loopback-bind, no-token `tm serve` story; would need work to use against
-  a non-loopback bind).
+- These routes are placeholders (`src/views/NotBuilt.tsx`) that say they're unbuilt:
+  - **Graph**
+  - **Rooms**
+  - **Decisions** (`GET /decisions` isn't called)
+  - **Providers** (`GET /providers` and `/harness` aren't called)
+- No mutations beyond dispatch and the ticket actions above: no dependency editing, milestones,
+  decisions, approvals, evidence attachment or lease handling.
+- No diff or artifact viewer. Evidence shows its kind, artifact id and summary only.
+- No token UI. `new TicketmasterClient({ token })` works, but nothing in the app asks for a token
+  (fine for the default loopback, no-token `tm serve`).
+- Every page load replays the whole event log from `seq` 0 to build the timelines. There is no
+  per-ticket history endpoint, so this gets slower as the log grows.
+- If the client reconnects to a *different* project whose log is longer than the one it was
+  reading, it keeps the old timelines. It only detects a server log that is behind its cursor.
 
 ## Running it
 
-Against a real `tm serve`:
-
 ```
-tm serve --addr 127.0.0.1:4173   # from the project root, in another terminal
 pnpm install
-pnpm dev                          # Vite dev server on 5173, proxying the API to :4173
+pnpm build                     # writes dist/, which tm serve serves at /app/
+tm serve --open                # from the project; works tickets in-process
 ```
 
-Set `VITE_TM_SERVER` to point `pnpm dev`'s proxy at a different `tm serve` address.
-
-Served by `tm serve` itself: `pnpm build` writes `dist/`, and `tm serve` serves it at `/app/`
-(`/` redirects there; any other `/app/...` path gets `index.html`, so reloads and pasted links
-work). The app is built with `base: "/app/"` and routes under `<BrowserRouter basename="/app">`,
-so its `/graph`, `/decisions` and `/providers` pages never collide with the API's endpoints of the
-same name. `tm serve` finds the build via `--web-dir`, then `TM_WEB_DIR`, then this directory's
-`dist/` in the checkout `tm` was built from; `tm serve --open` opens it in a browser.
+To develop against a running server, use `tm serve --addr 127.0.0.1:4173`, then `pnpm dev`. The
+Vite dev server on port 5173 proxies the API to port 4173. Set `VITE_TM_SERVER` to point the
+proxy somewhere else. The app is built with `base: "/app/"` and routes under
+`<BrowserRouter basename="/app">`, so its `/graph`, `/decisions` and `/providers` pages never
+collide with the API endpoints of the same names.
 
 ## Commands and results
 
 ```
-pnpm install && pnpm test && pnpm build
+pnpm test && pnpm typecheck && pnpm build
 ```
 
-- `pnpm test` (`vitest run`): **21 tests passed** across 4 files — `src/api/store.test.ts` (the
-  `ProjectStore` event-application logic), `src/views/statusModel.test.ts`,
-  `src/views/backlogModel.test.ts` (pure view-model logic), and `src/App.test.tsx` (a render
-  smoke test: nav renders, Status/Backlog render with a seeded ticket, an unbuilt view shows its
-  stub notice).
-- `pnpm build` (`tsc --noEmit && vite build`): typechecks clean and builds `dist/` successfully.
+- `pnpm test` (`vitest run`): 85 tests in 9 files.
+  - `src/views/ticketsModel.test.ts`: the group for all 14 states, approval overrides, the
+    actions each state allows, Cancel availability, summaries, ordering, and ages.
+  - `src/api/client.test.ts`: the exact `POST /tickets/:id/transition` body for every action,
+    the dispatch create-then-activate sequence, SSE frame parsing across chunk boundaries, and
+    `describeError` for 403, 409, 422 and network errors.
+  - `src/api/identity.test.ts`: the `human:web` default, normalization, and storage.
+  - `src/api/live.test.ts`: reconnecting after a dropped stream without duplicating history,
+    and "Retry now".
+  - `src/api/store.test.ts`: event folding.
+  - `src/views/timelineModel.test.ts`: how timeline events read.
+  - `src/App.test.tsx`: the rendered flows (home groups, dispatch, retry with guidance, cancel
+    confirmation, inline review, a refused action, the empty state).
+- `pnpm typecheck` and `pnpm build` (`tsc --noEmit && vite build`): clean.
+- Live check against `tm serve` with `TM_TEST_MOCK_PROVIDER=1`, driven with Playwright and
+  system Chrome:
+  - Dispatch works. The mock worker fails three attempts and the ticket escalates. Retry with
+    guidance appends the guidance to the objective.
+  - Queue a draft, accept from Review, and reject (blocked while the reason is empty) all work.
+    The name set in the chip shows up as the actor in the log.
+  - Stopping and restarting the server shows the banner, then the client goes Live again with an
+    identical timeline.
+  - At 390px wide there is no horizontal overflow.
