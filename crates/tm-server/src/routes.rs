@@ -1028,7 +1028,7 @@ async fn list_docs() -> Json<Value> {
 
 /// See [`list_docs`]: there is nowhere durable to put a doc yet.
 async fn create_doc() -> ServerError {
-    ServerError::BadRequest("docs storage is not wired into this server instance".to_string())
+    ServerError::BadRequest("Docs aren't available on this server yet.".to_string())
 }
 
 async fn list_approvals(State(state): State<AppState>) -> Json<Value> {
@@ -1077,7 +1077,7 @@ async fn get_approval(
     let status = state
         .approvals
         .get(&id)
-        .ok_or_else(|| ServerError::BadRequest(format!("unknown approval request {id}")))?;
+        .ok_or_else(|| ServerError::BadRequest(format!("Approval request {id} not found.")))?;
     Ok(Json(approval_status_json(&status)))
 }
 
