@@ -157,7 +157,7 @@ async fn run_on(
             Ok(handle) => (Some(handle), None),
             Err(e) => {
                 tracing::warn!(error = %e, "background scheduler did not start");
-                (None, Some(format!("background worker off: {e}")))
+                (None, Some(format!("Background worker not running: {e}")))
             }
         };
 
@@ -633,10 +633,10 @@ impl App {
                             Ok(if self.local_worker {
                                 format!("Dispatched {id} to a background worker.")
                             } else {
-                                format!("Queued {id}. No worker is running here: tm sched run")
+                                format!("Queued {id}, but no worker is running here — run `tm sched run` to work it.")
                             })
                         }
-                        Err(e) => Err(format!("Could not dispatch: {e}")),
+                        Err(e) => Err(format!("Couldn't dispatch ticket: {e}")),
                     }
                 }
                 TicketsAction::Cancel(id) => with_ticket(&id, |t| {
@@ -647,7 +647,7 @@ impl App {
                             Some("cancelled from tm tickets".to_string()),
                             self.project.actor.clone(),
                         )
-                        .map(|_| format!("Cancelled {t}."))
+                        .map(|_| format!("Cancelled ticket {t}."))
                 }),
                 TicketsAction::Accept(id) => with_ticket(&id, |t| {
                     self.project
