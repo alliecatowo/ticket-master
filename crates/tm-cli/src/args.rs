@@ -296,6 +296,8 @@ pub enum TicketCommand {
     Show(TicketRefArgs),
     /// Create a new ticket.
     New(TicketNewArgs),
+    /// Create and queue a work ticket for a background worker.
+    Dispatch(TicketDispatchArgs),
     /// Edit mutable fields of an existing ticket.
     Edit(TicketEditArgs),
     /// Make a draft ticket ready for a worker to pick up (`tm run` or `tm sched run`).
@@ -389,6 +391,14 @@ pub struct TicketNewArgs {
     /// Path patterns this ticket's lease may write to (repeatable).
     #[arg(long = "resource", value_name = "GLOB")]
     pub resources: Vec<String>,
+}
+
+/// `tm ticket dispatch`
+#[derive(Debug, Args)]
+pub struct TicketDispatchArgs {
+    /// The work objective, in natural language.
+    #[arg(value_name = "OBJECTIVE")]
+    pub objective: String,
 }
 
 /// `tm tickets`
@@ -1195,6 +1205,17 @@ mod tests {
         match cli.command {
             Some(Command::Ticket(TicketCommand::List(args))) => {
                 assert!(matches!(args.state, Some(TicketStateArg::Ready)));
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ticket_dispatch_parses_an_objective() {
+        let cli = Cli::parse_from(["tm", "ticket", "dispatch", "fix the build"]);
+        match cli.command {
+            Some(Command::Ticket(TicketCommand::Dispatch(args))) => {
+                assert_eq!(args.objective, "fix the build");
             }
             other => panic!("unexpected parse: {other:?}"),
         }

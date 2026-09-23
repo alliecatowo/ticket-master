@@ -565,12 +565,16 @@ fn provider_default(
                 .ok_or_else(|| {
                     tm_types::TmError::parse("Expected `provider/model` or `clear`".to_string())
                 })?;
-            if !tm_provider::Registry::known_providers()
+            let known_providers = tm_provider::Registry::known_providers();
+            let provider_info = known_providers
                 .iter()
-                .any(|known| known.id == provider)
-            {
+                .find(|known| known.id == provider)
+                .ok_or_else(|| {
+                    tm_types::TmError::parse(format!("Unknown provider `{provider}`"))
+                })?;
+            if !provider_info.is_configured() {
                 return Err(tm_types::TmError::parse(format!(
-                    "Unknown provider `{provider}`"
+                    "Provider `{provider}` is not configured in this environment; configure its required credentials first (see `tm provider detect`)"
                 )));
             }
             fs::create_dir_all(&project.state_dir)?;

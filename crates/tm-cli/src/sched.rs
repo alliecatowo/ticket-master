@@ -86,6 +86,11 @@ pub fn sched_plan(project: &Project, renderer: &Renderer) -> tm_types::Result<()
         .map(|s| format!("{}: {}", s.kind, s.target))
         .collect::<Vec<_>>()
         .join("\n");
+    let human = if human.is_empty() {
+        "No scheduler actions planned. Tickets may be absent, blocked, or awaiting a worker/provider.".to_string()
+    } else {
+        human
+    };
 
     renderer.emit(&summaries, &human)
 }
