@@ -11,12 +11,15 @@
 //!   or a model, before it is ever written into a cell.
 //! - [`lines`] — a styled, owned line type plus the helpers that draw one into a buffer.
 //! - [`markdown`] — a lightweight Markdown renderer for assistant replies.
-//! - [`transcript`] — the conversation model (entries, the live turn, scrolling) and its render.
+//! - [`transcript`] — the conversation model (entries, the live turn, scrolling) and its render,
+//!   tool calls drawn the way Claude Code draws them (`⏺ Bash(cmd)`, results under `⎿`).
+//! - [`diff`] — unified diffs reduced to numbered lines for an edit's inline diff.
 //! - [`input`] — the multi-line prompt editor with history.
 //! - [`commands`] — the slash-command table, its filter, and its parser.
 //! - [`status`] — the status bar's segments and their width-aware layout.
 
 pub mod commands;
+pub mod diff;
 pub mod glyphs;
 pub mod input;
 pub mod lines;
