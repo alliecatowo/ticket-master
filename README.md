@@ -53,14 +53,21 @@ full session [`tui-live.cast`](docs/showcase/tui-live.cast) (`asciinema play` it
 <summary><b>Option A — download a release (recommended)</b></summary>
 <br/>
 
-Prebuilt `tm` binaries ship with every [GitHub release](https://github.com/alliecatowo/ticket-master/releases)
-for `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`:
+Prebuilt `tm` binaries ship with every [GitHub release](https://github.com/alliecatowo/ticket-master/releases).
+This repo is private, so download authenticated (the `gh` CLI handles it):
 
 ```sh
-# Apple Silicon example — pick the asset matching your machine
-curl -sL https://github.com/alliecatowo/ticket-master/releases/latest/download/tm-aarch64-apple-darwin.tar.gz | tar -xz
-./tm --version && ./tm init
+gh release download --repo alliecatowo/ticket-master \
+  --pattern 'tm-aarch64-apple-darwin.tar.gz'
+tar -xzf tm-aarch64-apple-darwin.tar.gz
+./tm-aarch64-apple-darwin/tm --version && ./tm-aarch64-apple-darwin/tm init
 ```
+
+> **Platform status:** `v0.1.0` ships `tm-aarch64-apple-darwin`. The Linux asset is
+> blocked on a pre-existing break — `tm-computer` does not compile on Linux (CI is red
+> on `main` for the same reason) — so on Linux build from source (Option B) until that
+> is fixed. The release matrix already builds both targets; Linux attaches automatically
+> once it compiles.
 
 </details>
 
