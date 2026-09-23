@@ -586,7 +586,8 @@ genuine separate use. Full reasoning, the rejected alternative, and what this tr
 
 ## Ask the owner later
 
-- **D-020 (system-one decision providers, proposed):** approve building the first slice (shadow
+- **D-020 (system-one decision providers, proposed): deferred by the owner on 2026-09-23 ("toss jev in
+  backlog"); don't build until they bring it back.** When they do: approve building the first slice (shadow
   mode: jev/Laya predictions recorded as events and scored by `tm bench`, nothing acts on them)?
   Owner's notes so far (2026-09-23): Python can come from `mise use uv` rather than a manual
   install, so that item drops off the owner checklist; freeing RAM on this machine (e.g. stopping
