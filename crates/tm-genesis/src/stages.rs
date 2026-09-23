@@ -162,7 +162,7 @@ pub enum StageEvent {
 
 /// [`transition`] refused to move `from` given the given event.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
-#[error("illegal Genesis transition from {from:?} via this event")]
+#[error("can't leave the {from} stage with this event")]
 pub struct IllegalTransition {
     /// The stage the machine was in.
     pub from: Stage,
@@ -306,9 +306,7 @@ impl<'a> GenesisDriver<'a> {
         events
             .iter()
             .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone()))
-            .ok_or_else(|| {
-                TmError::invariant("store_artifact did not emit an artifact.created event")
-            })
+            .ok_or_else(|| TmError::invariant("saving that didn't produce a stored artifact"))
     }
 
     /// Persist a full `state` snapshot, the mechanism [`GenesisDriver::resume`] reads back.
@@ -336,7 +334,7 @@ impl<'a> GenesisDriver<'a> {
         match &artifact.storage {
             ArtifactStorage::Inline(bytes) => Ok(serde_json::from_slice(bytes)?),
             ArtifactStorage::OnDisk(_) => Err(TmError::storage(
-                "on-disk artifact bytes are not readable from tm-genesis: tm_core::Store exposes no project-root accessor to resolve the relative path",
+                "can't read this artifact yet: it was stored on disk, and this step only reads artifacts stored inline",
             )),
         }
     }
@@ -369,7 +367,9 @@ impl<'a> GenesisDriver<'a> {
             }
             Stage::Vision => {
                 let seed_id = state.seed.clone().ok_or_else(|| {
-                    TmError::invariant("Stage::Vision reached without a persisted Seed")
+                    TmError::invariant(
+                        "reached the Vision stage without a saved Seed to build from",
+                    )
                 })?;
                 let seed: Seed = self.load_field(&seed_id)?;
                 let mut vision =
@@ -381,7 +381,9 @@ impl<'a> GenesisDriver<'a> {
             }
             Stage::Spec => {
                 let vision_id = state.vision.clone().ok_or_else(|| {
-                    TmError::invariant("Stage::Spec reached without a persisted Vision")
+                    TmError::invariant(
+                        "reached the Spec stage without a saved Vision to build from",
+                    )
                 })?;
                 let vision: Vision = self.load_field(&vision_id)?;
                 let mut spec =
@@ -394,7 +396,7 @@ impl<'a> GenesisDriver<'a> {
             Stage::GraphCompilation => {
                 let spec_id = state.spec.clone().ok_or_else(|| {
                     TmError::invariant(
-                        "Stage::GraphCompilation reached without a persisted Specification",
+                        "reached graph compilation without a saved Specification to compile from",
                     )
                 })?;
                 let spec: Specification = self.load_field(&spec_id)?;
@@ -425,13 +427,15 @@ impl<'a> GenesisDriver<'a> {
             }
             Stage::Ignition => {
                 let graph_id = state.graph.clone().ok_or_else(|| {
-                    TmError::invariant("Stage::Ignition reached without a committed graph")
+                    TmError::invariant(
+                        "reached the Ignition stage without a committed ticket graph",
+                    )
                 })?;
                 let summary: GraphSummary = self.load_field(&graph_id)?;
                 // Approximation: the compiled graph doesn't name "the" V0 milestone distinctly
                 // from any other, so the first (by `Ref`) committed milestone stands in for it.
                 let v0 = summary.milestones.values().next().cloned().ok_or_else(|| {
-                    TmError::invariant("graph compilation produced no milestone to ignite against")
+                    TmError::invariant("graph compilation didn't produce a milestone to start from")
                 })?;
                 let policy = IgnitionPolicy::for_v0(v0);
                 next_state.ignition = Some(policy.clone());
@@ -440,7 +444,7 @@ impl<'a> GenesisDriver<'a> {
             Stage::V0 => transition(state.stage, &StageEvent::V0Reached).map_err(illegal)?,
             Stage::Evaluation => {
                 let findings = format!(
-                    "V0 checkpoint reached for project {:?}; recording an evaluation checkpoint before proceeding toward V1.",
+                    "Reached the V0 milestone for project {}. Recording a checkpoint before moving on toward V1.",
                     state.project
                 );
                 transition(state.stage, &StageEvent::EvaluationRecorded(findings))
@@ -466,7 +470,9 @@ impl<'a> GenesisDriver<'a> {
                     .or_else(|| view.milestones.keys().next())
                     .cloned()
                     .ok_or_else(|| {
-                        TmError::invariant("no milestone exists for the maturity gate to evaluate")
+                        TmError::invariant(
+                            "no milestone exists yet for the maturity gate to evaluate",
+                        )
                     })?;
                 let thresholds = MaturityThresholds::conservative();
                 let predicate = crate::maturity::evaluate_predicate(&view, &v1, thresholds);
@@ -486,7 +492,7 @@ impl<'a> GenesisDriver<'a> {
             Stage::AuthorityReconvergence => {
                 let ignition = state.ignition.clone().ok_or_else(|| {
                     TmError::invariant(
-                        "Stage::AuthorityReconvergence reached without an ignition policy",
+                        "reached authority reconvergence without an active ignition policy",
                     )
                 })?;
                 let outcome = crate::maturity::reconverge_authority(
@@ -545,7 +551,7 @@ impl<'a> GenesisDriver<'a> {
             }
         }
         latest.ok_or_else(|| {
-            TmError::not_found("genesis_state", "no genesis snapshot found in this project")
+            TmError::not_found("genesis_state", "this project hasn't started Genesis yet")
         })
     }
 }
