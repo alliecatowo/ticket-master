@@ -583,9 +583,12 @@ pub fn history_why(
 
     let (path, line) = if let Some(idx) = args.locator.rfind(':') {
         let (p, l_str) = args.locator.split_at(idx);
-        let line_num: u32 = l_str[1..]
-            .parse()
-            .map_err(|_| tm_types::TmError::parse("Invalid line number in locator"))?;
+        let line_num: u32 = l_str[1..].parse().map_err(|_| {
+            tm_types::TmError::parse(format!(
+                "\"{}\" isn't a valid path:line — try something like src/main.rs:42",
+                args.locator
+            ))
+        })?;
         (p, line_num)
     } else {
         (&args.locator[..], 1)
