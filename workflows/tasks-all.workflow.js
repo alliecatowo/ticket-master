@@ -1,22 +1,23 @@
 export const meta = {
-  name: 'tasks-all',
-  description: 'Trial every tm surface for real, record findings in docs/tasks/TASKS.md, implement every open task with Sonnet/Haiku workers (2 Rust builds max), merge serially, gate with verify, re-trial until clean',
+  name: 'tasks-wide',
+  description: 'Wide map-reduce over tm: many small probes/sweeps find defects, one design pass fixes command hierarchy, recorders write TASKS.md, then batches of no-build editors + one integrator that builds, verifies and lands each batch',
   phases: [
-    { title: 'Load', detail: 'read TASKS.md state (resume-safe)' },
-    { title: 'Trial', detail: 'drive each surface for real, report defects' },
-    { title: 'Record', detail: 'dedupe findings into TASKS.md' },
-    { title: 'Implement', detail: 'one worktree worker per task, 2 Rust builds max' },
-    { title: 'Integrate', detail: 'serial merges, TASKS.md check-off, verify gates, push' },
+    { title: 'Inventory', detail: 'build tm, list commands and copy-bearing files, set up the integration worktree' },
+    { title: 'Map', detail: 'small agents: one CLI group, one file of copy, or one flow probe each' },
+    { title: 'Reduce', detail: 'command-architecture design, dedupe into TASKS.md' },
+    { title: 'Edit', detail: 'no-build editors, one task each, disjoint files' },
+    { title: 'Integrate', detail: 'one agent per batch: build, fix, verify, commit, land on main, push' },
   ],
 }
 
 const PRIMARY = '/Users/allie/Develop/ticket-master'
-const RUST_SLOTS = 2
-const OTHER_SLOTS = 3
-const GATE_EVERY = 6
+const INTEG = `${PRIMARY}/.claude/worktrees/tm-integrate`
+const BIN = '/tmp/tm-wide/tm'
+const BATCH = 8
 const planTasks = (args && args.planTasks) || []
-const maxRounds = (args && args.maxRounds) || 3
-const skipFirstTrial = !!(args && args.skipFirstTrial)
+const skipDiscovery = !!(args && args.skipDiscovery)
+const maxProbeRounds = (args && args.maxProbeRounds) || 2
+const CRITIC_JOURNAL = (args && args.criticJournal) || ''
 const SEV = { critical: 0, high: 1, medium: 2, low: 4 }
 
 // ---------- plumbing ----------
@@ -30,7 +31,6 @@ function makeSem(n) {
 }
 async function withLock(sem, fn) { await sem.acquire(); try { return await fn() } finally { sem.release() } }
 const primaryLock = makeSem(1)
-
 let nullStreak = 0
 let halted = false
 async function call(prompt, opts) {
@@ -40,7 +40,7 @@ async function call(prompt, opts) {
     nullStreak++
     if (nullStreak >= 3 && !halted) {
       halted = true
-      log('Three agents in a row returned nothing (probably a usage limit). No new work starts. Once usage resets, relaunch this script FRESH (not resumeFromRunId) with a new args.stamp and args.skipFirstTrial: true; TASKS.md carries the state.')
+      log('Three agents in a row returned nothing (probably a usage limit). Stopping. Relaunch FRESH with a new args.stamp and args.skipDiscovery: true; TASKS.md and the tm-integrate worktree carry the state.')
     }
   } else nullStreak = 0
   return r
@@ -50,11 +50,10 @@ const tasks = new Map()
 let seq = 0
 function addTask(t, prio) {
   if (!t || !t.id || tasks.has(t.id)) return
-  tasks.set(t.id, { id: t.id, m: t.m || 'sonnet', r: t.r !== false, f: t.f || [], d: t.d || [], prio, seq: seq++, status: 'pending' })
+  tasks.set(t.id, { id: t.id, m: t.m || 'sonnet', r: t.r !== false, f: t.f || [], d: t.d || [], prio, seq: seq++, status: 'pending', tries: 0, note: '' })
 }
-const IGNORE_OVERLAP = /(^|\/)(CLAUDE\.md|SPEC\.md|README\.md|args\.rs|lib\.rs|main\.rs|mod\.rs|mise\.toml|Cargo\.toml|Cargo\.lock|package\.json|pnpm-lock\.yaml)$|^docs\//
-const realFiles = t => (t.f || []).filter(f => !IGNORE_OVERLAP.test(f))
-const overlap = (a, b) => { const B = realFiles(b); return realFiles(a).some(x => B.includes(x)) }
+// Files several tasks in one batch may share: the integrator applies their edits.
+const SHAREABLE = /(^|\/)(CLAUDE\.md|SPEC\.md|README\.md|args\.rs|lib\.rs|main\.rs|mod\.rs|mise\.toml|Cargo\.toml|Cargo\.lock|package\.json|pnpm-lock\.yaml|TASKS\.md|backlog\.md)$/
 function depState(t) {
   for (const d of t.d || []) {
     const dt = tasks.get(d)
@@ -65,287 +64,323 @@ function depState(t) {
   return 'ok'
 }
 
-const toMark = []      // {id, box: 'x'|'~', note, worktrees: []}
-const followups = []   // strings from implementers
-const gates = []
-const trialLog = []
-let mergesSinceGate = 0
-
 // ---------- schemas ----------
 const S = (props, req) => ({ type: 'object', properties: props, required: req || Object.keys(props) })
 const str = { type: 'string' }
 const strs = { type: 'array', items: str }
-const LOAD = S({
-  closed: strs,
-  open_t: { type: 'array', items: S({ id: str, severity: { enum: ['critical', 'high', 'medium', 'low'] }, m: { enum: ['haiku', 'sonnet', 'opus'] }, r: { type: 'boolean' }, f: strs, d: strs }) },
+const bool = { type: 'boolean' }
+const SEVE = { enum: ['critical', 'high', 'medium', 'low'] }
+const META = S({ id: str, severity: SEVE, m: { enum: ['haiku', 'sonnet', 'opus'] }, r: bool, f: strs, d: strs })
+const LOAD = S({ closed: strs, open: { type: 'array', items: META } })
+const INV = S({
+  ok: bool, notes: str,
+  cli: { type: 'array', items: S({ cmd: str, children: strs }) },
+  slash: strs,
+  copyFiles: strs,
 })
 const FINDING = S({
-  slug: str, title: str, severity: { enum: ['critical', 'high', 'medium', 'low'] },
+  slug: str, title: str, severity: SEVE, kind: { enum: ['bug', 'copy', 'hierarchy', 'missing', 'stub', 'ux'] },
   files: strs, change: str, acceptance: str, test_command: str,
-  model: { enum: ['haiku', 'sonnet'] }, builds_rust: { type: 'boolean' }, evidence: str,
+  model: { enum: ['haiku', 'sonnet'] }, builds_rust: bool, evidence: str,
 })
-const TRIAL = S({ works: strs, tasks: { type: 'array', items: FINDING } })
-const RECORD = S({
-  tasks: { type: 'array', items: S({ id: str, severity: { enum: ['critical', 'high', 'medium', 'low'] }, m: { enum: ['haiku', 'sonnet'] }, r: { type: 'boolean' }, f: strs, d: strs }) },
-  merged_into_existing: { type: 'integer' },
+const FINDINGS = S({ pass: bool, works: strs, tasks: { type: 'array', items: FINDING } })
+const COPY = S({ changed: { type: 'integer' }, changes: { type: 'array', items: S({ old: str, new: str }) } })
+const DESIGN = S({ design: str, tasks: { type: 'array', items: FINDING } })
+const JEV = S({ summary: str, laya: str, jev: str, tasks: { type: 'array', items: FINDING } })
+const RECORD = S({ tasks: { type: 'array', items: META }, notes: str })
+const EDIT = S({
+  id: str, status: { enum: ['edited', 'already-done', 'blocked'] },
+  files: strs, shared_edits: str, summary: str, tests: str,
+}, ['id', 'status', 'summary'])
+const INTEGRATE = S({
+  landed: strs, failed: { type: 'array', items: S({ id: str, reason: str }) },
+  green: bool, head: str, pushed: bool, main_updated: bool, notes: str,
 })
-const PREP = S({ ok: { type: 'boolean' }, bin: str, notes: str })
-const IMPL = S({
-  status: { enum: ['done', 'already-done', 'blocked', 'failed'] },
-  branch: str, worktree: str, commit: str, crates: strs, summary: str, followups: strs,
-}, ['status', 'summary'])
-const MERGE = S({ merged: { type: 'boolean' }, sha: str, reason: str }, ['merged', 'reason'])
-const GATE = S({ green: { type: 'boolean' }, pushed: { type: 'boolean' }, head: str, notes: str })
-const MARK = S({ ok: { type: 'boolean' }, notes: str })
 
-// ---------- shared prompt fragments ----------
-const RULES = `Hard rules for this repo (see CLAUDE.md for the why):
-- \`unset CARGO_TARGET_DIR\` in every shell before building. Builds only through mise tasks or \`env -u CARGO_TARGET_DIR cargo ... -j 2\`; never raise the -j 2 cap.
-- Never run the compiled \`tm\` inside ${PRIMARY} or any worktree root. Manual checks: \`S=$(mktemp -d)\`, \`export TM_HOME=$(mktemp -d)\`, work in $S, \`TM_TEST_MOCK_PROVIDER=1\` for the mock provider.
-- Never read, print, echo, cat, copy or commit \`.env\` or any value from it.
-- Never touch \`.claude/worktrees/odw-*\` (the owner's parallel provider-overhaul workflow) and never run \`mise run clean\` or \`mise run worktree:clean\`.
-- No model identifiers in commits. Every commit message ends with the line: Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
+// ---------- shared prompt text ----------
+const RULES = `Hard rules (CLAUDE.md has the why):
+- \`unset CARGO_TARGET_DIR\` before any cargo/mise build; never raise the -j 2 cap.
+- Never run the compiled tm inside ${PRIMARY} or any worktree. Use \`S=$(mktemp -d)\`, \`export TM_HOME=$(mktemp -d)\`, work in $S; \`TM_TEST_MOCK_PROVIDER=1\` for the mock provider.
+- Never read, print, echo, cat, copy or commit .env or any value from it. Never touch .claude/worktrees/odw-* and never run \`mise run clean\` or \`mise run worktree:clean\`.
+- Commit messages carry no model names and end with: Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`
 
-const TRIAL_BASE = (round, bin, max) => `You are a hands-on tester of ticket-master (\`tm\`), a Rust ticket and agent harness. CLAUDE.md in ${PRIMARY} describes every surface. Your job is to USE one surface for real, the way its owner would, and report concrete defects as atomic fix tasks. This is round ${round}${round > 1 ? ' (earlier rounds already fixed what they found; confirm those flows now work end to end and find what is still wrong)' : ''}.
+const VOICE = `Voice for anything a person reads (CLI output, errors, TUI labels and hints, HTTP errors, web UI):
+- Talk to a person, not a log. Say what happened, then what to do next ("Run \`tm ticket retry T-12\` to try again.").
+- Plain words. No internal type, enum or struct names, no {:?} debug output, no raw JSON (unless the command is explicitly --json), no event-kind strings, no "Successfully", no stacked "Error: failed to X: error: Y".
+- Name things the way the product does: "ticket T-12 (Fix the login redirect)", "worker", "project". Use the CLI's own verbs.
+- Short: one line when possible. Sentence case. Keep every format placeholder and its argument order intact.`
 
-Do not edit anything in ${PRIMARY}. Read code only to pin a defect you OBSERVED to the file and function that must change. Don't audit code for its own sake.
+const FINDING_RULES = (max) => `Report at most ${max} tasks, most severe first, each atomic (one worker, one sitting) and self-contained: the files to change (exact paths; find the source of a message by grepping ${PRIMARY}/crates or clients for its text), the change, an observable acceptance check, the exact test command (\`mise run test:crate -- <crate>\` or \`pnpm -C clients/<x> test\`), model (haiku for mechanical edits, sonnet otherwise), builds_rust. Severity: critical = the flow does not work at all; high = works but wrong, misleading or unusable; medium = rough, confusing, missing option or affordance; low = polish. Kinds: bug, copy, hierarchy (wrong place, duplicate, inconsistent name), missing, stub (looks real but isn't), ux. Put the command you ran and a ≤3-line output excerpt in evidence. Set pass=false if the thing you were asked to check does not work. List what works in works (short lines). Don't report provider/model setup UX (crates/tm-provider, the chat's /connect /provider /config): another workstream owns it. Skip anything already listed as open in ${PRIMARY}/docs/tasks/TASKS.md (\`grep '^- \\[ \\]' ${PRIMARY}/docs/tasks/TASKS.md\`).`
 
-Binary: \`S=$(mktemp -d); cp ${bin} "$S/tm"\`, and use "$S/tm". \`export TM_HOME=$(mktemp -d)\`. Work only in $S: \`git init\` a small realistic project there. Never run tm inside ${PRIMARY} or any worktree.
-Mock provider: \`TM_TEST_MOCK_PROVIDER=1\`. Real provider (only where your brief asks): load the repo's credentials into that one process, e.g. \`(set -a; . ${PRIMARY}/.env; set +a; exec "$S/tm" <args>)\`. Never cat, print, echo or copy .env or any value from it, and never write one into a file or your output.
-If running with .env loaded is denied, don't look for another way to load it: fall back to the mock provider and say so in \`works\`.
-Bound long runs: \`perl -e 'alarm shift; exec @ARGV' 600 "$S/tm" ...\` (macOS has no \`timeout\`). Don't run cargo; the binary is already built.
+const SCRATCH = `Binary: \`S=$(mktemp -d); cp ${BIN} "$S/tm"; export TM_HOME=$(mktemp -d)\`; work only inside $S (git init a tiny realistic project there, with one commit). Never run tm inside ${PRIMARY} or any worktree, and don't run cargo. Bound long runs: \`perl -e 'alarm shift; exec @ARGV' 300 "$S/tm" ...\`.`
+const LIVE = `Real provider: load the repo credentials into that one tm process only: \`(set -a; . ${PRIMARY}/.env; set +a; exec "$S/tm" <args>)\`. Never print or copy anything from .env. If that is denied, fall back to TM_TEST_MOCK_PROVIDER=1 and say so in works.`
 
-Report at most ${max} tasks, most severe first. Each task must be atomic (one Sonnet worker, one sitting): the files to change, the change, an observable acceptance check, and the exact test command (\`mise run test:crate -- <crate>\` or \`pnpm -C clients/<x> test\`). Severity: critical = the flow does not work at all; high = works but wrong, misleading or unusable; medium = rough, confusing, a missing option or affordance; low = polish. Count as defects: copy problems (machine-speak, jargon, raw ids/enums/debug dumps shown to people, dead ends, errors without a next step), fake or stubbed behavior that looks real, and concepts that don't hang together. Put the command and a ≤3-line output excerpt in \`evidence\`. In \`works\`, list short lines of what you verified works.
-Skip provider/model/config setup UX (crates/tm-provider and the chat's /connect, /provider, /config belong to another workstream); mention it in \`works\` only if it blocked you. Before reporting, \`grep '^- \\[' ${PRIMARY}/docs/tasks/TASKS.md\` and don't re-report an open task already listed there.`
-
-const FACETS = [
-  { key: 'flow', brief: `THE CORE PROMISE: a request becomes a ticket, a worker implements it, the work is verified, and the ticket finishes. In $S build a small Python or Rust project with one failing test and one missing feature. Drive: \`tm init\`, \`tm ticket new\`, \`tm ticket activate\`, \`tm run <T>\`, and a background \`tm sched run\` working several tickets, including one that depends on another. Follow each ticket through every state: does verification actually run the project's tests/checks, and what do verifying/auditing mean here? Then submitted → \`tm ticket accept\` → closed; \`reject --reason\` → rework; out of attempts → \`retry --guidance\`. Mock provider first, then ONE real-provider run of the missing-feature ticket to see a real model implement and verify it. Check \`tm events\`, \`tm tickets --json\`, the diff in the repo and what a person sees at each step. Also check the chat → ticket path: \`tm -p\` asking it to queue work.` },
-  { key: 'genesis', brief: `GENESIS: turning an idea into a working project. Read \`tm genesis --help\`, then run it offline (mock) and with the real provider on a small idea ("a Python CLI todo app with tests"). Does it terminate? What does it create: files, tickets, milestones, docs? Can \`tm sched run\` then work the created tickets into a project whose tests pass? Interrupt it and resume. Report everything that stops Genesis from producing a real, working project.` },
-  { key: 'tui', brief: `THE TUI. Load the terminal-mcp skill, call createSession for your own PTY session (never use the default session) and destroySession when done. Launch "$S/tm" in the scratch repo with the mock provider. Walk the chat (welcome, typing a request, \`/\` commands, \`?\` shortcuts, \`!\` shell, \`@\` files, /status /cost /model /resume /init /compact), then the tickets screen (← twice or /tickets): dispatch a ticket from its input, Space to peek, the numbered accept/reject/retry/queue choices, Ctrl+B board, attaching a ticket's chat. Screenshot to judge layout. Report broken keys, rendering glitches, confusing states, every piece of jank or machine-speak copy, and missing affordances. Also report which project-management views are missing (milestones, dependencies, timeline/calendar), each as a concrete atomic task saying where it lives in the TUI and which store data backs it.` },
-  { key: 'serve', brief: `THE SERVER, WEB CLIENT AND MCP. Start "$S/tm" serve on a free port (with workers, mock provider) in the scratch repo and drive a whole ticket lifecycle over HTTP with curl: create, activate, watch /events (SSE), transition accept/reject/retry, page /tickets/{id}/events, /schema, /health, /state. Point \`--web-dir\` at ${PRIMARY}/clients/web/dist (already built), load /app/ and its assets with curl; if Playwright is already installed under ${PRIMARY}/clients/web/node_modules, take one headless screenshot of the home and a ticket page. Then \`tm mcp\` over stdio (newline-delimited JSON-RPC): initialize, tools/list, tools/call ticket_dispatch, ticket_show, search and symbol tools, and confirm the dispatched ticket actually gets worked.` },
-  { key: 'codenav', brief: `CODE NAVIGATION, CONTEXT AND BUDGET, as an agent experiences them. \`git clone --depth 1 file://${PRIMARY} "$S/repo"\` (sources only) and \`tm init\` there. On the never-indexed project, run every navigation and search command \`tm --help\` lists (symbol, search, history, outline and so on), then edit a file and add a new one and check freshness. Then ONE real-provider \`tm -p --json\` turn asking "where is the ticket state machine and which transitions exist?" and ONE real-provider ticket needing code navigation. Check what context was prefetched, whether the agent used the navigation tools, and how tokens and budget are reported. Report wrong or empty results, a stale index, slow paths and missing tools.` },
-  { key: 'cli', brief: `EVERY CLI VERB, SETTINGS, AND PROJECT MANAGEMENT. Walk \`tm --help\` and every subcommand's \`--help\`; try common mistakes (typos, missing args, unknown ticket ids, wrong state) and judge each message. Settings: what can be configured (\`tm config\`, config files, env vars), are defaults sane, can a person discover them? Leave provider/model setup out. Project management: milestones, dependencies, timelines, calendar, priorities, labels, epics. What exists in the CLI and the store, and what is stubbed or missing? Propose concrete atomic tasks for the gaps (data model, CLI verbs, TUI view), ordered so a worker can build them one after another (use depends_on-style wording in \`change\`).` },
+// Small, single-purpose flow probes. Each checks one thing and stops.
+const PROBES = [
+  { key: 'lifecycle-accept', m: 'haiku', brief: 'Ticket lifecycle, happy path, mock provider: `tm init`, `tm ticket new "<objective>"`, `tm ticket activate`, `tm run <T>`. Does it reach submitted (not escalated)? Then `tm ticket accept` → closed. Check `tm tickets --json` and `tm events` at each step. If the mock cannot finish any ticket, that alone is a critical finding: the offline happy path needs a scripted provider that makes a small edit and submits.' },
+  { key: 'lifecycle-reject-retry', m: 'haiku', brief: 'Reject and retry, mock provider: get a ticket to submitted or escalated. `tm ticket reject <T> --reason "..."` and see what happens next (does it rework?); for an escalated ticket, `tm ticket retry <T> --guidance "..."`. Are the states, messages and next steps clear?' },
+  { key: 'deps-sched', m: 'haiku', brief: 'Dependencies and the background scheduler, mock provider: create ticket B depending on ticket A (find how: `tm ticket new --help`, `tm ticket --help`), run `tm sched run` bounded to 120s. Is B held until A closes? What does the scheduler print? Are milestones, priorities or due dates available at all?' },
+  { key: 'serve-api', m: 'haiku', brief: 'HTTP API, mock provider: `tm serve` on a free port (with workers). With curl: POST /tickets, activate, GET /tickets/{id}, GET /tickets/{id}/events, /schema, /health, /state, the transition endpoint (accept/reject/retry), and 5s of GET /events (SSE). Also GET /app/ with --web-dir ' + PRIMARY + '/clients/web/dist. Are errors JSON with a human message?' },
+  { key: 'mcp', m: 'haiku', brief: '`tm mcp` over stdio, mock provider, after `tm init`: send newline-delimited JSON-RPC: initialize, tools/list, tools/call for ticket_dispatch, ticket_list, ticket_show, search_exact, search_hybrid, symbol_def, symbol_outline. Is the dispatched ticket worked? Are tool descriptions and errors clear?' },
+  { key: 'genesis-offline', m: 'haiku', brief: 'Genesis offline: `tm genesis --help`, then run it with TM_TEST_MOCK_PROVIDER=1 on "a Python CLI todo app with tests", bounded to 300s. Does it terminate? What does it create (files, tickets, milestones, docs)? Can the resulting tickets be worked with `tm sched run`?' },
+  { key: 'genesis-live', m: 'sonnet', brief: 'Genesis with the real provider on "a tiny Python CLI that counts words in a file, with pytest tests", bounded to 600s. Does it terminate, and does it produce a project whose tests pass (run pytest via `uvx pytest` if needed)? What stops it from making a real project?', live: true },
+  { key: 'nav-fresh', m: 'haiku', brief: 'Code navigation freshness: `git clone --depth 1 file://' + PRIMARY + ' "$S/repo"`, `tm init` there. On the never-indexed project run every symbol/search/history/outline command `tm --help` lists (e.g. symbol def/refs/callers for `transition` in tm-core). Then add a new file with a new function and edit another; query again. Report empty, wrong, stale or slow results with timings.' },
+  { key: 'nav-semantic', m: 'sonnet', brief: 'Semantic search quality: in a clone as above, run the hybrid/semantic search command for 6 conceptual queries ("where are tickets moved between states", "how is the provider chosen for a request", "what decides the token budget of a context pack", "where are events hash-chained", "how does the TUI render the chat transcript", "where are worktrees created for runs"). For each, is the right file in the top 5? Find out which embedder is used and whether it is a real model or a hash stand-in, and say what it would take to use a real local embedding model.' },
+  { key: 'prefetch', m: 'sonnet', brief: 'Context prefetch and budget: in a clone as above, create a ticket about a specific function and find how to see the context pack a worker gets for it (a command, `tm run` output, the events log or the store). What was prefetched: outlines, symbols, history, search hits? Is it relevant, and how are tokens and budget shown to a person? Also check what a chat turn prefetches (`tm -p --json` with the mock provider).' },
+  { key: 'live-ticket', m: 'sonnet', brief: 'One real end-to-end ticket with the real provider: in a tiny Python project with a failing pytest test, `tm ticket new "Make the failing test pass without changing the test"`, then `tm run <T>` bounded to 600s. Did it edit the right file, run the tests (verification), and reach submitted? Accept it. Report every place the flow broke or was confusing, and how long it took.', live: true },
+  { key: 'live-nav-chat', m: 'sonnet', brief: 'One real chat turn needing navigation, real provider: in a clone of ' + PRIMARY + ' (as above, after `tm init`), `tm -p --json "Where is the ticket state machine and which transitions exist? Cite files."`. Did the agent use navigation/search tools (check the steps), was the answer right, and how many tokens did it take?', live: true },
+  { key: 'tui', m: 'sonnet', brief: 'The TUI, mock provider. Load the terminal-mcp skill, createSession for your own session (never the default) and destroySession at the end; at most 25 tool calls. In $S (after `tm init`) launch "$S/tm". Screenshot: the chat welcome; `/` command list; `?` shortcuts; ← twice to the tickets screen; type an objective and Enter to dispatch; Space to peek; Ctrl+B board; Esc back. Report broken keys, glitches, confusing states and machine-speak you can SEE.' },
 ]
 
-// ---------- agents ----------
-async function load() {
-  return call(`Run ${(args && args.stamp) || 'unstamped'}. Read ${PRIMARY}/docs/tasks/TASKS.md (read-only; change nothing). Return:
-- closed: the id (the bold text right after the checkbox) of every task line starting with "- [x]" or "- [~]".
-- open_t: every task under the "## T — Found in live trials" heading that starts with "- [ ]": its id; severity (from the "severity:" field on its model line if present, else "high"); m = its model (haiku, sonnet or opus); r = true if "builds Rust: yes"; f = its file paths from the "files:" line; d = its dependency ids from "deps:" (empty if "none").`,
-    { label: 'load', phase: 'Load', schema: LOAD, model: 'haiku', effort: 'low' })
+// ---------- steps ----------
+async function load(stamp) {
+  return call(`Run ${stamp}. Read ${PRIMARY}/docs/tasks/TASKS.md (read-only). Return:
+- closed: the id (the bold text after the checkbox) of every task line starting "- [x]" or "- [~]".
+- open: every task starting "- [ ]" that is NOT in a section whose heading starts with a batch name like "## B1".."## B22" (i.e. tasks in section T and any D-020 or other added sections): id; severity from its "severity:" field if present, else "high"; m (its model); r (true if "builds Rust: yes"); f (its file paths); d (its deps, empty for "none").`,
+    { label: 'load', phase: 'Inventory', schema: LOAD, model: 'haiku', effort: 'low' })
 }
 
-async function prep(round) {
-  return withLock(primaryLock, () => call(`In ${PRIMARY} (main branch; do not change tracked files): \`unset CARGO_TARGET_DIR\`, then \`mise run build\`, then \`pnpm -C clients/web install --frozen-lockfile && pnpm -C clients/web build\` (dist is gitignored). Copy the built tm binary (target/debug/tm) to /tmp/tm-trials/tm-r${round} (mkdir -p) and run \`/tmp/tm-trials/tm-r${round} --version\` from /tmp. Return ok, bin (that path), and notes (one line; the web build result).`,
-    { label: `prep:r${round}`, phase: 'Trial', schema: PREP, model: 'haiku', effort: 'low' }))
+async function inventory() {
+  return call(`Prepare a tm test run. Steps:
+1. In ${PRIMARY} (branch main; don't change tracked files): \`unset CARGO_TARGET_DIR; mise run build\`, then \`pnpm -C clients/web install --frozen-lockfile && pnpm -C clients/web build\`. \`mkdir -p /tmp/tm-wide && cp target/debug/tm ${BIN}\`.
+2. Integration worktree: if ${INTEG} does not exist, \`git -C ${PRIMARY} worktree add -b integrate ${INTEG} main\` (if branch integrate already exists, add it without -b). If it exists: it must have no uncommitted changes (if it has some, report them in notes and \`git -C ${INTEG} checkout -- . && git -C ${INTEG} clean -fd\`), then \`git -C ${INTEG} merge --no-edit main\`.
+3. CLI inventory: in a scratch dir (\`cd $(mktemp -d); export TM_HOME=$(mktemp -d)\`), run \`${BIN} --help\`, and \`${BIN} <sub> --help\` for each subcommand. Return cli: one entry per top-level subcommand (except help) with its child subcommand names (empty if none).
+4. slash: the slash command names listed in ${PRIMARY}/crates/tm-tui/src/chat/commands.rs.
+5. copyFiles: source files with the most user-facing text. Run \`rg -c '(println!|eprintln!|writeln!|bail!|anyhow!|format!\\(\\s*"|Line::from|Span::|\\.title\\(|TmError::)' crates/tm-cli/src crates/tm-tui/src crates/tm-server/src crates/tm-mcp/src crates/tm-genesis/src crates/tm-scheduler/src crates/tm-core/src\` in ${PRIMARY}; keep files with a count of 6 or more, excluding tests/ directories. Add each .tsx under clients/web/src/views and clients/web/src/components that is not a test. Return at most 45 paths relative to the repo root, largest counts first.
+Return ok, notes (one line), cli, slash, copyFiles.
+
+${RULES}`, { label: 'inventory', phase: 'Inventory', schema: INV, model: 'haiku', effort: 'low' })
 }
 
-async function runTrials(round, bin) {
-  const max = round === 1 ? 12 : 8
-  const results = await parallel(FACETS.map(f => () =>
-    call(`${TRIAL_BASE(round, bin, max)}\n\nYour surface:\n${f.brief}`,
-      { label: `trial:${f.key}:r${round}`, phase: 'Trial', schema: TRIAL, model: 'sonnet', effort: 'medium' })))
-  const found = results.map((r, i) => r && { facet: FACETS[i].key, works: r.works, tasks: r.tasks }).filter(Boolean)
-  trialLog.push({ round, facets: found.map(x => `${x.facet}: ${x.tasks.length} found, ${x.works.length} works`), works: found.flatMap(x => x.works.map(w => `${x.facet}: ${w}`)) })
-  if (!found.length) return 0
-  const fu = followups.splice(0)
-  const rec = await withLock(primaryLock, () => call(`You record test findings into the task list. Work in ${PRIMARY} on branch main (you are the only agent writing there right now; the owner's own session might commit too, so never reset or discard commits you didn't make).
-
-Findings from round ${round} of live trials, as JSON (facet, works, tasks):
-${JSON.stringify(found)}
-${fu.length ? `\nFollow-ups noticed by implementers (turn the real ones into tasks the same way; drop vague ones):\n${JSON.stringify(fu)}\n` : ''}
-Steps:
-1. Read docs/tasks/TASKS.md and docs/tasks/README.md (format and conventions).
-2. Dedupe: merge findings that describe the same defect (across facets), and drop any finding already covered by an OPEN task in TASKS.md. If it adds real detail to that open task, append one sentence to that task's change: line instead, and count it in merged_into_existing.
-3. Give each remaining task a unique kebab id \`r${round}-<facet>-<slug>\`. Where one needs another first, set deps (ids of other new or existing open tasks).
-4. Write each under the "## T — Found in live trials" heading (after the existing entries there), exactly in the existing entry format, but with the model line as: \`model: <m> · severity: <severity> · builds Rust: <yes|no> · area: <facet> · deps: <ids or none>\`, followed by files/change/acceptance/test lines, and one \`evidence:\` line. Keep the change text specific and self-contained, since a worker reads only this entry.
-5. Under that heading, also add a short "Verified working (round ${round})" list from the works lines (at most 15 bullets; merge similar ones).
-6. \`mise run hygiene\` must still pass (don't write bare D-NNN numbers for decisions that don't exist yet). Commit only docs/tasks/TASKS.md: "docs(tasks): record round ${round} trial findings".
-Return the new tasks' metadata: id, severity, m (haiku|sonnet), r (builds Rust), f (files), d (deps).
-
-${RULES}`, { label: `record:r${round}`, phase: 'Record', schema: RECORD, model: 'sonnet', effort: 'low' }))
-  if (!rec) return 0
-  for (const t of rec.tasks) addTask(t, SEV[t.severity] ?? 2)
-  log(`Round ${round}: recorded ${rec.tasks.length} new tasks (${rec.merged_into_existing} merged into existing ones)`)
-  return rec.tasks.filter(t => t.severity === 'critical' || t.severity === 'high').length
-}
-
-function implPrompt(t, note, attempt) {
-  return `Implement ONE task in the ticket-master repo, in the isolated git worktree you were started in.
-
-Task id: \`${t.id}\`. Its full spec (files, change, acceptance, test) is the \`**${t.id}**\` entry in docs/tasks/TASKS.md. Read that entry first (grep for it; don't read the whole file). If your worktree's copy lacks it, read it from ${PRIMARY}/docs/tasks/TASKS.md.${note ? `\n\nAttempt ${attempt}. ${note}` : ''}
-
-Steps:
-1. \`unset CARGO_TARGET_DIR\`; \`git rev-parse --show-toplevel\` must NOT be ${PRIMARY} itself (you must be in a separate worktree). If it is, stop and return status "failed" with that as the summary. Then bring your branch up to date with local main: \`git merge --ff-only main || git merge --no-edit main\`.
-2. Read only the code you need (prefer the zvec-grep search/rg tools, or LSP, over wide reads). If the spec is obsolete because main already does this, return "already-done" with the evidence. If it needs a decision only the owner can make, return "blocked" and say what.
-3. Implement it, scoped to the task, matching the surrounding code's style, naming and comment density. User-facing text must be plain, friendly and specific: no machine-speak, no raw enum or debug output, and errors say what to do next.
-4. Tests: add or adjust tests that prove the acceptance check (put #[cfg(test)] code at the bottom of the file). Run the task's test command, \`env -u CARGO_TARGET_DIR cargo clippy -p <crate> --all-targets -j 2 -- -D warnings\` for each Rust crate you touched, \`mise run fmt\` and \`mise run hygiene\`. For clients, run that client's pnpm test/build.
-5. Docs in the same change: a CLAUDE.md line for a new CLI verb or mise task, SPEC.md if it now disagrees. If the spec says \`[new decision: X]\`, write the next free docs/decisions/D-NNN-*.md (check \`ls docs/decisions\` on main at ${PRIMARY} too, and follow D-002's format). Don't edit docs/tasks/TASKS.md; the integrator ticks it off.
-6. Review your own diff skeptically before committing: does it really meet the acceptance check, is anything left stubbed, is there any unwrap/expect in non-test code? Fix what you find.
-7. Commit on your branch (conventional message).
-8. Whatever the outcome (done, failed, blocked, already-done), finish with \`rm -rf target\` in your worktree: the merge builds in the primary checkout, and this machine's disk is tight.
-Return status, branch (\`git branch --show-current\`), worktree (the toplevel path), commit (full sha), crates (Rust crates or clients touched), summary (2-3 sentences), and followups (real defects you noticed but that were out of scope, one line each; empty if none).
+function cliPrompt(g) {
+  return `Exercise \`tm ${g.cmd}\`${g.children.length ? ` and its subcommands (${g.children.join(', ')})` : ''} the way a new user would, with the mock provider (TM_TEST_MOCK_PROVIDER=1). ${SCRATCH}
+For each: read --help, run it once on a sensible happy path (create what it needs first, e.g. \`tm init\`, a ticket), and try one mistake (missing argument, unknown id, wrong state). Judge: does it do what its name says; would a person understand the output and errors; is it in the right place in the command tree (duplicated elsewhere, inconsistently named, should be a flag instead); is any of it a stub that only pretends. Stay within about 25 commands. Don't read code except to find where a bad message comes from.
+${VOICE}
+${FINDING_RULES(8)}
 
 ${RULES}`
 }
 
-function mergePrompt(t, impl) {
-  return `Integrate one finished task branch into main, in the primary checkout ${PRIMARY}. You are the only workflow agent writing there right now; the owner's own session may commit there too, so never discard, reset or rewrite commits you didn't make, and never force-push.
+function copyPrompt(path) {
+  return `Rewrite the user-facing text in ONE file: ${INTEG}/${path}. Edit it in place in that worktree. Only string contents change: no logic, no signatures, no other files. Don't build or commit.
+User-facing = what a person reads: CLI output, errors, prompts, TUI labels, hints and status lines, HTTP error messages, web UI text. Not user-facing: tracing/log lines, test code, doc comments, JSON keys, event kinds, identifiers, clap arg names.
+${VOICE}
+Leave text that is already clear alone; don't churn. Return changed (count) and changes (old → new for each changed string, trimmed to 120 chars each) so the integrator can update tests that match exact text.`
+}
 
-Task \`${t.id}\`: branch \`${impl.branch}\`, worktree ${impl.worktree}, commit ${impl.commit}. Touched: ${(impl.crates || []).join(', ') || 'see the diff'}. Worker's summary: ${impl.summary}
-
-1. \`cd ${PRIMARY}; unset CARGO_TARGET_DIR\`. Confirm \`git branch --show-current\` is main. If tracked files have uncommitted changes (untracked HELLO*.md files are expected; leave them), someone else is mid-change: wait with a bounded loop (\`for i in $(seq 20); do git diff --quiet && git diff --cached --quiet && break; sleep 30; done\`) and then continue, or return merged=false, reason "primary-dirty".
-2. \`PRE=$(git rev-parse HEAD)\`, then \`git merge --no-ff --no-edit ${impl.branch}\`. Resolve conflicts so that both sides' intent survives (for docs and registration files, keep both additions).
-3. Check the merge: \`mise run test:crate -- <crate>\` for each touched Rust crate, \`env -u CARGO_TARGET_DIR cargo clippy -p <crate> --all-targets -j 2 -- -D warnings\`, \`cargo fmt --all -- --check\` (on failure run \`mise run fmt\` and commit), and \`pnpm -C clients/<x> test\` for touched clients. If something fails because of the merge and the fix is small, fix it and commit. If not, and \`git log --oneline $PRE..HEAD\` shows only your merge and fix commits, \`git reset --hard $PRE\` and return merged=false with a 2-line reason quoting the failure.
-4. In docs/tasks/TASKS.md turn \`- [ ] **${t.id}**\` into \`- [x] **${t.id}**\` and append \` (landed <short merge sha>)\` to that line. Commit: "docs(tasks): check off ${t.id}".
-5. \`git worktree remove --force ${impl.worktree}\`, then \`git branch -D ${impl.branch}\` if merged. If you didn't merge, still remove the worktree but keep the branch.
-Return merged, sha (the merge commit), and reason (one line: what happened).
+function probePrompt(p, round) {
+  return `Check ONE thing about tm (\`tm\`, a Rust ticket and agent harness; CLAUDE.md in ${PRIMARY} describes its surfaces) by using it, then stop. Round ${round}${round > 1 ? ': earlier rounds fixed what they found, so confirm it now works and find what is still wrong' : ''}.
+What to check: ${p.brief}
+${SCRATCH}
+${p.live ? LIVE : 'Use the mock provider (TM_TEST_MOCK_PROVIDER=1).'}
+Stay within about 30 tool calls. Read code only to pin an observed defect to the file and function that must change.
+${VOICE}
+${FINDING_RULES(6)}
 
 ${RULES}`
 }
 
-async function gate(kind) {
-  const g = await withLock(primaryLock, () => call(`Run the full gate on main in the primary checkout ${PRIMARY} and push it. The owner's own session may also commit there, so never discard, reset or rewrite commits you didn't make, and never force-push.
+async function jevResearch() {
+  return call(`Make tm's system-one decision providers real (docs/decisions/D-020-system-one-decision-providers.md and docs/vision/system-one-decisions.md in ${PRIMARY}: small fast classifier/decider models, Jev and Laya, used for ticket triage, routing and intent classification). The owner has now asked for this. Research and prove the path, in at most about 40 tool calls:
+1. Laya on Kaggle: a Kaggle API token is at ~/.kaggle/access_token; use it only as \`KAGGLE_API_TOKEN=$(cat ~/.kaggle/access_token) uvx kaggle ...\` (never print it). Find the Laya model (kaggle models list -s laya, or search by owner if the vision doc names one); note size, format and license. If it is MLX or convertible and 4GB or smaller, download it to /tmp/laya and run one classification locally with \`uvx --from mlx-lm mlx_lm.generate\` (or mlx_lm.server, which serves an OpenAI-compatible API on localhost). Check free memory first (vm_stat); skip the local run if it would push the 8GB machine into swap, and say so.
+2. Jev on Vercel AI Gateway: find its model id, the request shape (OpenAI-compatible chat completions at the gateway), and how auth works for this user (AI_GATEWAY_API_KEY or a Vercel OIDC token; the Vercel CLI is logged in). Search the web and Vercel docs; don't create keys or projects.
+3. Read the D-020 doc and ${PRIMARY}/crates/tm-provider (roles, Fabric) to see where a decider plugs in.
+Return: summary (what works now), laya (source, size, how to run locally, measured latency or why not), jev (model id, endpoint, auth), and tasks: atomic implementation tasks that get tm to (a) a DecisionProvider trait with a deterministic mock, (b) an OpenAI-compatible HTTP decider usable for both Jev on the gateway and Laya served locally by mlx_lm.server, (c) config to pick one, (d) shadow-mode triage of new tickets (classify, record an event, don't act), (e) a small offline eval. Follow the task format below. Keep secrets out of files and output.
+${FINDING_RULES(10)}
 
-1. \`cd ${PRIMARY}; unset CARGO_TARGET_DIR\`; confirm the branch is main.
-2. \`mise run verify\`. If it fails, find the cause (often two merged tasks that each passed alone), fix it minimally, commit ("fix: ..."), and re-run. At most two fix rounds; if it's still red, say exactly what fails.
-3. If green: \`git push -u origin main\`. If it's rejected because origin moved, \`git pull --no-rebase --no-edit origin main\`, re-run \`mise run verify\`, and push. On network errors retry up to 4 times (2s, 4s, 8s, 16s).
-Return green, pushed, head (short sha) and notes (at most 3 lines).
-
-${RULES}`, { label: `gate:${kind}`, phase: 'Integrate', schema: GATE, model: 'sonnet', effort: 'medium' }))
-  if (g) { gates.push({ kind, ...g }); log(`Gate ${kind}: ${g.green ? 'green' : 'RED'}${g.pushed ? ', pushed' : ''} at ${g.head}`) }
-  return g
+${RULES}`, { label: 'research:jev-laya', phase: 'Map', schema: JEV, model: 'sonnet', effort: 'medium' })
 }
 
-async function flushMarks() {
-  if (!toMark.length || halted) return
-  const batch = toMark.splice(0)
-  await withLock(primaryLock, () => call(`In ${PRIMARY} on main (the owner's session may commit there too; never discard others' commits), update docs/tasks/TASKS.md for these tasks and clean up their worktrees:
-${batch.map(x => `- \`${x.id}\`: change its checkbox to \`[${x.box}]\` and append " (${x.note.replace(/\n/g, ' ').slice(0, 300)})" to that line.${x.worktrees.length ? ` Then \`git worktree remove --force\` ${x.worktrees.join(', ')} (keep the branches).` : ''}`).join('\n')}
-Commit only docs/tasks/TASKS.md: "docs(tasks): mark ${batch.length} task(s) deferred or already done". Return ok and notes.
+async function design(inv, cliFindings, probeFindings) {
+  return call(`You design tm's command surfaces so they feel like one coherent, tasteful product, not a pile of verbs: the CLI tree, the chat's slash commands, and the TUI's screen hierarchy (including project-management views: milestones, dependencies, timeline/calendar, the Kanban board). Read CLAUDE.md's surface description and docs/decisions/D-019-claude-code-parity-shell.md in ${PRIMARY}; Claude Code (the \`claude\` CLI, \`claude agents\`, its slash commands such as /context /memory /agents /todos /export /doctor /permissions /review /add-dir) is the reference for feel.
+Current CLI: ${JSON.stringify(inv.cli)}
+Current slash commands: ${JSON.stringify(inv.slash)}
+Findings from people exercising the CLI: ${JSON.stringify(cliFindings)}
+Flow probe results (pass/fail and titles): ${JSON.stringify(probeFindings)}
+Produce: design, a short markdown description of the target structure (at most 60 lines: what stays, what merges, renames, moves under another verb or becomes a flag, what's hidden as plumbing, which slash commands to add and what each does, where PM views live); and tasks, at most 20 atomic tasks that get there, ordered so each builds on the last (mention prerequisites in change). The first task writes the design as the next free docs/decisions/D-NNN-command-surfaces.md. Keep old verbs working as hidden aliases where scripts may rely on them. Don't touch provider/model setup (/connect /provider /config).
+${FINDING_RULES(20)}
 
-${RULES}`, { label: 'mark', phase: 'Integrate', schema: MARK, model: 'haiku', effort: 'low' }))
+${RULES}`, { label: 'design:surfaces', phase: 'Reduce', schema: DESIGN, model: 'opus', effort: 'medium' })
 }
 
-// ---------- one task, start to finish ----------
-async function lifecycle(t) {
-  let note = ''
-  const worktrees = []
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    if (halted) { t.status = 'pending'; return }
-    const model = t.m === 'haiku' ? 'haiku' : 'sonnet'
-    const effort = t.m === 'haiku' ? 'low' : t.m === 'opus' ? 'high' : 'medium'
-    const impl = await call(implPrompt(t, note, attempt), {
-      label: `impl:${t.id}${attempt > 1 ? ':2' : ''}`, phase: 'Implement', schema: IMPL,
-      model, effort, isolation: 'worktree',
-    })
-    if (!impl) { if (halted) { t.status = 'pending'; return } note = 'The previous attempt died without reporting; start fresh.'; continue }
-    if (impl.worktree) worktrees.push(impl.worktree)
-    if (impl.status === 'already-done') {
-      t.status = 'merged'
-      toMark.push({ id: t.id, box: 'x', note: `already satisfied on main: ${impl.summary}`, worktrees: impl.worktree ? [impl.worktree] : [] })
-      return
-    }
-    if (impl.status === 'done' && impl.commit && impl.branch) {
-      let mr = await withLock(primaryLock, () => call(mergePrompt(t, impl), { label: `merge:${t.id}`, phase: 'Integrate', schema: MERGE, model: 'sonnet', effort: 'low' }))
-      if (mr && !mr.merged && /primary-dirty/.test(mr.reason || '')) {
-        mr = await withLock(primaryLock, () => call(mergePrompt(t, impl), { label: `merge:${t.id}:2`, phase: 'Integrate', schema: MERGE, model: 'sonnet', effort: 'low' }))
-      }
-      if (mr && mr.merged) {
-        t.status = 'merged'
-        for (const f of impl.followups || []) followups.push(`${t.id}: ${f}`)
-        mergesSinceGate++
-        if (mergesSinceGate >= GATE_EVERY) { mergesSinceGate = 0; await gate(`after-${t.id}`) }
-        return
-      }
-      if (!mr && halted) { t.status = 'pending'; return }
-      note = `The previous attempt (branch ${impl.branch}) did not integrate: ${mr ? mr.reason : 'the merge agent died'}. Start from current main; you may cherry-pick from that branch.`
-      worktrees.pop() // the merge agent removes the worktree either way
-    } else {
-      note = `The previous attempt reported ${impl.status}: ${impl.summary}`
-      if (impl.status === 'blocked') break
-    }
+async function record(label, intro, payload, idPrefix) {
+  return withLock(primaryLock, () => call(`Record tasks into ${PRIMARY}/docs/tasks/TASKS.md on branch main. The owner's own session may also commit there: never reset or discard commits you didn't make.
+${intro}
+Input (JSON): ${JSON.stringify(payload)}
+Steps:
+1. Read docs/tasks/README.md and the section "## T — Found in live trials" of TASKS.md, and grep the open task titles (\`grep '^- \\[ \\]' docs/tasks/TASKS.md\`).
+2. Merge input tasks that describe the same defect, and drop any already covered by an open task (you may append one clarifying sentence to that task's change line instead).
+3. Give each a unique id \`${idPrefix}-<slug>\` and deps (ids of new or existing open tasks it needs first).
+4. Append them at the end of section T, in the existing entry format, with the model line \`model: <m> · severity: <s> · builds Rust: <yes|no> · area: <area> · deps: <ids or none>\` then files, change, acceptance, test and evidence lines. Write each so a worker can act on it with no other context.
+5. \`mise run hygiene\` must pass (no bare D-NNN for decision docs that don't exist yet). Commit only TASKS.md: "docs(tasks): ${label}".
+6. If ${INTEG} exists and \`git -C ${INTEG} status --porcelain\` is empty, \`git -C ${INTEG} merge --no-edit main\` so the integration worktree has these entries.
+Return tasks (metadata for each task you added: id, severity, m, r, f, d) and notes (one line).
+
+${RULES}`, { label: `record:${label}`, phase: 'Reduce', schema: RECORD, model: 'sonnet', effort: 'low' }))
+}
+
+async function criticPass() {
+  if (!CRITIC_JOURNAL) return null
+  return withLock(primaryLock, () => call(`The benchmark-readiness audit's completeness critic has finished. Its result is the line with "label":"critic" (type "result") in ${CRITIC_JOURNAL}; extract it with node or jq without printing the whole journal. Apply what is right to ${PRIMARY}/docs/tasks/TASKS.md on main: fix wrong file paths, split tasks that aren't atomic, add missing tasks at the end of section T (id prefix \`critic-\`, same entry format with a severity field), and mark obsolete ones "[~] (why)". Keep it tight: only changes the critic justifies with evidence. \`mise run hygiene\` must pass. Commit only TASKS.md: "docs(tasks): apply the audit critic". Return tasks (metadata of tasks you ADDED) and notes.
+
+${RULES}`, { label: 'record:critic', phase: 'Reduce', schema: RECORD, model: 'sonnet', effort: 'low' }))
+}
+
+function editPrompt(t, owned, shared, others) {
+  return `Make the code change for ONE task, editing files in the shared integration worktree ${INTEG} (other agents are editing other files there right now).
+Task \`${t.id}\`: its spec is the \`**${t.id}**\` entry in ${PRIMARY}/docs/tasks/TASKS.md (grep for it; don't read the whole file; if it isn't there, try ${INTEG}/docs/tasks/TASKS.md).${t.note ? `\nA previous attempt failed: ${t.note}` : ''}
+Files you own in this batch: ${owned.join(', ') || '(none declared: create or edit only files no one else owns)'}.
+${shared.length ? `Shared files (other tasks in this batch need them too): ${shared.join(', ')}. Do NOT edit these; put exactly what must change in each (file, where, the text to add or replace) in shared_edits, and the integrator applies it.` : ''}
+Files other agents own right now (never touch): ${others.join(', ') || 'none'}.
+Rules: don't build, don't run cargo or tests, don't commit, don't touch git. You may run \`rustfmt --edition 2021 --check <file>\` to catch syntax errors, and LSP diagnostics if you have them. Read only the code you need (zvec-grep search, rg, LSP). Match the surrounding style and comment density. Add or update the unit tests that prove the acceptance check, in the files you own (#[cfg(test)] at the bottom of the file). If the task needs a new decision doc, write the next free docs/decisions/D-NNN-*.md (check \`ls ${INTEG}/docs/decisions ${PRIMARY}/docs/decisions\`; D-002's format). If main already does what the task asks, return already-done with the evidence; if only the owner can decide something, return blocked.
+${VOICE}
+Return id, status, files (every file you changed or created), shared_edits (empty if none), summary (2 sentences), tests (which tests to run to prove it).`
+}
+
+async function integrate(n, batch, edits) {
+  return withLock(primaryLock, () => call(`You land batch ${n} in the integration worktree ${INTEG} (branch integrate). Editors changed files there without building. Their reports: ${JSON.stringify(edits)}
+Tasks in this batch: ${batch.map(t => t.id).join(', ')} (specs in ${INTEG}/docs/tasks/TASKS.md).
+1. \`cd ${INTEG}; unset CARGO_TARGET_DIR\`. Apply each report's shared_edits to the shared files.
+2. \`mise run fmt\`, then \`env -u CARGO_TARGET_DIR cargo check --workspace --all-targets -j 2\` and fix errors. If client files changed, run that client's pnpm test/build too.
+3. \`mise run verify\` (run it in the background and wait for it; it takes a while). Fix what fails: compile errors, clippy, tests asserting old message text (update them to the new text when the new text is right), hygiene. For a task whose change you can't make work with a reasonable fix, revert only its files (\`git checkout -- <files>\`, remove files it created) and report it failed with a one-line reason. Re-run until green.
+4. Commit: one commit per task where its files are its own ("<type>(<scope>): <summary>" plus "Task: <id>"), shared-file changes in a final commit. Then in docs/tasks/TASKS.md turn each landed \`- [ ] **<id>**\` into \`- [x] **<id>**\` with " (landed <short sha>)" appended; do the same for tasks an editor reported already-done, with " (already satisfied)". Leave failed ones unchecked. Commit "docs(tasks): land batch ${n}".
+5. Land it: \`git merge --no-edit main\` (if main moved, re-run the affected crates' tests), then in ${PRIMARY}: \`git merge --ff-only integrate\` (if the primary checkout refuses because of someone's local changes, don't touch them: set main_updated=false and continue). Push: \`git -C ${INTEG} push origin integrate:main\` (if rejected, \`git fetch origin main && git merge --no-edit origin/main\`, re-check, push again; retry network errors 4 times, 2s/4s/8s/16s). Never force-push.
+Return landed (ids), failed ({id, reason}), green, head (short sha), pushed, main_updated, notes (≤3 lines).
+
+${RULES}`, { label: `integrate:b${n}`, phase: 'Integrate', schema: INTEGRATE, model: 'sonnet', effort: 'medium' }))
+}
+
+// ---------- batch builder ----------
+function nextBatch() {
+  for (const t of tasks.values()) {
+    if (t.status === 'pending' && depState(t) === 'dead') t.status = 'skipped'
   }
-  if (halted) { t.status = 'pending'; return }
-  t.status = 'failed'
-  t.reason = note.slice(0, 300)
-  toMark.push({ id: t.id, box: '~', note: `deferred by the tasks-all workflow: ${t.reason}`, worktrees })
+  const ready = [...tasks.values()].filter(t => t.status === 'pending' && depState(t) === 'ok').sort((a, b) => a.prio - b.prio || a.seq - b.seq)
+  const chosen = []
+  const owner = new Map()
+  for (const t of ready) {
+    if (chosen.length >= BATCH) break
+    const clash = t.f.some(f => !SHAREABLE.test(f) && owner.has(f))
+    if (clash) continue
+    chosen.push(t)
+    for (const f of t.f) { if (!owner.has(f)) owner.set(f, []); owner.get(f).push(t.id) }
+  }
+  return chosen.map(t => {
+    const owned = t.f.filter(f => owner.get(f).length === 1)
+    const shared = t.f.filter(f => owner.get(f).length > 1)
+    const others = [...owner.keys()].filter(f => !t.f.includes(f))
+    return { t, owned, shared, others }
+  })
 }
 
-// ---------- scheduler ----------
-async function drain(feeder) {
-  const running = new Map()
-  let feederDone = !feeder
-  const feederP = feeder ? feeder.then(() => { feederDone = true }, () => { feederDone = true }) : null
+async function buildLoop(label) {
+  let n = 0
   while (!halted) {
-    for (const t of tasks.values()) {
-      if (t.status === 'pending' && depState(t) === 'dead') {
-        t.status = 'skipped'
-        toMark.push({ id: t.id, box: '~', note: 'deferred: a task it depends on did not land', worktrees: [] })
-      }
+    const plan = nextBatch()
+    if (!plan.length) break
+    n++
+    const tag = `${label}.${n}`
+    log(`Batch ${tag}: ${plan.map(p => p.t.id).join(', ')}`)
+    for (const p of plan) { p.t.status = 'running'; p.t.tries++ }
+    const edits = await parallel(plan.map(p => () => {
+      const model = p.t.m === 'haiku' ? 'haiku' : 'sonnet'
+      const effort = p.t.m === 'haiku' ? 'low' : p.t.m === 'opus' ? 'high' : 'medium'
+      return call(editPrompt(p.t, p.owned, p.shared, p.others), { label: `edit:${p.t.id}`, phase: 'Edit', schema: EDIT, model, effort })
+    }))
+    if (halted) { for (const p of plan) p.t.status = 'pending'; break }
+    const reports = edits.map((e, i) => e || { id: plan[i].t.id, status: 'blocked', summary: 'the editor died without reporting' })
+    const res = await integrate(tag, plan.map(p => p.t), reports)
+    if (!res) { for (const p of plan) p.t.status = 'pending'; break }
+    const landed = new Set(res.landed || [])
+    const failed = new Map((res.failed || []).map(f => [f.id, f.reason]))
+    for (const [i, p] of plan.entries()) {
+      const rep = reports[i]
+      if (landed.has(p.t.id) || rep.status === 'already-done') p.t.status = 'merged'
+      else if (rep.status === 'blocked' || p.t.tries >= 2) { p.t.status = 'failed'; p.t.note = failed.get(p.t.id) || rep.summary }
+      else { p.t.status = 'pending'; p.t.note = failed.get(p.t.id) || rep.summary }
     }
-    const run = [...tasks.values()].filter(t => t.status === 'running')
-    let rustN = run.filter(t => t.r).length
-    let otherN = run.length - rustN
-    const ready = [...tasks.values()].filter(t => t.status === 'pending' && depState(t) === 'ok').sort((a, b) => a.prio - b.prio || a.seq - b.seq)
-    for (const t of ready) {
-      if (t.r ? rustN >= RUST_SLOTS : otherN >= OTHER_SLOTS) continue
-      if (run.some(o => overlap(o, t))) continue
-      t.status = 'running'
-      run.push(t)
-      if (t.r) rustN++; else otherN++
-      running.set(t.id, lifecycle(t).catch(e => { t.status = 'failed'; t.reason = String(e).slice(0, 200) }).then(() => { running.delete(t.id) }))
-    }
-    if (running.size === 0) {
-      if (feederDone) break
-      await feederP
-      continue
-    }
-    await Promise.race([...running.values(), ...(feederDone ? [] : [feederP])])
+    log(`Batch ${tag}: ${landed.size} landed, ${res.green ? 'green' : 'RED'}, pushed=${res.pushed}, main=${res.main_updated}. ${res.notes}`)
   }
-  await Promise.all([...running.values()])
-  if (feederP) await feederP
+}
+
+async function markDeferred() {
+  const dead = [...tasks.values()].filter(t => (t.status === 'failed' || t.status === 'skipped') && !t.marked)
+  if (!dead.length || halted) return
+  dead.forEach(t => { t.marked = true })
+  await withLock(primaryLock, () => call(`In ${INTEG} (branch integrate), in docs/tasks/TASKS.md mark these tasks deferred: change "- [ ] **<id>**" to "- [~] **<id>**" and append the reason in parentheses:
+${dead.map(t => `- ${t.id}: ${(t.status === 'skipped' ? 'a task it depends on did not land' : t.note || 'failed twice').replace(/\n/g, ' ').slice(0, 250)}`).join('\n')}
+Commit only that file ("docs(tasks): defer ${dead.length} task(s)"), \`git merge --no-edit main\`, then \`git -C ${PRIMARY} merge --ff-only integrate\` (skip if refused) and \`git push origin integrate:main\`. Return ok and notes.
+
+${RULES}`, { label: 'mark-deferred', phase: 'Integrate', schema: S({ ok: bool, notes: str }), model: 'haiku', effort: 'low' }))
 }
 
 // ---------- main ----------
-phase('Load')
-const state = await load()
-if (!state) return { halted: true, error: 'could not read TASKS.md' }
-for (const id of state.closed) tasks.set(id, { id, status: 'merged', f: [], d: [], r: false })
-for (const t of state.open_t) addTask(t, SEV[t.severity] ?? 1)
+phase('Inventory')
+const stamp = (args && args.stamp) || 'unstamped'
+const inv = await inventory()
+if (!inv || !inv.ok) return { halted: true, error: 'inventory failed', notes: inv && inv.notes }
+const st = await load(stamp)
+if (!st) return { halted: true, error: 'could not read TASKS.md' }
+for (const id of st.closed) tasks.set(id, { id, status: 'merged', f: [], d: [], r: false })
+for (const t of st.open) addTask(t, SEV[t.severity] ?? 1)
 for (const t of planTasks) addTask({ id: t.id, m: t.m, r: t.r, f: t.f, d: t.d }, t.b === 0 ? 1 : t.b <= 8 ? 1.5 : 2.5)
-log(`Loaded ${state.closed.length} closed and ${[...tasks.values()].filter(t => t.status === 'pending').length} open tasks`)
+log(`Inventory: ${inv.cli.length} CLI groups, ${inv.slash.length} slash commands, ${inv.copyFiles.length} copy files. Tasks: ${st.closed.length} closed, ${[...tasks.values()].filter(t => t.status === 'pending').length} open.`)
 
-let roundsRun = 0
-for (let round = 1; round <= maxRounds && !halted; round++) {
-  roundsRun = round
-  let feeder = null
-  let highFound = null
-  if (!(round === 1 && skipFirstTrial)) {
-    phase('Trial')
-    const p = await prep(round)
-    if (p && p.ok) feeder = runTrials(round, p.bin).then(n => { highFound = n })
-    else log(`Round ${round}: the trial build failed (${p ? p.notes : 'no report'}); implementing without trials`)
+const summary = { rounds: [] }
+if (!skipDiscovery) {
+  phase('Map')
+  // Everything in the map runs at once: CLI groups, copy sweep (edits INTEG directly), probes, jev research.
+  const [cliRes, copyRes, probeRes, jev] = await Promise.all([
+    parallel(inv.cli.map(g => () => call(cliPrompt(g), { label: `cli:${g.cmd}`, phase: 'Map', schema: FINDINGS, model: 'haiku', effort: 'low' }))),
+    parallel(inv.copyFiles.map(p => () => call(copyPrompt(p), { label: `copy:${p.split('/').pop()}`, phase: 'Map', schema: COPY, model: 'sonnet', effort: 'low' }))),
+    parallel(PROBES.map(p => () => call(probePrompt(p, 1), { label: `probe:${p.key}`, phase: 'Map', schema: FINDINGS, model: p.m, effort: 'low' }))),
+    jevResearch(),
+  ])
+  const cliFindings = cliRes.map((r, i) => r && { group: inv.cli[i].cmd, tasks: r.tasks }).filter(Boolean)
+  const probeFindings = probeRes.map((r, i) => r && { probe: PROBES[i].key, pass: r.pass, works: r.works, tasks: r.tasks }).filter(Boolean)
+  const copyChanges = copyRes.map((r, i) => r && r.changed ? { file: inv.copyFiles[i], changes: r.changes } : null).filter(Boolean)
+  summary.rounds.push({ round: 1, probes: probeFindings.map(p => `${p.probe}: ${p.pass ? 'pass' : 'FAIL'} (${p.tasks.length})`), copyFiles: copyChanges.length, jev: jev && jev.summary })
+
+  phase('Reduce')
+  // The copy sweep lands first, as its own batch, so later batches start from clean text.
+  if (copyChanges.length && !halted) {
+    const res = await integrate('copy', [], copyChanges.map(c => ({ id: `copy:${c.file}`, status: 'edited', files: [c.file], shared_edits: '', summary: `rewrote ${c.changes.length} user-facing strings`, tests: `changed strings: ${JSON.stringify(c.changes).slice(0, 1500)}` })))
+    log(`Copy sweep: ${res ? `${res.green ? 'green' : 'RED'}, pushed=${res.pushed}` : 'integrator died'}`)
   }
-  phase('Implement')
-  await drain(feeder)
-  await flushMarks()
-  if (halted) break
-  await gate(`round-${round}`)
-  mergesSinceGate = 0
-  if (highFound === 0 || feeder === null && round > 1) break
+  const dz = await design(inv, cliFindings.map(c => ({ group: c.group, tasks: c.tasks.map(t => ({ title: t.title, kind: t.kind, severity: t.severity })) })), probeFindings.map(p => ({ probe: p.probe, pass: p.pass, titles: p.tasks.map(t => t.title) })))
+  const recs = []
+  if (dz) recs.push(await record('command surfaces design', `These come from a design pass over the CLI tree, slash commands and TUI hierarchy. Design summary:\n${dz.design}\nThe CLI findings below were inputs to it; keep only CLI findings the design tasks don't already cover.`, { design_tasks: dz.tasks, cli_findings: cliFindings }, 's1'))
+  recs.push(await record('flow probe findings', 'These come from small probes that each exercised one flow for real. Make sure the list also contains offline end-to-end tests (crates/tm-e2e or crates/tm-cli/tests) for: the full ticket lifecycle to closed with a scripted provider, reject/retry, dependencies, the HTTP API, tm mcp dispatch, Genesis offline, and navigation freshness plus search plus prefetch. Those tests are what makes "it works" stay true; add them as tasks if the probes did not.', probeFindings, 'p1'))
+  if (jev) recs.push(await record('jev and laya', `System-one decision providers (D-020) are back on: the owner asked for Jev/Laya support. Research summary: ${jev.summary}\nLaya: ${jev.laya}\nJev: ${jev.jev}\nAlso move D-020 out of docs/backlog.md's "Ask the owner later" (the owner approved it on 2026-09-23) and set the doc's status to accepted in a task, not by hand.`, jev.tasks, 'd20'))
+  recs.push(await criticPass())
+  for (const r of recs) if (r) for (const t of r.tasks) addTask(t, SEV[t.severity] ?? 2)
+  log(`Recorded ${recs.filter(Boolean).reduce((a, r) => a + r.tasks.length, 0)} new tasks`)
+}
+
+phase('Edit')
+await buildLoop('r1')
+await markDeferred()
+
+for (let round = 2; round <= maxProbeRounds && !halted; round++) {
+  phase('Map')
+  const probeRes = await parallel(PROBES.map(p => () => call(probePrompt(p, round), { label: `probe:${p.key}:r${round}`, phase: 'Map', schema: FINDINGS, model: p.m, effort: 'low' })))
+  const pf = probeRes.map((r, i) => r && { probe: PROBES[i].key, pass: r.pass, works: r.works, tasks: r.tasks }).filter(Boolean)
+  summary.rounds.push({ round, probes: pf.map(p => `${p.probe}: ${p.pass ? 'pass' : 'FAIL'} (${p.tasks.length})`) })
+  const serious = pf.flatMap(p => p.tasks).filter(t => t.severity === 'critical' || t.severity === 'high')
+  const rec = await record(`round ${round} probe findings`, 'Findings from re-running the flow probes after the fixes landed.', pf, `p${round}`)
+  if (rec) for (const t of rec.tasks) addTask(t, SEV[t.severity] ?? 2)
+  phase('Edit')
+  await buildLoop(`r${round}`)
+  await markDeferred()
+  if (!serious.length) break
 }
 
 const all = [...tasks.values()].filter(t => t.prio !== undefined)
-const by = s => all.filter(t => t.status === s).map(t => t.id)
 return {
   halted,
-  roundsRun,
-  merged: by('merged').length,
-  failed: all.filter(t => t.status === 'failed').map(t => ({ id: t.id, reason: t.reason })),
-  skipped: by('skipped'),
-  pending: by('pending'),
-  gates,
-  trials: trialLog.map(t => ({ round: t.round, facets: t.facets, works: t.works.slice(0, 40) })),
-  followupsLeft: followups,
+  summary,
+  merged: all.filter(t => t.status === 'merged').length,
+  failed: all.filter(t => t.status === 'failed').map(t => ({ id: t.id, note: t.note })),
+  skipped: all.filter(t => t.status === 'skipped').map(t => t.id),
+  pending: all.filter(t => t.status === 'pending' || t.status === 'running').map(t => t.id),
 }

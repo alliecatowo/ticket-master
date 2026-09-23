@@ -63,20 +63,31 @@ integration worktree. A failed release job is not a published working binary —
 each asset and smoke-test it before updating README install claims. Do not run
 `mise run worktree:clean` while the five active worktrees still contain changes.
 
-# `tasks-all.workflow.js`: work off docs/tasks/TASKS.md (Claude Code Workflow)
+# `tasks-all.workflow.js`: wide map-reduce over docs/tasks/TASKS.md (Claude Code Workflow)
 
-A Claude Code `Workflow` script, not an ODW one. Each round has four steps:
+This is a Claude Code `Workflow` script, not an ODW one. It uses many small agents rather than a
+few large ones.
 
-1. It builds `tm`, and six Sonnet testers drive each surface for real: the ticket flow, Genesis,
-   the TUI, the server with the web client and MCP, code navigation, and the CLI with settings
-   and project management.
-2. It records their findings as tasks in section T of `docs/tasks/TASKS.md`.
-3. It implements every open task. Each task gets its own Sonnet or Haiku worker in its own
-   worktree, with at most two Rust builds at once.
-4. Merges happen one at a time in the primary checkout, and each checks its task off. A full
-   `mise run verify` and a push run every six merges.
+1. **Inventory.** Build `tm`, list the CLI groups, slash commands and files that print text, and
+   set up the `.claude/worktrees/tm-integrate` worktree (branch `integrate`).
+2. **Map.** Small agents, each with one job, all at once:
+   - one Haiku agent per CLI group;
+   - one agent per file for the user-facing copy sweep (it edits `tm-integrate` directly, no
+     build);
+   - one probe per flow (ticket lifecycle, dependencies, API, MCP, Genesis, navigation,
+     semantic search, prefetch, TUI, plus three real-provider runs);
+   - one research agent for Jev/Laya (D-020).
+3. **Reduce.** The copy sweep lands as its own batch. One design pass on the command surfaces
+   (the CLI tree, slash commands and TUI hierarchy) turns into tasks. Recorders dedupe the
+   findings into section T of TASKS.md. The audit critic's corrections are applied.
+4. **Batches.** Up to eight tasks per batch:
+   - The tasks' files are disjoint. Registration and doc files may be shared; the integrator
+     applies the editors' `shared_edits` to them.
+   - One editor per task, which never builds.
+   - One integrator, which applies the shared edits, builds, runs `mise run verify`, fixes or
+     reverts, commits, ticks TASKS.md, fast-forwards `main` and pushes `integrate:main`.
+5. **Repeat.** The probes run again after the fixes, and new findings go through another round
+   of batches.
 
-Rounds repeat until a round finds nothing critical or high, three rounds at most. TASKS.md is the
-only resume state. After a usage-limit halt, relaunch it fresh with a new `args.stamp` and
-`args.skipFirstTrial: true`, rather than `resumeFromRunId`. `args.planTasks` carries the plan
-tasks' dependency and file metadata.
+TASKS.md and the `integrate` branch are the resume state. After a usage-limit halt, relaunch
+fresh with a new `args.stamp` and `args.skipDiscovery: true`.
