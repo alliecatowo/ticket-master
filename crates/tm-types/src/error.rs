@@ -55,6 +55,11 @@ pub enum TmError {
     #[error("agent turn failed: {0}")]
     TurnFailed(String),
 
+    /// A health or verification check reported a failure (e.g. `tm doctor`). The check's own
+    /// output already explains it; this carries the one-line summary.
+    #[error("check failed: {0}")]
+    CheckFailed(String),
+
     /// Malformed input that could not be parsed.
     #[error("parse: {0}")]
     Parse(String),

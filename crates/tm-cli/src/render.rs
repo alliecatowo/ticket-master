@@ -96,6 +96,7 @@ impl Renderer {
                 TmError::Parse(_) => "Parse",
                 TmError::Invariant(_) => "Invariant",
                 TmError::TurnFailed(_) => "TurnFailed",
+                TmError::CheckFailed(_) => "CheckFailed",
             };
             let json = serde_json::json!({
                 "error": {
@@ -191,12 +192,20 @@ impl Table {
 
         let mut output = String::new();
 
+        // The last column is never padded: one long value there (a doctor detail, an objective)
+        // would otherwise pad every row out to its width and wrap each one in a real terminal.
+        let last = self.headers.len() - 1;
+
         // Render header line
         for (i, header) in self.headers.iter().enumerate() {
             if i > 0 {
                 output.push_str("  ");
             }
-            output.push_str(&format!("{:<width$}", header, width = col_widths[i]));
+            if i == last {
+                output.push_str(header);
+            } else {
+                output.push_str(&format!("{:<width$}", header, width = col_widths[i]));
+            }
         }
         output.push('\n');
 
@@ -207,7 +216,11 @@ impl Table {
                     output.push_str("  ");
                 }
                 let cell = row.get(i).map(|s| s.as_str()).unwrap_or("");
-                output.push_str(&format!("{cell:<width$}"));
+                if i == last {
+                    output.push_str(cell);
+                } else {
+                    output.push_str(&format!("{cell:<width$}"));
+                }
             }
             output.push('\n');
         }

@@ -160,9 +160,16 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
             if report.all_ok() {
                 Ok(())
             } else {
-                Err(tm_types::TmError::invariant(
-                    "doctor found at least one failing check",
-                ))
+                let failed: Vec<&str> = report
+                    .checks
+                    .iter()
+                    .filter(|c| !c.ok && c.required)
+                    .map(|c| c.name.as_str())
+                    .collect();
+                Err(tm_types::TmError::CheckFailed(format!(
+                    "tm doctor: {} failed",
+                    failed.join(", ")
+                )))
             }
         }
         Some(Command::Ticket(cmd)) => {

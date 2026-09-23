@@ -278,6 +278,10 @@ pub enum TicketCommand {
     Edit(TicketEditArgs),
     /// Make a draft ticket ready for a worker to pick up (`tm run` or `tm sched run`).
     Activate(TicketRefArgs),
+    /// Accept a submitted ticket's work as done, closing it.
+    Accept(TicketAcceptArgs),
+    /// Reject a submitted ticket's work, sending it back for another attempt with your reason.
+    Reject(TicketRejectArgs),
     /// Close a ticket (requires it to be verified, unless its kind permits an unverified
     /// close).
     Close(TicketRefArgs),
@@ -374,6 +378,28 @@ pub struct TicketEditArgs {
     /// New scheduling priority.
     #[arg(long)]
     pub priority: Option<i32>,
+}
+
+/// `tm ticket accept`
+#[derive(Debug, Args)]
+pub struct TicketAcceptArgs {
+    /// The submitted ticket to accept.
+    #[arg(value_name = "TICKET")]
+    pub ticket: String,
+    /// An optional note recorded with the acceptance.
+    #[arg(long)]
+    pub note: Option<String>,
+}
+
+/// `tm ticket reject`
+#[derive(Debug, Args)]
+pub struct TicketRejectArgs {
+    /// The submitted ticket to reject.
+    #[arg(value_name = "TICKET")]
+    pub ticket: String,
+    /// What is wrong or missing; the next attempt's worker sees this.
+    #[arg(long)]
+    pub reason: String,
 }
 
 /// `tm ticket cancel`

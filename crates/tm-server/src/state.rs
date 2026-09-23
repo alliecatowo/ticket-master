@@ -216,6 +216,7 @@ pub struct ErrorBody {
 /// - `Conflict`, `InvalidTransition`, `LeaseExpired`, `BudgetExhausted` → 409 Conflict (all name
 ///   a legal-but-currently-blocked state transition)
 /// - `Storage`, `Provider`, `Io`, `Parse`, `Invariant` → 500 Internal Server Error
+/// - `TurnFailed`, `CheckFailed` → 422 Unprocessable Entity
 pub fn status_for(err: &TmError) -> StatusCode {
     match err {
         TmError::AuthorityDenied(_) => StatusCode::FORBIDDEN,
@@ -230,6 +231,7 @@ pub fn status_for(err: &TmError) -> StatusCode {
         TmError::Parse(_) => StatusCode::INTERNAL_SERVER_ERROR,
         TmError::Invariant(_) => StatusCode::INTERNAL_SERVER_ERROR,
         TmError::TurnFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
+        TmError::CheckFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
     }
 }
 
@@ -248,6 +250,7 @@ pub fn error_code(err: &TmError) -> &'static str {
         TmError::Parse(_) => "storage_error",
         TmError::Invariant(_) => "invariant_violation",
         TmError::TurnFailed(_) => "turn_failed",
+        TmError::CheckFailed(_) => "check_failed",
     }
 }
 

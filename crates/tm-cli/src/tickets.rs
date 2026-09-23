@@ -4,9 +4,10 @@
 
 use crate::args::{
     DecisionCommand, DecisionNewArgs, DecisionRefArgs, DecisionSupersedeArgs, DepCommand,
-    DepEdgeArgs, DepGraphArgs, MilestoneCommand, MilestoneRefArgs, TicketCancelArgs, TicketCommand,
-    TicketDelegateArgs, TicketEditArgs, TicketForkArgs, TicketListArgs, TicketNewArgs,
-    TicketRefArgs, TicketStateArg, TicketSubmitArgs,
+    DepEdgeArgs, DepGraphArgs, MilestoneCommand, MilestoneRefArgs, TicketAcceptArgs,
+    TicketCancelArgs, TicketCommand, TicketDelegateArgs, TicketEditArgs, TicketForkArgs,
+    TicketListArgs, TicketNewArgs, TicketRefArgs, TicketRejectArgs, TicketStateArg,
+    TicketSubmitArgs,
 };
 use crate::project::Project;
 use crate::render::{Renderer, Table, Tree};
@@ -189,6 +190,8 @@ pub fn dispatch_ticket(
         TicketCommand::Cancel(args) => ticket_cancel(args, project, renderer),
         TicketCommand::Reopen(args) => ticket_reopen(args, project, renderer),
         TicketCommand::Activate(args) => ticket_activate(args, project, renderer),
+        TicketCommand::Accept(args) => ticket_accept(args, project, renderer),
+        TicketCommand::Reject(args) => ticket_reject(args, project, renderer),
         TicketCommand::Tree(args) => ticket_tree(args, project, renderer),
         TicketCommand::Delegate(args) => ticket_delegate(args, project, renderer),
         TicketCommand::Submit(args) => ticket_submit(args, project, renderer),
@@ -454,6 +457,45 @@ pub fn ticket_activate(
     renderer.emit(
         &ticket_id,
         &format!("Activated ticket {ticket_id}: ready for a worker (tm run {ticket_id})"),
+    )?;
+    Ok(())
+}
+
+/// `tm ticket accept`: a human certifies a submission as done (`Submitted -> Closed`).
+pub fn ticket_accept(
+    args: &TicketAcceptArgs,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let ticket_id = TicketId::new(&args.ticket)?;
+    project
+        .store
+        .accept(&ticket_id, args.note.clone(), project.actor.clone())?;
+    renderer.emit(&ticket_id, &format!("Accepted {ticket_id}: closed."))?;
+    Ok(())
+}
+
+/// `tm ticket reject`: a human sends a submission back; the reason becomes part of the ticket's
+/// failure history, which the next attempt's worker sees.
+pub fn ticket_reject(
+    args: &TicketRejectArgs,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let ticket_id = TicketId::new(&args.ticket)?;
+    project
+        .store
+        .reject(&ticket_id, args.reason.clone(), project.actor.clone())?;
+    let state = project
+        .store
+        .view()?
+        .tickets
+        .get(&ticket_id)
+        .map(|t| format!("{:?}", t.state).to_ascii_lowercase())
+        .unwrap_or_default();
+    renderer.emit(
+        &ticket_id,
+        &format!("Rejected {ticket_id}: it is {state}, and the next attempt will see your reason."),
     )?;
     Ok(())
 }

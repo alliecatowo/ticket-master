@@ -487,10 +487,15 @@ pub async fn run_ticket(
 fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Result<String> {
     let state = state_label(ticket.state);
     if worktree_run_reached_success(ticket.state) {
-        return Ok(format!(
-            "Ticket {} submitted its work ({state}).",
-            ticket.id
-        ));
+        return Ok(if ticket.state == tm_core::TicketState::Submitted {
+            format!(
+                "Ticket {id} submitted its work. Review it (tm ticket show {id}), then \
+                 `tm ticket accept {id}` or `tm ticket reject {id} --reason \"...\"`.",
+                id = ticket.id
+            )
+        } else {
+            format!("Ticket {} submitted its work ({state}).", ticket.id)
+        });
     }
     let reason = ticket
         .failures

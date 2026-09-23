@@ -1582,8 +1582,17 @@ pub struct DoctorCheck {
     pub name: String,
     /// Whether the check passed.
     pub ok: bool,
+    /// Whether a failure here makes the project unhealthy. Optional capabilities (computer use,
+    /// which needs OS permissions most people never grant) are reported, but a failure is a
+    /// warning, not a doctor failure.
+    #[serde(default = "required_default")]
+    pub required: bool,
     /// Human-readable detail, especially on failure.
     pub detail: String,
+}
+
+fn required_default() -> bool {
+    true
 }
 
 /// The full `tm doctor` report.
@@ -1594,9 +1603,9 @@ pub struct DoctorReport {
 }
 
 impl DoctorReport {
-    /// Whether every check passed.
+    /// Whether every required check passed (a failed optional check is only a warning).
     pub fn all_ok(&self) -> bool {
-        self.checks.iter().all(|c| c.ok)
+        self.checks.iter().all(|c| c.ok || !c.required)
     }
 }
 
@@ -1647,10 +1656,10 @@ fn render_doctor_report(report: &DoctorReport) -> String {
         .map(|c| {
             vec![
                 c.name.clone(),
-                if c.ok {
-                    "ok".to_string()
-                } else {
-                    "FAIL".to_string()
+                match (c.ok, c.required) {
+                    (true, _) => "ok".to_string(),
+                    (false, true) => "FAIL".to_string(),
+                    (false, false) => "warn".to_string(),
                 },
                 c.detail.clone(),
             ]
@@ -1747,6 +1756,7 @@ async fn provider_doctor_detail(clock: Arc<dyn Clock>) -> DoctorCheck {
     DoctorCheck {
         name: "providers".to_string(),
         ok: true,
+        required: true,
         detail,
     }
 }
@@ -1762,6 +1772,7 @@ fn workflow_doctor_detail(project: &Project) -> DoctorCheck {
         return DoctorCheck {
             name: "workflow-1x1".to_string(),
             ok: true,
+            required: true,
             detail: "no workflow definitions found under .tm/workflows/".to_string(),
         };
     }
@@ -1779,6 +1790,7 @@ fn workflow_doctor_detail(project: &Project) -> DoctorCheck {
     DoctorCheck {
         name: "workflow-1x1".to_string(),
         ok: true,
+        required: true,
         detail,
     }
 }
@@ -1797,6 +1809,7 @@ pub fn doctor(
     checks.push(DoctorCheck {
         name: "scope".to_string(),
         ok: true,
+        required: true,
         detail: project.scope_line(),
     });
 
@@ -1804,6 +1817,7 @@ pub fn doctor(
     checks.push(DoctorCheck {
         name: "invariants".to_string(),
         ok: violations.is_empty(),
+        required: true,
         detail: if violations.is_empty() {
             "no invariant violations".to_string()
         } else {
@@ -1820,6 +1834,7 @@ pub fn doctor(
     checks.push(DoctorCheck {
         name: "hash-chain".to_string(),
         ok: chain.is_valid(),
+        required: true,
         detail: if chain.is_valid() {
             format!("{} events verified", chain.events_checked)
         } else {
@@ -1837,6 +1852,7 @@ pub fn doctor(
         Ok(delta) => DoctorCheck {
             name: "index-health".to_string(),
             ok: true,
+            required: true,
             detail: format!(
                 "repaired incremental drift: {} added, {} modified, {} removed, {} chunks written, \
                  {} commits ingested",
@@ -1847,6 +1863,7 @@ pub fn doctor(
         Err(e) => DoctorCheck {
             name: "index-health".to_string(),
             ok: false,
+            required: true,
             detail: e.to_string(),
         },
     };
@@ -1870,6 +1887,7 @@ pub fn doctor(
             Ok(caps) => DoctorCheck {
                 name: "computer-use".to_string(),
                 ok: caps.input && caps.capture,
+                required: false,
                 detail: if caps.notes.is_empty() {
                     format!(
                         "{:?} backend ready (input={}, capture={}, element_tree={}, headless={})",
@@ -1882,6 +1900,7 @@ pub fn doctor(
             Err(e) => DoctorCheck {
                 name: "computer-use".to_string(),
                 ok: false,
+                required: false,
                 detail: e.to_string(),
             },
         });

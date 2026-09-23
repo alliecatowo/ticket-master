@@ -72,8 +72,8 @@ use crate::lease::{Lease, LeaseStore, LeaseView};
 use crate::machine;
 use crate::milestone::{Milestone, MilestoneStore};
 use crate::ticket::{
-    ContextRef, DependencyKind, ExecutorRequirements, FailureClass, ResourceClaim, RetryPolicy,
-    Ticket, TicketKind, TicketState, Trigger, VerificationPolicy,
+    ContextRef, DependencyKind, ExecutorRequirements, FailureClass, FailureRecord, ResourceClaim,
+    RetryPolicy, Ticket, TicketKind, TicketState, Trigger, VerificationPolicy,
 };
 use crate::view::{ParticipantSummary, ProjectView, SchedulerView};
 
@@ -1022,6 +1022,118 @@ impl Store {
         })
     }
 
+    /// A human accepts a submission as done: `Submitted -> Verifying -> Auditing -> Closed` in one
+    /// atomic command, recorded as verified and audited by that human. This is the terminal path
+    /// for submitted work when no verification ticket is in play, and it is deliberately
+    /// human-only: an agent never certifies work (`SPEC.md` §11, "verification separation").
+    pub fn accept(
+        &self,
+        ticket: &TicketId,
+        note: Option<String>,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        if !actor.is_human() {
+            return Err(TmError::AuthorityDenied(format!(
+                "{actor} cannot accept a submission: only a human can certify work directly"
+            )));
+        }
+        let ticket = ticket.clone();
+        self.run_command(move |view| {
+            let t = view
+                .tickets
+                .get(&ticket)
+                .ok_or_else(|| TmError::not_found("ticket", &ticket))?;
+            let step = |from, trigger| {
+                machine::transition(from, trigger)
+                    .map_err(|e| TmError::InvalidTransition(e.to_string()))
+            };
+            let verifying = step(t.state, Trigger::VerificationStarted)?;
+            let auditing = step(verifying, Trigger::VerificationPassed)?;
+            let closed = step(auditing, Trigger::AuditPassed)?;
+            Ok(vec![
+                state_changed_draft(&ticket, t.state, verifying, actor.clone()),
+                state_changed_draft(&ticket, verifying, auditing, actor.clone()),
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(ticket.clone()),
+                    Payload::from(TicketVerifiedPayload {
+                        ticket: ticket.clone(),
+                        verifier: ticket.clone(),
+                    }),
+                ),
+                state_changed_draft(&ticket, auditing, closed, actor.clone()),
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(ticket.clone()),
+                    Payload::from(TicketAuditedPayload {
+                        ticket: ticket.clone(),
+                        auditor: ticket.clone(),
+                    }),
+                ),
+                EventDraft::new(
+                    actor,
+                    Id::from(ticket.clone()),
+                    Payload::from(TicketClosedPayload {
+                        ticket: ticket.clone(),
+                        reason: note.clone(),
+                    }),
+                ),
+            ])
+        })
+    }
+
+    /// A human rejects a submission: `Submitted -> Verifying -> Recovery`, recorded as a failed
+    /// verification carrying `reason`, then the ticket's retry policy decides between another
+    /// attempt (`-> Ready`) and escalation, exactly as for any other failure
+    /// ([`Store::record_failure`]). The next attempt's context includes `reason` among the
+    /// ticket's prior failures, so the worker sees what was wrong.
+    pub fn reject(
+        &self,
+        ticket: &TicketId,
+        reason: String,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        if !actor.is_human() {
+            return Err(TmError::AuthorityDenied(format!(
+                "{actor} cannot reject a submission directly: only a human can"
+            )));
+        }
+        let id = ticket.clone();
+        let failure_reason = reason.clone();
+        let mut events = self.run_command(move |view| {
+            let t = view
+                .tickets
+                .get(&id)
+                .ok_or_else(|| TmError::not_found("ticket", &id))?;
+            let step = |from, trigger| {
+                machine::transition(from, trigger)
+                    .map_err(|e| TmError::InvalidTransition(e.to_string()))
+            };
+            let verifying = step(t.state, Trigger::VerificationStarted)?;
+            let recovery = step(verifying, Trigger::VerificationFailed)?;
+            Ok(vec![
+                state_changed_draft(&id, t.state, verifying, actor.clone()),
+                state_changed_draft(&id, verifying, recovery, actor.clone()),
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(id.clone()),
+                    Payload::from(TicketVerificationFailedPayload {
+                        ticket: id.clone(),
+                        verifier: id.clone(),
+                        reason: reason.clone(),
+                    }),
+                ),
+            ])
+        })?;
+        events.extend(self.record_failure(
+            ticket,
+            FailureClass::VerificationFailed,
+            failure_reason,
+            ParticipantId::system(),
+        )?);
+        Ok(events)
+    }
+
     /// Cancel `ticket` from any non-terminal state, gated on `authority.tickets.cancel`
     /// (`SPEC.md` §4.3 rule 12).
     pub fn cancel(
@@ -1115,14 +1227,34 @@ impl Store {
             } else {
                 Trigger::RetryExhausted
             };
-            let mut drafts = vec![EventDraft::new(
-                actor.clone(),
-                Id::from(ticket.clone()),
-                Payload::from(TicketFailedPayload {
-                    ticket: ticket.clone(),
-                    reason: detail.clone(),
-                }),
-            )];
+            // The failure also joins the ticket's own history (`Ticket::failures`), which is what
+            // the next attempt's context pack shows its worker ("prior failures") and what
+            // `tm run` reports; `ticket.failed` alone only carries the reason for the log.
+            let mut failures = t.failures.clone();
+            failures.push(FailureRecord {
+                class,
+                detail: detail.clone(),
+                at: self.clock.now(),
+                attempt,
+            });
+            let mut drafts = vec![
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(ticket.clone()),
+                    Payload::from(TicketFailedPayload {
+                        ticket: ticket.clone(),
+                        reason: detail.clone(),
+                    }),
+                ),
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(ticket.clone()),
+                    Payload::from(TicketUpdatedPayload {
+                        ticket: ticket.clone(),
+                        fields: serde_json::json!({ "failures": failures }),
+                    }),
+                ),
+            ];
             // The failed executor is finished with this attempt, so its lease ends here and the
             // authority it held reverts. Leaving the lease live would block every later attempt
             // on the double-lease invariant (SPEC.md §4.5, §8).
@@ -4342,6 +4474,93 @@ mod tests {
         let ticket_id = TicketId::new(events[0].subject.as_str()).unwrap();
         let err = store.cancel(&ticket_id, None, actor()).unwrap_err();
         assert!(matches!(err, TmError::AuthorityDenied(_)));
+    }
+
+    /// A root ticket driven to `Submitted` by an agent worker, carrying one evidence artifact.
+    fn submitted_ticket(store: &Store) -> TicketId {
+        let ticket_id = create_root_ticket(store);
+        let worker: ParticipantId = "agent:builtin/worker".parse().unwrap();
+        store.activate(&ticket_id, actor()).expect("activate");
+        store
+            .acquire_lease(
+                &ticket_id,
+                worker.clone(),
+                Authority::none(),
+                vec![],
+                60,
+                actor(),
+            )
+            .expect("acquire lease");
+        store
+            .transition(&ticket_id, Trigger::WorkStarted, worker.clone())
+            .expect("work started");
+        let artifact = store
+            .store_artifact(
+                ArtifactKind::File,
+                "text/plain".into(),
+                b"tests pass".to_vec(),
+                serde_json::json!({}),
+                Some(ticket_id.clone()),
+                worker.clone(),
+            )
+            .expect("store_artifact");
+        let artifact_id = ArtifactId::new(artifact[0].subject.as_str()).expect("artifact id");
+        store
+            .submit(&ticket_id, "done".to_string(), vec![artifact_id], worker)
+            .expect("submit");
+        ticket_id
+    }
+
+    #[test]
+    fn a_human_accepts_a_submission_and_it_closes_cleanly() {
+        let (_dir, store) = open_store();
+        let ticket_id = submitted_ticket(&store);
+        let human: ParticipantId = "human:owner".parse().unwrap();
+        store
+            .accept(&ticket_id, Some("looks right".into()), human)
+            .expect("accept");
+        let view = store.view().unwrap();
+        assert_eq!(view.tickets[&ticket_id].state, TicketState::Closed);
+        assert!(
+            crate::invariants::check_invariants(&view).is_empty(),
+            "accepting leaves no invariant violations"
+        );
+    }
+
+    #[test]
+    fn an_agent_cannot_accept_and_only_submissions_can_be_accepted() {
+        let (_dir, store) = open_store();
+        let ticket_id = submitted_ticket(&store);
+        let agent: ParticipantId = "agent:builtin/other".parse().unwrap();
+        assert!(matches!(
+            store.accept(&ticket_id, None, agent).unwrap_err(),
+            TmError::AuthorityDenied(_)
+        ));
+        let draft = create_root_ticket(&store);
+        let human: ParticipantId = "human:owner".parse().unwrap();
+        assert!(matches!(
+            store.accept(&draft, None, human).unwrap_err(),
+            TmError::InvalidTransition(_)
+        ));
+    }
+
+    #[test]
+    fn a_human_rejection_sends_the_work_back_with_the_reason_recorded() {
+        let (_dir, store) = open_store();
+        let ticket_id = submitted_ticket(&store);
+        let human: ParticipantId = "human:owner".parse().unwrap();
+        store
+            .reject(&ticket_id, "subtract is missing a test".into(), human)
+            .expect("reject");
+        let view = store.view().unwrap();
+        let ticket = &view.tickets[&ticket_id];
+        assert_eq!(ticket.state, TicketState::Ready, "retried, not dropped");
+        let last = ticket
+            .failures
+            .last()
+            .expect("the rejection is a recorded failure");
+        assert_eq!(last.class, FailureClass::VerificationFailed);
+        assert_eq!(last.detail, "subtract is missing a test");
     }
 
     #[test]

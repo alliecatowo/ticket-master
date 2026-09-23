@@ -13,21 +13,18 @@ uv = "latest"
 "npm:typescript-language-server" = "latest"
 "npm:typescript" = "latest"
 "npm:@zvec/zvec-grep" = "latest"
+# Compiler cache shared by every checkout; see [env] below.
+sccache = "latest"
 
-# Every worktree under `.claude/worktrees/` is a full separate git checkout, so without this,
-# every one of them would build its own independent `target/` from scratch -- `target/` is
-# already ~11GB in the primary checkout alone, and this machine has ~32GB free, so two or three
-# worktrees doing a real build at once would be a genuine disk-space incident, not a hypothetical
-# one. Pinning one absolute `CARGO_TARGET_DIR` makes every worktree share the primary checkout's
-# `target/` instead: third-party dependency artifacts (the bulk of it) are reused as-is, and only
-# this workspace's own crates rebuild per worktree's checked-out source. Cargo's own locking
-# serializes concurrent access safely; it does not corrupt the shared dir, only makes two
-# simultaneous heavy builds wait on each other -- consistent with this file's existing `-j 2` /
-# "don't dispatch more than ~2 concurrent heavy builds" guidance. Hardcoded to this machine's
-# real path rather than computed, since this repo has no `origin` remote and no other known
-# collaborator or machine to be portable for; revisit if that ever changes.
+# Compiled dependencies are shared across the primary checkout and every worktree through
+# sccache, which caches by content hash, so a fresh worktree reuses the ~11GB of third-party
+# builds instead of recompiling them. Each checkout keeps its own `target/` for this workspace's
+# own crates. A single shared CARGO_TARGET_DIR was tried first and is NOT safe: cargo names
+# path-dependency artifacts by a workspace-relative hash, so two worktrees of this workspace write
+# the same artifact files and one tree's build can silently link the other tree's code (observed:
+# a worktree compiling against an error variant that only existed in the primary checkout).
 [env]
-CARGO_TARGET_DIR = "/Users/allie/Develop/ticket-master/target"
+RUSTC_WRAPPER = "sccache"
 
 # Every task here is the canonical way to do this thing in this repo. Use `mise run <task>`
 # instead of hand-rolling the equivalent `cargo`/`rm` invocation, so build flags (job caps on

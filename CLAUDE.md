@@ -173,15 +173,16 @@ then a probe worktree confirmed to branch from it rather than from `origin/main`
 ever gains other collaborators pushing from elsewhere, revisit whether `head` is still the more
 correct default.
 
-**`target/` is shared across every worktree, not rebuilt per worktree** — `mise.toml`'s `[env]`
-pins `CARGO_TARGET_DIR` to the primary checkout's absolute `target/` path. Checked empirically: a
-probe worktree's `cargo check` wrote into the primary checkout's `target/` and created no local
-`target/` of its own. This matters concretely, not just tidily: `target/` alone is already ~11GB
-and this machine has ~32GB free, so two or three worktrees each building their own independent
-copy would be a real disk-space incident, the same category this file already warns about
-elsewhere. Cargo's own file locking serializes concurrent access to the shared dir safely (one
-build waits, it doesn't corrupt); this composes with, not replaces, the existing `-j 2`/"don't
-dispatch more than ~2 concurrent heavy builds" guidance.
+**Compiled dependencies are shared across worktrees through sccache; `target/` is not.**
+`mise.toml` sets `RUSTC_WRAPPER=sccache` (installed by `mise install`), which caches compiler
+output by content hash, so a new worktree reuses the third-party builds instead of recompiling
+~11GB of them. Each checkout keeps its own `target/` for this workspace's own crates. Do **not**
+point several worktrees at one `CARGO_TARGET_DIR`: that was tried and is unsafe. Cargo names
+path-dependency artifacts by a workspace-relative hash, so two worktrees of this workspace write the
+same files and one tree's build can silently link the other tree's code; a subagent hit exactly
+that (its build saw an error variant that only existed in the primary checkout). Disk is still the
+constraint on this machine: a worktree's `target/` grows to ~8GB, so run `mise run worktree:clean`
+after merging and keep concurrent heavy builds to about two.
 
 **A worktree does not get `.env`, and nothing here auto-copies it in.** Git worktrees only ever
 contain tracked files (plus your own uncommitted changes on that branch) — a gitignored file like
