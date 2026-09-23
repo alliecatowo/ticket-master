@@ -875,7 +875,10 @@ impl AgentSession {
         // rather than `CodeIntel::open(root)` — the exact fix that stops this hot path (every
         // turn) from writing an index into the workspace when the project is global-scoped.
         let ci = self.project.code_intel()?;
-        let budget = TokenBudget::even(8_000);
+        // A ticket's pack is its whole brief, so it gets room; a chat turn's is a head start the
+        // model can extend with its own search tools, and every token of it rides along on every
+        // step of the turn.
+        let budget = TokenBudget::even(if ticket.is_some() { 8_000 } else { 3_000 });
         let context_pack = match &ticket {
             Some(ticket) => compile(
                 ticket,
