@@ -3853,6 +3853,7 @@ dependencies = [
  "dirs",
  "dotenvy",
  "git2",
+ "ignore",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

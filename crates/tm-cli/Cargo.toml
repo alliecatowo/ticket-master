@@ -65,6 +65,9 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dirs = { workspace = true }
+# Already pulled in transitively via tm-codeintel; used directly by the chat's `@` file completion
+# (`tui/chat_ops.rs`) to list the project's files honouring `.gitignore` (D-019).
+ignore = { workspace = true }
 dotenvy = { workspace = true }
 crossterm = { workspace = true }
 ratatui-core = { workspace = true }

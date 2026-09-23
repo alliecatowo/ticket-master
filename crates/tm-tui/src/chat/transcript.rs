@@ -272,6 +272,11 @@ impl Transcript {
         self.version = self.version.wrapping_add(1);
     }
 
+    /// A counter that changes whenever the content does (for caches over it).
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
     /// Append a settled entry.
     pub fn push(&mut self, entry: Entry) {
         self.entries.push(entry.sanitized());

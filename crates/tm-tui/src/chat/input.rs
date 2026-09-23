@@ -171,6 +171,17 @@ impl InputBox {
         text
     }
 
+    /// Remove and return the text without recording it in history (the caller records its own
+    /// form, as `!` mode does with `!command`).
+    pub fn take_quiet(&mut self) -> String {
+        let text = std::mem::take(&mut self.text);
+        self.cursor = 0;
+        self.browsing = None;
+        self.undo.clear();
+        self.last_edit = EditKind::Other;
+        text
+    }
+
     /// Add `text` to history without touching the editor.
     pub fn remember(&mut self, text: &str) {
         if text.trim().is_empty() || self.history.last().map(String::as_str) == Some(text) {

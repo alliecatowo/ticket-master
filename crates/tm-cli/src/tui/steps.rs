@@ -6,8 +6,11 @@
 
 use serde_json::Value;
 use tm_agent::outcome::{AgentOutcome, StepRecord, ToolCallRecord, ToolCallResolution};
+use tm_tui::chat::approval::{ApprovalChoice, ApprovalRequest};
 use tm_tui::chat::diff::{parse_unified, DiffLine, DiffLineKind};
-use tm_tui::chat::transcript::{Entry, NoticeLevel, ToolBody, ToolCallView, ToolStatus};
+use tm_tui::chat::transcript::{
+    tool_label, Entry, NoticeLevel, ToolBody, ToolCallView, ToolStatus,
+};
 use tm_tui::screens::chat::TurnUpdate;
 
 /// The longest salient argument kept (the transcript wraps it; this only bounds pathological
@@ -384,16 +387,84 @@ pub(crate) fn outcome_notice(outcome: &AgentOutcome) -> (Option<(NoticeLevel, St
     }
 }
 
-/// The notice shown when the model asks for something that needs approval: the TUI cannot
-/// prompt for it yet, so it is denied — said plainly, with the way around it.
-pub(crate) fn approval_notice(tool: &str, reason: &str) -> Entry {
-    Entry::Notice {
-        level: NoticeLevel::Warning,
-        text: format!(
-            "{tool} needs approval ({reason}). Denied automatically: the TUI cannot ask yet. \
-             Run `tm --plain` to approve interactively."
-        ),
+/// What the permission prompt shows for a pending call.
+pub(crate) fn approval_request(pending: &tm_agent::outcome::PendingApproval) -> ApprovalRequest {
+    ApprovalRequest {
+        tool: pending.tool_name.clone(),
+        target: tool_target(&pending.tool_name, &pending.input),
+        reason: pending.reason.trim().to_string(),
     }
+}
+
+/// The transcript's record of how the human answered a permission prompt, placed where the
+/// question came up.
+pub(crate) fn approval_notice(tool: &str, target: &str, choice: ApprovalChoice) -> Entry {
+    let what = if target.is_empty() {
+        tool_label(tool)
+    } else {
+        format!("{}({target})", tool_label(tool))
+    };
+    let (level, text) = match choice {
+        ApprovalChoice::Yes => (NoticeLevel::Info, format!("Allowed {what}")),
+        ApprovalChoice::YesForSession => (
+            NoticeLevel::Info,
+            format!("Allowed {what}, and won't ask again this session"),
+        ),
+        ApprovalChoice::No => (
+            NoticeLevel::Warning,
+            format!("Declined {what}. Tell tm what to do instead."),
+        ),
+    };
+    Entry::Notice { level, text }
+}
+
+/// A saved conversation's turns as transcript entries, for a resumed session (`tm -c`,
+/// `tm -r`, `/resume`): each prompt, then its steps; a `!` command the human ran shows as the
+/// shell block it was.
+pub(crate) fn conversation_entries(turns: &[tm_agent::ConversationTurn]) -> Vec<Entry> {
+    let mut out = Vec::new();
+    for turn in turns {
+        let message = turn.user_message.trim();
+        if let Some(view) = shell_turn_view(message) {
+            out.push(Entry::Shell(view));
+        } else if message.starts_with("[Request interrupted") {
+            out.push(Entry::Notice {
+                level: NoticeLevel::Warning,
+                text: "Interrupted.".to_string(),
+            });
+        } else if !message.is_empty() {
+            out.push(Entry::User(message.to_string()));
+        }
+        for step in &turn.steps {
+            out.extend(step_entries(step));
+        }
+    }
+    out
+}
+
+/// The text between `<tag>` and `</tag>` in `text`.
+fn tagged<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = start + text[start..].find(&close)?;
+    Some(&text[start..end])
+}
+
+/// A `!` command recorded into the conversation (`agent::shell_context_message`'s tags), back as
+/// the shell block it was shown as.
+fn shell_turn_view(message: &str) -> Option<ToolCallView> {
+    let command = tagged(message, "bash-input")?;
+    let code = tagged(message, "bash-exit-code")
+        .and_then(|c| c.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+    Some(ToolCallView::command(
+        "shell",
+        command,
+        code,
+        tagged(message, "bash-stdout").unwrap_or_default(),
+        tagged(message, "bash-stderr").unwrap_or_default(),
+    ))
 }
 
 #[cfg(test)]
@@ -626,7 +697,10 @@ mod tests {
             ),
             step(Some("Done."), vec![], 50),
         ];
-        let approvals = vec![(1, approval_notice("shell.run", "network access"))];
+        let approvals = vec![(
+            1,
+            approval_notice("shell.run", "git push", ApprovalChoice::No),
+        )];
         let TurnUpdate::Progress {
             entries,
             served_by,
@@ -649,6 +723,28 @@ mod tests {
         assert!(matches!(&entries[3], Entry::Assistant(t) if t == "Done."));
         assert_eq!(served_by.as_deref(), Some("devpass/muse-spark"));
         assert_eq!(tokens, 150);
+    }
+
+    #[test]
+    fn a_resumed_conversation_renders_prompts_steps_and_shell_commands() {
+        let turns = vec![
+            tm_agent::ConversationTurn {
+                user_message: "fix it".to_string(),
+                steps: vec![step(Some("Done."), vec![], 10)],
+            },
+            tm_agent::ConversationTurn {
+                user_message: "<bash-input>ls</bash-input>\n<bash-exit-code>0</bash-exit-code>\n<bash-stdout>a.txt</bash-stdout>\n".to_string(),
+                steps: Vec::new(),
+            },
+        ];
+        let entries = conversation_entries(&turns);
+        assert!(matches!(&entries[0], Entry::User(t) if t == "fix it"));
+        assert!(matches!(&entries[1], Entry::Assistant(t) if t == "Done."));
+        let Entry::Shell(view) = &entries[2] else {
+            panic!("a recorded ! command comes back as a shell block: {entries:?}");
+        };
+        assert_eq!(view.target, "ls");
+        assert_eq!(view.body, ToolBody::Output(vec!["a.txt".to_string()]));
     }
 
     #[test]
