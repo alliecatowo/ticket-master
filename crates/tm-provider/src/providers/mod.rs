@@ -113,6 +113,13 @@ impl ProviderInfo {
     /// three [`local`] backends, whose env vars are all optional so this method alone is
     /// vacuously `true` for them regardless of whether a server is actually listening).
     pub fn is_configured(&self) -> bool {
+        // GitHub Models supports a namespaced alias so an unrelated GitHub CLI token does not
+        // shadow it. Keep discovery/status consistent with the provider constructor.
+        if self.id == "github-models" {
+            let primary = std::env::var("GITHUB_TOKEN").ok();
+            let alias = std::env::var("GITHUB_MODELS_TOKEN").ok();
+            return openrouter::github_models_token(primary.as_deref(), alias.as_deref()).is_some();
+        }
         self.env_vars
             .iter()
             .filter(|v| v.required)
