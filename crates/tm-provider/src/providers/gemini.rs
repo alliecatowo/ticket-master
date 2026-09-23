@@ -1520,6 +1520,7 @@ mod tests {
         assert_eq!(called_names(&completion), vec!["fs.read", "invented"]);
 
         let streamed = concat!(
+            "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"text\": \"Reading.\"}]}}]}\n\n",
             "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"fs_read\", \"args\": {}}}]}, \"finishReason\": \"STOP\"}]}\n\n",
         );
         let completion = parse_completion_body(
