@@ -1738,13 +1738,31 @@ fn build_mock_fabric(clock: Arc<dyn Clock>) -> Fabric {
     fabric
 }
 
+/// Plain words for why a turn failed, in place of the internal [`tm_core::FailureClass`] enum
+/// name — what a person reads should never be a Rust identifier.
+fn describe_failure_class(class: tm_core::FailureClass) -> &'static str {
+    match class {
+        tm_core::FailureClass::ExecutorCrash => "the run was interrupted before it finished",
+        tm_core::FailureClass::VerificationFailed => "verification failed",
+        tm_core::FailureClass::AuditRejected => "the audit rejected this change",
+        tm_core::FailureClass::ProviderUnavailable => "the model provider was unavailable",
+        tm_core::FailureClass::BudgetExhausted => "the turn ran out of budget",
+        tm_core::FailureClass::AuthorityDenied => {
+            "this action needed authority the ticket doesn't have"
+        }
+        tm_core::FailureClass::ResourceConflict => "a resource conflict blocked the run",
+        tm_core::FailureClass::Other => "the turn failed",
+    }
+}
+
 /// A finished turn as the process's result: `Ok` when it replied or submitted, otherwise the error
 /// `tm -p` exits with (see [`AgentSession::run_prompt`]).
 fn outcome_result(outcome: &AgentOutcome) -> tm_types::Result<()> {
     match outcome {
-        AgentOutcome::Failed { class, detail, .. } => {
-            Err(TmError::TurnFailed(format!("{class:?}: {detail}")))
-        }
+        AgentOutcome::Failed { class, detail, .. } => Err(TmError::TurnFailed(format!(
+            "{}: {detail}",
+            describe_failure_class(*class)
+        ))),
         AgentOutcome::BudgetExhausted { exhausted, .. } => Err(TmError::BudgetExhausted(
             format_budget_dimension(*exhausted).to_string(),
         )),
@@ -1778,9 +1796,11 @@ pub(crate) fn turn_result_json(
             None,
             Some(format_pending_approval(pending_call)),
         ),
-        AgentOutcome::Failed { class, detail, .. } => {
-            ("failed", None, Some(format!("{class:?}: {detail}")))
-        }
+        AgentOutcome::Failed { class, detail, .. } => (
+            "failed",
+            None,
+            Some(format!("{}: {detail}", describe_failure_class(*class))),
+        ),
         AgentOutcome::Interrupted { .. } => ("interrupted", None, None),
     };
     let tool_status = |r: &ToolCallResolution| match r {
@@ -1846,7 +1866,9 @@ pub(crate) fn format_outcome_summary(outcome: &AgentOutcome) -> String {
         AgentOutcome::BudgetExhausted { exhausted, .. } => {
             format!("budget exhausted: {}", format_budget_dimension(*exhausted))
         }
-        AgentOutcome::Failed { class, detail, .. } => format!("failed ({class:?}): {detail}"),
+        AgentOutcome::Failed { class, detail, .. } => {
+            format!("{}: {detail}", describe_failure_class(*class))
+        }
         AgentOutcome::Interrupted { .. } => "interrupted".to_string(),
         AgentOutcome::AwaitingApproval { pending_call, .. } => {
             format_pending_approval(pending_call)
@@ -1867,7 +1889,7 @@ pub(crate) fn format_budget_dimension(dim: BudgetDimension) -> &'static str {
     match dim {
         BudgetDimension::Tokens => "tokens",
         BudgetDimension::Dollars => "dollars",
-        BudgetDimension::WallSeconds => "wall_seconds",
+        BudgetDimension::WallSeconds => "time",
     }
 }
 
@@ -3020,7 +3042,7 @@ mod tests {
         assert_eq!(format_budget_dimension(BudgetDimension::Dollars), "dollars");
         assert_eq!(
             format_budget_dimension(BudgetDimension::WallSeconds),
-            "wall_seconds"
+            "time"
         );
     }
 
