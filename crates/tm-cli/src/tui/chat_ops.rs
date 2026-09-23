@@ -273,22 +273,27 @@ impl App {
                     session.set_mode(to_agent_mode(mode));
                 }
             }
-            ChatAction::OpenEditor(text) => match tm_tui::chat::editor::edit(&text) {
-                Ok(Some(edited)) => self.chat.set_input(edited),
-                Ok(None) => self.chat.show_hint(
-                    "The editor exited with an error; the prompt is unchanged",
-                    NoticeLevel::Warning,
-                    false,
-                    now.plus_millis(3_000),
-                ),
-                Err(e) => self.chat.push_notice(
-                    NoticeLevel::Error,
-                    format!(
-                        "Could not open {}: {e}",
-                        tm_tui::chat::editor::editor_command()
+            ChatAction::OpenEditor(text) => {
+                let edited = tm_tui::chat::editor::edit(&text);
+                // The editor had the screen; whatever happened, repaint all of it.
+                self.chat.force_full_repaint();
+                match edited {
+                    Ok(Some(edited)) => self.chat.set_input(edited),
+                    Ok(None) => self.chat.show_hint(
+                        "The editor exited with an error; the prompt is unchanged",
+                        NoticeLevel::Warning,
+                        false,
+                        now.plus_millis(3_000),
                     ),
-                ),
-            },
+                    Err(e) => self.chat.push_notice(
+                        NoticeLevel::Error,
+                        format!(
+                            "Could not open {}: {e}",
+                            tm_tui::chat::editor::editor_command()
+                        ),
+                    ),
+                }
+            }
             ChatAction::Resume(id) => self.resume(&id),
             ChatAction::Approve(choice) => self.answer_approval(choice, now),
             ChatAction::ShowTasks => self.show_tasks(),

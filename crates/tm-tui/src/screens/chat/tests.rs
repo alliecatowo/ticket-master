@@ -988,3 +988,15 @@ fn history_additions_are_reported_for_persisting() {
     assert_eq!(chat.take_unsaved_history(), vec!["first".to_string()]);
     assert!(chat.take_unsaved_history().is_empty());
 }
+
+#[test]
+fn a_forced_repaint_draws_one_blank_frame_then_the_real_one() {
+    let env = Env::new();
+    let mut chat = screen();
+    chat.force_full_repaint();
+    let area = Rect::new(0, 0, 40, 10);
+    let mut buf = Buffer::empty(area);
+    chat.render(area, &mut buf, &env.ctx());
+    assert!(buf[(0, 0)].modifier.contains(Modifier::HIDDEN));
+    assert!(!screen_text(&render(&chat, &env, 40, 10)).trim().is_empty());
+}

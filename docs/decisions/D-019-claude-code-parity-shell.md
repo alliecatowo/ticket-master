@@ -304,10 +304,14 @@ transcript entries.
 - **Esc on a `!` command abandons, it does not kill.** `run_shell` runs on a blocking thread;
   aborting the task frees the session, but the process runs to completion in the background and
   its output is not recorded.
-- **Ctrl+G was checked by reasoning, not by a pty test.** The editor runs while the event loop is
-  blocked (so crossterm's reader is idle and cannot steal its keystrokes), and a `SIGCONT` to the
-  process reuses the runtime's resume path for the full repaint. An editor that forks and returns
-  at once (`code` without `--wait`) returns the prompt unchanged.
+- **Ctrl+G is checked by hand, not by an automated test.** The editor runs while the event loop
+  is blocked, so crossterm's reader is idle and cannot steal its keystrokes (checked in a pty with
+  an editor script reading `/dev/tty`); the chat then paints a blank frame so the next one
+  repaints every cell. An editor that forks and returns at once (`code` without `--wait`) returns
+  the prompt unchanged. Trying the runtime's `SIGCONT` resume path for the repaint first exposed
+  a real bug there: `Terminal::clear` queries the cursor position, which times out while
+  crossterm's event-stream thread holds the reader, and the TUI exits with "The cursor position
+  could not be read". Ctrl+Z / `fg` goes through that same path (`runtime.rs`, not changed here).
 - **The checklist is tickets, not model-written to-dos.** tm has no to-do tool; a model-maintained
   list needs one in `tm-agent`.
 - **No Claude-Code-style mid-prompt `/` completion, `Ctrl+S` stash, image paste, vim mode, or

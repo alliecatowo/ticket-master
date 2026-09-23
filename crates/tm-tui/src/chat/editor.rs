@@ -3,16 +3,23 @@
 //! The editor needs the real terminal, so for its lifetime the TUI steps aside: raw mode off, the
 //! alternate screen left, bracketed paste and mouse capture off. The call blocks the event loop on
 //! purpose — while it blocks, nothing polls crossterm's input stream, so no keystroke meant for
-//! the editor is read by the TUI (the stdin contention `Runtime::start` documents). Afterwards the
-//! terminal is set back up here, before any frame can be drawn, and a `SIGCONT` to this process
-//! takes the runtime's existing resume path (`runtime::install_signal_handlers`), which forces a
-//! full repaint — the same thing that happens after a Ctrl+Z / `fg`.
+//! the editor is read by the TUI (the stdin contention `Runtime::start` documents); a pty check
+//! with an editor that reads `/dev/tty` confirmed the keystrokes reach it. Afterwards the terminal
+//! is set back up here, before any frame can be drawn, and the caller asks the chat screen for a
+//! full repaint ([`crate::screens::chat::ChatScreen::force_full_repaint`]).
+//!
+//! The runtime's own resume path (a `SIGCONT`, as after Ctrl+Z) is deliberately not used: its
+//! `Terminal::clear` queries the cursor position, and that query times out while crossterm's
+//! event-stream thread holds the input reader, which ends the TUI with "The cursor position could
+//! not be read" — found by trying exactly that.
 
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::Command;
 
-use crossterm::event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::execute;
 use crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen};
 
@@ -52,8 +59,12 @@ pub fn edit(text: &str) -> io::Result<Option<String>> {
         .status();
 
     let _ = terminal::enable_raw_mode();
-    let _ = execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste);
-    request_full_redraw();
+    let _ = execute!(
+        io::stdout(),
+        EnterAlternateScreen,
+        EnableBracketedPaste,
+        EnableMouseCapture
+    );
 
     let edited = match status {
         Ok(status) if status.success() => Some(std::fs::read_to_string(&path)?),
@@ -66,18 +77,6 @@ pub fn edit(text: &str) -> io::Result<Option<String>> {
     let _ = std::fs::remove_file(&path);
     // Editors add a trailing newline; a prompt does not want one.
     Ok(edited.map(|t| t.trim_end_matches('\n').to_string()))
-}
-
-/// Ask the runtime to re-set-up the terminal (mouse capture included) and repaint everything, via
-/// its `SIGCONT` handler.
-fn request_full_redraw() {
-    #[cfg(unix)]
-    {
-        let _ = Command::new("kill")
-            .arg("-CONT")
-            .arg(std::process::id().to_string())
-            .status();
-    }
 }
 
 #[cfg(test)]

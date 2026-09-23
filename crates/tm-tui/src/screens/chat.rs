@@ -211,6 +211,10 @@ pub struct ChatScreen {
     last_esc: Option<Timestamp>,
     /// The Ctrl+T task checklist, when open.
     tasks: Option<Vec<TaskItem>>,
+    /// Set after the terminal was handed to another program: the next frame is a blank one in a
+    /// style no real frame uses, so the frame after it differs in every cell and the renderer's
+    /// diff repaints the whole screen.
+    repaint: std::cell::Cell<bool>,
     /// `(prompt, tokens)` for every finished turn, for `/cost`.
     turn_costs: Vec<(String, u64)>,
     /// The running turn's prompt, for `/cost`.
@@ -250,6 +254,7 @@ impl ChatScreen {
             queue: VecDeque::new(),
             last_esc: None,
             tasks: None,
+            repaint: std::cell::Cell::new(false),
             turn_costs: Vec::new(),
             running_prompt: None,
             files: FileIndex::default(),
@@ -338,6 +343,12 @@ impl ChatScreen {
     /// Whether the transcript viewer (Ctrl+O) is open.
     pub fn is_viewer_open(&self) -> bool {
         self.viewer.is_some()
+    }
+
+    /// Repaint every cell over the next two frames: call after another program (Ctrl+G's
+    /// editor) had the terminal, since the renderer's idea of what is on screen is stale then.
+    pub fn force_full_repaint(&mut self) {
+        self.repaint.set(true);
     }
 
     /// Show (or refresh) the Ctrl+T task checklist.
@@ -1582,7 +1593,7 @@ impl ChatScreen {
         let tips = [
             "Ask tm to explain, fix, or build something in this project".to_string(),
             "Type ! to run a shell command, @ to mention a file".to_string(),
-            format!("Press {left} on an empty prompt for tickets: work tm does in the background"),
+            format!("Press {left} twice for tickets: work tm does in the background"),
             "Be as specific as you would with another engineer for the best results".to_string(),
         ];
         let mut y = outer.y + outer.height + 1;
@@ -1763,6 +1774,11 @@ impl Component for ChatScreen {
         let theme = ctx.theme;
         let glyphs = Glyphs::for_caps(ctx.caps);
         let now = ctx.clock.now();
+
+        if self.repaint.replace(false) {
+            buf.set_style(area, Style::default().add_modifier(Modifier::HIDDEN));
+            return;
+        }
 
         if let Some(viewer) = &self.viewer {
             let version = self.transcript.version();
