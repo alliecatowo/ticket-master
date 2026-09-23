@@ -48,6 +48,7 @@ use tm_context::command::{
     self, ArtifactStream, CommandCache, CommandExecutor, CommandSpec, Query as CommandQuery,
     QueryAnswer,
 };
+use tm_core::artifact::hash_bytes;
 use tm_core::{
     ArtifactKind, ContextRef, EvidenceKind, ExecutorRequirements, RetryPolicy, Store, TicketKind,
     VerificationPolicy,
@@ -743,6 +744,17 @@ fn patch_json(p: &crate::patch::Patch) -> Value {
     })
 }
 
+/// The JSON Schema description of an edit tool's `expected_hash`, with `when` saying whether this
+/// tool needs it. The model has to learn from the schema alone where the hash comes from: without
+/// it, one computed its own sha256 and burned ~175k tokens trying md5, sha1 and friends.
+fn expected_hash_description(when: &str) -> String {
+    format!(
+        "The `hash` fs.read or fs.stat returned for this file; it guards against editing a file \
+         that changed since you read it. {when} Copy it from that result, never compute it \
+         yourself. After a successful edit, the result's `hash_after` is the file's new hash."
+    )
+}
+
 /// Edit conflicts and out-of-scope writes are actionable feedback for the model, not dispatch
 /// failures, so a [`crate::patch::PatchOutcome`] is always turned into a `Completed`-shaped
 /// value rather than propagated as an error.
@@ -1102,11 +1114,15 @@ impl BuiltinCapability {
                     }))
                     .collect::<Vec<_>>()))
             }
+            // Every read hands back `hash`: the exact `expected_hash` the edit tools check, always
+            // of the whole file (for `fs.read_range` too, never just the slice), so the model
+            // copies it instead of guessing a hash format (see `crate::patch::Edit`).
             ToolName::FsRead => {
                 let path = get_str(input, "path")?;
                 let full = resolve_repo_path(patch_engine.root(), path)?;
                 let content = std::fs::read_to_string(&full)?;
-                Ok(json!({"path": path, "content": content}))
+                let hash = hash_bytes(content.as_bytes());
+                Ok(json!({"path": path, "content": content, "hash": hash}))
             }
             ToolName::FsReadRange => {
                 let path = get_str(input, "path")?;
@@ -1121,9 +1137,10 @@ impl BuiltinCapability {
                     )));
                 }
                 let slice = String::from_utf8_lossy(&bytes[byte_start..byte_end]).into_owned();
-                Ok(
-                    json!({"path": path, "byte_start": byte_start, "byte_end": byte_end, "content": slice}),
-                )
+                Ok(json!({
+                    "path": path, "byte_start": byte_start, "byte_end": byte_end,
+                    "content": slice, "hash": hash_bytes(&bytes),
+                }))
             }
             ToolName::FsList => {
                 let path = get_str(input, "path")?;
@@ -1143,6 +1160,10 @@ impl BuiltinCapability {
                 let path = get_str(input, "path")?;
                 let full = resolve_repo_path(patch_engine.root(), path)?;
                 match std::fs::metadata(&full) {
+                    Ok(meta) if meta.is_file() => Ok(json!({
+                        "path": path, "exists": true, "is_dir": false, "len": meta.len(),
+                        "hash": hash_bytes(&std::fs::read(&full)?),
+                    })),
                     Ok(meta) => Ok(json!({
                         "path": path, "exists": true, "is_dir": meta.is_dir(), "len": meta.len(),
                     })),
@@ -1152,6 +1173,10 @@ impl BuiltinCapability {
                     Err(e) => Err(TmError::from(e)),
                 }
             }
+            // `expected_hash` stays mandatory here even though the patch engine could splice
+            // without it: these edits are bare byte offsets with no surrounding context, so a
+            // file that changed since the read would take the splice at the wrong bytes, silently.
+            // The hash is the only drift detection this tool has.
             ToolName::EditApplyPatch => {
                 let path = get_string(input, "path")?;
                 let mut expected_hash = get_opt_string(input, "expected_hash");
@@ -1656,7 +1681,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::FsRead.as_str(),
-                description: "Read a repository-relative file's full text content.",
+                description: "Read a repository-relative file's full text content. Also returns `hash`, the file's content hash: pass it as `expected_hash` to edit.apply_patch, edit.write_file or edit.delete_file.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -1667,7 +1692,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::FsReadRange.as_str(),
-                description: "Read a byte range `[byte_start, byte_end)` of a file.",
+                description: "Read a byte range `[byte_start, byte_end)` of a file. `hash` covers the whole file, not just the range, and is the value the edit tools' `expected_hash` takes.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1693,7 +1718,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::FsStat.as_str(),
-                description: "Metadata (existence, size, kind) for a repository-relative path.",
+                description: "Metadata (existence, size, kind) for a repository-relative path; for a file, also its `hash`, the value the edit tools' `expected_hash` takes.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -1704,7 +1729,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::EditApplyPatch.as_str(),
-                description: "Apply one or more byte-range replacements to a file, conflict-checked.",
+                description: "Replace byte ranges in an existing file. Offsets are byte offsets into the content fs.read returned. Edits apply in order, each against the file as the previous edit left it, so list them from the end of the file backwards to keep the earlier offsets valid. Requires `expected_hash` from fs.read.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1721,22 +1746,34 @@ impl CapabilityProvider for BuiltinCapability {
                                 "required": ["byte_start", "byte_end", "replacement"]
                             }
                         },
-                        "expected_hash": {"type": ["string", "null"]}
+                        "expected_hash": {
+                            "type": "string",
+                            "description": expected_hash_description(
+                                "Required: these edits are bare byte offsets, and the hash is what \
+                                 stops them landing on the wrong bytes."
+                            ),
+                        }
                     },
-                    "required": ["path", "edits"]
+                    "required": ["path", "edits", "expected_hash"]
                 }),
                 cost: CostClass::Mutating,
                 requires: requirement_for(ToolName::EditApplyPatch),
             },
             ToolSchema {
                 name: ToolName::EditWriteFile.as_str(),
-                description: "Overwrite a file's entire content, conflict-checked.",
+                description: "Overwrite a file's entire content, or create the file if it does not exist yet. Conflict-checked against `expected_hash`.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
                         "content": {"type": "string"},
-                        "expected_hash": {"type": ["string", "null"]}
+                        "expected_hash": {
+                            "type": ["string", "null"],
+                            "description": expected_hash_description(
+                                "Required when the file exists; omit it only to create a file \
+                                 that does not exist yet."
+                            ),
+                        }
                     },
                     "required": ["path", "content"]
                 }),
@@ -1745,7 +1782,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::EditCreateFile.as_str(),
-                description: "Create a new file; fails as a conflict if the path already exists.",
+                description: "Create a new file; fails as a conflict if the path already exists. Takes no hash. To change an existing file, use edit.write_file or edit.apply_patch with the `hash` from fs.read.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1759,14 +1796,17 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::EditDeleteFile.as_str(),
-                description: "Delete a file, conflict-checked against its last-observed content hash.",
+                description: "Delete a file, conflict-checked against `expected_hash`.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
-                        "expected_hash": {"type": ["string", "null"]}
+                        "expected_hash": {
+                            "type": "string",
+                            "description": expected_hash_description("Required."),
+                        }
                     },
-                    "required": ["path"]
+                    "required": ["path", "expected_hash"]
                 }),
                 cost: CostClass::Mutating,
                 requires: requirement_for(ToolName::EditDeleteFile),
