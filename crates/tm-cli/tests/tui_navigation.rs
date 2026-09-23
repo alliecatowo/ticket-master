@@ -1,6 +1,6 @@
 //! Proves the TUI's navigation shell actually navigates and returns, end to end against the real
 //! compiled `tm` binary (`docs/decisions/D-018-tui-chat-first-shell.md`, and D-019 §2 for the
-//! tickets screen that replaced D-018's home): the chat is the root, `←` `←`/Ctrl+T/`/tickets`
+//! tickets screen that replaced D-018's home): the chat is the root, `←` `←` and `/tickets`
 //! reach the tickets screen, the Kanban board and ticket detail hang off it, and Esc walks back
 //! one level at a time — the back-stack, not "Esc always goes to chat".
 
@@ -67,8 +67,6 @@ fn spawn(project: &std::path::Path, tm_home: &std::path::Path, mock: bool) -> su
     support::Pty::spawn(cmd, 100, 30).expect("spawn `tm` inside a pty")
 }
 
-/// `Ctrl+T`: a control letter is `letter - '@'` (`'T'` is 0x54, so 0x14).
-const CTRL_T: u8 = 0x14;
 const ESC: u8 = 0x1b;
 /// The Left arrow's escape sequence (CSI D).
 const LEFT: &[u8] = b"\x1b[D";
@@ -109,13 +107,13 @@ fn chat_to_tickets_to_board_to_detail_and_back_one_level_at_a_time() {
         "tickets is not the default, got: {screen:?}"
     );
 
-    // 2. Ctrl+T opens tickets, which lists the real ticket under its group, and no sessions:
-    //    conversations are not rows here (D-019 §3).
-    pty.write(&[CTRL_T]).expect("send Ctrl+T");
+    // 2. `/tickets` opens tickets, which lists the real ticket under its group, and no sessions:
+    //    conversations are not rows here (D-019 §3). (Ctrl+T is the chat's task checklist.)
+    pty.write(b"/tickets\r").expect("type /tickets");
     let screen = pty.wait_for(TICKETS_MARK, Duration::from_secs(10));
     assert!(
         has(&screen, TICKETS_MARK),
-        "Ctrl+T must open tickets, got: {screen:?}"
+        "/tickets must open tickets, got: {screen:?}"
     );
     assert!(
         screen

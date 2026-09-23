@@ -7,18 +7,32 @@
 /// is handed to the application as a [`crate::screens::chat::ChatAction::Command`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CommandId {
-    /// Toggle the help overlay.
+    /// Toggle the shortcuts panel.
     Help,
-    /// Go to the sessions & tickets home screen.
-    Home,
+    /// Start a fresh conversation.
+    Clear,
+    /// Pick a past conversation to continue.
+    Resume,
+    /// Summarize the conversation so far to free context.
+    Compact,
+    /// Show or switch the model.
+    Model,
+    /// Model, provider, cwd, scope, mode, ticket, tokens.
+    Status,
+    /// This session's tokens, turn by turn.
+    Cost,
+    /// Write an instructions file for this project.
+    Init,
+    /// Hand work to a background worker as a ticket.
+    Bg,
+    /// Open the tickets screen (Claude Code's agent view).
+    Tickets,
     /// Attach this conversation to a ticket.
     Attach,
     /// Detach from the attached ticket.
     Detach,
     /// Record a project decision.
     Decide,
-    /// Start a fresh conversation.
-    Clear,
     /// Quit tm.
     Exit,
 }
@@ -30,6 +44,8 @@ pub enum Arg {
     None,
     /// A required argument, described by its placeholder (`<ticket>`).
     Required(&'static str),
+    /// An optional argument (`/model [name]`).
+    Optional(&'static str),
 }
 
 /// One slash command.
@@ -54,14 +70,70 @@ pub const COMMANDS: &[SlashCommand] = &[
         name: "help",
         aliases: &[],
         arg: Arg::None,
-        description: "Keys, commands, and how sessions work",
+        description: "Show the keyboard shortcuts",
     },
     SlashCommand {
-        id: CommandId::Home,
-        name: "home",
-        aliases: &["agents", "tickets"],
+        id: CommandId::Clear,
+        name: "clear",
+        aliases: &["new"],
         arg: Arg::None,
-        description: "Sessions & background tickets",
+        description: "Start a fresh conversation",
+    },
+    SlashCommand {
+        id: CommandId::Resume,
+        name: "resume",
+        aliases: &["continue"],
+        arg: Arg::None,
+        description: "Resume a past conversation",
+    },
+    SlashCommand {
+        id: CommandId::Compact,
+        name: "compact",
+        aliases: &[],
+        arg: Arg::Optional("[focus]"),
+        description: "Summarize the conversation to free up context",
+    },
+    SlashCommand {
+        id: CommandId::Model,
+        name: "model",
+        aliases: &[],
+        arg: Arg::Optional("[model]"),
+        description: "Show or switch the model",
+    },
+    SlashCommand {
+        id: CommandId::Status,
+        name: "status",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Model, provider, directory, mode and ticket",
+    },
+    SlashCommand {
+        id: CommandId::Cost,
+        name: "cost",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Tokens this session has used, turn by turn",
+    },
+    SlashCommand {
+        id: CommandId::Init,
+        name: "init",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Write an AGENTS.md with instructions for this project",
+    },
+    SlashCommand {
+        id: CommandId::Bg,
+        name: "bg",
+        aliases: &["background"],
+        arg: Arg::Optional("[task]"),
+        description: "Hand work to a background worker as a ticket",
+    },
+    SlashCommand {
+        id: CommandId::Tickets,
+        name: "tickets",
+        aliases: &["agents", "home"],
+        arg: Arg::None,
+        description: "Background tickets and workers",
     },
     SlashCommand {
         id: CommandId::Attach,
@@ -75,7 +147,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         name: "detach",
         aliases: &[],
         arg: Arg::None,
-        description: "Detach from the ticket (fresh conversation)",
+        description: "Detach from the attached ticket",
     },
     SlashCommand {
         id: CommandId::Decide,
@@ -83,13 +155,6 @@ pub const COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         arg: Arg::Required("<text>"),
         description: "Record a project decision",
-    },
-    SlashCommand {
-        id: CommandId::Clear,
-        name: "clear",
-        aliases: &[],
-        arg: Arg::None,
-        description: "Start a fresh conversation",
     },
     SlashCommand {
         id: CommandId::Exit,
@@ -206,7 +271,9 @@ pub fn parse(line: &str) -> Option<Parsed> {
 pub fn usage(command: &SlashCommand) -> String {
     match command.arg {
         Arg::None => format!("/{}", command.name),
-        Arg::Required(placeholder) => format!("/{} {placeholder}", command.name),
+        Arg::Required(placeholder) | Arg::Optional(placeholder) => {
+            format!("/{} {placeholder}", command.name)
+        }
     }
 }
 
@@ -228,17 +295,18 @@ mod tests {
 
     #[test]
     fn prefix_filters_and_ranks_name_before_alias() {
-        assert_eq!(names(&filter("de")), vec!["detach", "decide"]);
+        assert_eq!(names(&filter("de")), vec!["detach", "decide", "model"]);
         assert_eq!(names(&filter("att")), vec!["attach"]);
-        let tick = filter("tick");
-        assert_eq!(names(&tick), vec!["home"]);
-        assert_eq!(tick[0].via_alias, Some("tickets"));
+        let home = filter("hom");
+        assert_eq!(names(&home), vec!["tickets"]);
+        assert_eq!(home[0].via_alias, Some("home"));
+        assert_eq!(names(&filter("re")), vec!["resume"]);
     }
 
     #[test]
     fn aliases_and_subsequences_match() {
         assert_eq!(names(&filter("quit")), vec!["exit"]);
-        assert_eq!(filter("agents")[0].command.id, CommandId::Home);
+        assert_eq!(filter("agents")[0].command.id, CommandId::Tickets);
         assert!(names(&filter("dt")).contains(&"detach"));
     }
 
@@ -260,12 +328,31 @@ mod tests {
             matches!(parse("/attach"), Some(Parsed::MissingArg(c)) if c.id == CommandId::Attach)
         );
         assert!(
-            matches!(parse("/tickets"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Home)
+            matches!(parse("/tickets"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Tickets)
         );
         assert_eq!(parse("/nope"), Some(Parsed::Unknown("nope".to_string())));
         assert_eq!(parse("not a command"), None);
         assert_eq!(parse("/"), None);
         assert_eq!(parse("/usr/bin is broken"), None);
+    }
+
+    #[test]
+    fn optional_arguments_parse_with_or_without_a_value() {
+        assert!(
+            matches!(parse("/model"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Model && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/bg fix the build"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Bg && arg == "fix the build")
+        );
+        assert_eq!(
+            usage(lookup("model").expect("model is in the table")),
+            "/model [model]"
+        );
+        for name in [
+            "help", "clear", "resume", "compact", "model", "status", "cost", "init", "bg", "exit",
+        ] {
+            assert!(lookup(name).is_some(), "/{name} is a command");
+        }
     }
 
     #[test]

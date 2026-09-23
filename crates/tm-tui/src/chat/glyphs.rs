@@ -56,10 +56,22 @@ pub struct Glyphs {
     pub rule: &'static str,
     /// Selection marker in lists and popups.
     pub pointer: &'static str,
-    /// "Go left" arrow, used in hints (`← sessions & tickets`).
+    /// "Go left" arrow, used in hints (`← for tickets`).
     pub left: &'static str,
     /// Up/down arrows pair, used in hints.
     pub updown: &'static str,
+    /// Leads every assistant message and tool call in the transcript (Claude Code's `⏺`).
+    pub record: &'static str,
+    /// Hangs a tool's result under its call (Claude Code's `⎿`).
+    pub result: &'static str,
+    /// The welcome box's mark (`✻ Welcome to tm!`).
+    pub star: &'static str,
+    /// The plan-mode indicator (`⏸ plan mode on`).
+    pub pause: &'static str,
+    /// The ask-mode indicator (`⏵ ask mode on`).
+    pub play: &'static str,
+    /// Skipped lines between two diff hunks.
+    pub vellipsis: &'static str,
     /// Spinner frames for a running turn.
     pub spinner: &'static [&'static str],
     /// Box borders.
@@ -94,6 +106,12 @@ impl Glyphs {
         pointer: "›",
         left: "←",
         updown: "↑↓",
+        record: "⏺",
+        result: "⎿",
+        star: "✻",
+        pause: "⏸",
+        play: "⏵",
+        vellipsis: "⋮",
         spinner: SPINNER_UNICODE,
         border: Border {
             top_left: "╭",
@@ -125,6 +143,12 @@ impl Glyphs {
         pointer: ">",
         left: "<-",
         updown: "up/down",
+        record: "*",
+        result: "L",
+        star: "*",
+        pause: "||",
+        play: ">",
+        vellipsis: ":",
         spinner: SPINNER_ASCII,
         border: Border {
             top_left: "+",
@@ -172,6 +196,12 @@ mod tests {
             g.pointer,
             g.left,
             g.updown,
+            g.record,
+            g.result,
+            g.star,
+            g.pause,
+            g.play,
+            g.vellipsis,
             g.border.top_left,
             g.border.horizontal,
             g.border.vertical,
@@ -192,6 +222,11 @@ mod tests {
                 g.denied,
                 g.dot,
                 g.gutter,
+                g.record,
+                g.result,
+                g.star,
+                g.play,
+                g.vellipsis,
             ] {
                 assert_eq!(display_width(s), 1, "{s:?} must occupy exactly one column");
             }

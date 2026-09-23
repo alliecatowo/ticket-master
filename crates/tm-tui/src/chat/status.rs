@@ -7,7 +7,7 @@ use ratatui_core::style::{Modifier, Style};
 
 use crate::chat::glyphs::Glyphs;
 use crate::chat::lines::{draw_spans, truncate_spans, Span};
-use crate::text::{display_width, truncate};
+use crate::text::display_width;
 use crate::theme::Theme;
 
 /// What the session is doing right now, shown as the bar's leading glyph.
@@ -39,6 +39,8 @@ pub struct StatusInfo {
     pub open_tickets: usize,
     /// Tokens spent by this session so far.
     pub tokens: u64,
+    /// How many tokens the conversation's context took on the last turn (0: not known yet).
+    pub context_tokens: u64,
 }
 
 /// One status-bar segment.
@@ -126,6 +128,17 @@ pub fn segments(
         });
     }
 
+    if info.context_tokens > 0 {
+        out.push(Segment {
+            priority: 35,
+            spans: vec![Span::new(
+                format!("{} context", format_tokens(info.context_tokens)),
+                muted,
+            )],
+            shrinkable: false,
+        });
+    }
+
     if info.tokens > 0 {
         out.push(Segment {
             priority: 40,
@@ -184,23 +197,64 @@ pub fn layout(segments: &[Segment], width: usize, sep: &Span, ellipsis: &str) ->
     truncate_spans(&out, width, ellipsis)
 }
 
-/// A right-aligned message for the status bar.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Hint {
-    /// The message.
-    pub span: Span,
-    /// An urgent hint ("press Ctrl+C again to quit") claims its space by squeezing the segments;
-    /// an ordinary one ("? for shortcuts") only appears when everything else already fits.
-    pub urgent: bool,
+/// How far tm may go without asking, as the chat shows it. Shift+Tab cycles auto → plan → ask
+/// (D-019); the application maps this onto the agent session's own mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PermissionMode {
+    /// The default: tm acts on its own. No indicator.
+    #[default]
+    Auto,
+    /// Read-only: tm investigates and proposes a plan.
+    Plan,
+    /// tm asks before every edit, command, git operation, or pty keystroke.
+    Ask,
 }
 
-/// Draw the whole bar into the one-row `area`: laid-out segments on the left, `hint`
-/// right-aligned.
+impl PermissionMode {
+    /// The next mode in the Shift+Tab cycle.
+    pub fn next(self) -> Self {
+        match self {
+            PermissionMode::Auto => PermissionMode::Plan,
+            PermissionMode::Plan => PermissionMode::Ask,
+            PermissionMode::Ask => PermissionMode::Auto,
+        }
+    }
+
+    /// Lowercase name (`auto`, `plan`, `ask`).
+    pub fn label(self) -> &'static str {
+        match self {
+            PermissionMode::Auto => "auto",
+            PermissionMode::Plan => "plan",
+            PermissionMode::Ask => "ask",
+        }
+    }
+
+    /// The status-line indicator, Claude Code style (`⏸ plan mode on (shift+tab to cycle)`), or
+    /// `None` in the default mode.
+    pub fn indicator(self, theme: &Theme, glyphs: &Glyphs) -> Option<Vec<Span>> {
+        let (glyph, text, color) = match self {
+            PermissionMode::Auto => return None,
+            PermissionMode::Plan => (glyphs.pause, "plan mode on", theme.accent),
+            PermissionMode::Ask => (glyphs.play, "ask mode on", theme.warning),
+        };
+        Some(vec![
+            Span::new(
+                format!("{glyph} {text}"),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::new(" (shift+tab to cycle)", Style::default().fg(theme.muted)),
+        ])
+    }
+}
+
+/// Draw the whole bar into the one-row `area`: `left` (the key hint, mode indicator, or a
+/// transient message) first, then as many of `segments` as fit, right-aligned. The segments yield
+/// space before `left` does.
 pub fn render(
     buf: &mut Buffer,
     area: Rect,
+    left: &[Span],
     segments: &[Segment],
-    hint: Option<&Hint>,
     theme: &Theme,
     glyphs: &Glyphs,
 ) {
@@ -211,31 +265,21 @@ pub fn render(
     let inner_width = (area.width - 2) as usize;
     let sep = Span::new(glyphs.sep, Style::default().fg(theme.muted));
 
-    let hint_width = hint.map(|h| display_width(&h.span.text)).unwrap_or(0);
-    let full = layout(segments, inner_width, &sep, glyphs.ellipsis);
-    let full_width: usize = full.iter().map(|s| display_width(&s.text)).sum();
-
-    let (left, show_hint) = match hint {
-        Some(_) if full_width + 2 + hint_width <= inner_width => (full, true),
-        Some(h) if h.urgent && hint_width + 2 < inner_width => (
-            layout(
-                segments,
-                inner_width - hint_width - 2,
-                &sep,
-                glyphs.ellipsis,
-            ),
-            true,
-        ),
-        _ => (full, false),
-    };
+    let left = truncate_spans(left, inner_width, glyphs.ellipsis);
+    let left_width: usize = left.iter().map(|s| display_width(&s.text)).sum();
     draw_spans(buf, inner_x, area.y, inner_width as u16, &left);
 
-    if let (Some(hint), true) = (hint, show_hint) {
-        let width = hint_width.min(inner_width);
-        let x = inner_x + (inner_width - width) as u16;
-        let text = truncate(&hint.span.text, width, glyphs.ellipsis);
-        buf.set_stringn(x, area.y, text, width, hint.span.style);
+    let gap = if left_width == 0 { 0 } else { 3 };
+    let room = inner_width.saturating_sub(left_width + gap);
+    // Below this the model name would be cut to a stub; better to show nothing on the right.
+    const MIN_RIGHT: usize = 12;
+    if room < MIN_RIGHT {
+        return;
     }
+    let right = layout(segments, room, &sep, glyphs.ellipsis);
+    let right_width: usize = right.iter().map(|s| display_width(&s.text)).sum();
+    let x = inner_x + (inner_width - right_width) as u16;
+    draw_spans(buf, x, area.y, right_width as u16, &right);
 }
 
 #[cfg(test)]
@@ -251,6 +295,7 @@ mod tests {
             ticket: None,
             open_tickets: 3,
             tokens: 12_345,
+            context_tokens: 0,
         }
     }
 
@@ -329,36 +374,60 @@ mod tests {
         assert!(!s.contains("open") && !s.contains("tokens"), "{s}");
     }
 
-    #[test]
-    fn render_places_the_hint_only_when_it_fits() {
+    fn row(left: &str, width: u16) -> String {
         let theme = Theme::dark();
         let segs = segments(&info(), TurnState::Idle, "", &theme, &Glyphs::UNICODE);
-        let row_with = |width: u16, urgent: bool| {
-            let hint = Hint {
-                span: Span::new(
-                    if urgent {
-                        "Press Ctrl+C again to quit"
-                    } else {
-                        "? for shortcuts"
-                    },
-                    Style::default(),
-                ),
-                urgent,
-            };
-            let area = Rect::new(0, 0, width, 1);
-            let mut buf = Buffer::empty(area);
-            render(&mut buf, area, &segs, Some(&hint), &theme, &Glyphs::UNICODE);
-            (0..width)
-                .map(|x| buf[(x, 0)].symbol().to_string())
-                .collect::<String>()
+        let area = Rect::new(0, 0, width, 1);
+        let mut buf = Buffer::empty(area);
+        render(
+            &mut buf,
+            area,
+            &[Span::new(left, Style::default())],
+            &segs,
+            &theme,
+            &Glyphs::UNICODE,
+        );
+        (0..width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn the_hint_is_on_the_left_and_segments_yield_first() {
+        let wide = row("? for shortcuts", 160);
+        assert!(wide.starts_with(" ? for shortcuts"), "{wide}");
+        assert!(wide.trim_end().ends_with("12.3k tokens"), "{wide}");
+        let narrow = row("? for shortcuts", 50);
+        assert!(narrow.contains("? for shortcuts"), "{narrow}");
+        assert!(narrow.contains("devpass"), "{narrow}");
+        assert!(!narrow.contains("3 open"), "{narrow}");
+        let tiny = row("Press Ctrl+C again to exit", 34);
+        assert!(tiny.contains("Press Ctrl+C again to exit"), "{tiny}");
+        assert!(!tiny.contains("devpass"), "no room for a stub: {tiny}");
+    }
+
+    #[test]
+    fn modes_show_claude_code_indicators() {
+        let theme = Theme::dark();
+        assert_eq!(
+            PermissionMode::Auto.indicator(&theme, &Glyphs::UNICODE),
+            None
+        );
+        let text = |mode: PermissionMode| -> String {
+            mode.indicator(&theme, &Glyphs::UNICODE)
+                .map(|spans| spans.iter().map(|s| s.text.as_str()).collect())
+                .unwrap_or_default()
         };
-        let row = |width: u16| row_with(width, false);
-        assert!(row(160).trim_end().ends_with("? for shortcuts"));
-        let narrow = row(50);
-        assert!(!narrow.contains("? for shortcuts"), "{narrow}");
-        assert!(narrow.contains("devpass"));
-        let urgent = row_with(60, true);
-        assert!(urgent.contains("Press Ctrl+C again to quit"), "{urgent}");
-        assert!(urgent.contains("devpass"), "{urgent}");
+        assert_eq!(
+            text(PermissionMode::Plan),
+            "⏸ plan mode on (shift+tab to cycle)"
+        );
+        assert_eq!(
+            text(PermissionMode::Ask),
+            "⏵ ask mode on (shift+tab to cycle)"
+        );
+        assert_eq!(PermissionMode::Auto.next(), PermissionMode::Plan);
+        assert_eq!(PermissionMode::Plan.next(), PermissionMode::Ask);
+        assert_eq!(PermissionMode::Ask.next(), PermissionMode::Auto);
     }
 }

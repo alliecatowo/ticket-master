@@ -12,7 +12,7 @@
 //! `tm` opens on the chat ([`ScreenId::Chat`], `tm_tui::screens::chat::ChatScreen`) — tm is a
 //! coding agent first, and tickets live in the background. `←` twice on an empty prompt (the
 //! first press shows "Press ← again to open tickets", as Claude Code does), `/tickets`
-//! (`/home`, `/agents`), or Ctrl+T opens the tickets screen ([`ScreenId::Tickets`],
+//! (`/home`, `/agents`) opens the tickets screen ([`ScreenId::Tickets`],
 //! `tm_tui::screens::tickets::TicketsScreen`, Claude Code's agent view with tickets as rows;
 //! `docs/decisions/D-019-claude-code-parity-shell.md` §2); `tm tickets` opens straight onto it.
 //! From there Enter attaches the chat to a ticket, and `b` opens the Kanban board. Esc walks back
@@ -26,6 +26,7 @@
 //! Nothing a human can type into the prompt quits: the only exits are Ctrl+C twice within
 //! [`QUIT_WINDOW_MILLIS`], Ctrl+D on an empty prompt, and `/exit`.
 
+mod chat_ops;
 mod steps;
 mod tickets_view;
 
@@ -34,7 +35,6 @@ use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use ratatui_core::style::Style;
-use tm_tui::chat::commands::CommandId;
 use tm_tui::chat::status::StatusInfo;
 use tm_tui::chat::transcript::NoticeLevel;
 use tm_tui::component::{Component, ComponentId, ComponentParent, FrameContext};
@@ -47,7 +47,7 @@ use tm_tui::screens::tickets::{FlashTone, TicketsAction, TicketsScreen};
 use tm_tui::theme::Theme;
 use tm_tui::widgets_data::form::{Field, Form};
 use tm_tui::widgets_data::list::List;
-use tm_types::{Clock, SessionId, TicketId, Timestamp};
+use tm_types::{Clock, TicketId, Timestamp};
 use tokio::sync::{Mutex, Notify};
 
 use crate::agent::{self, AgentSession};
@@ -139,11 +139,13 @@ async fn run_on(
     });
     let session_id = agent_session.session_id().clone();
 
-    let chat = ChatScreen::new(
+    let mut chat = ChatScreen::new(
         ComponentId::new("tm.chat"),
         session_id.clone(),
         base_status(&project, &view, None),
     );
+    let chat_ext = chat_ops::ChatExt::start(&project, &agent_session, &mut chat);
+    let attached = agent_session.attached_ticket().cloned();
     let now = project.clock.now();
 
     // D-019 §4: dispatched tickets get worked while `tm` is open, without anyone having to know
@@ -190,9 +192,10 @@ async fn run_on(
         shutdown: runtime.shutdown_handle(),
         agent_session: Arc::new(Mutex::new(agent_session)),
         sender,
-        attached: None,
+        attached,
         ctrl_c_at: None,
         last_refresh: now,
+        chat_ext,
     };
 
     if start == StartOn::Tickets {
@@ -309,7 +312,7 @@ fn base_status(
         global_scope: project.scope == Scope::Global,
         ticket: ticket.map(|t| t.to_string()),
         open_tickets: view.tickets.values().filter(|t| is_open(t.state)).count(),
-        tokens: 0,
+        ..StatusInfo::default()
     }
 }
 
@@ -468,6 +471,9 @@ struct App {
     ctrl_c_at: Option<Timestamp>,
     /// When the tickets/board data was last re-read.
     last_refresh: Timestamp,
+    /// The chat's own wiring: history, `@` files, interrupts, permission prompts
+    /// (`tui/chat_ops.rs`).
+    chat_ext: chat_ops::ChatExt,
 }
 
 // Manual: neither `Project` nor `AgentSession` implements `Debug`.
@@ -569,6 +575,14 @@ impl App {
                 return;
             }
         }
+        if self.current == ScreenId::Chat {
+            // The chat closes a dialog, interrupts a turn, or clears the prompt (D-019); only
+            // the last two arm the second press.
+            let arm = self.chat.on_ctrl_c(now, QUIT_WINDOW_MILLIS);
+            self.ctrl_c_at = arm.then_some(now);
+            self.handle_chat_actions(now);
+            return;
+        }
         self.ctrl_c_at = Some(now);
         self.chat.interrupt(now, QUIT_WINDOW_MILLIS);
     }
@@ -578,166 +592,16 @@ impl App {
             .is_some_and(|at| now.millis_since(at) <= QUIT_WINDOW_MILLIS)
     }
 
-    /// Replace the conversation with a fresh one (`/clear`, `/detach`), optionally attached to
-    /// `ticket`. Refused while a turn holds the session.
-    fn fresh_session(&mut self, ticket: Option<TicketId>) -> Result<SessionId, String> {
-        if self.chat.is_turn_running() {
-            return Err("A turn is running; wait for it to finish first.".to_string());
-        }
-        let Ok(mut session) = self.agent_session.try_lock() else {
-            return Err("A turn is still finishing; try again in a moment.".to_string());
-        };
-        let mut fresh = AgentSession::new(
-            self.project.clone(),
-            Renderer::from_flags(false, true, true),
-        );
-        if let Some(ticket) = &ticket {
-            fresh
-                .attach_ticket(ticket.clone())
-                .map_err(|e| format!("Could not re-attach {ticket}: {e}"))?;
-        }
-        let id = fresh.session_id().clone();
-        *session = fresh;
-        drop(session);
-        self.attached = ticket;
-        self.chat.reset(id.clone());
-        self.chat.status_mut().ticket = self.attached.as_ref().map(|t| t.to_string());
-        Ok(id)
-    }
-
-    fn run_command(&mut self, id: CommandId, arg: String, now: Timestamp) {
-        match id {
-            CommandId::Attach => self.attach(&arg),
-            CommandId::Detach => match self.attached.clone() {
-                None => self
-                    .chat
-                    .push_notice(NoticeLevel::Info, "No ticket is attached."),
-                Some(ticket) => match self.fresh_session(None) {
-                    Ok(_) => self.chat.push_notice(
-                        NoticeLevel::Info,
-                        format!(
-                            "Detached from {ticket}. This is a fresh conversation: the session \
-                             core cannot drop a ticket mid-conversation yet."
-                        ),
-                    ),
-                    Err(e) => self.chat.push_notice(NoticeLevel::Warning, e),
-                },
-            },
-            CommandId::Clear => match self.fresh_session(self.attached.clone()) {
-                Ok(session) => self.chat.push_notice(
-                    NoticeLevel::Info,
-                    format!("Fresh conversation ({session})."),
-                ),
-                Err(e) => self.chat.push_notice(NoticeLevel::Warning, e),
-            },
-            CommandId::Decide => self.decide(&arg),
-            // The chat screen turns these three into their own actions before they get here;
-            // handled anyway so the match stays exhaustive and honest.
-            CommandId::Home => return self.open_tickets(now),
-            CommandId::Help => return self.chat.toggle_help(),
-            CommandId::Exit => return self.quit(),
-        }
-        self.refresh(now);
-    }
-
-    fn attach(&mut self, arg: &str) {
-        let Ok(ticket) = arg.trim().parse::<TicketId>() else {
-            self.chat.push_notice(
-                NoticeLevel::Warning,
-                format!("\"{arg}\" is not a ticket id (they look like T-12)."),
-            );
-            return;
-        };
-        if self.chat.is_turn_running() {
-            self.chat.push_notice(
-                NoticeLevel::Warning,
-                "A turn is running; attach once it finishes.",
-            );
-            return;
-        }
-        let Ok(mut session) = self.agent_session.try_lock() else {
-            self.chat.push_notice(
-                NoticeLevel::Warning,
-                "A turn is still finishing; try again in a moment.",
-            );
-            return;
-        };
-        match session.attach_ticket(ticket.clone()) {
-            Ok(()) => {
-                drop(session);
-                let objective = self
-                    .project
-                    .store
-                    .view()
-                    .ok()
-                    .and_then(|v| v.tickets.get(&ticket).map(|t| t.objective.clone()))
-                    .unwrap_or_default();
-                self.attached = Some(ticket.clone());
-                self.chat.status_mut().ticket = Some(ticket.to_string());
-                let objective = objective.lines().next().unwrap_or_default().to_string();
-                self.chat.push_notice(
-                    NoticeLevel::Success,
-                    if objective.is_empty() {
-                        format!("Attached to {ticket}.")
-                    } else {
-                        format!("Attached to {ticket}: {objective}")
-                    },
-                );
-            }
-            Err(e) => self.chat.push_notice(
-                NoticeLevel::Error,
-                format!("Could not attach {ticket}: {e}"),
-            ),
-        }
-    }
-
-    /// `/decide <text>`: a project decision, scoped to the attached ticket if there is one — the
-    /// same record the plain loop's `/decide` writes.
-    fn decide(&mut self, text: &str) {
-        let subject = self
-            .attached
-            .as_ref()
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "session".to_string());
-        let affected = self.attached.clone().into_iter().collect();
-        let result = self.project.store.record_decision(
-            subject,
-            text.to_string(),
-            "recorded via the interactive tm session".to_string(),
-            Vec::new(),
-            affected,
-            Vec::new(),
-            self.project.actor.clone(),
-        );
-        match result {
-            Ok(events) => {
-                let id = events.iter().find_map(|e| {
-                    e.payload
-                        .as_decision_created()
-                        .map(|p| p.decision.to_string())
-                });
-                self.chat.push_notice(
-                    NoticeLevel::Success,
-                    match id {
-                        Some(id) => format!("Recorded decision {id}."),
-                        None => "Recorded the decision.".to_string(),
-                    },
-                );
-            }
-            Err(e) => self.chat.push_notice(
-                NoticeLevel::Error,
-                format!("Could not record the decision: {e}"),
-            ),
-        }
-    }
-
     fn handle_chat_actions(&mut self, now: Timestamp) {
+        self.persist_history();
         for action in self.chat.take_actions() {
             match action {
                 ChatAction::Send(prompt) => self.spawn_turn(prompt),
                 ChatAction::GoHome => self.open_tickets(now),
                 ChatAction::Quit => self.quit(),
                 ChatAction::Command { id, arg } => self.run_command(id, arg, now),
+                // `!`, Esc, Shift+Tab, Ctrl+G, /resume, permission answers: `tui/chat_ops.rs`.
+                other => self.on_chat_action(other, now),
             }
         }
     }
@@ -852,76 +716,6 @@ impl App {
         }
     }
 
-    /// Run `prompt` as a turn on a background task, reporting its progress as
-    /// [`AppMessage::Turn`]s so the event loop keeps drawing (and accepting input) while it runs.
-    ///
-    /// Calls the same `AgentSession::run_turn_streaming` the plain loop does. Approval is not
-    /// interactive here yet: a suspension is denied, and the transcript says so plainly —
-    /// prompting on stdin the way the plain loop does would race this runtime's own reader of the
-    /// same terminal (the stdin-contention failure `runtime.rs`'s `Runtime::start` documents).
-    fn spawn_turn(&self, prompt: String) {
-        let agent_session = Arc::clone(&self.agent_session);
-        let sender = self.sender.clone();
-        let session_id = self.chat.session().clone();
-
-        tokio::spawn(async move {
-            let mut session = agent_session.lock().await;
-            let mut latest: Vec<tm_agent::outcome::StepRecord> = Vec::new();
-            let mut approvals: Vec<(usize, tm_tui::chat::transcript::Entry)> = Vec::new();
-            let mut resolved_ticket: Option<TicketId> = None;
-
-            let outcome = session
-                .run_turn_streaming(
-                    &prompt,
-                    |event| match event {
-                        agent::TurnEvent::TicketResolved(ticket) => {
-                            resolved_ticket = Some(ticket.id.clone());
-                            sender.send(AppMessage::TicketChanged {
-                                id: ticket.id.clone(),
-                            });
-                        }
-                        // The chat screen reports compaction itself once it wires `/compact`.
-                        agent::TurnEvent::Compacted(_) => {}
-                        agent::TurnEvent::Steps(so_far) => {
-                            latest = so_far;
-                            sender.send(AppMessage::Turn {
-                                session: session_id.clone(),
-                                update: steps::progress(&latest, &approvals),
-                            });
-                        }
-                        agent::TurnEvent::AwaitingApproval(pending) => {
-                            approvals.push((
-                                latest.len(),
-                                steps::approval_notice(&pending.tool_name, &pending.reason),
-                            ));
-                            sender.send(AppMessage::Turn {
-                                session: session_id.clone(),
-                                update: steps::progress(&latest, &approvals),
-                            });
-                        }
-                    },
-                    |_pending| Ok(false),
-                )
-                .await;
-            drop(session);
-
-            let (notice, failed) = match &outcome {
-                Ok(outcome) => steps::outcome_notice(outcome),
-                Err(e) => (
-                    Some((NoticeLevel::Error, format!("The turn could not run: {e}"))),
-                    true,
-                ),
-            };
-            sender.send(AppMessage::Turn {
-                session: session_id,
-                update: TurnUpdate::Finished { notice, failed },
-            });
-            if let Some(id) = resolved_ticket {
-                sender.send(AppMessage::TicketChanged { id });
-            }
-        });
-    }
-
     /// Draw the "press Ctrl+C again" warning on screens that have no status bar of their own.
     fn render_quit_hint(
         &self,
@@ -999,21 +793,19 @@ impl Component for App {
                     self.on_ctrl_c(now);
                     return Propagation::Consumed;
                 }
-                if is_ctrl(key, 't') {
-                    if self.current == ScreenId::Chat {
-                        self.open_tickets(now);
-                    } else {
-                        self.back_to_chat();
-                    }
+                // Ctrl+T is the chat's task checklist (D-019 §1, as in Claude Code); from any
+                // other screen it still returns to the chat.
+                if is_ctrl(key, 't') && self.current != ScreenId::Chat {
+                    self.back_to_chat();
                     return Propagation::Consumed;
                 }
-                // `←` on an empty chat prompt: the first press says what a second one does, and
-                // the second opens tickets (Claude Code's "Press ← again to open agents").
+                // `←` on an empty chat prompt with nothing open over it: the first press says
+                // what a second one does, and the second opens tickets (Claude Code's "Press ←
+                // again to open agents").
                 if self.current == ScreenId::Chat
                     && key.code == KeyCode::Left
                     && key.modifiers.is_empty()
-                    && self.chat.input_text().is_empty()
-                    && !self.chat.is_help_open()
+                    && self.chat.left_opens_tickets()
                 {
                     match self.left_at {
                         Some(at) if now.millis_since(at) <= LEFT_WINDOW_MILLIS => {
@@ -1038,6 +830,12 @@ impl Component for App {
             Event::App(AppMessage::Turn { update, .. }) => {
                 let finished = matches!(update, TurnUpdate::Finished { .. });
                 let propagation = self.chat.handle_event(event, ctx);
+                // Finishing may have started what was queued behind the turn.
+                self.handle_chat_actions(now);
+                // A turn waiting for permission must be seen, whichever screen is showing.
+                if self.chat.is_awaiting_approval() && self.current != ScreenId::Chat {
+                    self.back_to_chat();
+                }
                 if finished {
                     self.refresh(now);
                 }
@@ -1116,7 +914,7 @@ impl Component for App {
                     code: KeyCode::Char('t'),
                     modifiers: KeyModifiers::CONTROL,
                 },
-                "tickets / back to chat",
+                "task checklist (chat) / back to chat",
             ),
         ];
         match self.current {

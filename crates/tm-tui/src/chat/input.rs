@@ -1,5 +1,6 @@
-//! The prompt editor: a multi-line, soft-wrapping text box with a grapheme-aware cursor and
-//! shell-style history.
+//! The prompt editor: a multi-line, soft-wrapping text box with a grapheme-aware cursor,
+//! shell-style history, readline editing (a kill ring for Ctrl+K/U/W and Ctrl+Y, undo for
+//! Ctrl+_), and Claude Code's collapsed pastes (`[Pasted text #1 +41 lines]`, expanded on send).
 //!
 //! The editor is plain state plus pure layout — which keys do what lives in the chat screen, so
 //! the key map (and its "typing never triggers a shortcut" rule) is readable in one place.
@@ -8,12 +9,42 @@ use std::cell::Cell;
 
 use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
-use ratatui_core::style::{Modifier, Style};
+use ratatui_core::style::{Color, Modifier, Style};
 
 use crate::chat::glyphs::Glyphs;
 use crate::chat::lines::draw_box;
 use crate::text::{display_width, graphemes, truncate};
 use crate::theme::Theme;
+
+/// A paste longer than this many characters collapses to a placeholder.
+pub const PASTE_COLLAPSE_CHARS: usize = 800;
+/// A paste with more than this many lines collapses to a placeholder.
+pub const PASTE_COLLAPSE_LINES: usize = 3;
+
+/// The most undo steps kept.
+const UNDO_LIMIT: usize = 100;
+
+/// What the last edit was, so a run of typed characters undoes as one step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum EditKind {
+    #[default]
+    Other,
+    Typing,
+}
+
+/// How the box is drawn: its prompt marker, the marker's colour, and an optional title on the
+/// top border.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BoxStyle<'a> {
+    /// The marker before the first row (`›`, or `!` in shell mode).
+    pub marker: &'a str,
+    /// The marker's colour (and the border's, when `tinted`).
+    pub color: Color,
+    /// Whether the border takes `color` too (shell mode, history search).
+    pub tinted: bool,
+    /// Text set into the top border (`search history`).
+    pub title: Option<&'a str>,
+}
 
 /// One visual (wrapped) row of the input: the byte range of `text` it shows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,10 +67,40 @@ pub struct InputBox {
     /// The text width the last render wrapped at, so vertical movement between frames uses the
     /// same rows the human is looking at.
     last_width: Cell<usize>,
+    /// Killed (Ctrl+K/U/W, Alt+D) text, newest last, for Ctrl+Y.
+    kill_ring: Vec<String>,
+    /// Earlier `(text, cursor)` states, newest last, for Ctrl+_.
+    undo: Vec<(String, usize)>,
+    last_edit: EditKind,
+    /// Collapsed pastes, by number: the placeholder `[Pasted text #N ...]` expands to the text.
+    pastes: Vec<(usize, String)>,
+    /// History entries added since the application last persisted them, already expanded.
+    unsaved: Vec<String>,
 }
 
-/// The widest the history is allowed to grow.
-const HISTORY_LIMIT: usize = 200;
+/// The most history entries kept.
+const HISTORY_LIMIT: usize = 500;
+
+/// A run of letters and digits: what Alt+B/F/D treat as a word (Claude Code's readline rule;
+/// punctuation such as `/`, `.`, `_` separates words).
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric()
+}
+
+/// The placeholder a collapsed paste shows as.
+pub fn paste_placeholder(number: usize, text: &str) -> String {
+    let extra_lines = text.trim_end_matches('\n').matches('\n').count();
+    if extra_lines == 0 {
+        format!("[Pasted text #{number}]")
+    } else {
+        format!("[Pasted text #{number} +{extra_lines} lines]")
+    }
+}
+
+/// Whether a paste is big enough to collapse.
+pub fn should_collapse(text: &str) -> bool {
+    text.chars().count() > PASTE_COLLAPSE_CHARS || text.lines().count() > PASTE_COLLAPSE_LINES
+}
 
 impl InputBox {
     /// An empty editor.
@@ -47,7 +108,7 @@ impl InputBox {
         InputBox::default()
     }
 
-    /// The current text.
+    /// The current text (collapsed pastes appear as their placeholders).
     pub fn text(&self) -> &str {
         &self.text
     }
@@ -62,20 +123,62 @@ impl InputBox {
         self.text.is_empty()
     }
 
+    fn checkpoint(&mut self, kind: EditKind) {
+        if kind == EditKind::Typing && self.last_edit == EditKind::Typing {
+            return;
+        }
+        self.last_edit = kind;
+        if self.undo.last().map(|(t, _)| t) == Some(&self.text) {
+            return;
+        }
+        self.undo.push((self.text.clone(), self.cursor));
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
+    }
+
+    /// Undo the last edit (Ctrl+_). A run of typed characters is one edit. Returns false when
+    /// there is nothing to undo.
+    pub fn undo(&mut self) -> bool {
+        let Some((text, cursor)) = self.undo.pop() else {
+            return false;
+        };
+        self.text = text;
+        self.cursor = cursor.min(self.text.len());
+        self.browsing = None;
+        self.last_edit = EditKind::Other;
+        true
+    }
+
     /// Replace the text, cursor at the end.
     pub fn set_text(&mut self, text: impl Into<String>) {
+        self.checkpoint(EditKind::Other);
         self.text = text.into();
         self.cursor = self.text.len();
         self.browsing = None;
     }
 
     /// Remove and return the text, leaving the editor empty. Non-blank text is recorded in
-    /// history (consecutive duplicates collapse).
+    /// history (consecutive duplicates collapse). Collapsed pastes stay as placeholders here;
+    /// [`InputBox::expand`] turns them back into the pasted text.
     pub fn take(&mut self) -> String {
         let text = std::mem::take(&mut self.text);
         self.cursor = 0;
         self.browsing = None;
+        self.undo.clear();
+        self.last_edit = EditKind::Other;
         self.remember(&text);
+        text
+    }
+
+    /// Remove and return the text without recording it in history (the caller records its own
+    /// form, as `!` mode does with `!command`).
+    pub fn take_quiet(&mut self) -> String {
+        let text = std::mem::take(&mut self.text);
+        self.cursor = 0;
+        self.browsing = None;
+        self.undo.clear();
+        self.last_edit = EditKind::Other;
         text
     }
 
@@ -85,13 +188,40 @@ impl InputBox {
             return;
         }
         self.history.push(text.to_string());
+        self.unsaved.push(self.expand(text));
         if self.history.len() > HISTORY_LIMIT {
             self.history.remove(0);
         }
     }
 
-    /// Clear the text (Ctrl+U), stopping any history browse.
+    /// Seed history with entries persisted by an earlier run, oldest first. They go before
+    /// anything already remembered this run and are not reported as unsaved.
+    pub fn load_history(&mut self, entries: Vec<String>) {
+        let mut merged: Vec<String> = Vec::with_capacity(entries.len() + self.history.len());
+        for entry in entries.into_iter().chain(self.history.drain(..)) {
+            if !entry.trim().is_empty() && merged.last() != Some(&entry) {
+                merged.push(entry);
+            }
+        }
+        let skip = merged.len().saturating_sub(HISTORY_LIMIT);
+        self.history = merged.split_off(skip);
+    }
+
+    /// Every history entry, oldest first.
+    pub fn history(&self) -> &[String] {
+        &self.history
+    }
+
+    /// History entries remembered since the last call, for the application to persist.
+    pub fn take_unsaved_history(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.unsaved)
+    }
+
+    /// Clear all the text, stopping any history browse.
     pub fn clear(&mut self) {
+        if !self.text.is_empty() {
+            self.checkpoint(EditKind::Other);
+        }
         self.text.clear();
         self.cursor = 0;
         self.browsing = None;
@@ -99,16 +229,66 @@ impl InputBox {
 
     /// Insert `s` at the cursor. `\r\n` and `\r` become `\n` (pasted text from any platform).
     pub fn insert(&mut self, s: &str) {
+        self.checkpoint(EditKind::Other);
+        self.insert_raw(s);
+    }
+
+    fn insert_raw(&mut self, s: &str) {
         let normalized = s.replace("\r\n", "\n").replace('\r', "\n");
         self.text.insert_str(self.cursor, &normalized);
         self.cursor += normalized.len();
         self.browsing = None;
     }
 
-    /// Insert a single character.
+    /// Insert a single typed character.
     pub fn insert_char(&mut self, c: char) {
+        let kind = if c.is_whitespace() {
+            EditKind::Other
+        } else {
+            EditKind::Typing
+        };
+        self.checkpoint(kind);
         let mut buf = [0u8; 4];
-        self.insert(c.encode_utf8(&mut buf));
+        self.insert_raw(c.encode_utf8(&mut buf));
+    }
+
+    /// Insert a paste: short ones as text, long ones (over [`PASTE_COLLAPSE_CHARS`] characters or
+    /// [`PASTE_COLLAPSE_LINES`] lines) as a `[Pasted text #N +M lines]` placeholder that
+    /// [`InputBox::expand`] turns back into the text. Returns whether it collapsed.
+    pub fn insert_paste(&mut self, text: &str) -> bool {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        if !should_collapse(&normalized) {
+            self.insert(&normalized);
+            return false;
+        }
+        let number = self.pastes.last().map_or(1, |(n, _)| n + 1);
+        let placeholder = paste_placeholder(number, &normalized);
+        self.pastes.push((number, normalized));
+        self.insert(&placeholder);
+        true
+    }
+
+    /// `text` with every collapsed paste's placeholder replaced by what was pasted.
+    pub fn expand(&self, text: &str) -> String {
+        let mut out = text.to_string();
+        for (number, pasted) in &self.pastes {
+            let placeholder = paste_placeholder(*number, pasted);
+            if out.contains(&placeholder) {
+                out = out.replace(&placeholder, pasted);
+            }
+        }
+        out
+    }
+
+    /// The collapsed paste placeholder ending exactly at byte `at`, if any, as its start.
+    fn placeholder_ending_at(&self, at: usize) -> Option<usize> {
+        let before = &self.text[..at];
+        self.pastes.iter().find_map(|(number, pasted)| {
+            let placeholder = paste_placeholder(*number, pasted);
+            before
+                .ends_with(&placeholder)
+                .then(|| at - placeholder.len())
+        })
     }
 
     fn prev_boundary(&self, from: usize) -> Option<usize> {
@@ -123,9 +303,14 @@ impl InputBox {
             .map(|g| from + g.text.len())
     }
 
-    /// Delete the grapheme before the cursor.
+    /// Delete the grapheme before the cursor — or the whole collapsed paste placeholder the
+    /// cursor sits just after, so a paste is removed in one keystroke, never half-edited.
     pub fn backspace(&mut self) {
-        if let Some(start) = self.prev_boundary(self.cursor) {
+        let start = self
+            .placeholder_ending_at(self.cursor)
+            .or_else(|| self.prev_boundary(self.cursor));
+        if let Some(start) = start {
+            self.checkpoint(EditKind::Other);
             self.text.replace_range(start..self.cursor, "");
             self.cursor = start;
         }
@@ -135,20 +320,74 @@ impl InputBox {
     /// Delete the grapheme under the cursor.
     pub fn delete(&mut self) {
         if let Some(end) = self.next_boundary(self.cursor) {
+            self.checkpoint(EditKind::Other);
             self.text.replace_range(self.cursor..end, "");
         }
         self.browsing = None;
     }
 
-    /// Delete the word before the cursor (Ctrl+W / Alt+Backspace).
-    pub fn delete_word_back(&mut self) {
-        let start = self.word_start_before(self.cursor);
-        self.text.replace_range(start..self.cursor, "");
+    fn kill(&mut self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+        self.checkpoint(EditKind::Other);
+        let killed: String = self.text.drain(start..end).collect();
         self.cursor = start;
+        self.kill_ring.push(killed);
+        if self.kill_ring.len() > 20 {
+            self.kill_ring.remove(0);
+        }
         self.browsing = None;
     }
 
-    fn word_start_before(&self, from: usize) -> usize {
+    /// Delete back to the previous whitespace (Ctrl+W): one press removes a whole path or
+    /// `--flag=value`. The text goes to the kill ring.
+    pub fn delete_word_back(&mut self) {
+        let start = self.whitespace_word_start(self.cursor);
+        self.kill(start, self.cursor);
+    }
+
+    /// Delete to the end of the current (or next) alphanumeric word (Alt+D), into the kill ring.
+    pub fn delete_word_forward(&mut self) {
+        let end = self.word_end_after(self.cursor);
+        self.kill(self.cursor, end);
+    }
+
+    /// Delete from the cursor to the end of the logical line (Ctrl+K); at the end of a line,
+    /// delete the newline instead. The text goes to the kill ring.
+    pub fn kill_to_end(&mut self) {
+        let end = match self.text[self.cursor..].find('\n') {
+            Some(0) => self.cursor + 1,
+            Some(i) => self.cursor + i,
+            None => self.text.len(),
+        };
+        self.kill(self.cursor, end);
+    }
+
+    /// Delete from the start of the logical line to the cursor (Ctrl+U); at the start of a line,
+    /// delete the newline before it, so repeating clears a multi-line prompt.
+    pub fn kill_to_start(&mut self) {
+        let line_start = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+        let start = if line_start == self.cursor && self.cursor > 0 {
+            self.cursor - 1
+        } else {
+            line_start
+        };
+        self.kill(start, self.cursor);
+    }
+
+    /// Insert the most recently killed text (Ctrl+Y). Returns false when nothing was killed.
+    pub fn yank(&mut self) -> bool {
+        match self.kill_ring.last().cloned() {
+            Some(text) => {
+                self.insert(&text);
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn whitespace_word_start(&self, from: usize) -> usize {
         let before = &self.text[..from];
         let trimmed = before.trim_end_matches(|c: char| c.is_whitespace());
         trimmed
@@ -157,11 +396,29 @@ impl InputBox {
             .unwrap_or(0)
     }
 
+    fn word_start_before(&self, from: usize) -> usize {
+        let before = &self.text[..from];
+        let trimmed = before.trim_end_matches(|c: char| !is_word_char(c));
+        trimmed
+            .rfind(|c: char| !is_word_char(c))
+            .map(|i| i + trimmed[i..].chars().next().map_or(1, char::len_utf8))
+            .unwrap_or(0)
+    }
+
+    fn word_end_after(&self, from: usize) -> usize {
+        let after = &self.text[from..];
+        let skip = after.find(is_word_char).unwrap_or(after.len());
+        let rest = &after[skip..];
+        let word = rest.find(|c: char| !is_word_char(c)).unwrap_or(rest.len());
+        from + skip + word
+    }
+
     /// Move one grapheme left.
     pub fn left(&mut self) {
         if let Some(p) = self.prev_boundary(self.cursor) {
             self.cursor = p;
         }
+        self.last_edit = EditKind::Other;
     }
 
     /// Move one grapheme right.
@@ -169,25 +426,25 @@ impl InputBox {
         if let Some(n) = self.next_boundary(self.cursor) {
             self.cursor = n;
         }
+        self.last_edit = EditKind::Other;
     }
 
-    /// Move to the start of the previous word.
+    /// Move to the start of the previous word (Alt+B; a word is a run of letters and digits).
     pub fn word_left(&mut self) {
         self.cursor = self.word_start_before(self.cursor);
+        self.last_edit = EditKind::Other;
     }
 
-    /// Move past the end of the next word.
+    /// Move to the end of the current or next word (Alt+F).
     pub fn word_right(&mut self) {
-        let after = &self.text[self.cursor..];
-        let skip_ws = after.len() - after.trim_start().len();
-        let rest = &after[skip_ws..];
-        let word = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        self.cursor += skip_ws + word;
+        self.cursor = self.word_end_after(self.cursor);
+        self.last_edit = EditKind::Other;
     }
 
     /// Move to the start of the current logical line.
     pub fn home(&mut self) {
         self.cursor = self.text[..self.cursor].rfind('\n').map_or(0, |i| i + 1);
+        self.last_edit = EditKind::Other;
     }
 
     /// Move to the end of the current logical line.
@@ -195,6 +452,18 @@ impl InputBox {
         self.cursor = self.text[self.cursor..]
             .find('\n')
             .map_or(self.text.len(), |i| self.cursor + i);
+        self.last_edit = EditKind::Other;
+    }
+
+    /// Replace `start..self.cursor()` with `replacement` (an `@` mention being completed).
+    pub fn replace_before_cursor(&mut self, start: usize, replacement: &str) {
+        if start > self.cursor || !self.text.is_char_boundary(start) {
+            return;
+        }
+        self.checkpoint(EditKind::Other);
+        self.text.replace_range(start..self.cursor, replacement);
+        self.cursor = start + replacement.len();
+        self.browsing = None;
     }
 
     /// The rows `text` wraps into at `width` columns: word-wrapped where a space allows it,
@@ -292,7 +561,7 @@ impl InputBox {
     }
 
     /// Draw the box. `placeholder` shows (muted) while empty; `busy` dims the prompt marker while
-    /// a turn runs, so it is visible that Enter will not send.
+    /// a turn runs.
     pub fn render(
         &self,
         area: Rect,
@@ -302,20 +571,58 @@ impl InputBox {
         placeholder: &str,
         busy: bool,
     ) {
+        let style = BoxStyle {
+            marker: glyphs.prompt,
+            color: theme.accent,
+            tinted: false,
+            title: None,
+        };
+        self.render_styled(area, buf, theme, glyphs, placeholder, busy, style);
+    }
+
+    /// [`InputBox::render`] with an explicit marker, colour and title (shell mode, history
+    /// search).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_styled(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        theme: &Theme,
+        glyphs: &Glyphs,
+        placeholder: &str,
+        busy: bool,
+        style: BoxStyle<'_>,
+    ) {
         if area.width < 6 || area.height < 3 {
             return;
         }
-        let border_style = Style::default().fg(theme.muted);
+        let border_style = if style.tinted {
+            Style::default().fg(style.color)
+        } else {
+            Style::default().fg(theme.muted)
+        };
         draw_box(buf, area, &glyphs.border, border_style);
+        if let Some(title) = style.title {
+            let title = format!(" {title} ");
+            buf.set_stringn(
+                area.x + 2,
+                area.y,
+                &title,
+                (area.width as usize).saturating_sub(4),
+                Style::default()
+                    .fg(style.color)
+                    .add_modifier(Modifier::BOLD),
+            );
+        }
 
-        let marker_style = if busy {
+        let marker_style = if busy && !style.tinted {
             Style::default().fg(theme.muted)
         } else {
             Style::default()
-                .fg(theme.accent)
+                .fg(style.color)
                 .add_modifier(Modifier::BOLD)
         };
-        buf.set_string(area.x + 2, area.y + 1, glyphs.prompt, marker_style);
+        buf.set_stringn(area.x + 2, area.y + 1, style.marker, 1, marker_style);
 
         let text_x = area.x + 4;
         let width = text_width(area.width);
@@ -323,7 +630,7 @@ impl InputBox {
         let visible_rows = (area.height - 2) as usize;
         // An explicit block colour where the theme has one (it survives terminals and screen
         // captures that ignore the reverse attribute); plain reverse video otherwise.
-        let cursor_style = if theme.foreground == ratatui_core::style::Color::Reset {
+        let cursor_style = if theme.foreground == Color::Reset {
             Style::default().add_modifier(Modifier::REVERSED)
         } else {
             Style::default().fg(theme.background).bg(theme.foreground)
@@ -446,6 +753,10 @@ mod tests {
             .collect()
     }
 
+    fn before_cursor(input: &InputBox) -> &str {
+        &input.text()[..input.cursor()]
+    }
+
     #[test]
     fn editing_is_grapheme_aware() {
         let mut input = typed("héllo 中文 👍🏽");
@@ -462,15 +773,101 @@ mod tests {
     }
 
     #[test]
-    fn words_move_and_delete() {
-        let mut input = typed("fix the flaky test");
-        input.delete_word_back();
-        assert_eq!(input.text(), "fix the flaky ");
+    fn ctrl_w_deletes_back_to_whitespace_and_alt_words_stop_at_punctuation() {
+        let mut input = typed("open src/utils/foo.ts now");
         input.word_left();
+        assert_eq!(&input.text()[input.cursor()..], "now");
         input.word_left();
-        assert_eq!(&input.text()[input.cursor()..], "the flaky ");
+        assert_eq!(&input.text()[input.cursor()..], "ts now");
+        input.word_left();
+        assert_eq!(&input.text()[input.cursor()..], "foo.ts now");
         input.word_right();
-        assert_eq!(&input.text()[input.cursor()..], " flaky ");
+        assert_eq!(before_cursor(&input), "open src/utils/foo");
+
+        let mut input = typed("open src/utils/foo.ts");
+        input.delete_word_back();
+        assert_eq!(input.text(), "open ");
+    }
+
+    #[test]
+    fn kills_go_to_the_ring_and_yank_brings_them_back() {
+        let mut input = typed("alpha beta\ngamma");
+        input.home();
+        input.kill_to_end();
+        assert_eq!(input.text(), "alpha beta\n");
+        assert!(input.yank());
+        assert_eq!(input.text(), "alpha beta\ngamma");
+
+        let mut input = typed("one two three");
+        input.home();
+        input.delete_word_forward();
+        assert_eq!(input.text(), " two three");
+        input.end();
+        input.kill_to_start();
+        assert_eq!(input.text(), "");
+        input.yank();
+        assert_eq!(input.text(), " two three");
+    }
+
+    #[test]
+    fn ctrl_u_repeats_across_lines() {
+        let mut input = typed("first\nsecond");
+        input.kill_to_start();
+        assert_eq!(input.text(), "first\n");
+        input.kill_to_start();
+        assert_eq!(input.text(), "first");
+        input.kill_to_start();
+        assert_eq!(input.text(), "");
+        let mut ends = typed("a\nb");
+        ends.home();
+        ends.left();
+        ends.kill_to_end();
+        assert_eq!(ends.text(), "ab", "Ctrl+K at a line end joins the lines");
+    }
+
+    #[test]
+    fn undo_restores_whole_typing_runs_and_single_edits() {
+        let mut input = InputBox::new();
+        for c in "fix the".chars() {
+            input.insert_char(c);
+        }
+        input.delete_word_back();
+        assert_eq!(input.text(), "fix ");
+        assert!(input.undo());
+        assert_eq!(input.text(), "fix the");
+        assert!(input.undo());
+        assert_eq!(input.text(), "fix ");
+        assert!(input.undo());
+        assert_eq!(input.text(), "fix");
+        assert!(input.undo());
+        assert_eq!(input.text(), "");
+        assert!(!input.undo());
+    }
+
+    #[test]
+    fn long_pastes_collapse_and_expand_on_send() {
+        let mut input = InputBox::new();
+        input.insert("look: ");
+        let pasted = (1..=10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(input.insert_paste(&pasted));
+        assert_eq!(input.text(), "look: [Pasted text #1 +9 lines]");
+        assert!(!input.insert_paste(" short"));
+        let sent = input.take();
+        assert_eq!(input.expand(&sent), format!("look: {pasted} short"));
+        assert_eq!(
+            input.take_unsaved_history(),
+            vec![format!("look: {pasted} short")],
+            "persisted history holds the real text"
+        );
+
+        let mut wide = InputBox::new();
+        assert!(wide.insert_paste(&"x".repeat(900)));
+        assert_eq!(wide.text(), "[Pasted text #1]");
+        wide.backspace();
+        assert_eq!(wide.text(), "", "a placeholder deletes as one unit");
     }
 
     #[test]
@@ -546,6 +943,16 @@ mod tests {
         assert!(input.history_prev());
         assert_eq!(input.text(), "a");
         assert!(!input.history_prev());
+    }
+
+    #[test]
+    fn loaded_history_goes_first_and_is_not_unsaved() {
+        let mut input = InputBox::new();
+        input.insert("this run");
+        input.take();
+        input.load_history(vec!["old one".into(), "old two".into()]);
+        assert_eq!(input.history(), ["old one", "old two", "this run"]);
+        assert_eq!(input.take_unsaved_history(), vec!["this run".to_string()]);
     }
 
     #[test]

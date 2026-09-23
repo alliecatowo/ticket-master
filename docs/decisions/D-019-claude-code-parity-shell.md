@@ -199,7 +199,8 @@ the rows.
   - In the chat, the first `←` on an empty prompt shows the urgent status hint "Press ← again to
     open tickets". A second press within 2 s opens tickets. `tm-cli`'s `App` intercepts this, so
     the chat screen was not edited.
-  - Ctrl+T and `/tickets` still open it.
+  - `/tickets` still opens it. (Ctrl+T did too until the chat took it back for the task
+    checklist; see "Implemented: chat".)
   - `tm tickets` (`args.rs`, `main.rs`) opens the TUI on the tickets screen (`tui::run_tickets`),
     and Esc goes to a fresh chat.
   - `tm tickets --json [--all]` prints `TicketOverview`s. With no project it prints `[]` and
@@ -213,7 +214,7 @@ the rows.
     selection stability.
   - Pty tests through the real binary: `crates/tm-cli/tests/tui_tickets.rs` (grouping, dispatch,
     peek, Ctrl+X twice, accept and reject, attach recap, `--json`/`--all`/no project) and the
-    updated `tui_navigation.rs` (double `←`, Ctrl+T, `/tickets`, board and detail, Esc chain).
+    updated `tui_navigation.rs` (double `←`, `/tickets`, board and detail, Esc chain).
 
 **Known gaps, stated plainly:**
 - ~~**`b` collides with typing.**~~ Fixed the same day: the brief's bare-letter keys (`b` board,
@@ -223,13 +224,106 @@ the rows.
 - **The peek panel has no reply input.** Claude Code's has one. Answering an escalation means
   attaching.
 - **No filters or pinning.** The `a:`/`s:` filters, Ctrl+S grouping by directory, Ctrl+T pin,
-  Ctrl+R rename, and Shift+↑/↓ reorder are not implemented. Ctrl+T keeps its D-018 meaning (tickets
-  and back), which conflicts with §1's "Ctrl+T toggles the task checklist". The chat track has to
-  settle that.
+  Ctrl+R rename, and Shift+↑/↓ reorder are not implemented. (Ctrl+T's conflict with §1's task
+  checklist is settled in "Implemented: chat": the chat owns it.)
 - **Summaries are mechanical,** not Haiku-written as Claude Code's are.
-- **Chat text still says "sessions & tickets" and `/home`** in its welcome card, `/home`'s
-  description, and a doc link in `screens/chat.rs`. That file belongs to the chat track and was
-  left alone.
+- (Settled in "Implemented: chat": the chat's "sessions & tickets" and `/home` wording.)
+
+## Implemented: chat (2026-09-22)
+
+Section 1 is built on the core pieces above. The screen is `crates/tm-tui/src/screens/chat.rs`
+(tests in `screens/chat/tests.rs`) with its parts in `crates/tm-tui/src/chat/`; the wiring into
+`AgentSession` is `crates/tm-cli/src/tui/chat_ops.rs`, and `tui/steps.rs` turns step records into
+transcript entries.
+
+- **Transcript, drawn the way Claude Code draws it** (`chat/transcript.rs`). Every assistant
+  message and tool call starts with `⏺` (green, red for a failure, yellow for a denial) and the
+  result hangs under `⎿`. Tools show under Claude Code's names (`tool_label`): `shell.run`/
+  `test.run`/`build.run` are `Bash(cmd)`, `fs.read` is `Read(path)` → "Read N lines", `fs.list`
+  is `List`, `search.*` is `Search("q")` → "Found N results", `edit.apply_patch`/`write_file` are
+  `Update(path)` → "Updated path with X additions and Y removals" plus a numbered inline diff
+  (removals on a red band, additions on a green one, xterm 52/22 on 256-colour terminals, coloured
+  text below that), `edit.create_file` is `Write(path)` → "Wrote N lines to path", `ticket.*` is
+  `Ticket`. Commands show their first four lines then `… +N lines (ctrl+o to expand)`; a failure
+  shows `Error: Exit code N` and the *last* lines instead, where the cause is. The diff comes from
+  the `unified_diff` the edit tools already return (`chat/diff.rs` parses it by hunk counts, so a
+  removed line starting with `--` is not a header); `apply_patch`'s per-edit patches are shown in
+  order, and an edit that returned `applied: false` is now red, where it used to render as a
+  success. A result over `MAX_INLINE_RESULT_BYTES` says where it was stored.
+- **Welcome box** (`✻ Welcome to tm!`, `/help`/`/status`, `cwd` with the path cut from the left,
+  model) and "Tips for getting started". **Status line:** `? for shortcuts` on the left, replaced
+  by `! for bash mode`, the mode indicator (`⏸ plan mode on (shift+tab to cycle)`, `⏵ ask mode
+  on`), popup hints or a transient message; model, cwd, ticket, context and token segments on the
+  right, which yield first.
+- **Input** (`chat/input.rs`, `mention.rs`). `!` on an empty prompt is shell mode (orange box,
+  `!` marker; Backspace, Esc or Ctrl+U on empty leaves it; pasting `!cmd` enters it); Enter runs
+  `AgentSession::run_shell`, shown as a `! cmd` block with its output. `@` completes file paths,
+  fuzzy over a `.gitignore`-honouring walk of the project done on a background thread (state dir
+  excluded, 50k files at most); Tab or Enter inserts `@path `. ↑/↓ history, persisted to
+  `<state_dir>/prompt-history.jsonl`; Ctrl+R searches it (Ctrl+R/↑ older, Tab/Esc accept, Enter
+  send, Ctrl+C cancel). Pastes over 800 characters or 3 lines become `[Pasted text #N +M lines]`,
+  deleted as one unit and expanded on send. Readline editing: Ctrl+A/E/B/F, Ctrl+K/U/W kill into
+  a ring and Ctrl+Y yanks, Alt+B/F/D on alphanumeric words (Ctrl+W to whitespace, as Claude Code
+  does), Ctrl+_ undo (arrives as Ctrl+7), Ctrl+G `$VISUAL`/`$EDITOR`. Shift+Enter, Alt+Enter,
+  Ctrl+J and a trailing `\` insert a newline.
+- **Turns.** A message sent while a turn (or `!` command) runs is queued, shown dimmed under the
+  spinner as `(queued)`, and sent when it ends; consecutive queued messages go as one. ↑ takes
+  them back. The spinner reads `✻ Thinking… (12s · 1.2k tokens · esc to interrupt)`. Esc
+  interrupts (`TurnInterrupter`; a `!` command's task is aborted), Esc Esc clears the draft into
+  history. Ctrl+C closes a dialog, else interrupts a running turn, else clears the prompt; the
+  last two arm a second press to quit. Ctrl+D on an empty prompt quits. Shift+Tab cycles
+  auto → plan → ask and calls `set_mode` (again at the start of every turn, so a change mid-turn
+  is not lost).
+- **Permission prompts** (`chat/approval.rs`) replace the input box: "Bash command" / "Edit file",
+  the command or path, the reason, "Do you want to proceed?", then `1. Yes`, `2. Yes, and don't
+  ask again this session`, `3. No, and tell tm what to do differently (esc)`. Number keys pick,
+  ↑/↓ and Enter pick, Esc and Ctrl+C are No, Shift+Tab is 2. No also interrupts the turn so the
+  human says what instead. The answer is noted in the transcript where the question came up.
+- **Viewer** (`chat/viewer.rs`): Ctrl+O shows every entry with each tool call's real name, full
+  input (pretty JSON) and full output, scrollable (↑↓, PgUp/PgDn, g/G, wheel), closed by q, Esc,
+  Ctrl+C or Ctrl+O. **`?`** on an empty prompt (and `/help`) shows the shortcuts panel under the
+  prompt in up to three columns. **Ctrl+T** toggles a task checklist above the prompt: the
+  attached ticket's subtasks and the tickets this conversation sent to `/bg`, with ☐/☒ marks.
+- **Commands.** `/help`, `/clear` (`/new`), `/resume` (a picker of saved conversations with first
+  message, age and turns), `/compact [focus]` ("Compacting conversation…", then `⎿ Compacted N
+  turns`, the summary in the viewer), `/model` (a picker over `model_choices`, current marked;
+  `/model <spec>` switches), `/status` (model, provider, directory, scope, mode, ticket, session,
+  tokens), `/cost` (tokens by turn), `/init` (`init_prompt` sent as a turn), `/bg [task]`
+  ("Moved to the background as T-5"), `/tickets` (`/home`, `/agents`), `/attach`, `/detach`
+  (now `detach_ticket`, the conversation carries on), `/decide`, `/exit`. A resumed conversation
+  (`tm -c`, `tm -r`, `/resume`) is rendered from its saved turns, `!` commands included.
+- **Keys the app root owns.** `←` `←` opens tickets only when `ChatScreen::left_opens_tickets` is
+  true (empty prompt, no popup, panel, viewer, picker, search, prompt or shell mode), so the key
+  never leaves an overlay. Ctrl+T in the chat is the checklist; from other screens it still
+  returns to the chat.
+- **Tests.** Unit tests for every rendering and key path above (`tm-tui`), and pty tests through
+  the real binary in `crates/tm-cli/tests/tui_chat_parity.rs`: `!` shell and Ctrl+O, `@`
+  completion, ↑/Ctrl+R/history surviving a restart, paste collapse, Ctrl+C clear-then-exit,
+  Shift+Tab indicator, `?` panel, `/status`, a queued message sent after a `!sleep`, and Esc
+  interrupting `!sleep 30`. `cargo run -p tm-tui --example chat_demo` plays every tool shape,
+  a diff, a long and a failing command, and a permission prompt.
+
+**Known gaps, stated plainly:**
+- **Steps arrive per turn, not live.** `AgentLoop` reports steps when a turn ends or suspends, so
+  a long turn shows the spinner and then everything at once. Tool calls cannot show a running
+  state until the loop streams them.
+- **Esc on a `!` command abandons, it does not kill.** `run_shell` runs on a blocking thread;
+  aborting the task frees the session, but the process runs to completion in the background and
+  its output is not recorded.
+- **Ctrl+G is checked by hand, not by an automated test.** The editor runs while the event loop
+  is blocked, so crossterm's reader is idle and cannot steal its keystrokes (checked in a pty with
+  an editor script reading `/dev/tty`); the chat then paints a blank frame so the next one
+  repaints every cell. An editor that forks and returns at once (`code` without `--wait`) returns
+  the prompt unchanged. Trying the runtime's `SIGCONT` resume path for the repaint first exposed
+  a real bug there: `Terminal::clear` queries the cursor position, which times out while
+  crossterm's event-stream thread holds the reader, and the TUI exits with "The cursor position
+  could not be read". Ctrl+Z / `fg` goes through that same path (`runtime.rs`, not changed here).
+- **The checklist is tickets, not model-written to-dos.** tm has no to-do tool; a model-maintained
+  list needs one in `tm-agent`.
+- **No Claude-Code-style mid-prompt `/` completion, `Ctrl+S` stash, image paste, vim mode, or
+  rewind (Esc Esc on an empty prompt).**
+- `⏺`/`⎿` need a font with U+23FA/U+23BF (every mainstream terminal font's fallback has them;
+  the terminal-mcp PNG renderer does not, and draws boxes).
 
 ## What this costs, stated plainly
 

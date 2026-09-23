@@ -48,10 +48,15 @@ never drift between sessions:
   pass lands, not mid-build. `mise run worktree:clean` sweeps every worktree under
   `.claude/worktrees/` the same way.
 - `mise run tui` — build and launch the ratatui TUI against the current directory's project. It
-  opens on the chat (`docs/decisions/D-018-tui-chat-first-shell.md`): nothing typed is a shortcut;
-  on an empty prompt `/` opens commands, `?` help, and `←` twice the tickets screen (the first
-  press says "Press ← again to open tickets"; also Ctrl+T or `/tickets`); Enter sends,
-  Shift+Enter/Ctrl+J newline; quit is Ctrl+C twice, Ctrl+D on an empty prompt, or `/exit`. The
+  opens on the chat, which is Claude Code's chat (D-019 §1 and its "Implemented: chat"): nothing
+  typed is a shortcut; on an empty prompt `/` opens commands, `?` the shortcuts panel, `!` shell
+  mode (runs in the project root, output joins the conversation), and `←` twice the tickets screen
+  (also `/tickets`); `@` completes file paths; Enter sends (queued while a turn runs), Shift+Enter/
+  Ctrl+J newline; ↑/↓ history (persisted), Ctrl+R search; Esc interrupts, Esc Esc clears;
+  Shift+Tab cycles auto/plan/ask; Ctrl+O transcript viewer; Ctrl+T task checklist; Ctrl+G
+  `$EDITOR`; Ctrl+K/U/W/Y, Alt+B/F/D, Ctrl+_ edit; permission prompts take 1/2/3; `/resume`,
+  `/compact`, `/model`, `/status`, `/cost`, `/init`, `/bg`; quit is Ctrl+C twice, Ctrl+D on an
+  empty prompt, or `/exit`. The
   tickets screen is Claude Code's `claude agents` view with tickets as rows
   (`docs/decisions/D-019-claude-code-parity-shell.md` §2 and its "Implemented: tickets screen"):
   groups Needs input / Working / Ready for review / Queued / Completed, a dispatch input at the
@@ -61,8 +66,10 @@ never drift between sessions:
   Esc back (no plain letter is a shortcut: typing always goes to the dispatch input). While
   the TUI is open a scheduler runs in-process (`sched::spawn_background_runner`), so dispatched
   tickets get worked; the header says so if it could not start. `cargo run -p tm-tui --example
-  chat_demo` plays a scripted turn (tool calls, Markdown) through the real chat screen, for
-  looking at rendering without a model.
+  chat_demo` plays a scripted turn (every tool shape, an inline diff, long and failing commands,
+  a permission prompt) through the real chat screen, for looking at rendering without a model.
+  If your shell inherited `CARGO_TARGET_DIR` from a parent session, prefix builds with
+  `env -u CARGO_TARGET_DIR` so a worktree builds into its own `target/`.
 - `tm tickets` opens the TUI straight onto the tickets screen (Esc goes to a fresh chat);
   `tm tickets --json` prints open tickets as a JSON array and exits (`--all` adds closed and
   cancelled), like `claude agents --json`, and never creates a project just to print `[]`.
