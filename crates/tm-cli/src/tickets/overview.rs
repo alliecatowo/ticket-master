@@ -347,7 +347,8 @@ pub fn summary_for(ticket: &Ticket, ctx: SummaryContext<'_>) -> (String, Summary
             )
         }
         S::Leased | S::Running if ctx.worker.is_none() => normal(
-            "no worker attached; its lease lapsed (tm sched run picks it back up)".to_string(),
+            "No worker attached — its lease lapsed. Run `tm sched run` to pick it back up."
+                .to_string(),
         ),
         S::Leased => normal(format!("starting attempt {}", ticket.attempts.max(1))),
         S::Running => normal(
@@ -388,7 +389,9 @@ pub fn summary_for(ticket: &Ticket, ctx: SummaryContext<'_>) -> (String, Summary
             )
         }
         S::Ready if ctx.workers_available => normal("queued · waiting for a worker".to_string()),
-        S::Ready => normal("queued, no worker running (tm sched run)".to_string()),
+        S::Ready => {
+            normal("Queued, but no worker is running. Run `tm sched run` to start one.".to_string())
+        }
         S::Blocked => normal(if ctx.open_dependencies.is_empty() {
             "blocked".to_string()
         } else {
@@ -675,7 +678,7 @@ mod tests {
         ));
         assert_eq!(summary(&t, &act, Some("agent:w"), true), "Fix the timeout");
         // Without a live lease, say so rather than pretending it is being worked.
-        assert!(summary(&t, &act, None, true).starts_with("no worker attached"));
+        assert!(summary(&t, &act, None, true).starts_with("No worker attached"));
     }
 
     #[test]
@@ -684,7 +687,7 @@ mod tests {
         let act = TicketActivity::default();
         assert_eq!(
             summary(&t, &act, None, false),
-            "queued, no worker running (tm sched run)"
+            "Queued, but no worker is running. Run `tm sched run` to start one."
         );
         assert_eq!(
             summary(&t, &act, None, true),
