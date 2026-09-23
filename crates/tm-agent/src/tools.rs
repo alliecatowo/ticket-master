@@ -566,8 +566,10 @@ struct CreateChildInput {
     /// since a ticket can never grant more than its creator has.
     #[serde(default)]
     authority: Option<Authority>,
+    /// Omitted: unlimited, like `tm ticket new`; the project budget still applies, and each
+    /// attempt is bounded by the loop's step limit and the ticket's retry policy.
     #[serde(default)]
-    budget: Budget,
+    budget: Option<Budget>,
     #[serde(default)]
     success: Vec<Predicate>,
     #[serde(default)]
@@ -1270,7 +1272,7 @@ impl BuiltinCapability {
                     parsed.context_refs,
                     parsed.success,
                     VerificationPolicy::Single,
-                    parsed.budget,
+                    parsed.budget.unwrap_or_else(Budget::unlimited),
                     default_retry_policy(),
                     parsed.priority,
                     ctx.actor.clone(),

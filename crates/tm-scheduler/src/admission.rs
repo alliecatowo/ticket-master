@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use tm_core::ticket::{Ticket, TicketKind, TicketState};
 use tm_core::view::SchedulerView;
-use tm_types::{Budget, Role, TicketId};
+use tm_types::{Role, TicketId};
 
 use crate::policy::SchedulingPolicy;
 use crate::select::ExecutorAvailability;
@@ -57,6 +57,11 @@ pub enum AdmissionRefusal {
         "ticket {0}'s remaining budget cannot both fund this dispatch and its verification reserve"
     )]
     BudgetInsufficientForVerificationReserve(TicketId),
+    /// The ticket's budget permits nothing more (`Budget::none()` included: it means zero, not
+    /// "untracked"), so a worker could not take a single step. Dispatching it would only hand
+    /// the lease straight back, over and over.
+    #[error("ticket {0} has no budget left to work with")]
+    BudgetExhausted(TicketId),
 }
 
 /// Live in-flight counts derived from a [`SchedulerView`], the state [`AdmissionGate::check`]
@@ -154,11 +159,10 @@ impl AdmissionGate {
         }
 
         // Gate 6: Budget, reserving a verification slice (`SPEC.md` §31.4,
-        // `docs/audit-2026-09-18-fable.md` B-10). `Budget::none()` (limit 0 in every dimension)
-        // is treated as "no budget tracking configured for this ticket" — the same sentinel
-        // meaning it already carries throughout this codebase's own test fixtures — not as "this
-        // ticket can never be dispatched"; the gate only ever refuses a ticket that was given a
-        // real, finite budget and has since spent past what its own reserve requires.
+        // `docs/audit-2026-09-18-fable.md` B-10). A budget that permits nothing more is refused
+        // outright (`Budget::none()` included: it means zero, per `tm_types::Budget`'s `Default`
+        // contract, which the agent loop and the store's usage accounting both enforce); a real,
+        // finite budget is refused once what remains can't cover its verification reserve.
         if let Some(refusal) = Self::budget_reserve_refusal(ticket, policy) {
             return AdmissionDecision::Refuse(refusal);
         }
@@ -179,9 +183,8 @@ impl AdmissionGate {
         policy: &SchedulingPolicy,
     ) -> Option<AdmissionRefusal> {
         let budget = ticket.budget;
-        if budget == Budget::none() {
-            // No budget tracking requested for this ticket; nothing to gate on.
-            return None;
+        if budget.is_exhausted() {
+            return Some(AdmissionRefusal::BudgetExhausted(ticket.id.clone()));
         }
         let remaining = budget.remaining();
         let fraction = policy.verification_budget_reserve_fraction.clamp(0.0, 1.0);
@@ -250,7 +253,9 @@ mod tests {
             context_refs: Vec::new(),
             success: Vec::new(),
             verification: tm_core::ticket::VerificationPolicy::None,
-            budget: tm_types::Budget::none(),
+            // These fixtures don't care about budget: ask for unlimited explicitly, since
+            // `Budget::none()` means zero and is refused.
+            budget: tm_types::Budget::unlimited(),
             retry: tm_core::ticket::RetryPolicy {
                 max_attempts: 3,
                 base_delay_seconds: 1,
@@ -641,19 +646,19 @@ mod tests {
     }
 
     #[test]
-    fn check_admits_a_ticket_with_budget_none_untracked() {
-        // `Budget::none()` is this codebase's own "no budget tracking configured" sentinel
-        // (every other fixture in this test module uses it precisely because these tests don't
-        // care about budget) — the gate must not start refusing every ticket that never opted
-        // into budget tracking.
+    fn check_refuses_a_ticket_whose_budget_permits_nothing() {
+        // `Budget::none()` means zero (`tm_types::Budget`'s `Default` contract), and a worker
+        // leased such a ticket can't afford one step: it would hand the lease straight back,
+        // and before this gate refused it the scheduler re-leased it every tick, forever.
         let gate = empty_gate();
-        let ticket = test_ticket("T-1", TicketKind::Work); // budget: Budget::none()
+        let mut ticket = test_ticket("T-1", TicketKind::Work);
+        ticket.budget = tm_types::Budget::none();
         let policy = SchedulingPolicy::conservative_default();
         let availability = AlwaysAvailable;
 
         assert_eq!(
             gate.check(&ticket, &policy, &availability),
-            AdmissionDecision::Admit
+            AdmissionDecision::Refuse(AdmissionRefusal::BudgetExhausted(ticket.id.clone()))
         );
     }
 
@@ -746,9 +751,7 @@ mod tests {
 
         assert_eq!(
             gate.check(&ticket, &policy, &availability),
-            AdmissionDecision::Refuse(AdmissionRefusal::BudgetInsufficientForVerificationReserve(
-                ticket.id.clone()
-            ))
+            AdmissionDecision::Refuse(AdmissionRefusal::BudgetExhausted(ticket.id.clone()))
         );
     }
 

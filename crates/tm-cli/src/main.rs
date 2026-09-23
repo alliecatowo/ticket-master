@@ -224,13 +224,15 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
             ops::dispatch_docs(&cmd, &opened, renderer)
         }
         Some(Command::Provider(cmd)) => {
-            let opened = project::open_for_command(cli.global.project.as_deref())?;
-            ops::dispatch_provider(&cmd, &opened, renderer).await
+            // Providers are machine-level; a project, if there is one, only adds its role table.
+            let opened = match project::open_for_command(cli.global.project.as_deref()) {
+                Ok(project) => Some(project),
+                Err(tm_types::TmError::NotFound { .. }) => None,
+                Err(e) => return Err(e),
+            };
+            ops::dispatch_provider(&cmd, opened.as_ref(), renderer).await
         }
-        Some(Command::Auth(args)) => {
-            let _opened = project::open_for_command(cli.global.project.as_deref())?;
-            auth::auth(&args, renderer).await
-        }
+        Some(Command::Auth(args)) => auth::auth(&args, renderer).await,
         Some(Command::Harness(cmd)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
             ops::dispatch_harness(&cmd, &opened, renderer)

@@ -509,16 +509,19 @@ mod templates_tests {
 }
 
 /// Dispatch one [`ProviderCommand`].
+///
+/// Providers are about this machine's credentials, not any one project, so every verb works
+/// without one; `project` only supplies a project-specific role table to `list`.
 pub async fn dispatch_provider(
     cmd: &ProviderCommand,
-    project: &Project,
+    project: Option<&Project>,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
     match cmd {
         ProviderCommand::List => provider_list(project, renderer).await,
         ProviderCommand::Detect => provider_detect(renderer).await,
-        ProviderCommand::Status => provider_status(project, renderer).await,
-        ProviderCommand::Test(args) => provider_test(args, project, renderer).await,
+        ProviderCommand::Status => provider_status(renderer).await,
+        ProviderCommand::Test(args) => provider_test(args, renderer).await,
     }
 }
 
@@ -544,13 +547,21 @@ fn availability_label(availability: tm_provider::Availability) -> &'static str {
 /// per *distinct* provider slug the table references, not once per row, since a slug can repeat
 /// across many roles and resolving a local backend's availability costs a real (short-timeout)
 /// network probe.
-pub async fn provider_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
-    let harness_path = project.state_dir.join("harness.toml");
-    let harness_content = fs::read_to_string(&harness_path)
-        .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
-
-    let role_table = tm_provider::RoleTable::parse(&harness_content)
-        .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?;
+///
+/// With no project, or a project without its own `harness.toml`, this lists the default table,
+/// which is what every turn actually routes through in that case.
+pub async fn provider_list(project: Option<&Project>, renderer: &Renderer) -> tm_types::Result<()> {
+    let harness_path = project.map(|p| p.state_dir.join("harness.toml"));
+    let role_table = match harness_path.filter(|path| path.is_file()) {
+        Some(path) => {
+            let harness_content = fs::read_to_string(&path).map_err(|e| {
+                tm_types::TmError::storage(format!("Failed to read harness.toml: {e}"))
+            })?;
+            tm_provider::RoleTable::parse(&harness_content)
+                .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?
+        }
+        None => tm_provider::RoleTable::default_table(),
+    };
 
     let known = tm_provider::Registry::known_providers();
     let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::SystemClock);
@@ -727,8 +738,8 @@ fn roles_routed_to(table: &tm_provider::RoleTable, provider_id: &str) -> Vec<&'s
 /// in-memory fabric and is never persisted (see [`PROVIDER_LIVE_STATE_NOTE`]). No completion is
 /// sent; the only network I/O is [`tm_provider::Registry::availability`]'s short-timeout probe of
 /// the three local backends, exactly as `tm provider detect` does.
-pub async fn provider_status(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
-    let clock = project.clock.clone();
+pub async fn provider_status(renderer: &Renderer) -> tm_types::Result<()> {
+    let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::SystemClock);
     let table = tm_provider::RoleTable::default_table();
     let (registered, fabric_error) = match crate::agent::build_fabric(clock.clone()) {
         Ok(fabric) => (fabric.provider_ids(), None),
@@ -1052,12 +1063,8 @@ fn provider_test_verdict(outcomes: &[ProviderTestOutcome]) -> tm_types::Result<(
 /// This makes real, billed network calls. It exits non-zero if any tested provider failed, and
 /// errors (non-zero, nothing tested) for a provider name that is unknown, not configured, or not
 /// used by the turn path — never reporting such a name as reachable.
-pub async fn provider_test(
-    args: &ProviderTestArgs,
-    project: &Project,
-    renderer: &Renderer,
-) -> tm_types::Result<()> {
-    let clock = project.clock.clone();
+pub async fn provider_test(args: &ProviderTestArgs, renderer: &Renderer) -> tm_types::Result<()> {
+    let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::SystemClock);
     let known = tm_provider::Registry::known_providers();
     let fabric = match crate::agent::build_fabric(clock.clone()) {
         Ok(fabric) => fabric,
