@@ -111,6 +111,10 @@ pub enum Command {
     #[command(subcommand)]
     Ticket(TicketCommand),
 
+    /// The tickets view, `tm`'s `claude agents` (D-019): opens the TUI on the tickets screen, or
+    /// with `--json` prints the ticket list as a JSON array and exits.
+    Tickets(TicketsArgs),
+
     /// Dependency edges between tickets.
     #[command(subcommand)]
     Dep(DepCommand),
@@ -378,6 +382,14 @@ pub struct TicketNewArgs {
     /// Path patterns this ticket's lease may write to (repeatable).
     #[arg(long = "resource", value_name = "GLOB")]
     pub resources: Vec<String>,
+}
+
+/// `tm tickets`
+#[derive(Debug, Args)]
+pub struct TicketsArgs {
+    /// With `--json`: also list completed tickets (closed and cancelled), not just open ones.
+    #[arg(long)]
+    pub all: bool,
 }
 
 /// `tm ticket edit`
@@ -1138,6 +1150,21 @@ mod tests {
             }
             other => panic!("unexpected parse: {other:?}"),
         }
+    }
+
+    #[test]
+    fn tickets_parses_with_json_and_all() {
+        let cli = Cli::parse_from(["tm", "tickets", "--json", "--all"]);
+        assert!(cli.global.json);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tickets(TicketsArgs { all: true }))
+        ));
+        let cli = Cli::parse_from(["tm", "tickets"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Tickets(TicketsArgs { all: false }))
+        ));
     }
 
     #[test]
