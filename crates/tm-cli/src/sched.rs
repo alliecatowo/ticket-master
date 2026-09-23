@@ -90,12 +90,21 @@ pub fn sched_plan(project: &Project, renderer: &Renderer) -> tm_types::Result<()
     renderer.emit(&summaries, &human)
 }
 
+/// Who the scheduler acts as: the leases it grants, the attempts it starts, the retries and
+/// escalations it drives. It is deterministic machinery, so it records as
+/// [`ParticipantId::system`], never as the human who happened to start the process (`tm sched
+/// run`, `tm serve`, the TUI) or activate the ticket. `tm run <ticket>` is different: a person
+/// asked for that one run, so it stays attributed to them.
+pub(crate) fn scheduler_actor() -> ParticipantId {
+    ParticipantId::system()
+}
+
 /// `tm sched tick`: run one scheduler tick, applying its actions.
 pub fn sched_tick(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let policy = tm_scheduler::SchedulingPolicy::conservative_default();
     let loop_driver =
         tm_scheduler::SchedulerLoop::new(&project.store, project.clock.clone(), policy);
-    let events = loop_driver.tick(project.actor.clone())?;
+    let events = loop_driver.tick(scheduler_actor())?;
 
     let summaries: Vec<EventSummary> = events.iter().map(event_to_summary).collect();
 
@@ -171,7 +180,7 @@ pub async fn sched_run(
         tokio::select! {
             _ = interval_timer.tick() => {
                 if !is_scheduler_paused(project)? {
-                    match loop_driver.tick(project.actor.clone()) {
+                    match loop_driver.tick(scheduler_actor()) {
                         Ok(events) => {
                             if !renderer.is_quiet() {
                                 for event in &events {
@@ -201,7 +210,8 @@ pub async fn sched_run(
 /// Code's agent view has a supervisor daemon for the same reason). It ticks every `interval`,
 /// honors `tm sched pause`, and logs through `tracing` only, never the terminal a TUI is drawing
 /// on. Leases keep it from double-working a ticket a separate `tm sched run` or `tm serve` is
-/// also running. Stops when the returned handle is aborted or the runtime shuts down.
+/// also running. Stops when the returned handle is aborted or the runtime shuts down. It acts
+/// as [`scheduler_actor`], not as `project.actor`.
 ///
 /// # Errors
 /// Fails up front if the dispatcher can't be built (typically: no provider configured).
@@ -256,7 +266,7 @@ fn spawn_runner_loop(
                     continue;
                 }
             }
-            match loop_driver.tick(project.actor.clone()) {
+            match loop_driver.tick(scheduler_actor()) {
                 Ok(events) if !events.is_empty() => {
                     tracing::debug!(events = events.len(), "background runner tick");
                 }
@@ -818,6 +828,249 @@ mod tests {
         assert_eq!(summary.kind, "Failed");
         assert!(summary.detail.contains("MarkReady"));
         assert!(summary.detail.contains("something went wrong"));
+    }
+
+    /// A provider that holds its fabric slot for a while before answering (text only, so every
+    /// attempt ends "without submitting"), counting calls and the most it ever had in flight.
+    struct SlowProvider {
+        clock: Arc<dyn tm_types::Clock>,
+        hold: Duration,
+        calls: std::sync::atomic::AtomicUsize,
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl tm_provider::Provider for SlowProvider {
+        fn id(&self) -> &str {
+            "slow"
+        }
+
+        async fn complete(
+            &self,
+            _req: tm_provider::CompletionRequest,
+        ) -> Result<tm_provider::Completion, tm_provider::ProviderError> {
+            use std::sync::atomic::Ordering::SeqCst;
+            self.calls.fetch_add(1, SeqCst);
+            let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+            self.peak.fetch_max(now, SeqCst);
+            tokio::time::sleep(self.hold).await;
+            self.in_flight.fetch_sub(1, SeqCst);
+            Ok(tm_provider::Completion {
+                model: tm_provider::ModelId::new("slow", "m1"),
+                candidates: vec![tm_provider::Candidate {
+                    content: vec![tm_provider::ContentBlock::Text {
+                        text: "looked, not done".to_string(),
+                    }],
+                    stop_reason: tm_provider::StopReason::EndTurn,
+                }],
+                usage: tm_provider::Usage {
+                    input_tokens: 10,
+                    output_tokens: 10,
+                    cache_read_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                latency: Duration::from_millis(0),
+                received_at: self.clock.now(),
+            })
+        }
+
+        async fn embed(
+            &self,
+            _req: tm_provider::EmbedRequest,
+        ) -> Result<tm_provider::Embeddings, tm_provider::ProviderError> {
+            Err(tm_provider::ProviderError::InvalidRequest(
+                "not used in this test".to_string(),
+            ))
+        }
+    }
+
+    /// A project in `dir` on a fixed clock, so a failed attempt's retry delay never elapses and
+    /// each ticket gets exactly the attempts the first tick starts.
+    fn test_project(dir: &std::path::Path) -> Arc<Project> {
+        let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::FixedClock::epoch());
+        let ids: Arc<dyn tm_types::IdSource> = Arc::new(tm_types::CounterIds::new());
+        let store = Arc::new(
+            tm_core::Store::open_with(dir, clock.clone(), ids.clone()).expect("open store"),
+        );
+        Arc::new(Project::for_test(dir, store, clock, ids))
+    }
+
+    /// A fabric whose only `coder.fast` candidate is `provider`, one request at a time.
+    fn one_slot_fabric(project: &Project, provider: Arc<SlowProvider>) -> Arc<tm_provider::Fabric> {
+        let table = tm_provider::RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"slow\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = tm_provider::Fabric::new(table, project.clock.clone());
+        fabric.register_provider(provider);
+        Arc::new(fabric)
+    }
+
+    fn slow_provider(project: &Project, hold: Duration) -> Arc<SlowProvider> {
+        Arc::new(SlowProvider {
+            clock: project.clock.clone(),
+            hold,
+            calls: Default::default(),
+            in_flight: Default::default(),
+            peak: Default::default(),
+        })
+    }
+
+    fn queued_ticket(project: &Project, objective: &str) -> TicketId {
+        let ticket =
+            crate::tickets::create_worker_ticket(project, objective).expect("create ticket");
+        project
+            .store
+            .activate(&ticket, project.actor.clone())
+            .expect("activate");
+        ticket
+    }
+
+    /// Poll until every one of `tickets` has at least one recorded failure (each attempt here
+    /// ends in one), then return their current state.
+    async fn wait_for_first_failures(
+        project: &Project,
+        tickets: &[&TicketId],
+    ) -> Vec<tm_core::Ticket> {
+        for _ in 0..500 {
+            let view = project.store.view().expect("view");
+            let now: Vec<_> = tickets.iter().map(|t| view.tickets[*t].clone()).collect();
+            if now.iter().all(|t| !t.failures.is_empty()) {
+                return now;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the tickets' first attempts never finished");
+    }
+
+    /// The bug: two tickets dispatched in the same tick against a provider that serves one
+    /// request at a time. The second request found the slot taken, the fabric said "wait", and
+    /// that was recorded as a `ProviderUnavailable` failure that spent one of the ticket's
+    /// attempts. Waiting for capacity is not a failed attempt (D-023).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_capacity_wait_does_not_spend_either_tickets_attempt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let first = queued_ticket(&project, "write the changelog");
+        let second = queued_ticket(&project, "write the release notes");
+
+        let provider = slow_provider(&project, Duration::from_millis(300));
+        let fabric = one_slot_fabric(&project, provider.clone());
+        let dispatcher = crate::dispatch::build_dispatcher_with_fabric(
+            &project,
+            tokio::runtime::Handle::current(),
+            None,
+            None,
+            fabric,
+            std::sync::Arc::new(crate::dispatch::HeadlessApprovalSink),
+        )
+        .expect("dispatcher");
+        // One tick of the scheduler the in-process runner drives, with the same dispatcher and
+        // policy: it leases both tickets together and starts exactly one attempt of each (a
+        // runner would keep ticking and start the retries too, which is not what this checks).
+        let mut policy = tm_scheduler::SchedulingPolicy::conservative_default();
+        policy.available_roles = tm_types::Role::ALL.iter().copied().collect();
+        let events =
+            tm_scheduler::SchedulerLoop::new(&project.store, project.clock.clone(), policy)
+                .with_dispatcher(dispatcher)
+                .tick(scheduler_actor())
+                .expect("tick");
+        let leased = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    tm_scheduler::SchedulerLoopEvent::Applied {
+                        action: tm_scheduler::SchedulerAction::Lease { .. },
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            leased, 2,
+            "both tickets dispatched in the same tick: {events:?}"
+        );
+        let tickets = wait_for_first_failures(&project, &[&first, &second]).await;
+
+        use std::sync::atomic::Ordering::SeqCst;
+        // Each attempt makes one or more calls (the loop may nudge a text-only reply once);
+        // what matters is that both tickets got served, one request at a time.
+        assert!(
+            provider.calls.load(SeqCst) >= 2,
+            "both tickets reached the provider"
+        );
+        assert_eq!(provider.peak.load(SeqCst), 1, "never two requests at once");
+        for t in &tickets {
+            assert_eq!(t.attempts, 1, "{}: {:?}", t.id, t.failures);
+            assert_eq!(t.failures.len(), 1, "{}: {:?}", t.id, t.failures);
+            assert_ne!(
+                t.failures[0].class,
+                tm_core::FailureClass::ProviderUnavailable,
+                "{} spent an attempt waiting for capacity: {}",
+                t.id,
+                t.failures[0].detail
+            );
+        }
+    }
+
+    /// Leases and attempt starts from the in-process runner are the scheduler's doing, recorded
+    /// as `system`, while the activation stays the human's.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_background_runner_leases_and_starts_attempts_as_the_scheduler() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let ticket = queued_ticket(&project, "write the changelog");
+
+        let provider = slow_provider(&project, Duration::from_millis(0));
+        let fabric = one_slot_fabric(&project, provider);
+        let dispatcher = crate::dispatch::build_dispatcher_with_fabric(
+            &project,
+            tokio::runtime::Handle::current(),
+            None,
+            None,
+            fabric,
+            std::sync::Arc::new(crate::dispatch::HeadlessApprovalSink),
+        )
+        .expect("dispatcher");
+        let runner = spawn_runner_loop(project.clone(), Duration::from_millis(20), dispatcher);
+        wait_for_first_failures(&project, &[&ticket]).await;
+        runner.abort();
+
+        let log = tm_events::EventLog::open(&project.state_dir.join("project.db")).expect("log");
+        let events = log
+            .read_subject(&tm_types::Id::from(ticket.clone()))
+            .expect("events");
+        let state_change = |from: &str, to: &str| {
+            events
+                .iter()
+                .find(|e| {
+                    e.payload
+                        .as_ticket_state_changed()
+                        .is_some_and(|p| p.from == from && p.to == to)
+                })
+                .unwrap_or_else(|| panic!("no {from} -> {to} change in {events:#?}"))
+        };
+        assert_eq!(state_change("draft", "blocked").actor, project.actor);
+        assert_eq!(state_change("blocked", "ready").actor, project.actor);
+        let system = ParticipantId::system();
+        assert_eq!(state_change("ready", "leased").actor, system);
+        assert_eq!(state_change("leased", "running").actor, system);
+        let leased = events
+            .iter()
+            .find(|e| e.payload.as_ticket_leased().is_some())
+            .expect("ticket.leased");
+        assert_eq!(leased.actor, system);
+        let attempt_started = events
+            .iter()
+            .find(|e| {
+                e.payload
+                    .as_ticket_updated()
+                    .is_some_and(|p| p.fields.get("attempts").is_some())
+            })
+            .expect("the attempts bump");
+        assert_eq!(attempt_started.actor, system);
     }
 
     #[test]

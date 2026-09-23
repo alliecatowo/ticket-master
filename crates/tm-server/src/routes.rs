@@ -60,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/schema", get(get_schema))
         .route("/tickets", get(list_tickets).post(create_ticket))
         .route("/tickets/{id}", get(get_ticket).patch(update_ticket))
+        .route("/tickets/{id}/events", get(ticket_events))
         .route("/tickets/{id}/transition", post(transition_ticket))
         .route("/tickets/{id}/lease", post(acquire_lease))
         .route("/tickets/{id}/evidence", post(attach_evidence))
@@ -535,8 +536,10 @@ struct PresenceUpdateRequest {
 // Handlers
 // ---------------------------------------------------------------------------------------------
 
-async fn health() -> Json<Value> {
-    Json(json!({"status": "ok"}))
+/// `GET /health`: liveness, plus whether this process is working ready tickets (`workers`, from
+/// [`crate::state::ServerConfig::workers`]).
+async fn health(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({"status": "ok", "workers": state.config.workers}))
 }
 
 async fn get_state(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
@@ -544,6 +547,7 @@ async fn get_state(State(state): State<AppState>) -> Result<Json<Value>, ServerE
     let head = state.events.head()?;
     Ok(Json(json!({
         "head": head,
+        "workers": state.config.workers,
         "tickets": view.tickets.values().collect::<Vec<_>>(),
         "leases": view.leases.values().map(lease_json).collect::<Vec<_>>(),
         "decisions": view.decisions.values().map(decision_json).collect::<Vec<_>>(),
@@ -592,7 +596,64 @@ async fn get_schema() -> Json<Value> {
             },
             "TransitionRequest": {
                 "type": "object",
-                "description": "externally tagged: one of activate|trigger|submit|verify|audit|close|cancel|reopen|fail"
+                "description": "externally tagged: exactly one of these keys",
+                "minProperties": 1,
+                "maxProperties": 1,
+                "properties": {
+                    "activate": {"type": "object", "required": ["actor"]},
+                    "trigger": {"type": "object", "required": ["trigger", "actor"]},
+                    "submit": {"type": "object", "required": ["summary", "actor"]},
+                    "verify": {"type": "object", "required": ["verifier", "passed", "actor"]},
+                    "audit": {"type": "object", "required": ["auditor", "outcome", "actor"]},
+                    "close": {"type": "object", "required": ["actor"]},
+                    "cancel": {"type": "object", "required": ["actor"]},
+                    "reopen": {"type": "object", "required": ["actor"]},
+                    "accept": {
+                        "type": "object",
+                        "description": "a human accepts submitted work, closing the ticket",
+                        "required": ["actor"],
+                        "properties": {
+                            "note": {"type": "string"},
+                            "actor": {"$ref": "#/definitions/ParticipantId"}
+                        }
+                    },
+                    "reject": {
+                        "type": "object",
+                        "description": "a human sends submitted work back; the reason must not be blank",
+                        "required": ["reason", "actor"],
+                        "properties": {
+                            "reason": {"type": "string", "minLength": 1, "pattern": "\\S"},
+                            "actor": {"$ref": "#/definitions/ParticipantId"}
+                        }
+                    },
+                    "retry": {
+                        "type": "object",
+                        "description": "a human sends an escalated ticket back to work",
+                        "required": ["actor"],
+                        "properties": {
+                            "guidance": {"type": "string"},
+                            "actor": {"$ref": "#/definitions/ParticipantId"}
+                        }
+                    },
+                    "fail": {"type": "object", "required": ["class", "detail", "actor"]}
+                }
+            },
+            "TicketEventsPage": {
+                "type": "object",
+                "description": "GET /tickets/{id}/events?after=<seq>&limit=<n>: one page of the ticket's own events, oldest first; pass `next` back as `after` until it is null",
+                "required": ["events", "next"],
+                "properties": {
+                    "events": {"type": "array"},
+                    "next": {"type": ["integer", "null"]}
+                }
+            },
+            "Health": {
+                "type": "object",
+                "required": ["status", "workers"],
+                "properties": {
+                    "status": {"const": "ok"},
+                    "workers": {"type": "boolean", "description": "whether this server works ready tickets itself"}
+                }
             }
         }
     }))
@@ -696,7 +757,13 @@ async fn transition_ticket(
         TransitionRequest::Cancel { reason, actor } => state.store.cancel(&id, reason, actor)?,
         TransitionRequest::Reopen { reason, actor } => state.store.reopen(&id, reason, actor)?,
         TransitionRequest::Accept { note, actor } => state.store.accept(&id, note, actor)?,
-        TransitionRequest::Reject { reason, actor } => state.store.reject(&id, reason, actor)?,
+        TransitionRequest::Reject { reason, actor } => {
+            // `Store::reject` refuses a blank reason itself; checking the same rule here first
+            // lets a malformed body answer 400 rather than 409.
+            tm_core::store::rejection_reason(&id, &reason)
+                .map_err(|e| ServerError::BadRequest(e.to_string()))?;
+            state.store.reject(&id, reason, actor)?
+        }
         TransitionRequest::Retry { guidance, actor } => state.store.retry(&id, guidance, actor)?,
         TransitionRequest::Fail {
             class,
@@ -705,6 +772,42 @@ async fn transition_ticket(
         } => state.store.record_failure(&id, class, detail, actor)?,
     };
     Ok(Json(json!({"events": events_json(&events)?})))
+}
+
+/// `GET /tickets/{id}/events`'s query: an exclusive `after` cursor (the last `seq` the client
+/// has; `from` is accepted as the same thing, matching `GET /events?from=`) and a page size
+/// capped at the server's replay page size.
+#[derive(Debug, Default, Deserialize)]
+struct TicketEventsQuery {
+    #[serde(default, alias = "from")]
+    after: Option<u64>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `GET /tickets/{id}/events?after=<seq>&limit=<n>`: one page of the ticket's own history (the
+/// events whose subject is the ticket, as `tm events` and the per-ticket event backstop count
+/// them), oldest first, so a client showing one ticket needn't replay the whole log. `next` is
+/// the cursor for the following page, or `null` once this page reached the end.
+async fn ticket_events(
+    State(state): State<AppState>,
+    Path(id): Path<TicketId>,
+    axum::extract::Query(query): axum::extract::Query<TicketEventsQuery>,
+) -> Result<Json<Value>, ServerError> {
+    if !state.store.view()?.tickets.contains_key(&id) {
+        return Err(TmError::not_found("ticket", &id).into());
+    }
+    let max = state.config.sse_replay_page_size.max(1);
+    let limit = query.limit.unwrap_or(max).clamp(1, max);
+    let events = state.events.read_subject_after(
+        &tm_types::Id::from(id),
+        query.after.unwrap_or(0),
+        limit,
+    )?;
+    let next = (events.len() == limit)
+        .then(|| events.last().map(|e| e.seq))
+        .flatten();
+    Ok(Json(json!({"events": events_json(&events)?, "next": next})))
 }
 
 async fn acquire_lease(
@@ -1138,6 +1241,8 @@ mod tests {
             presence_ttl_seconds: 60,
             broadcast_poll_interval: Duration::from_millis(10),
             sse_replay_page_size: 100,
+            sse_keep_alive: Duration::from_secs(15),
+            workers: false,
         };
         let state = AppState::open(config, clock, ids).expect("open app state");
         (dir, state)
@@ -1200,8 +1305,136 @@ mod tests {
 
     #[tokio::test]
     async fn health_reports_ok() {
-        let Json(body) = health().await;
+        let (_dir, state) = test_state();
+        let Json(body) = health(State(state)).await;
         assert_eq!(body["status"], "ok");
+    }
+
+    #[tokio::test]
+    async fn health_and_state_say_whether_workers_are_running() {
+        let (_dir, mut state) = test_state();
+        for workers in [false, true] {
+            state.config.workers = workers;
+            let Json(health) = health(State(state.clone())).await;
+            assert_eq!(health["workers"], workers);
+            let Json(snapshot) = get_state(State(state.clone())).await.expect("state");
+            assert_eq!(snapshot["workers"], workers);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_schema_lists_the_human_review_transitions_and_ticket_history() {
+        let Json(schema) = get_schema().await;
+        let transitions = &schema["definitions"]["TransitionRequest"]["properties"];
+        for key in ["accept", "reject", "retry", "activate", "cancel", "fail"] {
+            assert!(
+                transitions.get(key).is_some(),
+                "{key} missing: {transitions}"
+            );
+        }
+        assert_eq!(
+            transitions["reject"]["required"],
+            json!(["reason", "actor"])
+        );
+        assert!(schema["definitions"].get("TicketEventsPage").is_some());
+        assert!(schema["definitions"]["Health"]["properties"]
+            .get("workers")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn a_reject_with_a_blank_reason_is_a_bad_request() {
+        let (_dir, state) = test_state();
+        let id = make_ready_ticket(&state).await;
+        for reason in ["", "   ", "\n\t"] {
+            let request: TransitionRequest = serde_json::from_value(
+                json!({"reject": {"reason": reason, "actor": "human:owner"}}),
+            )
+            .expect("wire shape");
+            let err = transition_ticket(State(state.clone()), Path(id.clone()), Json(request))
+                .await
+                .expect_err("a blank reason is refused");
+            assert_eq!(status_of(err), StatusCode::BAD_REQUEST, "{reason:?}");
+        }
+        let view = state.store.view().expect("view");
+        assert_eq!(
+            view.tickets[&id].state,
+            TicketState::Ready,
+            "nothing changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn ticket_history_pages_only_that_tickets_events() {
+        let (_dir, state) = test_state();
+        let first = make_ticket(&state).await;
+        let second = make_ticket(&state).await;
+        for id in [&first, &second, &first, &second] {
+            state
+                .store
+                .update_ticket(id, json!({"priority": 1}), actor())
+                .expect("update");
+        }
+        let all_first: Vec<u64> = state
+            .events
+            .read_subject(&tm_types::Id::from(first.clone()))
+            .expect("subject")
+            .iter()
+            .map(|e| e.seq)
+            .collect();
+        assert!(all_first.len() > 2, "enough to need several pages");
+
+        let mut seen = Vec::new();
+        let mut after = None;
+        loop {
+            let query = TicketEventsQuery {
+                after,
+                limit: Some(2),
+            };
+            let Json(page) = ticket_events(
+                State(state.clone()),
+                Path(first.clone()),
+                axum::extract::Query(query),
+            )
+            .await
+            .expect("page");
+            let events = page["events"].as_array().expect("events").clone();
+            assert!(events.len() <= 2);
+            for e in &events {
+                assert_eq!(e["subject"], first.as_str(), "only this ticket's events");
+                seen.push(e["seq"].as_u64().expect("seq"));
+            }
+            match page["next"].as_u64() {
+                Some(next) => after = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(seen, all_first, "every event once, oldest first");
+
+        // `from` is the same exclusive cursor as `after`, as on `GET /events`.
+        let page = |q: &str| {
+            let query: axum::extract::Query<TicketEventsQuery> =
+                axum::extract::Query::try_from_uri(&format!("/x?{q}").parse().expect("uri"))
+                    .expect("query parses");
+            ticket_events(State(state.clone()), Path(first.clone()), query)
+        };
+        let Json(by_from) = page(&format!("from={}&limit=2", all_first[0]))
+            .await
+            .expect("page");
+        let Json(by_after) = page(&format!("after={}&limit=2", all_first[0]))
+            .await
+            .expect("page");
+        assert_eq!(by_from, by_after);
+        assert_eq!(by_from["events"][0]["seq"].as_u64(), Some(all_first[1]));
+
+        let err = ticket_events(
+            State(state.clone()),
+            Path(TicketId::new("T-999").expect("id")),
+            axum::extract::Query(TicketEventsQuery::default()),
+        )
+        .await
+        .expect_err("unknown ticket");
+        assert_eq!(status_of(err), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1274,6 +1507,8 @@ mod tests {
             presence_ttl_seconds: 60,
             broadcast_poll_interval: Duration::from_millis(10),
             sse_replay_page_size: 100,
+            sse_keep_alive: Duration::from_secs(15),
+            workers: false,
         };
         let state = AppState::open(config, clock, ids).expect("open app state");
 

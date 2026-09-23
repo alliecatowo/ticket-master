@@ -40,8 +40,8 @@ the same way:
 
 Differences from the TUI, on purpose:
 - Row titles get 44 columns instead of 32.
-- A queued ticket always reads "waiting for a worker". The client can't tell whether `tm serve`
-  was started with `--no-workers`.
+- A queued ticket always reads "waiting for a worker". The client doesn't read `workers` from
+  `GET /health` yet (see "Not built").
 
 ## What is built
 
@@ -104,8 +104,19 @@ Differences from the TUI, on purpose:
 - No diff or artifact viewer. Evidence shows its kind, artifact id and summary only.
 - No token UI. `new TicketmasterClient({ token })` works, but nothing in the app asks for a token
   (fine for the default loopback, no-token `tm serve`).
-- Every page load replays the whole event log from `seq` 0 to build the timelines. There is no
-  per-ticket history endpoint, so this gets slower as the log grows.
+- Every page load replays the whole event log from `seq` 0 to build the timelines, which gets
+  slower as the log grows. The server now has what's needed to stop that; the client hasn't
+  adopted it yet:
+  - `GET /tickets/{id}/events?after=<seq>&limit=<n>` returns `{events, next}`: one page of that
+    ticket's own events, oldest first, in the same wire shape as the other event lists. Pass
+    `next` back as `after` until it is `null`. `after` is exclusive, like `/events?from=`, and
+    `from` is accepted as the same cursor.
+  - `GET /health` and `GET /state` include `workers: true|false`: whether this `tm serve` works
+    ready tickets. It is `false` under `--no-workers`, and also when the runner couldn't start.
+    With it, "waiting for a worker" could say "no worker is running" instead.
+  - `GET /events` honors a `Last-Event-ID` header over `?from=`, and sends `:` keep-alive
+    comments while idle. `parseSseFrame` already ignores those.
+  - A `reject` with a blank reason is now a 400. The UI already blocks it.
 - If the client reconnects to a *different* project whose log is longer than the one it was
   reading, it keeps the old timelines. It only detects a server log that is behind its cursor.
 

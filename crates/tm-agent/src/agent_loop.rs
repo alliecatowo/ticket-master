@@ -71,6 +71,38 @@ pub const DEFAULT_MAX_EVENTS_PER_TICKET: u32 = 5000;
 /// Upper bound on generated tokens per provider call.
 const MAX_TOKENS_PER_STEP: u32 = 4096;
 
+/// How long, in total, one provider call waits for fabric capacity before the loop gives up and
+/// reports [`FailureClass::ProviderUnavailable`] (`docs/decisions/D-023-capacity-wait-is-not-a-failed-attempt.md`).
+/// When the fabric routes a call to [`tm_provider::RouteDecision::Wait`] (every candidate is
+/// at its concurrency limit, or out of per-minute quota, or behind an open breaker, and one frees
+/// up at a known time), the call waits for that time instead of failing: waiting for capacity is
+/// not a failed attempt. Five minutes covers a concurrency slot held by another ticket's long
+/// provider call and a per-minute quota window; a daily or monthly cap that would not reset
+/// within it fails at once rather than waiting out the allowance. Override with
+/// [`AgentLoop::with_capacity_wait`].
+pub const DEFAULT_CAPACITY_WAIT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// The longest single sleep between two capacity checks. A concurrency slot has no real reset
+/// time (the fabric reports a one-second hint), so the loop re-checks at least this often.
+const CAPACITY_POLL_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The shortest sleep between two capacity checks, so a wait whose `until` is already due (or a
+/// slot that another caller keeps winning) never spins.
+const CAPACITY_POLL_MIN: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// The prefix [`Fabric::execute`] gives the error it returns for a
+/// [`tm_provider::RouteDecision::Wait`]: a routing refusal made before any provider was called.
+/// Matched by text because the fabric reports it as a plain `TmError::Provider`;
+/// `capacity_refusal_text_matches_the_fabric` pins it against the real fabric so a wording change
+/// there fails a test instead of silently turning every capacity wait back into a failure.
+const CAPACITY_REFUSAL_PREFIX: &str = "no candidate available for role ";
+
+/// True when `err` is the fabric refusing to route for lack of capacity (see
+/// [`CAPACITY_REFUSAL_PREFIX`]), as opposed to a provider that was called and failed.
+fn is_capacity_refusal(err: &TmError) -> bool {
+    matches!(err, TmError::Provider(msg) if msg.starts_with(CAPACITY_REFUSAL_PREFIX))
+}
+
 /// Minimal prompt-cache bookkeeping the loop carries across steps within one run, so repeated
 /// system-prompt content can be marked cacheable on providers that support it. Opaque outside
 /// this crate; [`AgentLoop`] is the only thing that reads or writes it.
@@ -117,6 +149,8 @@ pub struct AgentLoop {
     role: Role,
     actor: ParticipantId,
     max_steps: u32,
+    /// How long one provider call may wait for fabric capacity; see [`DEFAULT_CAPACITY_WAIT`].
+    capacity_wait: std::time::Duration,
     /// The [`DEFAULT_MAX_EVENTS_PER_TICKET`]-shaped backstop this loop enforces; see that
     /// constant's doc comment.
     max_events_per_ticket: u32,
@@ -168,9 +202,17 @@ impl AgentLoop {
             role,
             actor,
             max_steps: DEFAULT_MAX_STEPS,
+            capacity_wait: DEFAULT_CAPACITY_WAIT,
             max_events_per_ticket: DEFAULT_MAX_EVENTS_PER_TICKET,
             store,
         }
+    }
+
+    /// Override how long one provider call may wait for fabric capacity before failing (see
+    /// [`DEFAULT_CAPACITY_WAIT`]). `Duration::ZERO` restores fail-fast behavior.
+    pub fn with_capacity_wait(mut self, wait: std::time::Duration) -> Self {
+        self.capacity_wait = wait;
+        self
     }
 
     /// Override the default step limit (mainly for tests that want to force
@@ -534,6 +576,100 @@ impl AgentLoop {
         Ok(AgentOutcome::BudgetExhausted { steps, exhausted })
     }
 
+    /// [`Fabric::execute`] `request`, waiting for capacity instead of failing when the fabric has
+    /// none right now (`docs/decisions/D-023-capacity-wait-is-not-a-failed-attempt.md`).
+    ///
+    /// A call is retried only when the fabric refused to route it ([`is_capacity_refusal`]: no
+    /// provider was called), never after a provider was called and failed. Before each try the
+    /// loop asks [`Fabric::route`] whether a candidate is free; the check after a refusal is what
+    /// matters, because two loops dispatched in the same scheduler tick routinely both see a free
+    /// slot and one of them loses it. The wait is bounded by [`AgentLoop::with_capacity_wait`],
+    /// counted as time actually slept (an injected clock need not advance), and a `Wait` whose
+    /// `until` lies beyond what is left of that allowance fails at once. Nothing is appended to the
+    /// log while waiting; the caller records provider events once, for the final result.
+    async fn execute_with_capacity_wait(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<tm_provider::Completion> {
+        let mut waited = std::time::Duration::ZERO;
+        loop {
+            // `Fabric::route` doesn't roll quota windows forward (only `execute` does), so a
+            // `Wait` already due may be stale: let `execute` decide those.
+            if let tm_provider::RouteDecision::Wait(until) = self.route_now(&request) {
+                let pause = (until > self.clock.now())
+                    .then(|| self.capacity_pause(until, waited))
+                    .flatten();
+                if let Some(pause) = pause {
+                    tokio::time::sleep(pause).await;
+                    waited += pause;
+                    continue;
+                }
+            }
+            let err = match self.fabric.execute(self.role, request.clone()).await {
+                Ok(completion) => return Ok(completion),
+                Err(err) => err,
+            };
+            if !is_capacity_refusal(&err) {
+                return Err(err);
+            }
+            let pause = match self.route_now(&request) {
+                tm_provider::RouteDecision::Wait(until) => self.capacity_pause(until, waited),
+                // The slot freed between the refusal and this check: try again, after the
+                // minimum pause so a slot other callers keep winning can't make this spin.
+                tm_provider::RouteDecision::Use(_) | tm_provider::RouteDecision::Degrade(..) => {
+                    self.capacity_pause(self.clock.now(), waited)
+                }
+                tm_provider::RouteDecision::Exhausted => None,
+            };
+            let Some(pause) = pause else {
+                return Err(err);
+            };
+            tracing::debug!(
+                role = self.role.as_str(),
+                waited_ms = waited.as_millis() as u64,
+                "provider at capacity; waiting instead of failing the attempt"
+            );
+            tokio::time::sleep(pause).await;
+            waited += pause;
+        }
+    }
+
+    /// The fabric's routing decision for `request` right now, built from the same [`Need`] shape
+    /// [`Fabric::execute`] itself routes with.
+    ///
+    /// [`Need`]: tm_provider::Need
+    fn route_now(&self, request: &CompletionRequest) -> tm_provider::RouteDecision {
+        let need = tm_provider::Need {
+            tolerance: self.role.default_tolerance(),
+            estimated_tokens: request.max_tokens,
+            max_cost_micros: None,
+        };
+        self.fabric.route(self.role, &need, self.clock.now())
+    }
+
+    /// How long to sleep before re-checking capacity that frees up at `until`, having already
+    /// waited `waited`; `None` when the wait allowance is spent or `until` lies beyond it.
+    fn capacity_pause(
+        &self,
+        until: tm_types::Timestamp,
+        waited: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        let remaining = self.capacity_wait.checked_sub(waited)?;
+        if remaining.is_zero() {
+            return None;
+        }
+        let due_in =
+            std::time::Duration::from_millis(until.millis_since(self.clock.now()).max(0) as u64);
+        if due_in > remaining {
+            return None;
+        }
+        Some(
+            due_in
+                .clamp(CAPACITY_POLL_MIN, CAPACITY_POLL_MAX)
+                .min(remaining),
+        )
+    }
+
     /// Translate every [`FabricRecord`] the most recent [`tm_provider::fabric::Fabric::execute`]
     /// call produced into the matching already-closed `provider.*` [`tm_events::EventKind`]
     /// (`docs/audit-2026-09-18-fable.md` B-07) and append them together. `FabricRecord::Degraded`
@@ -782,7 +918,7 @@ impl AgentLoop {
                 model: None,
             };
 
-            let completion = match self.fabric.execute(self.role, request).await {
+            let completion = match self.execute_with_capacity_wait(request).await {
                 Ok(completion) => completion,
                 Err(e) => {
                     self.record_provider_events(task)?;
@@ -2072,6 +2208,49 @@ mod tests {
         );
         // The bracket is ordered: started strictly before ended.
         assert!(started[0].seq < ended[0].seq);
+    }
+
+    /// [`is_capacity_refusal`] matches the fabric's `Wait` refusal by text; this pins that text
+    /// against the real fabric, and checks an `Exhausted` refusal is not mistaken for one.
+    #[tokio::test]
+    async fn capacity_refusal_text_matches_the_fabric() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1, limits = { requests_per_minute = 1 } }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Fabric::new(table, clock.clone());
+        let provider = MockProvider::new("mock", ModelId::new("mock", "m1"), clock.clone());
+        provider.script_default_response(text_only_completion(ModelId::new("mock", "m1"), &clock));
+        fabric.register_provider(Arc::new(provider));
+        let request = CompletionRequest {
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_tokens: 16,
+            temperature: None,
+            stop_sequences: Vec::new(),
+            stream: false,
+            n: 1,
+            model: None,
+        };
+
+        fabric
+            .execute(Role::CoderFast, request.clone())
+            .await
+            .expect("the first request fits the quota");
+        let refused = fabric
+            .execute(Role::CoderFast, request.clone())
+            .await
+            .expect_err("the second waits for the next minute");
+        assert!(is_capacity_refusal(&refused), "{refused:?}");
+
+        let unroutable = Fabric::new(RoleTable::parse("").expect("empty table"), clock);
+        let exhausted = unroutable
+            .execute(Role::CoderFast, request)
+            .await
+            .expect_err("nothing can serve the role");
+        assert!(!is_capacity_refusal(&exhausted), "{exhausted:?}");
     }
 
     #[tokio::test]

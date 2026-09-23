@@ -356,6 +356,37 @@ impl EventLog {
         Ok(events)
     }
 
+    /// Read up to `limit` events whose `subject` equals `subject` and whose `seq` is strictly
+    /// greater than `after`, in ascending `seq` order: one page of a subject's history, resumable
+    /// from the last `seq` a caller saw (the same exclusive cursor `GET /events?from=` uses).
+    pub fn read_subject_after(
+        &self,
+        subject: &Id,
+        after: u64,
+        limit: usize,
+    ) -> tm_types::Result<Vec<Event>> {
+        let conn = schema::open_read_connection(&self.path)?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT seq, ts, kind, subject, actor, session, causation, correlation, payload, hash
+                 FROM events WHERE subject = ?1 AND seq > ?2 ORDER BY seq ASC LIMIT ?3",
+            )
+            .map_err(|e| TmError::storage(e.to_string()))?;
+        let rows = stmt
+            .query_map(
+                params![subject.as_str(), after as i64, limit as i64],
+                row_to_raw,
+            )
+            .map_err(|e| TmError::storage(e.to_string()))?;
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(decode_event(
+                row.map_err(|e| TmError::storage(e.to_string()))?,
+            )?);
+        }
+        Ok(events)
+    }
+
     /// Read every event with `from <= seq <= to`, in ascending `seq` order.
     pub fn read_range(&self, from: u64, to: u64) -> tm_types::Result<Vec<Event>> {
         let conn = schema::open_read_connection(&self.path)?;

@@ -799,10 +799,12 @@ each has a round-trip test asserting that pushing then pulling a projection is i
 `axum`. Endpoints (JSON):
 
 ```
-GET  /health
-GET  /events?from=<seq>            # SSE stream, resumable by seq
-GET  /state                        # materialized snapshot + head seq
+GET  /health                       # {status, workers}: does this process work ready tickets
+GET  /events?from=<seq>            # SSE stream, resumable by seq (Last-Event-ID wins over from),
+                                   # keep-alive comments while idle
+GET  /state                        # materialized snapshot + head seq + workers
 GET  /tickets  /tickets/:id        POST /tickets  PATCH /tickets/:id
+GET  /tickets/:id/events?after=<seq>&limit=<n>   # one page of that ticket's events + next cursor (from= = after=)
 POST /tickets/:id/transition       POST /tickets/:id/lease  /heartbeat  /release
 GET  /graph                        # nodes + edges for the canvas
 GET/POST /decisions  /milestones  /artifacts  /docs  /approvals
@@ -818,6 +820,8 @@ GET  /presence                     GET /providers   GET /harness   GET /metrics
 - Presence: participant → current ticket/file/action, TTL'd, broadcast over SSE. Path leases are
   surfaced so humans and agents collide on the same substrate.
 - Comments and approvals are first-class events; an approval blocks the requesting agent.
+- A `reject` transition needs a non-blank reason (`tm_core::store::rejection_reason`, enforced by
+  `Store::reject` for every surface; the server answers 400 for a blank one).
 
 ---
 

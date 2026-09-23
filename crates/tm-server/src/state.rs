@@ -58,8 +58,16 @@ pub struct ServerConfig {
     pub presence_ttl_seconds: u32,
     /// How often the broadcast poller checks the log for new events.
     pub broadcast_poll_interval: Duration,
-    /// Maximum events served in one backlog page during SSE replay.
+    /// Maximum events served in one backlog page during SSE replay, and the most one
+    /// `GET /tickets/{id}/events` page returns.
     pub sse_replay_page_size: usize,
+    /// How often an idle SSE stream sends a keep-alive comment, so proxies and browsers don't
+    /// drop a connection that is simply waiting for the next event.
+    pub sse_keep_alive: Duration,
+    /// Whether this process is also working ready tickets (`tm serve` without `--no-workers`,
+    /// and the in-process runner actually started). Reported by `GET /health` and `GET /state`
+    /// so a client can tell "queued, a worker will pick it up" from "queued, nothing is running".
+    pub workers: bool,
 }
 
 impl ServerConfig {
@@ -464,6 +472,8 @@ mod tests {
             presence_ttl_seconds: 300,
             broadcast_poll_interval: Duration::from_secs(1),
             sse_replay_page_size: 100,
+            sse_keep_alive: Duration::from_secs(15),
+            workers: false,
         };
         assert!(!config.requires_auth());
     }
@@ -478,6 +488,8 @@ mod tests {
             presence_ttl_seconds: 300,
             broadcast_poll_interval: Duration::from_secs(1),
             sse_replay_page_size: 100,
+            sse_keep_alive: Duration::from_secs(15),
+            workers: false,
         };
         assert!(config.requires_auth());
     }

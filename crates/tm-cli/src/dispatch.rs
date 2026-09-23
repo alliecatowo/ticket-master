@@ -262,8 +262,22 @@ pub fn build_dispatcher_with_human(
     steps: Option<tokio::sync::mpsc::UnboundedSender<tm_agent::StepRecord>>,
     human_sink: Arc<dyn HumanApprovalSink>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
-    let exec_root = exec_root.unwrap_or(project.root.as_path());
     let fabric = build_fabric(project.clock.clone())?;
+    build_dispatcher_with_fabric(project, handle, exec_root, steps, fabric, human_sink)
+}
+
+/// [`build_dispatcher`] over an already-built `fabric` instead of the one
+/// [`crate::agent::build_fabric`] would pick from the environment — the seam an in-process test
+/// uses to run the real dispatcher against a provider it controls.
+pub(crate) fn build_dispatcher_with_fabric(
+    project: &Project,
+    handle: tokio::runtime::Handle,
+    exec_root: Option<&Path>,
+    steps: Option<tokio::sync::mpsc::UnboundedSender<tm_agent::StepRecord>>,
+    fabric: Arc<tm_provider::Fabric>,
+    human_sink: Arc<dyn HumanApprovalSink>,
+) -> tm_types::Result<Arc<ExecutorDispatcher>> {
+    let exec_root = exec_root.unwrap_or(project.root.as_path());
     let ci = Arc::new(project.code_intel()?);
     let command_cache: Arc<dyn tm_context::CommandCache + Send + Sync> =
         Arc::new(MemoryCommandCache::new(project.ids.clone()));
