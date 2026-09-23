@@ -42,6 +42,11 @@ export interface ProjectStoreSnapshot {
   timelines: Map<TicketId, WireEvent[]>;
   /** Events seen since the client first connected, most recent last — the Status view's input. */
   recentEvents: WireEvent[];
+  /**
+   * Whether the history replay has caught up with the first snapshot's head. Until then an
+   * empty timeline or a missing submission summary means "not read yet", not "none".
+   */
+  historyReady: boolean;
 }
 
 const RECENT_EVENTS_LIMIT = 200;
@@ -129,6 +134,7 @@ export class ProjectStore {
       activity: new Map(this.activity),
       timelines: new Map(this.timelines),
       recentEvents: [...this.recentEvents],
+      historyReady: this.liveSince !== null && this.historySeq >= this.liveSince,
     };
   }
 

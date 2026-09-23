@@ -72,7 +72,8 @@ export function describeEvent(event: WireEvent): TimelineEntry {
       return entry(`Updated ${Object.keys(fields).join(", ")}`, "muted", true);
     }
     case "ticket.state_changed":
-      return entry(`${field(event, "from") ?? "?"} → ${field(event, "to") ?? "?"}`, "muted");
+      // Bookkeeping: the event beside it (leased, submitted, escalated…) already says it.
+      return entry(`${field(event, "from") ?? "?"} → ${field(event, "to") ?? "?"}`, "muted", true);
     case "ticket.leased":
       return entry(`Leased to ${field(event, "holder") ?? "a worker"}`);
     case "ticket.lease_released":

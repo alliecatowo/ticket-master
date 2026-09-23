@@ -55,7 +55,7 @@ export function ReviewView() {
                 {o.attempts}
               </span>
             </div>
-            <p className="review__summary">{o.submission ?? <span className="muted">No summary.</span>}</p>
+            <p className="review__summary">{o.submission ?? <span className="muted">{store.historyReady ? "No summary." : "Reading the event log…"}</span>}</p>
             {o.evidence.length > 0 && (
               <ul className="evidence evidence--inline">
                 {o.evidence.map((e, i) => (

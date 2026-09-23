@@ -66,7 +66,7 @@ export function TicketView() {
               {overview.submission ? (
                 <p className="prose">{overview.submission}</p>
               ) : (
-                <p className="hint">No summary recorded.</p>
+                <p className="hint">{store.historyReady ? "No summary recorded." : "Reading the event log…"}</p>
               )}
               {overview.evidence.length > 0 && (
                 <ul className="evidence">
@@ -267,7 +267,7 @@ function Timeline({ ticketId }: { ticketId: string }) {
         )}
       </div>
       {shown.length === 0 ? (
-        <p className="hint">No events for this ticket yet.</p>
+        <p className="hint">{store.historyReady ? "No events for this ticket yet." : "Reading the event log…"}</p>
       ) : (
         <ol className="timeline">
           {shown.map((e) => (

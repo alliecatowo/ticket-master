@@ -79,7 +79,8 @@ Differences from the TUI, on purpose:
   - `ProjectStore` keeps two cursors. Tickets, leases and evidence come from the snapshot and
     are patched only by events after it. History (the timeline, submission summaries, escalation
     reasons) is folded from the log exactly once, so a reconnect never duplicates a timeline
-    row.
+    row. Until the replay reaches the first snapshot's head (`historyReady`), an empty timeline or
+    missing summary reads "Reading the event log…", not "none".
   - Mutations don't update local state optimistically. The resulting events arrive over the
     stream.
 - **Errors**:
@@ -128,7 +129,7 @@ collide with the API endpoints of the same names.
 pnpm test && pnpm typecheck && pnpm build
 ```
 
-- `pnpm test` (`vitest run`): 84 tests in 9 files.
+- `pnpm test` (`vitest run`): 85 tests in 9 files.
   - `src/views/ticketsModel.test.ts`: the group for all 14 states, approval overrides, the
     actions each state allows, Cancel availability, summaries, ordering, and ages.
   - `src/api/client.test.ts`: the exact `POST /tickets/:id/transition` body for every action,

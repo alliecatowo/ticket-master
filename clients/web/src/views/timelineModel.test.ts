@@ -19,6 +19,6 @@ describe("describeEvent", () => {
 
   it("marks bookkeeping as minor", () => {
     expect(describeEvent(event({ kind: "usage.recorded", payload: { tokens: 12 } })).minor).toBe(true);
-    expect(describeEvent(event({ kind: "ticket.state_changed" })).text).toBe("ready → leased");
+    expect(describeEvent(event({ kind: "ticket.state_changed" }))).toMatchObject({ text: "ready → leased", minor: true });
   });
 });

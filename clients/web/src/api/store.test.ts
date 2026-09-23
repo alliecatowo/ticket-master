@@ -35,6 +35,21 @@ describe("ProjectStore", () => {
     expect(store.cursor()).toBe(3);
   });
 
+  it("reports history ready only once the replay reaches the first snapshot's head", () => {
+    const store = new ProjectStore();
+    expect(store.snapshot().historyReady).toBe(false);
+    store.seed({ ...snapshot, head: 2 });
+    expect(store.snapshot().historyReady).toBe(false);
+    store.apply(event({ seq: 1 }));
+    expect(store.snapshot().historyReady).toBe(false);
+    store.apply(event({ seq: 2, payload: { ticket: "T-1", from: "leased", to: "running" } }));
+    expect(store.snapshot().historyReady).toBe(true);
+    // An empty log has nothing to read.
+    const empty = new ProjectStore();
+    empty.seed({ ...snapshot, head: 0 });
+    expect(empty.snapshot().historyReady).toBe(true);
+  });
+
   it("never folds the same event twice (a replayed overlap after a reconnect)", () => {
     const store = new ProjectStore();
     store.seed(snapshot);
