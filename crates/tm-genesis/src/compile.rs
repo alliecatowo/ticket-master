@@ -135,14 +135,14 @@ pub struct GraphCompilation {
 pub enum CompilationError {
     /// The proposal, projected onto the existing project state, violates one or more `tm-core`
     /// invariants.
-    #[error("proposed graph violates tm-core invariants: {0:?}")]
+    #[error("proposed ticket graph would break {} project rule(s); rejecting", .0.len())]
     InvalidGraph(Vec<Violation>),
     /// A [`Ref`] used by a dependency, milestone membership or `parent_ref` does not name any
     /// [`ProposedTicket::ticket_ref`]/[`ProposedMilestone::milestone_ref`] in the same proposal.
-    #[error("proposal references unknown ref {0:?}")]
+    #[error("proposed ticket graph refers to \"{0}\", which isn't in the same proposal")]
     DanglingRef(Ref),
     /// [`compile_with_retry`] exhausted its bounded attempts without producing a valid graph.
-    #[error("graph compilation exhausted {attempts} attempt(s), escalating")]
+    #[error("ticket graph planning failed after {attempts} attempt(s); escalating to a human")]
     Exhausted {
         /// How many attempts were made.
         attempts: u32,
@@ -292,7 +292,7 @@ fn first_text_block(completion: &tm_provider::Completion) -> TmResult<String> {
                 _ => None,
             })
         })
-        .ok_or_else(|| TmError::parse("provider response contained no text content"))
+        .ok_or_else(|| TmError::parse("the provider's response didn't include any text"))
 }
 
 /// Ask `planner.frontier` to propose a [`GraphCompilation`] for `spec`. `attempt` and
@@ -314,8 +314,11 @@ pub async fn propose_graph(
         .await
         .map_err(|e| TmError::Provider(e.to_string()))?;
     let text = first_text_block(&completion)?;
-    let payload: ProposedGraphPayload = serde_json::from_str(&text)
-        .map_err(|e| TmError::parse(format!("malformed GraphCompilation JSON: {e}")))?;
+    let payload: ProposedGraphPayload = serde_json::from_str(&text).map_err(|e| {
+        TmError::parse(format!(
+            "couldn't understand the provider's ticket graph response: {e}"
+        ))
+    })?;
 
     let proposal = GraphCompilation {
         source_spec: None,
@@ -553,7 +556,7 @@ fn rollback_tickets(
     for id in tickets.values() {
         let _ = store.cancel(
             id,
-            Some("genesis graph compilation rejected wholesale; rolling back".to_string()),
+            Some("Rolling back: the proposed ticket graph was rejected as a whole".to_string()),
             actor.clone(),
         );
     }
@@ -751,7 +754,7 @@ pub async fn compile_with_retry(
     // genesis stage stay distinguishable in `tm doctor`/audit output.
     let correlation = ids.random_hex(8);
     let summary = if last_violations.is_empty() {
-        "no violations recorded on the final attempt".to_string()
+        "no issues recorded on the final attempt".to_string()
     } else {
         last_violations
             .iter()
@@ -760,9 +763,9 @@ pub async fn compile_with_retry(
             .join("; ")
     };
     store.record_decision(
-        format!("genesis graph compilation exhausted retries [{correlation}]"),
-        format!("as of {}: {summary}", clock.now().to_rfc3339()),
-        "bounded retries exhausted, escalating to a human per SPEC.md §12".to_string(),
+        format!("Ticket graph planning failed after every attempt [{correlation}]"),
+        format!("As of {}: {summary}", clock.now().to_rfc3339()),
+        "Ran out of attempts; escalating to a human to review.".to_string(),
         vec![],
         vec![],
         vec![],
