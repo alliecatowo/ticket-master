@@ -47,7 +47,12 @@ never drift between sessions:
 - `mise run clean` — `rm -rf target`. This machine runs tight on disk; do this after a verify
   pass lands, not mid-build. `mise run worktree:clean` sweeps every worktree under
   `.claude/worktrees/` the same way.
-- `mise run tui` — build and launch the ratatui TUI against the current directory's project.
+- `mise run tui` — build and launch the ratatui TUI against the current directory's project. It
+  opens on the chat (`docs/decisions/D-018-tui-chat-first-shell.md`): nothing typed is a shortcut;
+  on an empty prompt `/` opens commands, `?` help, `←` the sessions & tickets home (also Ctrl+T or
+  `/home`); Enter sends, Shift+Enter/Ctrl+J newline; quit is Ctrl+C twice, Ctrl+D on an empty
+  prompt, or `/exit`. `cargo run -p tm-tui --example chat_demo` plays a scripted turn (tool calls,
+  Markdown) through the real chat screen, for looking at rendering without a model.
 - `mise run dev` — same, with `RUST_LOG=tm=debug,tm_core=debug,tm_agent=debug` piped to
   `/tmp/tm-dev.log` instead of the alt-screen (so debug output doesn't corrupt the TUI's frame).
 - `mise run doctor` — `tm doctor` against the current directory.
@@ -175,6 +180,19 @@ copy would be a real disk-space incident, the same category this file already wa
 elsewhere. Cargo's own file locking serializes concurrent access to the shared dir safely (one
 build waits, it doesn't corrupt); this composes with, not replaces, the existing `-j 2`/"don't
 dispatch more than ~2 concurrent heavy builds" guidance.
+
+**But a shared `target/` does let one worktree's build silently reuse another worktree's
+artifacts.** Observed 2026-09-22: a worktree whose `tm-types` lacked a `TmError::TurnFailed`
+variant failed to compile `tm-server` with "pattern `TurnFailed` not covered" — cargo had reused a
+`tm-types` built from a *different* worktree's newer source. Workspace-member fingerprints are
+keyed by workspace-relative paths and checked by source mtime, so identical paths in two worktrees
+share one fingerprint, and whichever side has the older files skips the rebuild. A track that
+changes a crate another concurrent track also compiles against should build with its own
+`CARGO_TARGET_DIR=<worktree>/target cargo ... -j 2` (disk permitting — check `df -h` first) rather
+than trust the shared dir; the directory goes away with the worktree itself (`mise run
+worktree:clean` force-removes worktrees). The reverse also holds: building a changed crate into the
+shared dir can hand *your* artifacts to another track, so isolate before the first build, not
+after the first confusing error.
 
 **A worktree does not get `.env`, and nothing here auto-copies it in.** Git worktrees only ever
 contain tracked files (plus your own uncommitted changes on that branch) — a gitignored file like

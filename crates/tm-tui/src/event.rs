@@ -124,6 +124,15 @@ pub enum AppMessage {
         /// The repo-relative path the diff covers.
         path: String,
     },
+    /// A chat turn made progress or finished (`screens::chat::ChatScreen`). Carries plain
+    /// transcript data ([`crate::chat::transcript::Entry`]), already translated from the agent's
+    /// own step records by the application.
+    Turn {
+        /// The session the turn belongs to; a screen showing a different session ignores it.
+        session: SessionId,
+        /// What happened.
+        update: crate::screens::chat::TurnUpdate,
+    },
     /// A short-lived status message for the toast/notification area.
     Toast {
         /// How urgently to present it.

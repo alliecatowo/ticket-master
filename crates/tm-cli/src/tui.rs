@@ -3,42 +3,56 @@
 //! non-tty stdout/stdin, or `TERM=dumb` still gets.
 //!
 //! This module owns exactly the seam between `tm-cli` and `tm-tui`: [`should_launch`] decides
-//! which of the two bare-`tm` paths a given invocation takes, [`App`] is the small root
-//! [`tm_tui::component::ComponentParent`] this crate wires around `tm-tui`'s screens, and [`run`]
-//! drives `tm_tui::runtime::Runtime` against an already-open [`crate::project::Project`]'s real
-//! state.
+//! which of the two bare-`tm` paths a given invocation takes, [`App`] is the root
+//! [`tm_tui::component::ComponentParent`] wired around `tm-tui`'s screens, and [`run`] drives
+//! `tm_tui::runtime::Runtime` against an already-open [`crate::project::Project`]'s real state.
 //!
-//! `App` is a real navigation shell, not a single permanently-visible screen: [`ScreenId`] names
-//! which of [`tm_tui::screens::home::Home`] (the bare-`tm` default, unchanged), the Kanban board
-//! (`tm_tui::screens::kanban::Kanban`, entered from `Home` via [`is_tickets_chord`]), and a ticket
-//! drill-down (`tm_tui::screens::ticket_detail::TicketDetailScreen`, entered from a Kanban card's
-//! Enter) is currently on screen, and `App::back_stack` is a real back-stack `Left`/`Esc`
-//! ([`is_back_chord`]) unwinds one level at a time. `ticket_graph`, `diff_viewer`,
-//! `session_stream`, `verification_ladder`, and `command_palette` remain unwired past this crate
-//! for now — see this module's tests and the caller's commit message for why that scope line was
-//! drawn where it was.
+//! # Navigation (`docs/decisions/D-018-tui-chat-first-shell.md`)
+//!
+//! `tm` opens on the chat ([`ScreenId::Chat`], `tm_tui::screens::chat::ChatScreen`) — tm is a
+//! coding agent first, and tickets live in the background. `←` on an empty prompt, `/home`
+//! (`/agents`, `/tickets`), or Ctrl+T opens the cross-session home ([`ScreenId::Home`],
+//! `tm_tui::screens::home::Home`: sessions, background tickets, workers); from there `b` opens the
+//! Kanban board and Enter on a ticket opens its detail. Esc walks back one level at a time
+//! (`App::back_stack`); Ctrl+T from anywhere else returns straight to the chat.
+//!
+//! Nothing a human can type into the prompt quits: the only exits are Ctrl+C twice within
+//! [`QUIT_WINDOW_MILLIS`], Ctrl+D on an empty prompt, and `/exit`.
 
+mod steps;
+
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+use ratatui_core::style::Style;
+use tm_tui::chat::commands::CommandId;
+use tm_tui::chat::status::StatusInfo;
+use tm_tui::chat::transcript::NoticeLevel;
 use tm_tui::component::{Component, ComponentId, ComponentParent, FrameContext};
 use tm_tui::event::{AppMessage, Event, InputEvent, KeyBinding, KeyChord, Propagation};
 use tm_tui::runtime::{MessageSender, Runtime, RuntimeError};
-use tm_tui::screens::dashboard::Dashboard;
-use tm_tui::screens::home::Home;
+use tm_tui::screens::chat::{ChatAction, ChatScreen, TurnUpdate};
+use tm_tui::screens::home::{Home, HomeAction, HomeData, SessionRow, TicketRow, Tone, WorkerRow};
 use tm_tui::screens::kanban::{Kanban, KanbanCard, KanbanColumn};
 use tm_tui::screens::ticket_detail::TicketDetailScreen;
 use tm_tui::theme::Theme;
 use tm_tui::widgets_data::form::{Field, Form};
 use tm_tui::widgets_data::list::List;
-use tm_tui::widgets_data::table::{Column, Table};
-use tm_types::{SessionId, TicketId};
+use tm_types::{Clock, SessionId, TicketId, Timestamp};
 use tokio::sync::{Mutex, Notify};
 
 use crate::agent::{self, AgentSession};
 use crate::args::GlobalOpts;
-use crate::project::Project;
+use crate::project::{Project, Scope};
 use crate::render::Renderer;
+
+/// How close together two Ctrl+C presses must be to quit.
+const QUIT_WINDOW_MILLIS: i64 = 1_200;
+
+/// How often the home/board screens re-read project state while on screen, so background work
+/// done by another process (a `tm sched run` worker) shows up without a keypress.
+const REFRESH_MILLIS: i64 = 2_000;
 
 /// Whether a bare `tm` invocation (`cli.command.is_none()`, `cli.prompt.is_none()`) should open
 /// the ratatui TUI ([`run`]) rather than [`crate::agent::AgentSession::run_interactive`].
@@ -68,107 +82,275 @@ pub fn should_launch(global: &GlobalOpts) -> bool {
     std::io::stdout().is_terminal() && std::io::stdin().is_terminal()
 }
 
-/// Open the home screen over `project`'s current state and drive it until the human quits or a
-/// termination signal arrives.
+/// Open the chat over `project` and drive it until the human quits or a termination signal
+/// arrives.
 ///
-/// The chat input the home screen wires in (D-002's "you should be able to just code without
-/// looking at tickets") drives the exact same turn-running logic (`crate::agent`'s
-/// `AgentSession::run_turn_streaming`) the plain `tm`/`tm -p` loop uses — see [`App::spawn_turn`]
-/// for how a submitted prompt gets from a key event to a running [`tm_agent::agent_loop::AgentLoop`].
+/// Every submitted prompt runs through the exact same turn logic the plain `tm`/`tm -p` loop uses
+/// (`AgentSession::run_turn_streaming`) — see [`App::spawn_turn`].
 pub async fn run(project: Arc<Project>) -> tm_types::Result<()> {
     let view = project
         .store
         .view()
         .map_err(|e| tm_types::TmError::storage(e.to_string()))?;
-    // No ticket is active yet at launch, so there is nothing to show a goal for.
-    let dashboard = build_dashboard(&view, None);
-    let kanban = Kanban::new(ComponentId::new("tm.kanban"), build_kanban_columns(&view));
 
     let (mut runtime, sender) = Runtime::start(project.clock.clone(), Theme::dark())
         .await
         .map_err(runtime_error)?;
 
     // `--quiet`/`--no-color`: the TUI never renders through `Renderer` (its own widgets own
-    // presentation), so these flags are inert here, but `AgentSession::new` still needs some
-    // `Renderer` to construct — see `App::spawn_turn`, which drives this session through
-    // `run_turn_streaming` directly rather than through `AgentSession::run_turn`, the one method
-    // that would actually read it.
+    // presentation), but `AgentSession::new` still needs one to construct.
     let agent_session = AgentSession::new(project.clone(), Renderer::from_flags(false, true, true));
     let session_id = agent_session.session_id().clone();
-    let agent_session = Arc::new(Mutex::new(agent_session));
 
-    let mut home = Home::new(ComponentId::new("tm.home"), dashboard, session_id.clone());
-    // D-003: the same one-line scope note the plain loop prints once before its first prompt
-    // (`agent.rs::run_interactive`), shown here as a persistent status row instead.
-    home.set_status_line(Some(project.scope_line()));
-    // Held for the runtime's whole lifetime: `App::spawn_turn` clones this into each background
-    // turn it spawns. Dropping it early would close `Runtime`'s message channel and turn
-    // `messages.recv()` into an immediate `RuntimeError::ChannelClosed` on the very next
-    // event-loop iteration.
-    let mut app = App::new(
+    let chat = ChatScreen::new(
+        ComponentId::new("tm.chat"),
+        session_id.clone(),
+        base_status(&project, &view, None),
+    );
+    let now = project.clock.now();
+    let home = Home::new(
+        ComponentId::new("tm.home"),
+        build_home_data(&project, &view, &session_id, now),
+    );
+    let kanban = Kanban::new(ComponentId::new("tm.kanban"), build_kanban_columns(&view));
+
+    // `sender` is held for the runtime's whole lifetime: `App::spawn_turn` clones it into each
+    // background turn. Dropping it early would close `Runtime`'s message channel.
+    let mut app = App {
+        id: ComponentId::new("tm.app"),
         project,
+        chat,
         home,
         kanban,
-        runtime.shutdown_handle(),
-        agent_session,
+        detail: None,
+        current: ScreenId::Chat,
+        back_stack: Vec::new(),
+        shutdown: runtime.shutdown_handle(),
+        agent_session: Arc::new(Mutex::new(agent_session)),
         sender,
-        session_id,
-    );
+        attached: None,
+        ctrl_c_at: None,
+        last_refresh: now,
+    };
 
     runtime.run(&mut app).await.map_err(runtime_error)
 }
 
-/// Map a [`RuntimeError`] (terminal I/O, a closed channel, a closed input stream) to the
-/// `tm_types::Result` every `tm-cli` execution module already returns, so `main.rs`'s single
-/// `TmError`-to-exit-code path handles a TUI failure exactly like any other command's.
+/// Map a [`RuntimeError`] to the `tm_types::Result` every `tm-cli` execution module returns.
 fn runtime_error(err: RuntimeError) -> tm_types::TmError {
     tm_types::TmError::storage(format!("tm-tui runtime error: {err}"))
 }
 
-/// Build the dashboard's ticket table and session list from `view`'s real, already-materialized
-/// project state — no placeholder rows. The session list reads live leases (who currently holds
-/// which ticket): `tm_core::ProjectView` has no separate "session" collection, and a lease *is*
-/// the closest existing notion of "a worker session in progress" (see `agent.rs`'s `SessionId`,
-/// which is not persisted in `ProjectView` at all).
-///
-/// `goal` is the active ticket's current durable goal text (`SPEC.md` §29,
-/// `docs/audit-2026-09-18-fable.md` B-09), already read via `tm_core::Store::goal_state` by the
-/// caller (`App::refresh`) — `view` alone carries no goal state (`goal_state` reads the
-/// `goals` materialized table directly, not `ProjectView`), and there being no active ticket yet
-/// (the initial dashboard `run` builds before any prompt is submitted) is exactly `None`.
-fn build_dashboard(view: &tm_core::ProjectView, goal: Option<String>) -> Dashboard {
-    let mut tickets = Table::new(
-        ComponentId::new("tm.dashboard.tickets"),
-        vec![
-            Column::new("ID", 1),
-            Column::new("State", 1),
-            Column::new("Objective", 3),
-        ],
-    );
-    tickets.set_rows(
-        view.tickets
-            .values()
-            .map(|t| {
-                vec![
-                    t.id.to_string(),
-                    format!("{:?}", t.state),
-                    t.objective.clone(),
-                ]
-            })
-            .collect(),
-    );
+/// The model the status bar names before any turn has reported who actually answered — the same
+/// provider selection `agent::build_fabric` makes, so the name does not jump after the first turn.
+fn configured_model() -> String {
+    if std::env::var_os("TM_TEST_MOCK_PROVIDER").is_some() {
+        return "mock/m1".to_string();
+    }
+    match tm_provider::DevPassProvider::preferred_model() {
+        Some(model) => format!("devpass/{model}"),
+        None => format!("anthropic/{}", agent::AGENT_MODEL),
+    }
+}
 
-    let mut sessions = List::new(ComponentId::new("tm.dashboard.sessions"));
-    sessions.set_items(
+/// `path` with the home directory shortened to `~`.
+fn display_path(path: &Path) -> String {
+    let shown = path.display().to_string();
+    match std::env::var_os("HOME").map(PathBuf::from) {
+        Some(home) if !home.as_os_str().is_empty() => match path.strip_prefix(&home) {
+            Ok(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+            Ok(rest) => format!("~/{}", rest.display()),
+            Err(_) => shown,
+        },
+        _ => shown,
+    }
+}
+
+/// The checked-out branch of the git repository containing `root` (or a short commit id when
+/// HEAD is detached), read straight from `.git/HEAD` — no subprocess on the render path.
+fn git_branch(root: &Path) -> Option<String> {
+    let dir = root.ancestors().find(|d| d.join(".git").exists())?;
+    let dot_git = dir.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        // A worktree or submodule: `.git` is a file pointing at the real git dir.
+        let pointer = std::fs::read_to_string(&dot_git).ok()?;
+        let target = PathBuf::from(pointer.trim().strip_prefix("gitdir:")?.trim());
+        if target.is_absolute() {
+            target
+        } else {
+            dir.join(target)
+        }
+    };
+    let head = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    match head.strip_prefix("ref: ") {
+        Some(reference) => Some(
+            reference
+                .strip_prefix("refs/heads/")
+                .unwrap_or(reference)
+                .to_string(),
+        ),
+        None => head.get(..7).map(str::to_string),
+    }
+}
+
+/// `~/src/app (main)`.
+fn place(project: &Project) -> String {
+    let mut place = display_path(&project.root);
+    if let Some(branch) = git_branch(&project.root) {
+        place.push_str(&format!(" ({branch})"));
+    }
+    place
+}
+
+fn is_open(state: tm_core::TicketState) -> bool {
+    !matches!(
+        state,
+        tm_core::TicketState::Closed | tm_core::TicketState::Cancelled
+    )
+}
+
+/// The status-bar facts `App` owns (the chat screen overlays the served model and its tokens).
+fn base_status(
+    project: &Project,
+    view: &tm_core::ProjectView,
+    ticket: Option<&TicketId>,
+) -> StatusInfo {
+    StatusInfo {
+        model: configured_model(),
+        cwd: display_path(&project.root),
+        branch: git_branch(&project.root),
+        global_scope: project.scope == Scope::Global,
+        ticket: ticket.map(|t| t.to_string()),
+        open_tickets: view.tickets.values().filter(|t| is_open(t.state)).count(),
+        tokens: 0,
+    }
+}
+
+/// How a ticket state reads on the home screen.
+fn tone_for(state: tm_core::TicketState) -> Tone {
+    use tm_core::TicketState as S;
+    match state {
+        S::Escalated | S::Blocked | S::Recovery | S::Rework | S::Replan => Tone::Attention,
+        S::Leased | S::Running | S::Submitted | S::Verifying | S::Auditing => Tone::Active,
+        S::Draft | S::Ready => Tone::Queued,
+        S::Closed => Tone::Done,
+        S::Cancelled => Tone::Inactive,
+    }
+}
+
+/// `just now`, `5m`, `3h`, `2d`.
+fn ago(millis: i64) -> String {
+    let secs = millis.max(0) / 1000;
+    match secs {
+        0..=59 => "just now".to_string(),
+        60..=3_599 => format!("{}m ago", secs / 60),
+        3_600..=86_399 => format!("{}h ago", secs / 3_600),
+        _ => format!("{}d ago", secs / 86_400),
+    }
+}
+
+/// One past session as read from the event log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoggedSession {
+    id: String,
+    turns: usize,
+    last: Option<Timestamp>,
+}
+
+/// The most recent sessions recorded in the project's event log, newest first: every event a
+/// turn writes carries its session id, and each turn brackets itself with `session.started`, so
+/// one grouped read-only query yields each session's turn count and last activity. Transcripts
+/// themselves are not persisted, so these are history, not something to resume.
+fn logged_sessions(project: &Project, limit: usize) -> Vec<LoggedSession> {
+    let path = project.store.state_dir().join("project.db");
+    let Ok(conn) = tm_events::schema::open_read_connection(&path) else {
+        return Vec::new();
+    };
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT session, SUM(CASE WHEN kind = 'session.started' THEN 1 ELSE 0 END), MAX(ts) \
+         FROM events WHERE session IS NOT NULL GROUP BY session ORDER BY MAX(seq) DESC LIMIT ?1",
+    ) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
+        Ok(LoggedSession {
+            id: row.get::<_, String>(0)?,
+            turns: row.get::<_, i64>(1)?.max(0) as usize,
+            last: row
+                .get::<_, Option<String>>(2)?
+                .and_then(|ts| Timestamp::parse_rfc3339(&ts).ok()),
+        })
+    });
+    match rows {
+        Ok(rows) => rows.filter_map(Result::ok).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Everything the home screen shows, from real project state.
+fn build_home_data(
+    project: &Project,
+    view: &tm_core::ProjectView,
+    current: &SessionId,
+    now: Timestamp,
+) -> HomeData {
+    let holder_of = |ticket: &TicketId| {
         view.leases
             .values()
-            .map(|lease| format!("{} holds {}", lease.holder, lease.ticket))
-            .collect(),
+            .find(|l| &l.ticket == ticket && !l.is_expired(now))
+            .map(|l| l.holder.to_string())
+    };
+    let tickets = view
+        .tickets
+        .values()
+        .map(|t| TicketRow {
+            id: t.id.to_string(),
+            state: format!("{:?}", t.state),
+            tone: tone_for(t.state),
+            objective: t.objective.lines().next().unwrap_or_default().to_string(),
+            note: holder_of(&t.id).map(|h| format!("held by {h}")),
+        })
+        .collect();
+    let workers = view
+        .leases
+        .values()
+        .filter(|l| !l.is_expired(now))
+        .map(|l| WorkerRow {
+            holder: l.holder.to_string(),
+            ticket: l.ticket.to_string(),
+            age: ago(now.millis_since(l.acquired)).replace(" ago", ""),
+        })
+        .collect();
+
+    let logged = logged_sessions(project, 8);
+    let current_logged = logged.iter().find(|s| s.id == current.as_str());
+    let mut sessions = vec![SessionRow {
+        id: current.to_string(),
+        turns: current_logged.map_or(0, |s| s.turns),
+        when: None,
+        current: true,
+    }];
+    sessions.extend(
+        logged
+            .iter()
+            .filter(|s| s.id != current.as_str())
+            .map(|s| SessionRow {
+                id: s.id.clone(),
+                turns: s.turns,
+                when: s.last.map(|t| ago(now.millis_since(t))),
+                current: false,
+            }),
     );
 
-    let mut dashboard = Dashboard::new(ComponentId::new("tm.dashboard"), tickets, sessions);
-    dashboard.set_goal(goal);
-    dashboard
+    HomeData {
+        place: place(project),
+        tickets,
+        workers,
+        sessions,
+    }
 }
 
 /// Build the Kanban board's columns from `view`'s real ticket state: one column per real
@@ -176,12 +358,8 @@ fn build_dashboard(view: &tm_core::ProjectView, goal: Option<String>) -> Dashboa
 /// ticket currently in that state.
 ///
 /// Deliberately one column per raw state rather than a hand-curated "phase" grouping with
-/// invented labels (e.g. "In Progress") — the backlog's own ask was a board that names the real
-/// state machine, not a generic simplification of it, and a board built directly from
-/// `TicketState::ALL` never drifts out of sync with the enum the way a hardcoded grouping would
-/// (see this repo's `CLAUDE.md` on exactly that failure mode for enum-derived constants). Not
-/// every column fitting on screen at once is `tm_tui::screens::kanban::Kanban`'s own problem to
-/// solve (horizontal scrolling), not this function's.
+/// invented labels — the board names the real state machine, and a board built directly from
+/// `TicketState::ALL` never drifts out of sync with the enum the way a hardcoded grouping would.
 fn build_kanban_columns(view: &tm_core::ProjectView) -> Vec<KanbanColumn> {
     tm_core::TicketState::ALL
         .iter()
@@ -198,14 +376,8 @@ fn build_kanban_columns(view: &tm_core::ProjectView) -> Vec<KanbanColumn> {
 }
 
 /// Build a read-only drill-down screen for `ticket_id`, or `None` if it no longer exists in
-/// `view` (e.g. the board went stale between the card being drawn and Enter being pressed — a
-/// race this function resolves by simply declining to open anything, rather than panicking or
-/// showing a screen for a ticket that is not really there).
-///
-/// The activity feed is built entirely from data `view` already carries (dependencies, children,
-/// a live lease if one is held, and recorded failures) rather than a dedicated per-ticket
-/// event-log query, which this crate does not have wired up yet — every line is still real
-/// project state, not a placeholder.
+/// `view` (the list went stale between drawing and Enter — declining to open anything is the
+/// honest resolution).
 fn build_detail_screen(
     view: &tm_core::ProjectView,
     ticket_id: &TicketId,
@@ -263,185 +435,108 @@ fn build_detail_screen(
     ))
 }
 
-/// Which of this app's screens is currently on screen. `Home` is the permanent default (D-002:
-/// bare `tm` opens straight into chat, zero prompts); `Kanban` and `Detail` are reachable on
-/// demand and returned from via [`App`]'s back-stack (`App::back_stack`) — the "compare 1:1 with
-/// `claude agents`" ask: a navigable list/board you enter and leave, not a second screen
-/// permanently glued alongside the first the way `Home`'s own embedded `Dashboard` already is.
+/// Which screen is on screen. `Chat` is the root: it is never pushed onto `App::back_stack`, and
+/// it is where every back-navigation eventually lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScreenId {
-    /// The default chat screen. Never pushed onto `App::back_stack` as a *target* (nothing is
-    /// "before" it) but always the fallback `App::pop_screen` lands on if the stack is ever
-    /// unexpectedly empty.
+    /// The conversation (the default).
+    Chat,
+    /// Sessions, background tickets, and workers.
     Home,
-    /// The Kanban board.
+    /// The Kanban board, opened from `Home`.
     Kanban,
-    /// A single ticket's drill-down detail, opened from a Kanban card's Enter action.
+    /// One ticket's detail, opened from `Home` or a Kanban card.
     Detail,
 }
 
-/// True when `key` is the chord that opens the Kanban/Tickets view from `Home`.
-///
-/// A modifier chord, not a bare letter: `Home`'s chat input is always focused the instant `tm`
-/// starts (see `screens::home::Home`'s own module doc) and claims every plain keystroke as text a
-/// human is typing into a prompt, so a bare `t` would just be typed into the chat box instead of
-/// navigating anywhere. `Ctrl+T` ("Tickets") is not claimed by this terminal's raw-mode input in
-/// the way e.g. `Ctrl+S`/`Ctrl+Q` risk colliding with a terminal's own XON/XOFF flow control, and
-/// reads mnemonically for what it opens.
-fn is_tickets_chord(key: &crossterm::event::KeyEvent) -> bool {
-    key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL)
+fn is_ctrl(key: &crossterm::event::KeyEvent, c: char) -> bool {
+    key.code == KeyCode::Char(c) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
-/// A typed alternative to [`is_tickets_chord`]: `/tickets` (or bare `tickets`, forgiving the slash
-/// a human typing fast might drop), submitted through the same chat input every prompt goes
-/// through. `Ctrl+T` alone is not discoverable the way a named command is — nothing on screen
-/// hints it exists, unlike `claude agents`, which a human finds by typing a plausible word. This
-/// is the same navigation, reached the way that command actually reads: typed, not a hidden chord.
-/// Checked before treating a submission as a real prompt, so it never reaches the model.
-fn is_tickets_command(prompt: &str) -> bool {
-    matches!(prompt.trim(), "/tickets" | "tickets")
-}
-
-/// True when `key` is a back-navigation chord for a screen currently showing `current`.
-///
-/// `Esc` always means "back" on any non-`Home` screen (nothing in this crate ever binds `Esc` to
-/// anything else). `Left` means "back" everywhere except [`ScreenId::Kanban`], where it is
-/// already `Kanban`'s own column-navigation key (`Left`/`Right` move between columns) — binding
-/// it to *both* "previous column" and "back" would make the two indistinguishable the moment a
-/// human is in the leftmost column and presses `Left` again, so Kanban's back path is `Esc` only.
-/// This is a deliberate, narrower reading of "Left/Esc from any non-Home screen returns to the
-/// previous screen" for the one screen where `Left` already means something else.
+/// True when `key` walks back one level on `current`. Esc always does; `Left` does on the detail
+/// screen, but not on the board, where `Left`/`Right` move between columns. (`Home` handles its
+/// own Esc/`→` as "back to chat" — see `tm_tui::screens::home`.)
 fn is_back_chord(key: &crossterm::event::KeyEvent, current: ScreenId) -> bool {
     match key.code {
         KeyCode::Esc => true,
-        KeyCode::Left => current != ScreenId::Kanban,
+        KeyCode::Left => current == ScreenId::Detail,
         _ => false,
     }
 }
 
-/// This crate's root component: wraps `tm-tui`'s [`Home`] screen and adds the two things every
-/// screen needs that no individual screen should own itself — a quit keybinding that ends
-/// [`Runtime::run`]'s event loop the same way a termination signal does, and the domain-aware
-/// wiring `Home` deliberately can't own itself (`tm-tui` has no `tm_core`/`tm_agent` dependency —
-/// see `tm_tui::screens::home`'s module docs): reading a fresh `tm_core::ProjectView` when a
-/// ticket changes, and actually running a turn when the chat input is submitted.
+/// The root component: owns every screen, routes input to the one on screen, runs chat turns,
+/// executes slash commands, and keeps the domain-derived views (home, board, status bar) fresh.
 struct App {
     id: ComponentId,
-    /// The open project, read fresh on every `AppMessage::TicketChanged` so the dashboard
-    /// reflects the scratch ticket a submitted prompt just created (or any other change) without
-    /// the human needing to do anything to see it — D-002's "internal state ... a glance, not
-    /// forced".
     project: Arc<Project>,
+    chat: ChatScreen,
     home: Home,
-    /// The Kanban board, reachable from `home` via [`is_tickets_chord`]. Persistent for the whole
-    /// process lifetime (like `home`), not rebuilt on every navigation, so a human's place in it
-    /// (which column, which card, how far scrolled) survives leaving and returning — refreshed in
-    /// place by [`App::refresh`] on every `AppMessage::TicketChanged`, the same trigger that keeps
-    /// `home`'s dashboard current.
     kanban: Kanban,
-    /// The ticket detail drill-down, present only once a Kanban card has actually been opened.
-    /// Rebuilt fresh (not reused) every time [`App::open_detail`] runs, so it is never possible
-    /// to observe stale ticket data by re-entering a previously-visited detail screen.
+    /// Rebuilt fresh on every open, so it never shows stale ticket data.
     detail: Option<TicketDetailScreen>,
-    /// Which screen is currently on screen. `Home` is `App::new`'s only starting value — the bare
-    /// `tm` default this task must not change.
     current: ScreenId,
-    /// The back-stack `App::pop_screen` unwinds: every screen navigated *away from* to reach
-    /// `self.current`, most recent last. Popping this (not "always go home") is what makes
-    /// `Home -> Kanban -> Detail -> back -> back` land on `Kanban` then `Home`, rather than
-    /// jumping straight to `Home` from two levels deep.
+    /// Every screen navigated away from to reach `current`, most recent last.
     back_stack: Vec<ScreenId>,
-    /// Notified on `q`/`ctrl-c`, mirroring `Runtime`'s own `SIGTERM`/`SIGHUP` shutdown path
-    /// (`runtime.rs`'s `install_signal_handlers`) rather than inventing a second exit mechanism.
+    /// Notified to quit, the same path `Runtime`'s own `SIGTERM`/`SIGHUP` handling takes.
     shutdown: Arc<Notify>,
-    /// The one `AgentSession` this TUI process drives every submitted prompt through — the exact
-    /// same type (and, via `run_turn_streaming`, the exact same turn-running logic) `tm`/`tm -p`
-    /// drive via `AgentSession::run_turn`. Behind a `tokio::sync::Mutex` (not a plain field)
-    /// because [`App::spawn_turn`] runs a turn on a background task so the event loop stays
-    /// responsive while it runs; the mutex also means a second submission mid-turn simply waits
-    /// for the lock rather than running concurrently against the same session state — belt and
-    /// suspenders alongside `Home`'s own `turn_running` gate, which is what actually stops a
-    /// second submission from being accepted in the first place.
+    /// The one conversation this process drives. Behind a `tokio::sync::Mutex` because turns run
+    /// on a background task; commands that need it (`/attach`, `/clear`) `try_lock` and refuse
+    /// while a turn holds it rather than blocking the event loop.
     agent_session: Arc<Mutex<AgentSession>>,
-    /// Cloned into every spawned turn so it can push `AppMessage`s back into this runtime's event
-    /// loop as the turn progresses.
+    /// Cloned into every spawned turn so it can report progress back into the event loop.
     sender: MessageSender,
-    /// `self.agent_session`'s session id, cached here (rather than re-locking the mutex) so
-    /// `spawn_turn` can stamp every `AppMessage::StreamChunk` it sends without an `.await`.
-    session_id: SessionId,
+    /// The ticket the conversation is attached to, mirrored here for the status bar and `/decide`.
+    attached: Option<TicketId>,
+    /// When Ctrl+C was last pressed, for the double-press quit.
+    ctrl_c_at: Option<Timestamp>,
+    /// When the home/board data was last re-read.
+    last_refresh: Timestamp,
 }
 
-// Manual, not `#[derive(Debug)]`: `Component: std::fmt::Debug` requires *some* impl, but neither
-// `project::Project` nor `agent::AgentSession` derives `Debug` themselves (an open `tm_core::Store`
-// handle and a live session are not meaningfully "printable" state), so this reports just the
-// fields a debugger actually cares about — shape and identity, not a dump of everything reachable
-// through two more `Arc`s.
+// Manual: neither `Project` nor `AgentSession` implements `Debug`.
 impl std::fmt::Debug for App {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("App")
             .field("id", &self.id)
-            .field("home", &self.home)
             .field("current", &self.current)
-            .field("session_id", &self.session_id)
+            .field("session", self.chat.session())
             .finish_non_exhaustive()
     }
 }
 
 impl App {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        project: Arc<Project>,
-        home: Home,
-        kanban: Kanban,
-        shutdown: Arc<Notify>,
-        agent_session: Arc<Mutex<AgentSession>>,
-        sender: MessageSender,
-        session_id: SessionId,
-    ) -> Self {
-        App {
-            id: ComponentId::new("tm.app"),
-            project,
-            home,
-            kanban,
-            detail: None,
-            current: ScreenId::Home,
-            back_stack: Vec::new(),
-            shutdown,
-            agent_session,
-            sender,
-            session_id,
+    fn quit(&self) {
+        // `notify_one`, not `notify_waiters`: this runs inside the very `select!` iteration of
+        // `Runtime::run` that delivered the key, whose `shutdown.notified()` listener is about to
+        // be dropped and rebuilt; `notify_one` stores a permit for that next listener instead of
+        // being lost in the gap.
+        self.shutdown.notify_one();
+    }
+
+    fn push_screen(&mut self, next: ScreenId) {
+        if self.current != next {
+            self.back_stack.push(self.current);
+            self.current = next;
         }
     }
 
-    /// True when `key` is this app's quit chord: plain `q`, or ctrl-c (honoured here rather than
-    /// left to the terminal, since raw mode disables the kernel's own SIGINT-on-ctrl-c handling).
-    fn is_quit(key: &crossterm::event::KeyEvent) -> bool {
-        key.code == KeyCode::Char('q')
-            || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-    }
-
-    /// Navigate forward to `next`, remembering `self.current` on the back-stack so
-    /// [`App::pop_screen`] can return to it later. The one and only way `self.current` ever
-    /// moves away from wherever it started.
-    fn push_screen(&mut self, next: ScreenId) {
-        self.back_stack.push(self.current);
-        self.current = next;
-    }
-
-    /// Navigate back to whatever screen `self.current` was entered from, or [`ScreenId::Home`] if
-    /// the stack is unexpectedly already empty (defensive: nothing in this module's own
-    /// navigation logic should ever pop more times than it pushed, but landing on `Home` rather
-    /// than panicking is the honest fallback if that invariant is ever wrong).
     fn pop_screen(&mut self) {
-        self.current = self.back_stack.pop().unwrap_or(ScreenId::Home);
+        self.current = self.back_stack.pop().unwrap_or(ScreenId::Chat);
     }
 
-    /// Open `ticket_id`'s detail screen and push [`ScreenId::Detail`], if `ticket_id` parses as a
-    /// real [`TicketId`] and still exists in a freshly-read `tm_core::ProjectView`. Both failure
-    /// modes (a malformed id, which should never happen since `ticket_id` always originates from
-    /// a `TicketId::to_string()` in [`build_kanban_columns`]; or a ticket that existed when the
-    /// Kanban card was drawn but is gone by the time Enter is processed) simply decline to
-    /// navigate anywhere, rather than opening a screen for a ticket that is not really there.
+    fn back_to_chat(&mut self) {
+        self.back_stack.clear();
+        self.current = ScreenId::Chat;
+    }
+
+    fn open_home(&mut self, now: Timestamp) {
+        self.refresh(now);
+        self.home.select_chat();
+        self.back_stack.clear();
+        self.back_stack.push(ScreenId::Chat);
+        self.current = ScreenId::Home;
+    }
+
     fn open_detail(&mut self, ticket_id: &str) {
         let Ok(id) = TicketId::new(ticket_id) else {
             return;
@@ -455,89 +550,238 @@ impl App {
         }
     }
 
-    /// Re-read `self.project`'s store and hand both `self.home` a freshly built dashboard *and*
-    /// `self.kanban` freshly built columns — the `AppMessage::TicketChanged` handler's whole job.
-    /// Both are refreshed unconditionally, regardless of `self.current` (which screen is actually
-    /// on screen right now): a turn can change ticket state while the human is looking at either
-    /// screen, and each must show current data the moment it is (re)selected rather than whatever
-    /// was true when it was last on screen. A read failure is swallowed (the previous dashboard/
-    /// board just stay on screen one more frame) rather than tearing down the TUI over a
-    /// transient store error; `tm-cli`'s other commands already treat a `view()` failure as fatal
-    /// where that is the right call, which driving a live UI is not.
-    ///
-    /// `ticket` is `changed`'s own id: the ticket whose state just moved is also the one whose
-    /// goal (`SPEC.md` §29) is worth showing — `Store::goal_state` failing or finding nothing set
-    /// yet is not an error here either, it just means no goal line renders this frame. An empty
-    /// `text` is filtered out the same way: `tm_core::materialize`'s `goal.step_added`/
-    /// `goal.reoriented`/`goal.claimed_complete` arms can (defensibly, per their own doc
-    /// comments) leave a `goals` row with `text = ""` if the log somehow ever saw one of those
-    /// before a `goal.set` — real `AgentLoop` usage never produces that ordering, but a bare
-    /// `Goal: ` line with nothing after it would be a visible artifact of that edge case if it
-    /// ever did happen, so it renders as "no goal" instead.
-    fn refresh(&mut self, ticket: &TicketId) {
-        if let Ok(view) = self.project.store.view() {
-            let goal = self
-                .project
-                .store
-                .goal_state(ticket)
-                .ok()
-                .flatten()
-                .map(|g| g.text)
-                .filter(|text| !text.is_empty());
-            self.home.set_dashboard(build_dashboard(&view, goal));
-            self.kanban.set_columns(build_kanban_columns(&view));
-            // If the ticket currently open in the detail drill-down is the one that just
-            // changed, rebuild it too — otherwise a human sitting on `ScreenId::Detail` while a
-            // background turn moves that exact ticket's state would keep looking at a stale
-            // snapshot from whenever they opened it, the one screen `refresh` would otherwise
-            // leave behind (unlike `home`/`kanban`, which this function already always keeps
-            // current regardless of `self.current`).
-            if self.detail.as_ref().map(TicketDetailScreen::ticket) == Some(ticket) {
-                if let Some(screen) = build_detail_screen(&view, ticket) {
-                    self.detail = Some(screen);
-                }
+    /// Re-read project state into every domain-derived view. A read failure keeps the previous
+    /// data on screen rather than tearing the UI down over a transient store error.
+    fn refresh(&mut self, now: Timestamp) {
+        self.last_refresh = now;
+        let Ok(view) = self.project.store.view() else {
+            return;
+        };
+        let session = self.chat.session().clone();
+        self.home
+            .set_data(build_home_data(&self.project, &view, &session, now));
+        self.kanban.set_columns(build_kanban_columns(&view));
+        if let Some(open) = self.detail.as_ref().map(|d| d.ticket().clone()) {
+            if let Some(screen) = build_detail_screen(&view, &open) {
+                self.detail = Some(screen);
+            }
+        }
+        let fresh = base_status(&self.project, &view, self.attached.as_ref());
+        let status = self.chat.status_mut();
+        status.open_tickets = fresh.open_tickets;
+        status.branch = fresh.branch;
+        status.ticket = fresh.ticket;
+    }
+
+    fn on_ctrl_c(&mut self, now: Timestamp) {
+        if let Some(at) = self.ctrl_c_at {
+            if now.millis_since(at) <= QUIT_WINDOW_MILLIS {
+                self.quit();
+                return;
+            }
+        }
+        self.ctrl_c_at = Some(now);
+        self.chat.interrupt(now, QUIT_WINDOW_MILLIS);
+    }
+
+    fn quit_hint_active(&self, now: Timestamp) -> bool {
+        self.ctrl_c_at
+            .is_some_and(|at| now.millis_since(at) <= QUIT_WINDOW_MILLIS)
+    }
+
+    /// Replace the conversation with a fresh one (`/clear`, `/detach`), optionally attached to
+    /// `ticket`. Refused while a turn holds the session.
+    fn fresh_session(&mut self, ticket: Option<TicketId>) -> Result<SessionId, String> {
+        if self.chat.is_turn_running() {
+            return Err("A turn is running; wait for it to finish first.".to_string());
+        }
+        let Ok(mut session) = self.agent_session.try_lock() else {
+            return Err("A turn is still finishing; try again in a moment.".to_string());
+        };
+        let mut fresh = AgentSession::new(
+            self.project.clone(),
+            Renderer::from_flags(false, true, true),
+        );
+        if let Some(ticket) = &ticket {
+            fresh
+                .attach_ticket(ticket.clone())
+                .map_err(|e| format!("Could not re-attach {ticket}: {e}"))?;
+        }
+        let id = fresh.session_id().clone();
+        *session = fresh;
+        drop(session);
+        self.attached = ticket;
+        self.chat.reset(id.clone());
+        self.chat.status_mut().ticket = self.attached.as_ref().map(|t| t.to_string());
+        Ok(id)
+    }
+
+    fn run_command(&mut self, id: CommandId, arg: String, now: Timestamp) {
+        match id {
+            CommandId::Attach => self.attach(&arg),
+            CommandId::Detach => match self.attached.clone() {
+                None => self
+                    .chat
+                    .push_notice(NoticeLevel::Info, "No ticket is attached."),
+                Some(ticket) => match self.fresh_session(None) {
+                    Ok(_) => self.chat.push_notice(
+                        NoticeLevel::Info,
+                        format!(
+                            "Detached from {ticket}. This is a fresh conversation: the session \
+                             core cannot drop a ticket mid-conversation yet."
+                        ),
+                    ),
+                    Err(e) => self.chat.push_notice(NoticeLevel::Warning, e),
+                },
+            },
+            CommandId::Clear => match self.fresh_session(self.attached.clone()) {
+                Ok(session) => self.chat.push_notice(
+                    NoticeLevel::Info,
+                    format!("Fresh conversation ({session})."),
+                ),
+                Err(e) => self.chat.push_notice(NoticeLevel::Warning, e),
+            },
+            CommandId::Decide => self.decide(&arg),
+            // The chat screen turns these three into their own actions before they get here;
+            // handled anyway so the match stays exhaustive and honest.
+            CommandId::Home => return self.open_home(now),
+            CommandId::Help => return self.chat.toggle_help(),
+            CommandId::Exit => return self.quit(),
+        }
+        self.refresh(now);
+    }
+
+    fn attach(&mut self, arg: &str) {
+        let Ok(ticket) = arg.trim().parse::<TicketId>() else {
+            self.chat.push_notice(
+                NoticeLevel::Warning,
+                format!("\"{arg}\" is not a ticket id (they look like T-12)."),
+            );
+            return;
+        };
+        if self.chat.is_turn_running() {
+            self.chat.push_notice(
+                NoticeLevel::Warning,
+                "A turn is running; attach once it finishes.",
+            );
+            return;
+        }
+        let Ok(mut session) = self.agent_session.try_lock() else {
+            self.chat.push_notice(
+                NoticeLevel::Warning,
+                "A turn is still finishing; try again in a moment.",
+            );
+            return;
+        };
+        match session.attach_ticket(ticket.clone()) {
+            Ok(()) => {
+                drop(session);
+                let objective = self
+                    .project
+                    .store
+                    .view()
+                    .ok()
+                    .and_then(|v| v.tickets.get(&ticket).map(|t| t.objective.clone()))
+                    .unwrap_or_default();
+                self.attached = Some(ticket.clone());
+                self.chat.status_mut().ticket = Some(ticket.to_string());
+                let objective = objective.lines().next().unwrap_or_default().to_string();
+                self.chat.push_notice(
+                    NoticeLevel::Success,
+                    if objective.is_empty() {
+                        format!("Attached to {ticket}.")
+                    } else {
+                        format!("Attached to {ticket}: {objective}")
+                    },
+                );
+            }
+            Err(e) => self.chat.push_notice(
+                NoticeLevel::Error,
+                format!("Could not attach {ticket}: {e}"),
+            ),
+        }
+    }
+
+    /// `/decide <text>`: a project decision, scoped to the attached ticket if there is one — the
+    /// same record the plain loop's `/decide` writes.
+    fn decide(&mut self, text: &str) {
+        let subject = self
+            .attached
+            .as_ref()
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "session".to_string());
+        let affected = self.attached.clone().into_iter().collect();
+        let result = self.project.store.record_decision(
+            subject,
+            text.to_string(),
+            "recorded via the interactive tm session".to_string(),
+            Vec::new(),
+            affected,
+            Vec::new(),
+            self.project.actor.clone(),
+        );
+        match result {
+            Ok(events) => {
+                let id = events.iter().find_map(|e| {
+                    e.payload
+                        .as_decision_created()
+                        .map(|p| p.decision.to_string())
+                });
+                self.chat.push_notice(
+                    NoticeLevel::Success,
+                    match id {
+                        Some(id) => format!("Recorded decision {id}."),
+                        None => "Recorded the decision.".to_string(),
+                    },
+                );
+            }
+            Err(e) => self.chat.push_notice(
+                NoticeLevel::Error,
+                format!("Could not record the decision: {e}"),
+            ),
+        }
+    }
+
+    fn handle_chat_actions(&mut self, now: Timestamp) {
+        for action in self.chat.take_actions() {
+            match action {
+                ChatAction::Send(prompt) => self.spawn_turn(prompt),
+                ChatAction::GoHome => self.open_home(now),
+                ChatAction::Quit => self.quit(),
+                ChatAction::Command { id, arg } => self.run_command(id, arg, now),
             }
         }
     }
 
-    /// Run `prompt` as a turn on a background task, translating [`agent::TurnEvent`]s and the
-    /// final [`tm_agent::outcome::AgentOutcome`] into [`AppMessage`]s as they happen, so
-    /// [`Runtime::run`]'s event loop keeps redrawing (scrolling the stream pane, honouring quit)
-    /// while the turn is in flight rather than blocking on it.
+    fn handle_home_action(&mut self, now: Timestamp) {
+        match self.home.take_action() {
+            Some(HomeAction::BackToChat) => self.back_to_chat(),
+            Some(HomeAction::OpenTicket(id)) => self.open_detail(&id),
+            Some(HomeAction::OpenBoard) => {
+                self.refresh(now);
+                self.push_screen(ScreenId::Kanban);
+            }
+            None => {}
+        }
+    }
+
+    /// Run `prompt` as a turn on a background task, reporting its progress as
+    /// [`AppMessage::Turn`]s so the event loop keeps drawing (and accepting input) while it runs.
     ///
-    /// Calls [`AgentSession::run_turn_streaming`] directly — the same shared method
-    /// `AgentSession::run_turn` (the plain `tm`/`tm -p` loop) calls — rather than
-    /// `AgentSession::run_turn` itself, since that method's own rendering goes through
-    /// `Renderer::note`/`error` (plain stdout), not this runtime's message channel.
-    ///
-    /// Approval handling is deliberately minimal for this first TUI turn driver: an
-    /// `AwaitingApproval` suspension is always auto-denied (`Ok(false)`), and a note explaining
-    /// why is streamed into the pane instead. Prompting for approval the way the plain loop does
-    /// (a blocking stdin read via `prompt_approval_decision`) would race the same real terminal
-    /// input this runtime's own `crossterm::event::EventStream` reads from — precisely the
-    /// stdin-contention failure mode `runtime.rs`'s `Runtime::start` doc comment already found
-    /// and fixed once for the capability probe; deliberately not reintroducing an instance of it
-    /// here. A real interactive approval UI (a modal, a dedicated keybinding) is future work.
+    /// Calls the same `AgentSession::run_turn_streaming` the plain loop does. Approval is not
+    /// interactive here yet: a suspension is denied, and the transcript says so plainly —
+    /// prompting on stdin the way the plain loop does would race this runtime's own reader of the
+    /// same terminal (the stdin-contention failure `runtime.rs`'s `Runtime::start` documents).
     fn spawn_turn(&self, prompt: String) {
         let agent_session = Arc::clone(&self.agent_session);
         let sender = self.sender.clone();
-        let session_id = self.session_id.clone();
+        let session_id = self.chat.session().clone();
 
         tokio::spawn(async move {
             let mut session = agent_session.lock().await;
-
-            let mut steps_sent = 0usize;
-            let mut resolved_ticket: Option<tm_types::TicketId> = None;
-
-            let send_chunk = |sender: &MessageSender, text: String| {
-                if !text.is_empty() {
-                    sender.send(AppMessage::StreamChunk {
-                        session: session_id.clone(),
-                        text,
-                        final_chunk: false,
-                    });
-                }
-            };
+            let mut latest: Vec<tm_agent::outcome::StepRecord> = Vec::new();
+            let mut approvals: Vec<(usize, tm_tui::chat::transcript::Entry)> = Vec::new();
+            let mut resolved_ticket: Option<TicketId> = None;
 
             let outcome = session
                 .run_turn_streaming(
@@ -549,46 +793,66 @@ impl App {
                                 id: ticket.id.clone(),
                             });
                         }
-                        agent::TurnEvent::Steps(steps) => {
-                            for step in steps.iter().skip(steps_sent) {
-                                send_chunk(&sender, format!("{}\n", agent::format_step(step)));
-                            }
-                            steps_sent = steps.len();
+                        agent::TurnEvent::Steps(so_far) => {
+                            latest = so_far;
+                            sender.send(AppMessage::Turn {
+                                session: session_id.clone(),
+                                update: steps::progress(&latest, &approvals),
+                            });
                         }
                         agent::TurnEvent::AwaitingApproval(pending) => {
-                            send_chunk(
-                                &sender,
-                                format!(
-                                    "{}\n(auto-denied: the TUI does not support interactive \
-                                     approval yet)\n",
-                                    agent::format_pending_approval(&pending)
-                                ),
-                            );
+                            approvals.push((
+                                latest.len(),
+                                steps::approval_notice(&pending.tool_name, &pending.reason),
+                            ));
+                            sender.send(AppMessage::Turn {
+                                session: session_id.clone(),
+                                update: steps::progress(&latest, &approvals),
+                            });
                         }
                     },
                     |_pending| Ok(false),
                 )
                 .await;
+            drop(session);
 
-            let summary = match &outcome {
-                Ok(outcome) => agent::format_outcome_summary(outcome),
-                Err(e) => format!("turn failed to run: {e}"),
+            let (notice, failed) = match &outcome {
+                Ok(outcome) => steps::outcome_notice(outcome),
+                Err(e) => (
+                    Some((NoticeLevel::Error, format!("The turn could not run: {e}"))),
+                    true,
+                ),
             };
-            sender.send(AppMessage::StreamChunk {
+            sender.send(AppMessage::Turn {
                 session: session_id,
-                text: if summary.is_empty() {
-                    String::new()
-                } else {
-                    format!("{summary}\n")
-                },
-                final_chunk: true,
+                update: TurnUpdate::Finished { notice, failed },
             });
-            // The ticket's own state may have moved (e.g. a submitted turn transitions it), so
-            // the dashboard is refreshed again now, not just once at resolution time.
             if let Some(id) = resolved_ticket {
                 sender.send(AppMessage::TicketChanged { id });
             }
         });
+    }
+
+    /// Draw the "press Ctrl+C again" warning on screens that have no status bar of their own.
+    fn render_quit_hint(
+        &self,
+        area: ratatui_core::layout::Rect,
+        buf: &mut ratatui_core::buffer::Buffer,
+        ctx: &FrameContext<'_>,
+    ) {
+        let text = " Press Ctrl+C again to quit ";
+        let width = text.chars().count() as u16;
+        if area.width <= width || area.height == 0 {
+            return;
+        }
+        buf.set_string(
+            area.x + area.width - width - 1,
+            area.y + area.height - 1,
+            text,
+            Style::default()
+                .fg(ctx.theme.background)
+                .bg(ctx.theme.warning),
+        );
     }
 }
 
@@ -603,110 +867,142 @@ impl Component for App {
         buf: &mut ratatui_core::buffer::Buffer,
         ctx: &FrameContext<'_>,
     ) {
-        // Only the screen actually on screen renders — `home`/`kanban`/`detail` otherwise keep
-        // their state alive in memory (see this struct's own field docs) without taking any
-        // frame time, the same "inactive but not destroyed" property a real windowing system
-        // gives a backgrounded window.
         match self.current {
+            ScreenId::Chat => self.chat.render(area, buf, ctx),
             ScreenId::Home => self.home.render(area, buf, ctx),
             ScreenId::Kanban => self.kanban.render(area, buf, ctx),
             ScreenId::Detail => {
                 if let Some(detail) = &self.detail {
                     detail.render(area, buf, ctx);
                 }
+                // The detail screen has no key hints of its own; say how to leave it.
+                if area.height > 2 && area.width > 30 {
+                    buf.set_stringn(
+                        area.x + 1,
+                        area.y + area.height - 1,
+                        "esc back   ctrl+t chat   ctrl+c twice quit",
+                        (area.width - 2) as usize,
+                        Style::default().fg(ctx.theme.muted),
+                    );
+                }
             }
+        }
+        if self.current != ScreenId::Chat && self.quit_hint_active(ctx.clock.now()) {
+            self.render_quit_hint(area, buf, ctx);
         }
     }
 
     fn handle_event(&mut self, event: &Event, ctx: &FrameContext<'_>) -> Propagation {
-        if let Event::Input(InputEvent::Key(key)) = event {
-            if App::is_quit(key) {
-                // `notify_one`, not `notify_waiters`: this runs synchronously, inside the very
-                // `select!` iteration of `Runtime::run`'s event loop that delivered this key, on
-                // the same task. That iteration's `shutdown.notified()` listener is about to be
-                // dropped (a different arm — this one — won the `select!`), and the loop
-                // reconstructs a brand new listener next iteration; `notify_waiters` only wakes
-                // *currently registered* listeners and stores nothing for that next one, so a
-                // notification racing the listener's own reconstruction like this one can be
-                // silently lost. `notify_one` stores a permit when nobody is registered yet, so
-                // the next iteration's fresh listener consumes it immediately instead — the
-                // correctness property this path actually needs, not just what happened to work
-                // in manual testing.
-                self.shutdown.notify_one();
+        let now = ctx.clock.now();
+
+        match event {
+            Event::Input(InputEvent::Key(key)) => {
+                if key.kind == KeyEventKind::Release {
+                    return Propagation::Consumed;
+                }
+                // The only two global chords. Neither is a printable key.
+                if is_ctrl(key, 'c') {
+                    self.on_ctrl_c(now);
+                    return Propagation::Consumed;
+                }
+                if is_ctrl(key, 't') {
+                    if self.current == ScreenId::Chat {
+                        self.open_home(now);
+                    } else {
+                        self.back_to_chat();
+                    }
+                    return Propagation::Consumed;
+                }
+            }
+            // Turn progress always reaches the chat, whichever screen is showing: a turn does not
+            // pause because the human went to look at the board.
+            Event::App(AppMessage::Turn { update, .. }) => {
+                let finished = matches!(update, TurnUpdate::Finished { .. });
+                let propagation = self.chat.handle_event(event, ctx);
+                if finished {
+                    self.refresh(now);
+                }
+                return if propagation.is_consumed() {
+                    propagation
+                } else {
+                    // A stale session's update (after /clear) is dropped, not an error.
+                    Propagation::Consumed
+                };
+            }
+            Event::App(AppMessage::TicketChanged { .. }) => {
+                self.refresh(now);
                 return Propagation::Consumed;
             }
-        }
-
-        // Domain-aware (needs `tm_core::ProjectView`, which `tm-tui` deliberately never depends
-        // on): handled here rather than forwarded into `self.home`/`self.kanban`, which only ever
-        // see the already-built `Dashboard`/columns this hands them via `refresh`. Runs
-        // regardless of `self.current` (see `refresh`'s own doc comment on why both are always
-        // kept current).
-        if let Event::App(AppMessage::TicketChanged { id }) = event {
-            self.refresh(id);
-            return Propagation::Consumed;
-        }
-
-        // A turn's streaming output must keep reaching `home`'s stream pane (and its
-        // `turn_running` bookkeeping) even while some other screen is the one on screen — the
-        // turn `App::spawn_turn` started does not pause just because the human navigated away to
-        // browse the Kanban board mid-turn. Routed here, unconditionally, rather than only when
-        // `self.current == ScreenId::Home`; `home`'s own `handle_event` already ignores a chunk
-        // for a session that is not its own, so this is safe to always offer.
-        if let Event::App(AppMessage::StreamChunk { .. }) = event {
-            return self.home.handle_event(event, ctx);
-        }
-
-        if let Event::Input(InputEvent::Key(key)) = event {
-            if self.current == ScreenId::Home && is_tickets_chord(key) {
-                self.push_screen(ScreenId::Kanban);
-                return Propagation::Consumed;
+            Event::Tick { .. } => {
+                if matches!(self.current, ScreenId::Home | ScreenId::Kanban)
+                    && now.millis_since(self.last_refresh) >= REFRESH_MILLIS
+                {
+                    self.refresh(now);
+                }
+                return Propagation::Propagate;
             }
-            if self.current != ScreenId::Home && is_back_chord(key, self.current) {
-                self.pop_screen();
-                return Propagation::Consumed;
-            }
+            _ => {}
         }
 
         match self.current {
+            ScreenId::Chat => {
+                let propagation = self.chat.handle_event(event, ctx);
+                self.handle_chat_actions(now);
+                propagation
+            }
             ScreenId::Home => {
                 let propagation = self.home.handle_event(event, ctx);
-                if let Some(prompt) = self.home.take_submission() {
-                    if is_tickets_command(&prompt) {
-                        self.push_screen(ScreenId::Kanban);
-                    } else {
-                        self.spawn_turn(prompt);
-                    }
-                }
+                self.handle_home_action(now);
                 propagation
             }
             ScreenId::Kanban => {
+                if let Event::Input(InputEvent::Key(key)) = event {
+                    if is_back_chord(key, ScreenId::Kanban) {
+                        self.pop_screen();
+                        return Propagation::Consumed;
+                    }
+                }
                 let propagation = self.kanban.handle_event(event, ctx);
                 if let Some(ticket_id) = self.kanban.take_activation() {
                     self.open_detail(&ticket_id);
                 }
                 propagation
             }
-            ScreenId::Detail => match &mut self.detail {
-                Some(detail) => detail.handle_event(event, ctx),
-                None => Propagation::Propagate,
-            },
+            ScreenId::Detail => {
+                if let Event::Input(InputEvent::Key(key)) = event {
+                    if is_back_chord(key, ScreenId::Detail) {
+                        self.pop_screen();
+                        return Propagation::Consumed;
+                    }
+                }
+                match &mut self.detail {
+                    Some(detail) => detail.handle_event(event, ctx),
+                    None => Propagation::Propagate,
+                }
+            }
         }
     }
 
     fn keybindings(&self, ctx: &FrameContext<'_>) -> Vec<KeyBinding> {
-        let mut bindings = vec![KeyBinding::new(KeyChord::plain(KeyCode::Char('q')), "quit")];
+        let mut bindings = vec![
+            KeyBinding::new(
+                KeyChord {
+                    code: KeyCode::Char('c'),
+                    modifiers: KeyModifiers::CONTROL,
+                },
+                "quit (press twice)",
+            ),
+            KeyBinding::new(
+                KeyChord {
+                    code: KeyCode::Char('t'),
+                    modifiers: KeyModifiers::CONTROL,
+                },
+                "sessions & tickets / back to chat",
+            ),
+        ];
         match self.current {
-            ScreenId::Home => {
-                bindings.push(KeyBinding::new(
-                    KeyChord {
-                        code: KeyCode::Char('t'),
-                        modifiers: KeyModifiers::CONTROL,
-                    },
-                    "open tickets (kanban board)",
-                ));
-                bindings.extend(self.home.keybindings(ctx));
-            }
+            ScreenId::Chat => bindings.extend(self.chat.keybindings(ctx)),
+            ScreenId::Home => bindings.extend(self.home.keybindings(ctx)),
             ScreenId::Kanban => {
                 bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back"));
                 bindings.extend(self.kanban.keybindings(ctx));
@@ -723,12 +1019,10 @@ impl Component for App {
     }
 
     fn focusable_children(&self) -> Vec<ComponentId> {
-        // Only the screen actually on screen is reachable by focus — see `runtime.rs`'s
-        // `Runtime::run`, which rebuilds `FocusTree` from this every iteration specifically so a
-        // navigation change like this one takes effect on the very next frame rather than
-        // leaving focus pointed at a screen that is no longer even rendered.
+        // The chat and home screens take input straight from `App::handle_event`, not through the
+        // focus tree; the board and detail screens still use it.
         match self.current {
-            ScreenId::Home => self.home.focusable_children(),
+            ScreenId::Chat | ScreenId::Home => Vec::new(),
             ScreenId::Kanban => vec![self.kanban.id()],
             ScreenId::Detail => match &self.detail {
                 Some(detail) => {
@@ -748,7 +1042,8 @@ impl ComponentParent for App {
             return Some(self);
         }
         match self.current {
-            ScreenId::Home => self.home.resolve(id),
+            ScreenId::Chat => (id == self.chat.id()).then_some(&self.chat as &dyn Component),
+            ScreenId::Home => (id == self.home.id()).then_some(&self.home as &dyn Component),
             ScreenId::Kanban => (id == self.kanban.id()).then_some(&self.kanban as &dyn Component),
             ScreenId::Detail => self.detail.as_ref().and_then(|detail| detail.resolve(id)),
         }
@@ -759,18 +1054,16 @@ impl ComponentParent for App {
             return Some(self);
         }
         match self.current {
-            ScreenId::Home => self.home.resolve_mut(id),
-            ScreenId::Kanban => {
-                if id == self.kanban.id() {
-                    Some(&mut self.kanban as &mut dyn Component)
-                } else {
-                    None
-                }
+            ScreenId::Chat if id == self.chat.id() => Some(&mut self.chat as &mut dyn Component),
+            ScreenId::Home if id == self.home.id() => Some(&mut self.home as &mut dyn Component),
+            ScreenId::Kanban if id == self.kanban.id() => {
+                Some(&mut self.kanban as &mut dyn Component)
             }
             ScreenId::Detail => self
                 .detail
                 .as_mut()
                 .and_then(|detail| detail.resolve_mut(id)),
+            _ => None,
         }
     }
 }
@@ -806,9 +1099,7 @@ mod tests {
         assert!(!should_launch(&global(false, false, true)));
     }
 
-    /// A real ticket, created the same way `agent.rs::create_scratch_ticket` does, rather than a
-    /// hand-built `Ticket` literal — `Ticket` has fields this test does not own the shape of, and
-    /// going through `Store::create_ticket` means it can never drift out of sync with them.
+    /// A real ticket, created through `Store::create_ticket` rather than a hand-built literal.
     fn create_real_ticket(store: &Store, objective: &str) -> tm_types::TicketId {
         let actor = ParticipantId::new("human:tester").unwrap();
         let events = store
@@ -844,78 +1135,6 @@ mod tests {
             .expect("create_ticket emits ticket.created")
     }
 
-    #[test]
-    fn build_dashboard_reflects_a_real_ticket_from_project_state() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(tmp.path()).expect("open store");
-        create_real_ticket(&store, "wire the tui");
-
-        let view = store.view().expect("view");
-        let dashboard = build_dashboard(&view, None);
-        // `Dashboard` does not expose its rows directly; a full render assertion is `tm-tui`'s
-        // own insta-snapshot layer's job. What this crate owns is that real project state
-        // actually made it into the widget, which the debug repr is enough to prove.
-        assert!(format!("{dashboard:?}").contains("wire the tui"));
-    }
-
-    #[test]
-    fn build_dashboard_over_an_empty_project_has_no_fake_rows() {
-        let view = tm_core::ProjectView::empty();
-        let dashboard = build_dashboard(&view, None);
-        let rendered = format!("{dashboard:?}");
-        assert!(
-            !rendered.contains("placeholder") && !rendered.contains("example"),
-            "an empty project must render an honestly empty dashboard, not a fabricated row"
-        );
-    }
-
-    #[test]
-    fn build_dashboard_with_no_goal_carries_none() {
-        let view = tm_core::ProjectView::empty();
-        let dashboard = build_dashboard(&view, None);
-        // `Dashboard`'s derived `Debug` always names the `goal` field; `None` here is what
-        // distinguishes "no active goal" from `build_dashboard_with_a_goal_carries_its_text`
-        // below, since `tm-tui` has no render-to-string assertion this crate can reach for.
-        assert!(format!("{dashboard:?}").contains("goal: None"));
-    }
-
-    #[test]
-    fn build_dashboard_with_a_goal_carries_its_text() {
-        let view = tm_core::ProjectView::empty();
-        let dashboard = build_dashboard(&view, Some("ship the login fix".to_string()));
-        // `Dashboard` does not expose its `goal` field directly; the debug repr is enough to
-        // prove the text this function was given actually made it into the widget, the same
-        // convention `build_dashboard_reflects_a_real_ticket_from_project_state` above uses for
-        // ticket rows.
-        assert!(format!("{dashboard:?}").contains("ship the login fix"));
-    }
-
-    #[test]
-    fn goal_state_read_for_a_changed_ticket_carries_through_to_build_dashboard() {
-        // `App::refresh` reads `Store::goal_state` for the changed ticket and passes
-        // its text to `build_dashboard`; this exercises that exact composition (not just
-        // `build_dashboard` in isolation), so a regression that drops the goal along the way
-        // would actually be caught here.
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(tmp.path()).expect("open store");
-        let ticket = create_real_ticket(&store, "wire the tui");
-        store
-            .set_goal(
-                &ticket,
-                "make the dashboard show this".to_string(),
-                ParticipantId::new("human:tester").unwrap(),
-            )
-            .expect("set_goal");
-
-        let view = store.view().expect("view");
-        let goal = store
-            .goal_state(&ticket)
-            .expect("goal_state")
-            .map(|g| g.text);
-        let dashboard = build_dashboard(&view, goal);
-        assert!(format!("{dashboard:?}").contains("make the dashboard show this"));
-    }
-
     fn plain_key(code: KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -925,23 +1144,22 @@ mod tests {
     }
 
     #[test]
-    fn tickets_chord_requires_control_t_not_a_bare_t() {
-        assert!(is_tickets_chord(&ctrl_key(KeyCode::Char('t'))));
-        assert!(
-            !is_tickets_chord(&plain_key(KeyCode::Char('t'))),
-            "a bare 't' must reach the chat input as a typed character, not navigate"
-        );
-        assert!(!is_tickets_chord(&ctrl_key(KeyCode::Char('k'))));
+    fn only_modifier_chords_are_global() {
+        assert!(is_ctrl(&ctrl_key(KeyCode::Char('c')), 'c'));
+        assert!(is_ctrl(&ctrl_key(KeyCode::Char('t')), 't'));
+        for c in ['q', 't', 'c', '?', '/'] {
+            assert!(
+                !is_ctrl(&plain_key(KeyCode::Char(c)), 'c')
+                    && !is_ctrl(&plain_key(KeyCode::Char(c)), 't'),
+                "a bare {c:?} must never be a global chord"
+            );
+        }
     }
 
     #[test]
-    fn esc_is_a_back_chord_on_every_non_home_screen_including_kanban() {
+    fn esc_is_back_everywhere_and_left_only_on_detail() {
         assert!(is_back_chord(&plain_key(KeyCode::Esc), ScreenId::Kanban));
         assert!(is_back_chord(&plain_key(KeyCode::Esc), ScreenId::Detail));
-    }
-
-    #[test]
-    fn left_is_a_back_chord_everywhere_except_kanban() {
         assert!(is_back_chord(&plain_key(KeyCode::Left), ScreenId::Detail));
         assert!(
             !is_back_chord(&plain_key(KeyCode::Left), ScreenId::Kanban),
@@ -950,13 +1168,66 @@ mod tests {
     }
 
     #[test]
+    fn tones_cover_every_ticket_state() {
+        for state in tm_core::TicketState::ALL {
+            let _ = tone_for(*state);
+        }
+        assert_eq!(tone_for(tm_core::TicketState::Escalated), Tone::Attention);
+        assert_eq!(tone_for(tm_core::TicketState::Running), Tone::Active);
+        assert_eq!(tone_for(tm_core::TicketState::Draft), Tone::Queued);
+        assert_eq!(tone_for(tm_core::TicketState::Closed), Tone::Done);
+    }
+
+    #[test]
+    fn ago_is_compact() {
+        assert_eq!(ago(5_000), "just now");
+        assert_eq!(ago(5 * 60_000), "5m ago");
+        assert_eq!(ago(3 * 3_600_000), "3h ago");
+        assert_eq!(ago(2 * 86_400_000), "2d ago");
+        assert_eq!(ago(-10), "just now");
+    }
+
+    #[test]
+    fn display_path_shortens_home() {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        assert_eq!(display_path(&home.join("src").join("app")), "~/src/app");
+        assert_eq!(display_path(&home), "~");
+        assert_eq!(
+            display_path(Path::new("/definitely/elsewhere")),
+            "/definitely/elsewhere"
+        );
+    }
+
+    #[test]
+    fn git_branch_reads_head_including_worktree_pointers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(
+            repo.join(".git").join("HEAD"),
+            "ref: refs/heads/feature/x\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        assert_eq!(git_branch(&repo.join("sub")).as_deref(), Some("feature/x"));
+
+        let wt = tmp.path().join("wt");
+        let gitdir = tmp.path().join("gitdirs").join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", gitdir.display())).unwrap();
+        std::fs::write(gitdir.join("HEAD"), "0123456789abcdef\n").unwrap();
+        assert_eq!(git_branch(&wt).as_deref(), Some("0123456"));
+
+        assert_eq!(git_branch(&tmp.path().join("nowhere")), None);
+    }
+
+    #[test]
     fn build_kanban_columns_has_one_column_per_real_ticket_state_and_no_more() {
         let view = tm_core::ProjectView::empty();
         let columns = build_kanban_columns(&view);
-        // Deliberately not hardcoding a literal count: this test must keep passing (with no edit
-        // needed here) if `TicketState` ever gains or loses a variant, per this repo's own
-        // convention on deriving cardinality-based expectations from the enum rather than a
-        // hardcoded number (see `CLAUDE.md`'s "Parallel tracks against a moving `main`").
         assert_eq!(columns.len(), tm_core::TicketState::ALL.len());
         let titles: Vec<&str> = columns.iter().map(|c| c.title.as_str()).collect();
         assert!(titles.contains(&"Running"));
@@ -971,8 +1242,6 @@ mod tests {
 
         let view = store.view().expect("view");
         let columns = build_kanban_columns(&view);
-        // A freshly created ticket starts in `TicketState::Draft` (see `tm_core::ticket`'s own
-        // machine docs), so its card must land in exactly that column and no other.
         let draft = columns
             .iter()
             .find(|c| c.title == "Draft")
@@ -1017,19 +1286,6 @@ mod tests {
         let screen = build_detail_screen(&view, &ticket_id)
             .expect("a ticket that was just created must still be in a freshly-read view");
         assert_eq!(screen.ticket(), &ticket_id);
-    }
-
-    #[test]
-    fn build_detail_screen_activity_falls_back_to_a_plain_message_when_nothing_happened_yet() {
-        let tmp = tempfile::tempdir().unwrap();
-        let store = Store::open(tmp.path()).expect("open store");
-        let ticket_id = create_real_ticket(&store, "a brand new ticket");
-
-        let view = store.view().expect("view");
-        let screen = build_detail_screen(&view, &ticket_id).expect("ticket exists");
-        // `TicketDetailScreen` does not expose its activity list directly; the debug repr is
-        // enough to prove real (non-fabricated) content reached the widget, the same convention
-        // `build_dashboard`'s own tests use.
         assert!(format!("{screen:?}").contains("no recorded activity yet"));
     }
 }

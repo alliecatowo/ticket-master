@@ -32,6 +32,11 @@ pub struct Theme {
     pub background: Color,
     /// The base foreground (text) colour.
     pub foreground: Color,
+    /// A raised surface one step off `background`, for content that should read as a distinct
+    /// block (fenced code, the echoed user message band). Always paired with an explicit
+    /// `foreground` by callers, never with the terminal's default colour, so the pair stays legible
+    /// whatever the terminal's own background is.
+    pub surface: Color,
     /// The accent colour used for primary emphasis (active tab, primary button, ...).
     pub accent: Color,
     /// A de-emphasized colour for secondary text (timestamps, hints, disabled items).
@@ -54,6 +59,7 @@ impl Default for Theme {
             name: "placeholder",
             background: Color::Reset,
             foreground: Color::Reset,
+            surface: Color::Reset,
             accent: Color::Reset,
             muted: Color::Reset,
             success: Color::Reset,
@@ -78,6 +84,7 @@ impl Theme {
     pub fn dark() -> Self {
         let background = Color::Rgb(0x17, 0x18, 0x1c);
         let foreground = Color::Rgb(0xe6, 0xe6, 0xea);
+        let surface = Color::Rgb(0x26, 0x28, 0x30);
         let accent = Color::Rgb(0x9d, 0x7c, 0xf5);
         let muted = Color::Rgb(0x7a, 0x7d, 0x8c);
         let success = Color::Rgb(0x4f, 0xd6, 0x9b);
@@ -87,6 +94,7 @@ impl Theme {
             name: "dark",
             background,
             foreground,
+            surface,
             accent,
             muted,
             success,
@@ -107,6 +115,7 @@ impl Theme {
     pub fn light() -> Self {
         let background = Color::Rgb(0xfa, 0xf9, 0xfc);
         let foreground = Color::Rgb(0x1c, 0x1d, 0x22);
+        let surface = Color::Rgb(0xee, 0xec, 0xf3);
         let accent = Color::Rgb(0x6d, 0x4a, 0xd6);
         let muted = Color::Rgb(0x6b, 0x6e, 0x7a);
         let success = Color::Rgb(0x1f, 0x8f, 0x63);
@@ -116,6 +125,7 @@ impl Theme {
             name: "light",
             background,
             foreground,
+            surface,
             accent,
             muted,
             success,
@@ -141,6 +151,15 @@ impl Theme {
             name: self.name,
             background: degrade_color(caps, self.background),
             foreground: degrade_color(caps, self.foreground),
+            // Below 256 colours the nearest match for a one-step-off surface is plain black or
+            // white, which reads as a hole in the screen rather than a subtle block — drop the
+            // band entirely instead and let layout (indent, gutter) carry the distinction.
+            surface: match caps.color {
+                crate::caps::ColorSupport::TrueColor | crate::caps::ColorSupport::Ansi256 => {
+                    degrade_color(caps, self.surface)
+                }
+                _ => Color::Reset,
+            },
             accent: degrade_color(caps, self.accent),
             muted: degrade_color(caps, self.muted),
             success: degrade_color(caps, self.success),
