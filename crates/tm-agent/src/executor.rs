@@ -473,7 +473,7 @@ impl Executor for BuiltinExecutor {
                     }),
                 }
             }
-            AgentOutcome::Replied { steps, .. } => {
+            AgentOutcome::Replied { steps, .. } | AgentOutcome::Interrupted { steps } => {
                 // Unreachable in practice: this executor never sets `AgentTask::conversation`, the
                 // only way the loop produces `Replied`. Mapped to the same failure a ticketed run
                 // that stops talking without submitting has always produced.

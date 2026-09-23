@@ -34,10 +34,24 @@ pub struct Cli {
     #[command(flatten)]
     pub global: GlobalOpts,
 
-    /// Non-interactive form of the bare-`tm` coding agent: run one prompt to completion and
-    /// exit, instead of opening the readline loop. Ignored when a subcommand is also given.
-    #[arg(short = 'p', long = "prompt", value_name = "TEXT", global = true)]
+    /// Run one prompt to completion and exit (scriptable; see `--json`). Exits 0 on a reply, 2
+    /// when the agent failed the task, 4 when it ran out of budget.
+    #[arg(short = 'p', long = "prompt", value_name = "TEXT")]
     pub prompt: Option<String>,
+
+    /// Continue the most recent conversation in this project.
+    #[arg(short = 'c', long = "continue", conflicts_with = "resume")]
+    pub continue_session: bool,
+
+    /// Resume a saved conversation by id (`S-12`). Without an id, list saved conversations.
+    #[arg(
+        short = 'r',
+        long = "resume",
+        value_name = "SESSION",
+        num_args = 0..=1,
+        default_missing_value = ""
+    )]
+    pub resume: Option<String>,
 
     /// The subcommand to run; `None` means the bare-`tm` agent.
     #[command(subcommand)]

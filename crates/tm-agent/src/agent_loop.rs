@@ -197,6 +197,12 @@ impl AgentLoop {
         self
     }
 
+    /// Stop asking about `class` (an action class such as `shell.run`) for the rest of this
+    /// loop's life: the human answered "Yes, and don't ask again".
+    pub fn approve_for_session(&mut self, class: String) {
+        self.oversight.approved_for_session.insert(class);
+    }
+
     /// Point every tool call this loop dispatches (`fs.*`/`edit.*`/`git.*`/`shell.*`) at `root`
     /// instead of the default [`project_root`] (the process's own current directory) — the seam
     /// `crate::executor::BuiltinExecutor::with_root` uses to run a ticket against an isolated
@@ -300,6 +306,24 @@ impl AgentLoop {
         pending: crate::outcome::PendingApproval,
         approved: bool,
     ) -> Result<AgentOutcome> {
+        let denial = (!approved).then(|| "approval declined".to_string());
+        self.resume_with(task, steps_so_far, pending, denial).await
+    }
+
+    /// [`AgentLoop::resume`], where a denial can carry the human's own words ("No, and tell tm
+    /// what to do differently"): `denial` is `None` to approve, or `Some(reason)` to deny, and
+    /// `reason` is exactly what the model sees as the tool result.
+    ///
+    /// # Errors
+    /// Returns `Err` under the same infrastructure-failure conditions as [`AgentLoop::run`].
+    pub async fn resume_with(
+        &mut self,
+        task: AgentTask,
+        steps_so_far: Vec<crate::outcome::StepRecord>,
+        pending: crate::outcome::PendingApproval,
+        denial: Option<String>,
+    ) -> Result<AgentOutcome> {
+        let approved = denial.is_none();
         let effective_authority = self.authority.intersect(&task.authority);
         let root = self.root();
 
@@ -348,7 +372,7 @@ impl AgentLoop {
             self.tools.dispatch(&call, &ctx).await
         } else {
             ToolOutcome::Denied {
-                reason: "approval declined".to_string(),
+                reason: denial.unwrap_or_else(|| "approval declined".to_string()),
             }
         };
 
@@ -2594,6 +2618,7 @@ mod tests {
         let oversight = Oversight {
             approval_required: ["git.commit".to_string()].into_iter().collect(),
             spend_over_micros: None,
+            approved_for_session: Default::default(),
         };
         let mut agent_loop = AgentLoop::new(
             fabric,

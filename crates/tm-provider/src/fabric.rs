@@ -45,6 +45,36 @@ pub trait Provider: Send + Sync {
     async fn embed(&self, req: EmbedRequest) -> Result<Embeddings, ProviderError>;
 }
 
+/// Releases a candidate's concurrency slot if the call holding it is dropped before it settles
+/// (a turn interrupted mid-request): `RequestStarted` without a matching finish would otherwise
+/// leave the slot taken for the fabric's whole life. Cancelling isn't the provider's fault, so it
+/// never counts against the breaker.
+struct InFlight<'a> {
+    fabric: &'a Fabric,
+    candidate: Option<ModelId>,
+}
+
+impl InFlight<'_> {
+    /// The call finished; its own success or failure event releases the slot instead.
+    fn settle(mut self) {
+        self.candidate = None;
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if let Some(candidate) = self.candidate.take() {
+            self.fabric.state.write().apply(
+                FabricEvent::RequestFailed {
+                    candidate,
+                    counts_against_breaker: false,
+                },
+                self.fabric.clock.now(),
+            );
+        }
+    }
+}
+
 /// One structured record of a fabric decision, for the caller to turn into a workspace event.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FabricRecord {
@@ -273,7 +303,12 @@ impl Fabric {
         // Redact secret-shaped substrings out of the outbound request before it reaches the
         // provider -- see this module's top docs and `tm_auth::redact`'s.
         let req = redact_completion_request(&self.redactor, req);
+        let in_flight = InFlight {
+            fabric: self,
+            candidate: Some(candidate_key.clone()),
+        };
         let call_result = provider.complete(req).await;
+        in_flight.settle();
         let finished_at = self.clock.now();
         let latency = std::time::Duration::from_millis(finished_at.millis_since(now).max(0) as u64);
 
@@ -674,6 +709,52 @@ mod tests {
             .find(|(k, _)| **k == ModelId::new("mock", "m1"))
             .expect("registered");
         assert_eq!(state.breaker.failure_count, 0);
+    }
+
+    /// A provider whose calls never finish, standing in for a request a human interrupts.
+    struct NeverAnswers;
+
+    #[async_trait]
+    impl Provider for NeverAnswers {
+        fn id(&self) -> &str {
+            "mock"
+        }
+        async fn complete(&self, _req: CompletionRequest) -> Result<Completion, ProviderError> {
+            std::future::pending().await
+        }
+        async fn embed(&self, _req: EmbedRequest) -> Result<Embeddings, ProviderError> {
+            std::future::pending().await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_call_gives_its_concurrency_slot_back() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "mock", model = "m1", max_concurrency = 1 }"#,
+        );
+        let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
+        fabric.register_provider(Arc::new(NeverAnswers));
+
+        tokio::select! {
+            _ = fabric.execute(Role::CoderFast, req()) => panic!("NeverAnswers never answers"),
+            _ = tokio::task::yield_now() => {}
+        }
+
+        let snapshot = fabric.state_snapshot();
+        let (_, state) = snapshot
+            .candidates()
+            .find(|(k, _)| **k == ModelId::new("mock", "m1"))
+            .expect("registered");
+        assert_eq!(
+            state.live_concurrency, 0,
+            "the dropped call released its slot"
+        );
+        assert_eq!(
+            state.breaker.failure_count, 0,
+            "cancelling is not a provider failure"
+        );
     }
 
     #[tokio::test]

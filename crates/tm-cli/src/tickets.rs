@@ -199,6 +199,33 @@ pub fn dispatch_ticket(
     }
 }
 
+/// Create a top-level work ticket with the defaults a background worker needs
+/// (`Authority::worker()`, an unlimited budget, one verification pass), still a draft. The one
+/// place `/bg` and any other "hand this to a worker" path create tickets, so they match
+/// `tm ticket new`.
+pub fn create_worker_ticket(project: &Project, objective: &str) -> tm_types::Result<TicketId> {
+    let events = project.store.create_ticket(
+        tm_core::TicketKind::Work,
+        objective.to_string(),
+        None,
+        None,
+        Authority::worker(),
+        Vec::new(),
+        default_executor_requirements(),
+        Vec::new(),
+        Vec::new(),
+        VerificationPolicy::Single,
+        Budget::unlimited(),
+        default_retry_policy(),
+        0,
+        project.actor.clone(),
+    )?;
+    events
+        .iter()
+        .find_map(|e| e.payload.as_ticket_created().map(|p| p.ticket.clone()))
+        .ok_or_else(|| TmError::invariant("create_ticket did not emit ticket.created"))
+}
+
 /// `tm ticket list`
 pub fn ticket_list(
     args: &TicketListArgs,
