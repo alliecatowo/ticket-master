@@ -2,10 +2,8 @@
 //!
 //! The read surface mirrors `tm harness show` and `tm provider list`; `set` runs the exact
 //! validation path as `tm harness set` (parse the TOML value, apply it at the dotted path,
-//! reparse, validate) and reports the same outcome — validated but not written, since that
-//! verb never writes `harness.toml` either (`promote` reads its candidate from disk). The
-//! chat refuses to paper over that: the notice says precisely what happened and what to do
-//! next. Nothing here touches the network, spends provider budget, or reads a secret:
+//! reparse, validate) and writes the validated candidate that `promote` reads. Nothing here
+//! touches the network, spends provider budget, or reads a secret:
 //! `harness.toml` carries routing and weights, never credentials.
 
 use tm_tui::chat::transcript::NoticeLevel;
@@ -157,19 +155,9 @@ pub fn config_get(project: &Project, key: &str) -> (NoticeLevel, String) {
     }
 }
 
-/// `/config set <key> <toml-value>`: the exact validation `tm harness set` performs, with
-/// the exact outcome it reports — validated, not written (that verb never writes
-/// `harness.toml`; `promote` reads its candidate from disk).
+/// `/config set <key> <toml-value>`: validate and persist the same harness candidate as CLI.
 pub fn config_set(project: &Project, key: &str, value: &str) -> (NoticeLevel, String) {
     let path = project.state_dir.join("harness.toml");
-    if !path.is_file() {
-        return (
-            NoticeLevel::Warning,
-            "No harness.toml yet — `tm harness set` needs one too. Create the project \
-             harness first (`tm harness show` explains the shape)."
-                .to_string(),
-        );
-    }
     let parsed: Result<toml::Value, _> = toml::from_str(value);
     let value = match parsed {
         Ok(value) => value,
@@ -221,14 +209,10 @@ pub fn config_set(project: &Project, key: &str, value: &str) -> (NoticeLevel, St
             if let Err(e) = updated.validate() {
                 return (NoticeLevel::Warning, format!("Validation failed: {e:?}"));
             }
-            (
-                NoticeLevel::Success,
-                format!(
-                    "Valid: {key} applies cleanly. Same as `tm harness set`: validated, not \
-                     written — edit {} and run `tm harness promote` to apply.",
-                    path.display()
-                ),
-            )
+            match std::fs::write(&path, reserialized) {
+                Ok(()) => (NoticeLevel::Success, format!("Saved {key}; promote the next harness epoch to apply.")),
+                Err(e) => (NoticeLevel::Warning, format!("Could not save {}: {e}", path.display())),
+            }
         }
         Err(e) => (
             NoticeLevel::Warning,

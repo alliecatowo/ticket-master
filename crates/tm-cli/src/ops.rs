@@ -538,23 +538,32 @@ fn availability_label(availability: tm_provider::Availability) -> &'static str {
     }
 }
 
-/// Load the role table the turn path routes through: the project's `harness.toml` parsed as
-/// a [`tm_provider::RoleTable`] when it exists, else [`tm_provider::RoleTable::default_table`]
-/// (D-021: shared with the chat's `/provider` and `/config` so all three surfaces route
-/// identically).
+/// Load provider routing from `providers.toml`; read legacy role-shaped `harness.toml` only
+/// when the new file is absent.
 pub(crate) fn load_role_table(
     project: Option<&Project>,
 ) -> tm_types::Result<tm_provider::RoleTable> {
-    let harness_path = project.map(|p| p.state_dir.join("harness.toml"));
-    match harness_path.filter(|path| path.is_file()) {
+    let providers_path = project.map(|p| p.state_dir.join("providers.toml"));
+    match providers_path.filter(|path| path.is_file()) {
         Some(path) => {
-            let harness_content = fs::read_to_string(&path).map_err(|e| {
-                tm_types::TmError::storage(format!("Failed to read harness.toml: {e}"))
+            let content = fs::read_to_string(&path).map_err(|e| {
+                tm_types::TmError::storage(format!("Failed to read providers.toml: {e}"))
             })?;
-            tm_provider::RoleTable::parse(&harness_content)
-                .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))
+            tm_provider::RoleTable::parse(&content)
+                .map_err(|e| tm_types::TmError::parse(format!("Invalid providers.toml: {e:?}")))
         }
-        None => Ok(tm_provider::RoleTable::default_table()),
+        None => {
+            let legacy = project.map(|p| p.state_dir.join("harness.toml"));
+            if let Some(path) = legacy.filter(|path| path.is_file()) {
+                let content = fs::read_to_string(&path).map_err(|e| {
+                    tm_types::TmError::storage(format!("Failed to read legacy role config: {e}"))
+                })?;
+                if let Ok(table) = tm_provider::RoleTable::parse(&content) {
+                    return Ok(table);
+                }
+            }
+            Ok(tm_provider::RoleTable::default_table())
+        }
     }
 }
 
@@ -1126,11 +1135,14 @@ pub fn dispatch_harness(
 pub fn harness_show(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let _view = project.store.view()?;
     let harness_path = project.state_dir.join("harness.toml");
-    let harness_content = fs::read_to_string(&harness_path)
-        .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
-
-    let config = tm_harness::HarnessConfig::parse(&harness_content)
-        .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?;
+    let config = if harness_path.is_file() {
+        let content = fs::read_to_string(&harness_path)
+            .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
+        tm_harness::HarnessConfig::parse(&content)
+            .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?
+    } else {
+        tm_harness::HarnessConfig::default()
+    };
 
     if renderer.is_json() {
         renderer.emit(&config, "")?;
@@ -1156,9 +1168,13 @@ pub fn harness_set(
 ) -> tm_types::Result<()> {
     let _view = project.store.view()?;
     let harness_path = project.state_dir.join("harness.toml");
-    let harness_content = fs::read_to_string(&harness_path)
-        .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
-
+    let harness_content = if harness_path.is_file() {
+        fs::read_to_string(&harness_path)
+            .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?
+    } else {
+        toml::to_string_pretty(&tm_harness::HarnessConfig::default())
+            .map_err(|e| tm_types::TmError::parse(format!("Failed to serialize defaults: {e}")))?
+    };
     let mut config = tm_harness::HarnessConfig::parse(&harness_content)
         .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?;
 
@@ -1194,13 +1210,12 @@ pub fn harness_set(
         .validate()
         .map_err(|e| tm_types::TmError::parse(format!("Validation failed: {e:?}")))?;
 
+    let next_epoch = project.store.harness_epochs()?.iter().map(|e| e.epoch).max().unwrap_or(0) + 1;
+    fs::write(&harness_path, &new_config_str)?;
     if renderer.is_json() {
-        renderer.emit(
-            &serde_json::json!({"status": "pending", "next_epoch": 1}),
-            "",
-        )?;
+        renderer.emit(&serde_json::json!({"status": "saved", "next_epoch": next_epoch}), "")?;
     } else {
-        renderer.note("New harness config proposed. Run 'tm harness promote' to apply.");
+        renderer.note(&format!("Saved validated harness config. Promote with 'tm harness promote {next_epoch} --force' (or provide a benchmark report)."));
     }
     Ok(())
 }

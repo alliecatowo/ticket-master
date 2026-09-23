@@ -924,6 +924,19 @@ fn finalize_promoted_source(
 pub fn init(args: &InitArgs, renderer: &Renderer) -> tm_types::Result<()> {
     let dir = args.path.clone().unwrap_or_else(|| PathBuf::from("."));
     let (root, promotion) = create_or_promote_project_dir(&dir, args.fresh)?;
+    let state_dir = root.join(".tm");
+    let harness_path = state_dir.join("harness.toml");
+    if !harness_path.exists() {
+        let defaults = toml::to_string_pretty(&tm_harness::HarnessConfig::default())
+            .map_err(|e| TmError::parse(format!("Failed to serialize harness defaults: {e}")))?;
+        std::fs::write(&harness_path, defaults)?;
+    }
+    let providers_path = state_dir.join("providers.toml");
+    if !providers_path.exists() {
+        let defaults = toml::to_string_pretty(&tm_provider::RoleTable::default_table())
+            .map_err(|e| TmError::parse(format!("Failed to serialize provider defaults: {e}")))?;
+        std::fs::write(&providers_path, defaults)?;
+    }
     let (json, human) = match &promotion {
         Some(report) => (
             serde_json::json!({ "root": root, "promoted": report }),
