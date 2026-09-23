@@ -69,18 +69,18 @@ fn slash_popup_filters_and_enter_runs_the_command_and_question_mark_opens_shortc
 
     // `?` on the empty prompt opens the shortcuts panel; `?` again closes it.
     pty.write(b"?").expect("type ?");
-    let screen = pty.wait_for("! for bash mode", Duration::from_secs(5));
+    let screen = pty.wait_for("! for shell mode", Duration::from_secs(5));
     assert!(
-        has(&screen, "! for bash mode")
+        has(&screen, "! for shell mode")
             && has(&screen, "@ for file paths")
             && has(&screen, "double tap esc to clear input")
             && has(&screen, "shift + tab to cycle modes"),
         "`?` must open the shortcuts panel, got: {screen:?}"
     );
     pty.write(b"?").expect("type ? again");
-    let screen = pty.wait_until_gone("! for bash mode", Duration::from_secs(5));
+    let screen = pty.wait_until_gone("! for shell mode", Duration::from_secs(5));
     assert!(
-        !has(&screen, "! for bash mode"),
+        !has(&screen, "! for shell mode"),
         "? closes the panel, got: {screen:?}"
     );
 
@@ -88,7 +88,7 @@ fn slash_popup_filters_and_enter_runs_the_command_and_question_mark_opens_shortc
     pty.write(b"why?").expect("type a question");
     let screen = pty.wait_for("why?", Duration::from_secs(5));
     assert!(
-        has(&screen, "why?") && !has(&screen, "! for bash mode"),
+        has(&screen, "why?") && !has(&screen, "! for shell mode"),
         "got: {screen:?}"
     );
 

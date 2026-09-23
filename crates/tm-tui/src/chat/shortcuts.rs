@@ -13,7 +13,7 @@ use crate::theme::Theme;
 fn entries(glyphs: &Glyphs) -> Vec<String> {
     let enter = if glyphs.unicode { "⏎" } else { "enter" };
     vec![
-        "! for bash mode".to_string(),
+        "! for shell mode".to_string(),
         "/ for commands".to_string(),
         "@ for file paths".to_string(),
         format!("{} for tickets", glyphs.left),
@@ -83,7 +83,7 @@ mod tests {
         let theme = Theme::dark();
         let wide = lines(120, &theme, &Glyphs::UNICODE);
         assert_eq!(wide.len(), 5);
-        assert!(wide[0].text().contains("! for bash mode"));
+        assert!(wide[0].text().contains("! for shell mode"));
         assert!(wide[0].text().contains("double tap esc to clear input"));
         assert!(wide[1].text().contains("shift + tab to cycle modes"));
         assert_eq!(

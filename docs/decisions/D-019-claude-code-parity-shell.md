@@ -252,7 +252,7 @@ transcript entries.
   success. A result over `MAX_INLINE_RESULT_BYTES` says where it was stored.
 - **Welcome box** (`✻ Welcome to tm!`, `/help`/`/status`, `cwd` with the path cut from the left,
   model) and "Tips for getting started". **Status line:** `? for shortcuts` on the left, replaced
-  by `! for bash mode`, the mode indicator (`⏸ plan mode on (shift+tab to cycle)`, `⏵ ask mode
+  by `! for shell mode`, the mode indicator (`⏸ plan mode on (shift+tab to cycle)`, `⏵ ask mode
   on`), popup hints or a transient message; model, cwd, ticket, context and token segments on the
   right, which yield first.
 - **Input** (`chat/input.rs`, `mention.rs`). `!` on an empty prompt is shell mode (orange box,

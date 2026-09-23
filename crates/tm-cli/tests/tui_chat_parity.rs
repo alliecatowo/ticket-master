@@ -73,8 +73,8 @@ fn bang_runs_a_shell_command_and_shows_it_as_a_bash_block_then_ctrl_o_expands_it
     let mut pty = spawn(project.path(), tm_home.path());
 
     pty.write(b"!").expect("!");
-    let screen = pty.wait_for("! for bash mode", WAIT);
-    assert!(has(&screen, "! for bash mode"), "{screen:?}");
+    let screen = pty.wait_for("! for shell mode", WAIT);
+    assert!(has(&screen, "! for shell mode"), "{screen:?}");
     pty.write(b"seq 1 30").expect("type command");
     pty.write(b"\r").expect("enter");
     let screen = pty.wait_for("+26 lines (ctrl+o to expand)", WAIT);
@@ -234,13 +234,13 @@ fn shift_tab_cycles_the_mode_indicator_and_question_mark_shows_shortcuts() {
     assert!(has(&screen, "? for shortcuts"), "{screen:?}");
 
     pty.write(b"?").expect("?");
-    let screen = pty.wait_for("! for bash mode", WAIT);
+    let screen = pty.wait_for("! for shell mode", WAIT);
     assert!(
         has(&screen, "ctrl + o for transcript") && has(&screen, "ctrl + r to search history"),
         "{screen:?}"
     );
     pty.write(b"?").expect("?");
-    let _ = pty.wait_until_gone("! for bash mode", WAIT);
+    let _ = pty.wait_until_gone("! for shell mode", WAIT);
 
     pty.write(b"/status\r").expect("/status");
     let screen = pty.wait_for("Model: mock/m1", WAIT);

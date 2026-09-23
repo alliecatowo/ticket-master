@@ -848,7 +848,7 @@ impl ChatScreen {
             Parsed::MissingArg(command) => {
                 self.complete(command);
                 self.show_hint(
-                    format!("usage: {}", commands::usage(command)),
+                    format!("Usage: {}", commands::usage(command)),
                     NoticeLevel::Info,
                     false,
                     now.plus_millis(HINT_MILLIS),
@@ -1521,7 +1521,7 @@ impl ChatScreen {
         }
         if self.in_shell() {
             return vec![Span::new(
-                "! for bash mode",
+                "! for shell mode",
                 Style::default()
                     .fg(theme.warning)
                     .add_modifier(Modifier::BOLD),

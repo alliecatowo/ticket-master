@@ -184,7 +184,7 @@ fn bang_on_an_empty_prompt_is_shell_mode_and_enter_runs_the_command() {
     assert_eq!(chat.input_text(), "", "the ! is the mode, not text");
     let rows = render(&chat, &env, 80, 24);
     assert!(rows[21].contains("! Run a shell command"), "{rows:#?}");
-    assert!(rows[23].contains("! for bash mode"), "{}", rows[23]);
+    assert!(rows[23].contains("! for shell mode"), "{}", rows[23]);
 
     type_text(&mut chat, &env, "ls -la");
     press(&mut chat, &env, key(KeyCode::Enter));
@@ -399,7 +399,7 @@ fn question_mark_on_an_empty_prompt_toggles_the_shortcuts_panel() {
     assert!(chat.is_help_open());
     let text = screen_text(&render(&chat, &env, 100, 30));
     for needle in [
-        "! for bash mode",
+        "! for shell mode",
         "/ for commands",
         "@ for file paths",
         "shift + tab to cycle modes",
