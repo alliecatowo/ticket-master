@@ -979,6 +979,18 @@ fn attach_project(root: &Path) -> tm_types::Result<(Project, tm_genesis::attach:
     Ok((project, report))
 }
 
+/// A short, human-readable label for a [`tm_genesis::attach::DocKind`], for `tm attach`'s
+/// discovered-docs table — plain words instead of the enum variant's `{:?}` debug form.
+fn doc_kind_label(kind: tm_genesis::attach::DocKind) -> &'static str {
+    match kind {
+        tm_genesis::attach::DocKind::Readme => "readme",
+        tm_genesis::attach::DocKind::Contributing => "contributing guide",
+        tm_genesis::attach::DocKind::Architecture => "architecture doc",
+        tm_genesis::attach::DocKind::Changelog => "changelog",
+        tm_genesis::attach::DocKind::Directory => "docs directory",
+    }
+}
+
 fn render_attach_report(report: &tm_genesis::attach::AttachReport) -> String {
     let mut sections = vec![
         format!("attached {}", report.project_root.display()),
@@ -995,7 +1007,7 @@ fn render_attach_report(report: &tm_genesis::attach::AttachReport) -> String {
         let rows = report
             .docs
             .iter()
-            .map(|d| vec![d.path.clone(), format!("{:?}", d.kind)])
+            .map(|d| vec![d.path.clone(), doc_kind_label(d.kind).to_string()])
             .collect();
         sections.push(Table::new(vec!["doc".to_string(), "kind".to_string()], rows).render());
     }
@@ -1250,6 +1262,25 @@ fn resolve_genesis_provider(
     )))
 }
 
+/// A short, human-readable label for a Genesis [`tm_genesis::Stage`], for progress notes and the
+/// final summary — plain words instead of the enum variant's `{:?}` debug form.
+fn genesis_stage_label(stage: tm_genesis::Stage) -> &'static str {
+    match stage {
+        tm_genesis::Stage::Seed => "reading the prompt",
+        tm_genesis::Stage::Vision => "compiling the vision",
+        tm_genesis::Stage::Spec => "writing the spec",
+        tm_genesis::Stage::GraphCompilation => "building the ticket graph",
+        tm_genesis::Stage::Ignition => "starting work under the ignition policy",
+        tm_genesis::Stage::V0 => "reached the V0 milestone",
+        tm_genesis::Stage::Evaluation => "evaluating V0 before continuing to V1",
+        tm_genesis::Stage::V1 => "reached the V1 milestone",
+        tm_genesis::Stage::Stabilization => "stabilizing before the maturity gate",
+        tm_genesis::Stage::MaturityGate => "checking the maturity gate",
+        tm_genesis::Stage::AuthorityReconvergence => "handing off to steady-state authority",
+        tm_genesis::Stage::SteadyState => "done",
+    }
+}
+
 /// `tm genesis [--prompt <text>|-]`: turn a prompt into a running project via the Genesis stage
 /// driver.
 pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> {
@@ -1304,7 +1335,7 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
         );
         loop {
             if !quiet {
-                progress.note(&format!("genesis: entering stage {:?}", state.stage));
+                progress.note(&format!("genesis: {}", genesis_stage_label(state.stage)));
             }
             if state.stage == tm_genesis::Stage::SteadyState {
                 break;
@@ -1315,8 +1346,8 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
     })?;
 
     let human = format!(
-        "genesis complete for {:?}: now at {:?}",
-        final_state.project, final_state.stage
+        "genesis complete: {}",
+        genesis_stage_label(final_state.stage)
     );
     renderer.emit(&final_state, &human)
 }
