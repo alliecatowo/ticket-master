@@ -804,9 +804,19 @@ pub enum ProviderCommand {
     /// Show each provider's availability and whether tm's turn path uses it. No live breaker or
     /// quota state is reported: that exists only inside a running process.
     Status,
+    /// Show or set the project-scoped default chat model; use `clear` to remove it.
+    Default(ProviderDefaultArgs),
     /// Send one tiny real (billed) completion through each provider tm's turn path uses, or just
     /// the named one; exits non-zero if any fails.
     Test(ProviderTestArgs),
+}
+
+/// Arguments for `tm provider default`.
+#[derive(Debug, Args)]
+pub struct ProviderDefaultArgs {
+    /// `provider/model`, or `clear`; omit to show the saved default.
+    #[arg(value_name = "SPEC")]
+    pub spec: Option<String>,
 }
 
 /// `tm provider test`

@@ -194,7 +194,7 @@ impl GithubModelsProvider {
                     .ok()
                     .filter(|token| !token.trim().is_empty())
             })
-            .map_err(|_| missing_env_var("GITHUB_TOKEN"))?;
+            .ok_or_else(|| missing_env_var("GITHUB_TOKEN"))?;
         let base_url = std::env::var("GITHUB_MODELS_BASE_URL").ok();
 
         let config = github_models_config(&model.model, token, base_url);

@@ -158,9 +158,12 @@ pub fn config_get(project: &Project, key: &str) -> (NoticeLevel, String) {
 /// `/config set <key> <toml-value>`: validate and persist the same harness candidate as CLI.
 pub fn config_set(project: &Project, key: &str, value: &str) -> (NoticeLevel, String) {
     let path = project.state_dir.join("harness.toml");
-    let parsed: Result<toml::Value, _> = toml::from_str(value);
+    let parsed: Result<toml::Table, _> = toml::from_str(&format!("value = {value}"));
     let value = match parsed {
-        Ok(value) => value,
+        Ok(mut table) => match table.remove("value") {
+            Some(value) => value,
+            None => return (NoticeLevel::Warning, "Invalid TOML value".to_string()),
+        },
         Err(e) => {
             return (NoticeLevel::Warning, format!("Invalid TOML value: {e}"));
         }
@@ -210,8 +213,14 @@ pub fn config_set(project: &Project, key: &str, value: &str) -> (NoticeLevel, St
                 return (NoticeLevel::Warning, format!("Validation failed: {e:?}"));
             }
             match std::fs::write(&path, reserialized) {
-                Ok(()) => (NoticeLevel::Success, format!("Saved {key}; promote the next harness epoch to apply.")),
-                Err(e) => (NoticeLevel::Warning, format!("Could not save {}: {e}", path.display())),
+                Ok(()) => (
+                    NoticeLevel::Success,
+                    format!("Saved {key}; promote the next harness epoch to apply."),
+                ),
+                Err(e) => (
+                    NoticeLevel::Warning,
+                    format!("Could not save {}: {e}", path.display()),
+                ),
             }
         }
         Err(e) => (
@@ -293,9 +302,10 @@ mod tests {
         assert!(text.contains("schema_version"), "{text}");
         let (level, text) = config_get(&project, "no.such.key");
         assert_eq!(level, NoticeLevel::Warning, "{text}");
-        // But `set` refuses without a file, exactly like `tm harness set`.
-        let (level, text) = config_set(&project, "routing_weights.recency", "0.5");
-        assert_eq!(level, NoticeLevel::Warning, "{text}");
-        assert!(text.contains("No harness.toml yet"), "{text}");
+        // `set` scaffolds defaults in memory and persists a valid update.
+        let (level, text) = config_set(&project, "routing.recency_weight", "0.5");
+        assert_eq!(level, NoticeLevel::Success, "{text}");
+        let saved = std::fs::read_to_string(project.state_dir.join("harness.toml")).unwrap();
+        assert!(saved.contains("recency_weight = 0.5"), "{saved}");
     }
 }

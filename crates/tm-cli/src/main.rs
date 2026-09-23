@@ -389,6 +389,8 @@ mod tests {
         // running this test happens to have at `~/.tm`.
         let _guard = ENV_GUARD.lock().await;
         let tm_home = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tm_home.path()).unwrap();
         std::env::set_var("TM_HOME", tm_home.path());
 
         let renderer = Renderer::from_flags(false, false, true);
@@ -414,6 +416,7 @@ mod tests {
 
         let result = dispatch(cli, &renderer).await;
         std::env::remove_var("TM_HOME");
+        std::env::set_current_dir(original_dir).unwrap();
         match result {
             Err(tm_types::TmError::NotFound { .. }) => (),
             other => panic!(
@@ -427,6 +430,8 @@ mod tests {
     async fn dispatch_search_subcommand_no_project_error() {
         let _guard = ENV_GUARD.lock().await;
         let tm_home = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(tm_home.path()).unwrap();
         std::env::set_var("TM_HOME", tm_home.path());
 
         let renderer = Renderer::from_flags(false, false, true);
@@ -450,6 +455,7 @@ mod tests {
 
         let result = dispatch(cli, &renderer).await;
         std::env::remove_var("TM_HOME");
+        std::env::set_current_dir(original_dir).unwrap();
         match result {
             Err(tm_types::TmError::NotFound { .. }) => (),
             other => panic!(

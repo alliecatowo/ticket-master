@@ -599,7 +599,7 @@ impl AgentSession {
     pub fn set_model(&mut self, spec: &str) -> tm_types::Result<Option<ModelId>> {
         let spec = spec.trim();
         if spec.is_empty() || spec.eq_ignore_ascii_case("default") {
-            self.model = None;
+            self.model = load_default_model(&self.project);
             self.save_best_effort();
             return self.model();
         }
@@ -610,12 +610,14 @@ impl AgentSession {
                 ModelId::new(provider, model)
             }
             Some((provider, _)) => {
-                let known = tm_provider::Registry::known_providers().iter().any(|p| p.id == provider);
+                let known = tm_provider::Registry::known_providers()
+                    .iter()
+                    .any(|p| p.id == provider);
                 return Err(TmError::Provider(if known {
                     format!("Provider `{provider}` is not configured; connect it with `/connect {provider}`.")
                 } else {
                     format!("Unknown or unroutable provider `{provider}`. Use `/model` to list routable models or `/connect` to configure a provider.")
-                }))
+                }));
             }
             None => {
                 let choices = self.model_choices()?;
@@ -1579,12 +1581,18 @@ pub(crate) fn build_fabric(clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric
 }
 
 /// Build the shared provider fabric from the project's role configuration.
-pub(crate) fn build_fabric_for_project(project: &Project, clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric>> {
+pub(crate) fn build_fabric_for_project(
+    project: &Project,
+    clock: Arc<dyn Clock>,
+) -> tm_types::Result<Arc<Fabric>> {
     let table = crate::ops::load_role_table(Some(project))?;
     build_fabric_with_table(table, clock)
 }
 
-fn build_fabric_with_table(mut table: RoleTable, clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric>> {
+fn build_fabric_with_table(
+    mut table: RoleTable,
+    clock: Arc<dyn Clock>,
+) -> tm_types::Result<Arc<Fabric>> {
     if std::env::var_os(TEST_MOCK_PROVIDER_ENV).is_some() {
         return Ok(Arc::new(build_mock_fabric(clock)));
     }
@@ -1686,7 +1694,9 @@ fn build_fabric_with_table(mut table: RoleTable, clock: Arc<dyn Clock>) -> tm_ty
 /// Load a project-scoped chat model default, when one has been saved.
 pub(crate) fn load_default_model(project: &Project) -> Option<ModelId> {
     #[derive(serde::Deserialize)]
-    struct Saved { model: String }
+    struct Saved {
+        model: String,
+    }
     std::fs::read(project.state_dir.join("default-model.json"))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
@@ -1702,7 +1712,10 @@ pub(crate) fn save_default_model(project: &Project, model: Option<&ModelId>) {
     let result = (|| -> tm_types::Result<()> {
         std::fs::create_dir_all(&project.state_dir)?;
         match model {
-            Some(model) => std::fs::write(path, serde_json::to_vec(&serde_json::json!({"model": model.to_string()}))?)?,
+            Some(model) => std::fs::write(
+                path,
+                serde_json::to_vec(&serde_json::json!({"model": model.to_string()}))?,
+            )?,
             None => match std::fs::remove_file(path) {
                 Ok(()) => (),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
@@ -1711,7 +1724,9 @@ pub(crate) fn save_default_model(project: &Project, model: Option<&ModelId>) {
         }
         Ok(())
     })();
-    if let Err(error) = result { tracing::warn!(error = %error, "could not persist project model default"); }
+    if let Err(error) = result {
+        tracing::warn!(error = %error, "could not persist project model default");
+    }
 }
 
 /// The first model in `candidates` whose provider is registered, if any — the default turn's
@@ -3213,7 +3228,7 @@ mod tests {
 
         assert_eq!(
             session.set_model("default").unwrap(),
-            Some(ModelId::new("mock", "m1"))
+            Some(ModelId::new("mock", "m2"))
         );
     }
 

@@ -16,7 +16,7 @@ use tm_core::ArtifactKind;
 use tm_scheduler::dispatch::{ContextPackSource, ExecutorDispatcher, ExecutorRegistry};
 use tm_types::{Oversight, Role, TicketId};
 
-use crate::agent::{build_fabric, MemoryCommandCache, ProcessCommandExecutor};
+use crate::agent::{build_fabric_for_project, MemoryCommandCache, ProcessCommandExecutor};
 use crate::project::Project;
 
 /// Compiles a ticket's context pack against the live project state and renders it to text via
@@ -46,7 +46,7 @@ impl ContextPackSource for ProjectContextPackSource {
             tm_context::tokens::TokenBudget::even(10_000),
             tm_codeintel::SignalWeights::default(),
             &[],
-            &tm_provider::RoleTable::default_table(),
+            &crate::ops::load_role_table_for_state_dir(&self.state_dir)?,
         )?;
         Ok(tm_agent::render_task_prompt(ticket, &pack))
     }
@@ -263,7 +263,7 @@ pub fn build_dispatcher_with_human(
     human_sink: Arc<dyn HumanApprovalSink>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
     let exec_root = exec_root.unwrap_or(project.root.as_path());
-    let fabric = build_fabric(project.clock.clone())?;
+    let fabric = build_fabric_for_project(project, project.clock.clone())?;
     let ci = Arc::new(project.code_intel()?);
     let command_cache: Arc<dyn tm_context::CommandCache + Send + Sync> =
         Arc::new(MemoryCommandCache::new(project.ids.clone()));
