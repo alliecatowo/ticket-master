@@ -25,8 +25,8 @@ pub enum CommandId {
     Init,
     /// Hand work to a background worker as a ticket.
     Bg,
-    /// Go to the tickets view.
-    Home,
+    /// Open the tickets screen (Claude Code's agent view).
+    Tickets,
     /// Attach this conversation to a ticket.
     Attach,
     /// Detach from the attached ticket.
@@ -129,7 +129,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "Hand work to a background worker as a ticket",
     },
     SlashCommand {
-        id: CommandId::Home,
+        id: CommandId::Tickets,
         name: "tickets",
         aliases: &["agents", "home"],
         arg: Arg::None,
@@ -147,7 +147,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         name: "detach",
         aliases: &[],
         arg: Arg::None,
-        description: "Detach from the ticket (fresh conversation)",
+        description: "Detach from the attached ticket",
     },
     SlashCommand {
         id: CommandId::Decide,
@@ -306,7 +306,7 @@ mod tests {
     #[test]
     fn aliases_and_subsequences_match() {
         assert_eq!(names(&filter("quit")), vec!["exit"]);
-        assert_eq!(filter("agents")[0].command.id, CommandId::Home);
+        assert_eq!(filter("agents")[0].command.id, CommandId::Tickets);
         assert!(names(&filter("dt")).contains(&"detach"));
     }
 
@@ -328,7 +328,7 @@ mod tests {
             matches!(parse("/attach"), Some(Parsed::MissingArg(c)) if c.id == CommandId::Attach)
         );
         assert!(
-            matches!(parse("/tickets"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Home)
+            matches!(parse("/tickets"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Tickets)
         );
         assert_eq!(parse("/nope"), Some(Parsed::Unknown("nope".to_string())));
         assert_eq!(parse("not a command"), None);

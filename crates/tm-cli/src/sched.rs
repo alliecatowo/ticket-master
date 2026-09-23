@@ -161,7 +161,7 @@ pub async fn sched_run(
     let interval = Duration::from_secs(tick_interval_secs);
 
     let dispatcher =
-        crate::dispatch::build_dispatcher(project, tokio::runtime::Handle::current(), None)?;
+        crate::dispatch::build_dispatcher(project, tokio::runtime::Handle::current(), None, None)?;
     let loop_driver =
         tm_scheduler::SchedulerLoop::new(&project.store, project.clock.clone(), policy)
             .with_dispatcher(dispatcher);
@@ -210,7 +210,7 @@ pub fn spawn_background_runner(
     interval: Duration,
 ) -> tm_types::Result<tokio::task::JoinHandle<()>> {
     let dispatcher =
-        crate::dispatch::build_dispatcher(&project, tokio::runtime::Handle::current(), None)?;
+        crate::dispatch::build_dispatcher(&project, tokio::runtime::Handle::current(), None, None)?;
     Ok(tokio::spawn(async move {
         let mut policy = tm_scheduler::SchedulingPolicy::conservative_default();
         policy.available_roles = tm_types::Role::ALL.iter().copied().collect();
@@ -440,8 +440,13 @@ pub async fn run_ticket(
     };
     let exec_root = worktree.as_ref().map(|w| w.path.as_path());
 
-    let dispatcher =
-        crate::dispatch::build_dispatcher(project, tokio::runtime::Handle::current(), exec_root)?;
+    let (step_tx, mut step_rx) = tokio::sync::mpsc::unbounded_channel();
+    let dispatcher = crate::dispatch::build_dispatcher(
+        project,
+        tokio::runtime::Handle::current(),
+        exec_root,
+        Some(step_tx),
+    )?;
     let ttl_seconds = u32::try_from(ticket_state.budget.wall_seconds)
         .unwrap_or(u32::MAX)
         .clamp(60, RUN_TICKET_MAX_TTL_SECONDS);
@@ -488,6 +493,10 @@ pub async fn run_ticket(
             break;
         }
         tokio::time::sleep(RUN_TICKET_POLL_INTERVAL).await;
+        // Live progress: each step the run has taken since the last poll, as `tm -p` prints it.
+        while let Ok(step) = step_rx.try_recv() {
+            renderer.note(&crate::agent::format_step(&step));
+        }
         let view = project.store.view()?;
         let Some(t) = view.tickets.get(&ticket) else {
             break;
@@ -500,6 +509,9 @@ pub async fn run_ticket(
             outcome = Some(run_outcome(t, failures_before));
             break;
         }
+    }
+    while let Ok(step) = step_rx.try_recv() {
+        renderer.note(&crate::agent::format_step(&step));
     }
 
     if let Some(worktree) = worktree {

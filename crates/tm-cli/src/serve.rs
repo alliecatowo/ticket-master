@@ -1,22 +1,29 @@
 //! `tm serve`: build the [`tm_server`] router over the opened project and bind to it.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::net::TcpListener;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 use crate::args::ServeArgs;
 use crate::project::Project;
 use crate::render::Renderer;
 
+/// Where the web client lives on the server. A prefix of its own keeps its routes (`/graph`,
+/// `/decisions`, ...) from colliding with the API's.
+const WEB_PREFIX: &str = "/app";
+
+/// How often `tm serve`'s workers look for ready tickets.
+const WORKER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Run `tm serve`: bind `tm-server`'s axum router to `args.addr` (default: loopback, ephemeral
-/// port), print the URL a human or the web client should hit, serve the built web client's
-/// static assets when present, and shut down cleanly on ctrl-c.
+/// port), serve the web client at `/app/` when it's built, work tickets in the background unless
+/// `--no-workers`, print the URL, and shut down cleanly on ctrl-c.
 pub async fn serve(
     args: &ServeArgs,
-    project: &Project,
+    project: Arc<Project>,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
     let bind_addr = parse_bind_addr(args.addr.as_deref())?;
@@ -41,22 +48,83 @@ pub async fn serve(
 
     let mut router = tm_server::routes::router((*state).clone());
 
-    if let Some(web_dir) = find_web_client_dir(&project.root) {
-        router = router.nest_service("/", ServeDir::new(&web_dir));
+    let web_dir = find_web_client_dir(args.web_dir.as_deref());
+    if let Some(web_dir) = &web_dir {
+        // Any path under the prefix that isn't a built file is a client route: hand it
+        // `index.html` so a reload or a pasted link works.
+        let app = ServeDir::new(web_dir).fallback(ServeFile::new(web_dir.join("index.html")));
+        router = router.nest_service(WEB_PREFIX, app).route(
+            "/",
+            axum::routing::get(|| async { axum::response::Redirect::temporary("/app/") }),
+        );
     }
+
+    let workers = if args.no_workers {
+        None
+    } else {
+        match crate::sched::spawn_background_runner(Arc::clone(&project), WORKER_INTERVAL) {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                renderer.note(&format!(
+                    "Not working tickets: {e}. Tickets can still be created and reviewed."
+                ));
+                None
+            }
+        }
+    };
 
     let listener = TcpListener::bind(bind_addr).await?;
     let resolved_addr = listener.local_addr()?;
+    let base = format!("http://{resolved_addr}");
 
     if !renderer.is_quiet() {
-        renderer.note(&format!("Serving at http://{}", resolved_addr));
+        renderer.note(&format!("Serving the API at {base}"));
+        match &web_dir {
+            Some(_) => renderer.note(&format!("Web client: {base}{WEB_PREFIX}/")),
+            None => renderer.note(
+                "Web client not found; build it with `pnpm -C clients/web install && pnpm -C \
+                 clients/web build`, or point --web-dir / TM_WEB_DIR at a build.",
+            ),
+        }
+        if workers.is_some() {
+            renderer.note("Working ready tickets in the background (--no-workers to stop).");
+        }
+    }
+    if args.open {
+        let url = match &web_dir {
+            Some(_) => format!("{base}{WEB_PREFIX}/"),
+            None => base.clone(),
+        };
+        if let Err(e) = open_in_browser(&url) {
+            renderer.note(&format!("Couldn't open a browser ({e}); visit {url}"));
+        }
     }
 
-    axum::serve(listener, router)
+    let served = axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
+        .await;
+    if let Some(workers) = workers {
+        workers.abort();
+    }
+    served?;
     Ok(())
+}
+
+/// Open `url` with the platform's opener.
+fn open_in_browser(url: &str) -> std::io::Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(url)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
 }
 
 /// Parse a bind address string or return the default loopback with ephemeral port.
@@ -75,21 +143,31 @@ fn parse_bind_addr(addr: Option<&str>) -> tm_types::Result<SocketAddr> {
     }
 }
 
-/// Check for web client build directories in common locations.
-fn find_web_client_dir(project_root: &Path) -> Option<std::path::PathBuf> {
-    let candidates = [
-        project_root.join("web").join("dist"),
-        project_root.join("web").join("build"),
-        project_root.join("apps").join("web").join("dist"),
-        project_root.join("apps").join("web").join("build"),
-    ];
+/// The built web client to serve: `explicit` (`--web-dir`), else `TM_WEB_DIR`, else
+/// `clients/web/dist` in the source checkout this binary was built from. Only a directory with an
+/// `index.html` counts. The project being served is never searched: its own `web/dist` is its
+/// app, not tm's.
+fn find_web_client_dir(explicit: Option<&Path>) -> Option<PathBuf> {
+    let built_from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../clients/web/dist");
+    web_client_dir_from(
+        explicit,
+        std::env::var_os("TM_WEB_DIR").map(PathBuf::from),
+        &built_from,
+    )
+}
 
-    for candidate in &candidates {
-        if candidate.is_dir() {
-            return Some(candidate.clone());
-        }
-    }
-    None
+/// [`find_web_client_dir`]'s choice, given its three sources.
+fn web_client_dir_from(
+    explicit: Option<&Path>,
+    env: Option<PathBuf>,
+    built_from: &Path,
+) -> Option<PathBuf> {
+    explicit
+        .map(Path::to_path_buf)
+        .into_iter()
+        .chain(env)
+        .chain(std::iter::once(built_from.to_path_buf()))
+        .find(|dir| dir.join("index.html").is_file())
 }
 
 /// Wait for ctrl-c signal. Ignores errors installing the handler; graceful shutdown fails
@@ -122,48 +200,37 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn find_web_client_dir_none() {
-        let root = tempfile::TempDir::new().expect("temp dir");
-        let result = find_web_client_dir(root.path());
-        assert!(result.is_none());
+    fn built(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).expect("create dir");
+        std::fs::write(dir.join("index.html"), "<html></html>").expect("write index");
+        dir.to_path_buf()
     }
 
     #[test]
-    fn find_web_client_dir_web_dist() {
+    fn the_web_client_is_found_by_flag_then_env_then_the_build_checkout() {
         let root = tempfile::TempDir::new().expect("temp dir");
-        let web_dist = root.path().join("web").join("dist");
-        std::fs::create_dir_all(&web_dist).expect("create dirs");
-        let result = find_web_client_dir(root.path());
-        assert_eq!(result, Some(web_dist));
-    }
-
-    #[test]
-    fn find_web_client_dir_web_build() {
-        let root = tempfile::TempDir::new().expect("temp dir");
-        let web_build = root.path().join("web").join("build");
-        std::fs::create_dir_all(&web_build).expect("create dirs");
-        let result = find_web_client_dir(root.path());
-        assert_eq!(result, Some(web_build));
-    }
-
-    #[test]
-    fn find_web_client_dir_apps_web_dist() {
-        let root = tempfile::TempDir::new().expect("temp dir");
-        let apps_web_dist = root.path().join("apps").join("web").join("dist");
-        std::fs::create_dir_all(&apps_web_dist).expect("create dirs");
-        let result = find_web_client_dir(root.path());
-        assert_eq!(result, Some(apps_web_dist));
-    }
-
-    #[test]
-    fn find_web_client_dir_precedence_web_dist_over_web_build() {
-        let root = tempfile::TempDir::new().expect("temp dir");
-        let web_dist = root.path().join("web").join("dist");
-        let web_build = root.path().join("web").join("build");
-        std::fs::create_dir_all(&web_dist).expect("create web/dist");
-        std::fs::create_dir_all(&web_build).expect("create web/build");
-        let result = find_web_client_dir(root.path());
-        assert_eq!(result, Some(web_dist));
+        let flag = built(&root.path().join("flag"));
+        let env = built(&root.path().join("env"));
+        let checkout = built(&root.path().join("checkout"));
+        assert_eq!(
+            web_client_dir_from(Some(&flag), Some(env.clone()), &checkout),
+            Some(flag)
+        );
+        assert_eq!(
+            web_client_dir_from(None, Some(env.clone()), &checkout),
+            Some(env)
+        );
+        assert_eq!(
+            web_client_dir_from(None, None, &checkout),
+            Some(checkout.clone())
+        );
+        let unbuilt = root.path().join("unbuilt");
+        std::fs::create_dir_all(&unbuilt).expect("create dir");
+        assert_eq!(
+            web_client_dir_from(Some(&unbuilt), None, &checkout),
+            Some(checkout),
+            "a directory without index.html isn't a build"
+        );
+        assert_eq!(web_client_dir_from(None, None, &unbuilt), None);
     }
 }

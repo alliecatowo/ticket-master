@@ -199,6 +199,21 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
             };
             tickets::dispatch_ticket(&cmd, &opened, renderer)
         }
+        Some(Command::Tickets(args)) => {
+            // `tm tickets` is `claude agents` (D-019 §2): on a real terminal it opens the TUI on
+            // the tickets screen, starting a project the way bare `tm` does. `--json` (or a
+            // non-tty) only lists, and never creates a project just to say there are no tickets.
+            if !cli.global.json && tui::should_launch(&cli.global) {
+                let opened = project::open_bare(cli.global.project.as_deref(), renderer)?;
+                return tui::run_tickets(Arc::new(opened)).await;
+            }
+            let opened = match project::open_for_command(cli.global.project.as_deref()) {
+                Ok(project) => Some(project),
+                Err(tm_types::TmError::NotFound { .. }) => None,
+                Err(e) => return Err(e),
+            };
+            tickets::tickets_list(&args, opened.as_ref(), renderer)
+        }
         Some(Command::Dep(cmd)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
             tickets::dispatch_dep(&cmd, &opened, renderer)
@@ -271,7 +286,7 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
         }
         Some(Command::Serve(args)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
-            serve::serve(&args, &opened, renderer).await
+            serve::serve(&args, std::sync::Arc::new(opened), renderer).await
         }
         Some(Command::Events(cmd)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;

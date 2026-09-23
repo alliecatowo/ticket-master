@@ -103,6 +103,10 @@ fn run_with_worktree_creates_a_real_worktree_and_keeps_it_when_the_run_does_not_
         "the failure says what happened, got stderr {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        stdout.contains("mock provider: this is a scripted reply"),
+        "the run's steps are shown as they happen, got stdout {stdout}"
+    );
 
     let worktrees_dir = root.join(".tm").join("worktrees");
     let entries: Vec<_> = std::fs::read_dir(&worktrees_dir)

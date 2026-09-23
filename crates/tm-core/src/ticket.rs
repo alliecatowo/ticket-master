@@ -205,6 +205,17 @@ pub struct ExecutorRequirements {
     pub min_capability: tm_types::Tolerance,
 }
 
+impl Default for ExecutorRequirements {
+    /// What a ticket created without saying gets, from any surface: a fast coding agent.
+    fn default() -> Self {
+        ExecutorRequirements {
+            role: tm_types::Role::CoderFast,
+            human_required: false,
+            min_capability: tm_types::Tolerance::default(),
+        }
+    }
+}
+
 /// A reference to context material a worker should load before starting, resolved by
 /// `tm-context`; `tm-core` only stores the pointer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -216,14 +227,16 @@ pub struct ContextRef {
     pub reason: String,
 }
 
-/// How a ticket's submission is checked before it may close.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// How a ticket's submission is checked before it may close. Defaults to
+/// [`VerificationPolicy::Single`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationPolicy {
     /// No verification evidence is required. Only legal for kinds where
     /// [`TicketKind::permits_unverified_close`] is true.
     None,
     /// A single verification ticket must pass.
+    #[default]
     Single,
     /// Every predicate in `success` must be independently checked.
     EveryPredicate,
@@ -242,6 +255,18 @@ pub struct RetryPolicy {
     pub backoff_multiplier: f64,
     /// Upper bound on the computed delay, regardless of attempt count.
     pub max_delay_seconds: u32,
+}
+
+impl Default for RetryPolicy {
+    /// Three attempts, five-second base delay, doubling backoff, capped at five minutes.
+    fn default() -> Self {
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay_seconds: 5,
+            backoff_multiplier: 2.0,
+            max_delay_seconds: 300,
+        }
+    }
 }
 
 impl RetryPolicy {

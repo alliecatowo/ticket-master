@@ -288,18 +288,23 @@ struct CreateTicketRequest {
     parent: Option<TicketId>,
     #[serde(default)]
     milestone: Option<MilestoneId>,
-    #[serde(default = "Authority::none")]
+    // Unset fields get what `tm ticket new` gives a ticket, so a client can create workable
+    // work from just a kind and an objective.
+    #[serde(default = "Authority::worker")]
     authority: Authority,
     #[serde(default)]
     resources: Vec<ResourceClaim>,
+    #[serde(default)]
     executor: ExecutorRequirements,
     #[serde(default)]
     context_refs: Vec<ContextRef>,
     #[serde(default)]
     success: Vec<Predicate>,
+    #[serde(default)]
     verification: VerificationPolicy,
-    #[serde(default = "Budget::none")]
+    #[serde(default = "Budget::unlimited")]
     budget: Budget,
+    #[serde(default)]
     retry: RetryPolicy,
     #[serde(default)]
     priority: i32,
@@ -378,6 +383,17 @@ enum TransitionRequest {
     Reopen {
         #[serde(default)]
         reason: Option<String>,
+        actor: ParticipantId,
+    },
+    /// A human accepts submitted work, closing the ticket (`tm ticket accept`).
+    Accept {
+        #[serde(default)]
+        note: Option<String>,
+        actor: ParticipantId,
+    },
+    /// A human sends submitted work back with a reason (`tm ticket reject`).
+    Reject {
+        reason: String,
         actor: ParticipantId,
     },
     Fail {
@@ -673,6 +689,8 @@ async fn transition_ticket(
         TransitionRequest::Close { reason, actor } => state.store.close(&id, reason, actor)?,
         TransitionRequest::Cancel { reason, actor } => state.store.cancel(&id, reason, actor)?,
         TransitionRequest::Reopen { reason, actor } => state.store.reopen(&id, reason, actor)?,
+        TransitionRequest::Accept { note, actor } => state.store.accept(&id, note, actor)?,
+        TransitionRequest::Reject { reason, actor } => state.store.reject(&id, reason, actor)?,
         TransitionRequest::Fail {
             class,
             detail,
@@ -1192,6 +1210,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_ticket_posted_with_only_an_objective_gets_worker_defaults() {
+        let (_dir, state) = test_state();
+        let body: CreateTicketRequest = serde_json::from_value(serde_json::json!({
+            "kind": "work",
+            "objective": "fix the flaky test",
+            "actor": actor(),
+        }))
+        .expect("kind, objective and actor are enough");
+        let (_, Json(created)) = create_ticket(State(state.clone()), Json(body))
+            .await
+            .expect("create ticket");
+        let id = TicketId::new(created["ticket"]["id"].as_str().expect("id")).expect("valid id");
+        let Json(ticket) = get_ticket(State(state), Path(id))
+            .await
+            .expect("get ticket");
+        assert_eq!(ticket.authority, Authority::worker());
+        assert_eq!(ticket.budget, Budget::unlimited());
+        assert_eq!(ticket.executor, ExecutorRequirements::default());
+        assert_eq!(ticket.verification, VerificationPolicy::Single);
+    }
+
+    #[tokio::test]
     async fn get_missing_ticket_is_not_found() {
         let (_dir, state) = test_state();
         let missing = TicketId::new("T-999").expect("valid shape");
@@ -1289,6 +1329,22 @@ mod tests {
             .await
             .expect("get ticket");
         assert_ne!(ticket.state, TicketState::Draft);
+    }
+
+    #[tokio::test]
+    async fn accept_and_reject_are_transitions_only_a_human_can_make() {
+        let (_dir, state) = test_state();
+        let id = make_ready_ticket(&state).await;
+        for body in [
+            json!({"accept": {"actor": "system"}}),
+            json!({"reject": {"reason": "no tests", "actor": "system"}}),
+        ] {
+            let request: TransitionRequest = serde_json::from_value(body).expect("wire shape");
+            let err = transition_ticket(State(state.clone()), Path(id.clone()), Json(request))
+                .await
+                .expect_err("the system is not a human");
+            assert_ne!(status_of(err), StatusCode::NOT_FOUND);
+        }
     }
 
     #[tokio::test]

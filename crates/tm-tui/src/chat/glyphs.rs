@@ -56,7 +56,7 @@ pub struct Glyphs {
     pub rule: &'static str,
     /// Selection marker in lists and popups.
     pub pointer: &'static str,
-    /// "Go left" arrow, used in hints (`← sessions & tickets`).
+    /// "Go left" arrow, used in hints (`← for tickets`).
     pub left: &'static str,
     /// Up/down arrows pair, used in hints.
     pub updown: &'static str,

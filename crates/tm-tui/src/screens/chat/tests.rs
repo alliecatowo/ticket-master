@@ -757,13 +757,47 @@ fn esc_dismisses_the_popup_until_the_query_changes() {
 }
 
 #[test]
-fn left_on_an_empty_prompt_goes_home_but_moves_the_cursor_otherwise() {
+fn left_goes_to_tickets_only_on_an_empty_prompt_with_nothing_open() {
     let env = Env::new();
     let mut chat = screen();
-    press(&mut chat, &env, key(KeyCode::Left));
-    assert_eq!(chat.take_actions(), vec![ChatAction::GoHome]);
+    assert!(chat.left_opens_tickets());
+    type_text(&mut chat, &env, "?");
+    assert!(
+        !chat.left_opens_tickets(),
+        "the shortcuts panel owns the key"
+    );
+    type_text(&mut chat, &env, "?");
+    type_text(&mut chat, &env, "!");
+    assert!(!chat.left_opens_tickets(), "shell mode");
+    press(&mut chat, &env, key(KeyCode::Backspace));
+    press(&mut chat, &env, ctrl('o'));
+    assert!(!chat.left_opens_tickets(), "the viewer");
+    press(&mut chat, &env, key(KeyCode::Esc));
+    press(&mut chat, &env, ctrl('r'));
+    assert!(!chat.left_opens_tickets(), "history search");
+    press(&mut chat, &env, key(KeyCode::Esc));
     type_text(&mut chat, &env, "ab");
+    assert!(!chat.left_opens_tickets(), "text in the prompt");
     press(&mut chat, &env, key(KeyCode::Left));
+    assert!(chat.take_actions().is_empty(), "← only moves the cursor");
+}
+
+#[test]
+fn ctrl_t_toggles_the_task_checklist() {
+    use crate::chat::tasks::{TaskItem, TaskState};
+    let env = Env::new();
+    let mut chat = screen();
+    press(&mut chat, &env, ctrl('t'));
+    assert_eq!(chat.take_actions(), vec![ChatAction::ShowTasks]);
+    chat.show_tasks(vec![TaskItem {
+        state: TaskState::Active,
+        text: "T-5 fix the flaky test".into(),
+    }]);
+    let text = screen_text(&render(&chat, &env, 80, 24));
+    assert!(text.contains("Tasks (ctrl+t to hide)"), "{text}");
+    assert!(text.contains("☐ T-5 fix the flaky test"), "{text}");
+    press(&mut chat, &env, ctrl('t'));
+    assert!(!chat.is_tasks_open());
     assert!(chat.take_actions().is_empty());
 }
 

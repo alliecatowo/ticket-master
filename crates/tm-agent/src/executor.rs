@@ -208,6 +208,8 @@ pub struct BuiltinExecutor {
     /// preserves this executor's behavior before `--worktree` existed exactly: every tool call
     /// resolves against the process's own current directory, the same as before.
     root_override: Option<PathBuf>,
+    /// Where every run's steps go as they happen (see [`BuiltinExecutor::with_step_sender`]).
+    step_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::outcome::StepRecord>>,
 }
 
 impl BuiltinExecutor {
@@ -246,7 +248,18 @@ impl BuiltinExecutor {
             computer,
             oversight,
             root_override: None,
+            step_sender: None,
         }
+    }
+
+    /// Send every step of every run this executor drives to `sender` as it happens
+    /// ([`AgentLoop::with_step_sender`]), so `tm run` can show a ticket's progress live.
+    pub fn with_step_sender(
+        mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<crate::outcome::StepRecord>,
+    ) -> Self {
+        self.step_sender = Some(sender);
+        self
     }
 
     /// Point every run this executor drives at `root` instead of the process's own current
@@ -337,6 +350,9 @@ impl BuiltinExecutor {
         .with_oversight(self.oversight.clone());
         if let Some(root) = self.root_override.clone() {
             agent_loop = agent_loop.with_root(root);
+        }
+        if let Some(sender) = self.step_sender.clone() {
+            agent_loop = agent_loop.with_step_sender(sender);
         }
         let date = self.clock.now().to_rfc3339();
         let root = agent_loop.root().display().to_string();

@@ -571,11 +571,29 @@ struct CreateChildInput {
     #[serde(default)]
     budget: Option<Budget>,
     #[serde(default)]
-    success: Vec<Predicate>,
+    success: Vec<SuccessInput>,
     #[serde(default)]
     context_refs: Vec<ContextRef>,
     #[serde(default)]
     priority: i32,
+}
+
+/// One `success` entry as a model writes it: a plain sentence (what models reach for first, and a
+/// [`Predicate::Judgment`] claim is exactly that), or a predicate in its tagged form.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum SuccessInput {
+    Claim(String),
+    Predicate(Predicate),
+}
+
+impl From<SuccessInput> for Predicate {
+    fn from(input: SuccessInput) -> Self {
+        match input {
+            SuccessInput::Claim(claim) => Predicate::Judgment { claim },
+            SuccessInput::Predicate(predicate) => predicate,
+        }
+    }
 }
 
 /// Default requirements for a child ticket spawned by an agent: a fast coder, no human
@@ -1270,7 +1288,7 @@ impl BuiltinCapability {
                     Vec::new(),
                     default_executor_requirements(),
                     parsed.context_refs,
-                    parsed.success,
+                    parsed.success.into_iter().map(Predicate::from).collect(),
                     VerificationPolicy::Single,
                     parsed.budget.unwrap_or_else(Budget::unlimited),
                     default_retry_policy(),
@@ -1922,7 +1940,16 @@ impl CapabilityProvider for BuiltinCapability {
                         },
                         "authority": {"type": "object"},
                         "budget": {"type": "object"},
-                        "success": {"type": "array"},
+                        "success": {
+                            "type": "array",
+                            "description": "How to tell it's done. Each item is a sentence a \
+                                            reviewer checks, or a condition checked by running \
+                                            it: {\"command_succeeds\": {\"command\": [\"cargo\", \
+                                            \"test\"]}}, {\"tests_pass\": {}}, {\"file_exists\": \
+                                            {\"path\": \"src/x.rs\"}}, or {\"file_matches\": \
+                                            {\"path\": \"...\", \"regex\": \"...\"}}.",
+                            "items": {"anyOf": [{"type": "string"}, {"type": "object"}]}
+                        },
                         "context_refs": {"type": "array"},
                         "priority": {"type": "integer"}
                     },
@@ -3538,6 +3565,38 @@ mod tests {
         assert_eq!(
             view.tickets[&id].parent, None,
             "no attached ticket means no parent"
+        );
+    }
+
+    #[tokio::test]
+    async fn ticket_create_child_takes_plain_sentences_and_tagged_predicates_as_success() {
+        let h = Harness::new();
+        let input = json!({
+            "kind": "work",
+            "objective": "add a flag",
+            "success": ["the flag is documented", {"file_exists": {"path": "src/flag.rs"}}],
+        });
+        let result = completed(
+            h.registry
+                .dispatch(&call("ticket.create_child", input), &h.ctx())
+                .await,
+        );
+        let id: TicketId = result["child"]
+            .as_str()
+            .expect("child id")
+            .parse()
+            .expect("id");
+        let view = h.registry.store.view().expect("view");
+        assert_eq!(
+            view.tickets[&id].success,
+            [
+                Predicate::Judgment {
+                    claim: "the flag is documented".into()
+                },
+                Predicate::FileExists {
+                    path: "src/flag.rs".into()
+                },
+            ]
         );
     }
 

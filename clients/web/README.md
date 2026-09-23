@@ -93,12 +93,12 @@ pnpm dev                          # Vite dev server on 5173, proxying the API to
 
 Set `VITE_TM_SERVER` to point `pnpm dev`'s proxy at a different `tm serve` address.
 
-For the `tm serve --open` static-asset story, `pnpm build` writes `dist/`; note that
-`crates/tm-cli/src/serve.rs`'s `find_web_client_dir` currently looks for `web/dist` or
-`apps/web/dist` (relative to the project root), not `clients/web/dist` — wiring that up is Rust
-work outside this task's scope (`clients/web/` only), so today `dist/` needs to be copied/symlinked
-to one of those locations (or `find_web_client_dir` extended) for `tm serve` to pick it up
-automatically.
+Served by `tm serve` itself: `pnpm build` writes `dist/`, and `tm serve` serves it at `/app/`
+(`/` redirects there; any other `/app/...` path gets `index.html`, so reloads and pasted links
+work). The app is built with `base: "/app/"` and routes under `<BrowserRouter basename="/app">`,
+so its `/graph`, `/decisions` and `/providers` pages never collide with the API's endpoints of the
+same name. `tm serve` finds the build via `--web-dir`, then `TM_WEB_DIR`, then this directory's
+`dist/` in the checkout `tm` was built from; `tm serve --open` opens it in a browser.
 
 ## Commands and results
 

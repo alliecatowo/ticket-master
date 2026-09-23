@@ -7,9 +7,11 @@ use crate::args::{
     DepEdgeArgs, DepGraphArgs, MilestoneCommand, MilestoneRefArgs, TicketAcceptArgs,
     TicketCancelArgs, TicketCommand, TicketDelegateArgs, TicketEditArgs, TicketForkArgs,
     TicketListArgs, TicketNewArgs, TicketRefArgs, TicketRejectArgs, TicketStateArg,
-    TicketSubmitArgs,
+    TicketSubmitArgs, TicketsArgs,
 };
 use crate::project::Project;
+
+pub mod overview;
 use crate::render::{Renderer, Table, Tree};
 use std::collections::BTreeMap;
 use std::fs;
@@ -173,6 +175,53 @@ pub(crate) fn default_retry_policy() -> RetryPolicy {
         backoff_multiplier: 2.0,
         max_delay_seconds: 300,
     }
+}
+
+/// `tm tickets --json` (and the plain, non-tty form of `tm tickets`): the ticket list, like
+/// `claude agents --json`. Open tickets only unless `args.all`; `--json` prints a JSON array of
+/// [`overview::TicketOverview`], otherwise one line per ticket under its group's heading.
+pub fn tickets_list(
+    args: &TicketsArgs,
+    project: Option<&Project>,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    use tm_types::Clock as _;
+    let Some(project) = project else {
+        // No project anywhere: there are no tickets, and listing must not create state.
+        let empty: Vec<overview::TicketOverview> = Vec::new();
+        return renderer.emit(&empty, "No tickets yet. Dispatch one from `tm tickets`.");
+    };
+    let view = project.store.view()?;
+    let mut index = overview::ActivityIndex::new();
+    index.refresh(project.store.state_dir())?;
+    let mut rows = overview::overviews(&view, &index, project.clock.now(), false, args.all);
+    rows.sort_by(|a, b| {
+        a.group
+            .cmp(&b.group)
+            .then_with(|| b.id.number().cmp(&a.id.number()))
+    });
+    let mut text = String::new();
+    let mut last_group = None;
+    for row in &rows {
+        if last_group != Some(row.group) {
+            if last_group.is_some() {
+                text.push('\n');
+            }
+            text.push_str(match row.group {
+                overview::TicketGroup::NeedsInput => "Needs input\n",
+                overview::TicketGroup::Working => "Working\n",
+                overview::TicketGroup::Review => "Ready for review\n",
+                overview::TicketGroup::Queued => "Queued\n",
+                overview::TicketGroup::Completed => "Completed\n",
+            });
+            last_group = Some(row.group);
+        }
+        text.push_str(&format!("  {}  {}  {}\n", row.id, row.title, row.summary));
+    }
+    if rows.is_empty() {
+        text.push_str("No open tickets.");
+    }
+    renderer.emit(&rows, text.trim_end())
 }
 
 /// Dispatch one [`TicketCommand`].
@@ -397,6 +446,23 @@ pub fn ticket_new(
     }
 
     Ok(())
+}
+
+/// Create a worker ticket for `objective` ([`create_worker_ticket`]: the same defaults as `tm
+/// ticket new` and `/bg`) and activate it (`Draft -> Ready`), so a background worker picks it up.
+/// This is what the tickets screen's dispatch input does (D-019 §2); it lives here so the CLI
+/// and the TUI cannot drift apart on what a dispatched ticket looks like.
+///
+/// # Errors
+/// `TmError::parse` for an objective that is empty once trimmed.
+pub fn create_and_queue(project: &Project, objective: &str) -> tm_types::Result<TicketId> {
+    let objective = objective.trim();
+    if objective.is_empty() {
+        return Err(TmError::parse("describe the task first"));
+    }
+    let id = create_worker_ticket(project, objective)?;
+    project.store.activate(&id, project.actor.clone())?;
+    Ok(id)
 }
 
 /// `tm ticket edit`

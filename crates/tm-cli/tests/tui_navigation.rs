@@ -1,7 +1,8 @@
 //! Proves the TUI's navigation shell actually navigates and returns, end to end against the real
-//! compiled `tm` binary (`docs/decisions/D-018-tui-chat-first-shell.md`): the chat is the root,
-//! `←`/Ctrl+T/`/home` reach the cross-session home, the Kanban board and ticket detail hang off
-//! home, and Esc walks back one level at a time — the back-stack, not "Esc always goes to chat".
+//! compiled `tm` binary (`docs/decisions/D-018-tui-chat-first-shell.md`, and D-019 §2 for the
+//! tickets screen that replaced D-018's home): the chat is the root, `←` `←` and `/tickets`
+//! reach the tickets screen, the Kanban board and ticket detail hang off it, and Esc walks back
+//! one level at a time — the back-stack, not "Esc always goes to chat".
 
 mod support;
 
@@ -66,15 +67,12 @@ fn spawn(project: &std::path::Path, tm_home: &std::path::Path, mock: bool) -> su
     support::Pty::spawn(cmd, 100, 30).expect("spawn `tm` inside a pty")
 }
 
-/// `Ctrl+T`: a control letter is `letter - '@'` (`'T'` is 0x54, so 0x14).
-const CTRL_T: u8 = 0x14;
 const ESC: u8 = 0x1b;
 /// The Left arrow's escape sequence (CSI D).
 const LEFT: &[u8] = b"\x1b[D";
 
-/// Text only the home screen shows (its footer; the chat's welcome card also says "sessions &
-/// tickets", so that phrase cannot tell the two apart).
-const HOME_MARK: &str = "back to chat";
+/// Text only the tickets screen shows (its dispatch input's placeholder).
+const TICKETS_MARK: &str = "Describe a task for a background worker";
 /// Text only the chat shows.
 const CHAT_MARK: &str = "Ask tm anything";
 /// Text only the Kanban board shows.
@@ -92,7 +90,7 @@ fn quit(pty: &mut support::Pty) {
 }
 
 #[test]
-fn chat_to_home_to_board_to_detail_and_back_one_level_at_a_time() {
+fn chat_to_tickets_to_board_to_detail_and_back_one_level_at_a_time() {
     let (project, ticket_id) = init_project_with_one_ticket();
     let detail_heading = format!("Ticket {ticket_id}");
     let tm_home = tempfile::tempdir().expect("tempdir");
@@ -105,26 +103,28 @@ fn chat_to_home_to_board_to_detail_and_back_one_level_at_a_time() {
         "bare `tm` opens the chat, got: {screen:?}"
     );
     assert!(
-        !has(&screen, HOME_MARK),
-        "home is not the default, got: {screen:?}"
+        !has(&screen, TICKETS_MARK),
+        "tickets is not the default, got: {screen:?}"
     );
 
-    // 2. Ctrl+T opens home, which lists the real ticket with its state badge.
-    pty.write(&[CTRL_T]).expect("send Ctrl+T");
-    let screen = pty.wait_for(HOME_MARK, Duration::from_secs(10));
+    // 2. `/tickets` opens tickets, which lists the real ticket under its group, and no sessions:
+    //    conversations are not rows here (D-019 §3). (Ctrl+T is the chat's task checklist.)
+    pty.write(b"/tickets\r").expect("type /tickets");
+    let screen = pty.wait_for(TICKETS_MARK, Duration::from_secs(10));
     assert!(
-        has(&screen, HOME_MARK),
-        "Ctrl+T must open home, got: {screen:?}"
+        has(&screen, TICKETS_MARK),
+        "/tickets must open tickets, got: {screen:?}"
     );
     assert!(
-        screen.iter().any(|l| l.contains("DRAFT")
-            && l.contains(&ticket_id)
-            && l.contains("kanban nav probe")),
-        "home must list the real ticket with its state badge, got: {screen:?}"
+        screen
+            .iter()
+            .any(|l| l.contains(&ticket_id) && l.contains("kanban nav probe")),
+        "tickets must list the real ticket, got: {screen:?}"
     );
+    assert!(has(&screen, "Queued"), "a draft is queued, got: {screen:?}");
     assert!(
-        has(&screen, "this conversation"),
-        "home lists this session, got: {screen:?}"
+        !has(&screen, "Sessions") && !has(&screen, "this conversation"),
+        "sessions are not listed on the tickets screen, got: {screen:?}"
     );
 
     // 3. `b` opens the board.
@@ -132,7 +132,7 @@ fn chat_to_home_to_board_to_detail_and_back_one_level_at_a_time() {
     let screen = pty.wait_for(BOARD_MARK, Duration::from_secs(10));
     assert!(
         has(&screen, BOARD_MARK),
-        "`b` on home opens the board, got: {screen:?}"
+        "`b` on tickets opens the board, got: {screen:?}"
     );
     assert!(
         has(&screen, "Draft"),
@@ -156,71 +156,65 @@ fn chat_to_home_to_board_to_detail_and_back_one_level_at_a_time() {
     );
     assert!(!has(&screen, &detail_heading));
 
-    // 6. Esc: back to home.
+    // 6. Esc: back to tickets.
     pty.write(&[ESC]).expect("Esc");
-    let screen = pty.wait_for(HOME_MARK, Duration::from_secs(10));
+    let screen = pty.wait_for(TICKETS_MARK, Duration::from_secs(10));
     assert!(
-        has(&screen, HOME_MARK),
-        "second Esc returns to home, got: {screen:?}"
+        has(&screen, TICKETS_MARK),
+        "second Esc returns to tickets, got: {screen:?}"
     );
     assert!(!has(&screen, BOARD_MARK));
 
-    // 7. Down + Enter on the ticket row opens the detail straight from home.
-    pty.write(b"\x1b[B").expect("Down");
-    std::thread::sleep(Duration::from_millis(150));
-    pty.write(b"\r").expect("Enter");
-    let screen = pty.wait_for(&detail_heading, Duration::from_secs(10));
-    assert!(
-        has(&screen, &detail_heading),
-        "Enter on a home ticket row opens its detail, got: {screen:?}"
-    );
-    pty.write(&[ESC]).expect("Esc");
-    let screen = pty.wait_for(HOME_MARK, Duration::from_secs(10));
-    assert!(
-        has(&screen, HOME_MARK),
-        "Esc from detail returns to home, got: {screen:?}"
-    );
-
-    // 8. Esc: back to the chat.
+    // 7. Esc: back to the chat.
     pty.write(&[ESC]).expect("Esc");
     let screen = pty.wait_for(CHAT_MARK, Duration::from_secs(10));
     assert!(
         has(&screen, CHAT_MARK),
         "third Esc returns to the chat, got: {screen:?}"
     );
-    assert!(!has(&screen, HOME_MARK));
+    assert!(!has(&screen, TICKETS_MARK));
 
     quit(&mut pty);
 }
 
 #[test]
-fn left_on_an_empty_prompt_goes_home_and_esc_comes_back() {
+fn left_twice_on_an_empty_prompt_opens_tickets_and_esc_comes_back() {
     let (project, _ticket_id) = init_project_with_one_ticket();
     let tm_home = tempfile::tempdir().expect("tempdir");
     let mut pty = spawn(project.path(), tm_home.path(), true);
     let _ = pty.wait_for(CHAT_MARK, Duration::from_secs(10));
 
+    // The first ← only says what a second one does, as Claude Code does.
     pty.write(LEFT).expect("Left");
-    let screen = pty.wait_for(HOME_MARK, Duration::from_secs(10));
+    let screen = pty.wait_for("Press ← again to open tickets", Duration::from_secs(10));
     assert!(
-        has(&screen, HOME_MARK),
-        "← on an empty prompt opens home, got: {screen:?}"
+        has(&screen, "Press ← again to open tickets"),
+        "the first ← shows the hint, got: {screen:?}"
+    );
+    assert!(!has(&screen, TICKETS_MARK), "one ← does not navigate yet");
+
+    pty.write(LEFT).expect("Left again");
+    let screen = pty.wait_for(TICKETS_MARK, Duration::from_secs(10));
+    assert!(
+        has(&screen, TICKETS_MARK),
+        "a second ← opens tickets, got: {screen:?}"
     );
 
     pty.write(&[ESC]).expect("Esc");
     let screen = pty.wait_for(CHAT_MARK, Duration::from_secs(10));
     assert!(
         has(&screen, CHAT_MARK),
-        "Esc on home returns to the chat, got: {screen:?}"
+        "Esc on tickets returns to the chat, got: {screen:?}"
     );
 
     // With text in the prompt, ← is just cursor movement.
     pty.write(b"ab").expect("type");
     let _ = pty.wait_for("ab", Duration::from_secs(5));
     pty.write(LEFT).expect("Left");
+    pty.write(LEFT).expect("Left");
     let screen = pty.settle(Duration::from_millis(400), Duration::from_millis(600));
     assert!(
-        !has(&screen, HOME_MARK),
+        !has(&screen, TICKETS_MARK),
         "← with text in the prompt must not navigate, got: {screen:?}"
     );
 
@@ -235,7 +229,7 @@ fn typing_letters_that_used_to_be_shortcuts_only_types() {
     let _ = pty.wait_for(CHAT_MARK, Duration::from_secs(10));
 
     // `q` was a global quit key, `t` a navigation key in an earlier design; `b` is a key on the
-    // home screen. In the prompt, all of them are just text.
+    // tickets screen. In the prompt, all of them are just text.
     pty.write(b"qtb q").expect("type former shortcut letters");
     let screen = pty.wait_for("qtb q", Duration::from_secs(5));
     assert!(
@@ -243,27 +237,27 @@ fn typing_letters_that_used_to_be_shortcuts_only_types() {
         "the letters must land in the prompt, got: {screen:?}"
     );
     assert!(pty.is_running(), "typing q must not quit");
-    assert!(!has(&screen, HOME_MARK) && !has(&screen, BOARD_MARK));
+    assert!(!has(&screen, TICKETS_MARK) && !has(&screen, BOARD_MARK));
 
     quit(&mut pty);
 }
 
 #[test]
-fn slash_tickets_opens_home_without_spawning_a_turn() {
+fn slash_tickets_opens_tickets_without_spawning_a_turn() {
     let (project, _ticket_id) = init_project_with_one_ticket();
     let tm_home = tempfile::tempdir().expect("tempdir");
     // Deliberately no `TM_TEST_MOCK_PROVIDER`: if the command ever fell through to a turn, this
-    // would attempt a real provider call and show an error instead of home.
+    // would attempt a real provider call and show an error instead of the tickets screen.
     let mut pty = spawn(project.path(), tm_home.path(), false);
     let _ = pty.wait_for(CHAT_MARK, Duration::from_secs(10));
 
     pty.write(b"/tickets").expect("type the command");
     let _ = pty.wait_for("/tickets", Duration::from_secs(5));
     pty.write(b"\r").expect("Enter");
-    let screen = pty.wait_for(HOME_MARK, Duration::from_secs(10));
+    let screen = pty.wait_for(TICKETS_MARK, Duration::from_secs(10));
     assert!(
-        has(&screen, HOME_MARK),
-        "`/tickets` must open home, got: {screen:?}"
+        has(&screen, TICKETS_MARK),
+        "`/tickets` must open the tickets screen, got: {screen:?}"
     );
 
     pty.write(&[ESC]).expect("Esc");

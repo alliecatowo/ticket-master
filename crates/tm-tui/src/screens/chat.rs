@@ -48,6 +48,7 @@ use crate::chat::mention::{self, FileIndex};
 use crate::chat::picker::{ConversationRow, Picker, PickerOutcome, PickerPurpose};
 use crate::chat::shortcuts;
 use crate::chat::status::{self, PermissionMode, StatusInfo, TurnState};
+use crate::chat::tasks::{self, TaskItem};
 use crate::chat::transcript::{Entry, NoticeLevel, ToolCallView, ToolStatus, Transcript};
 use crate::chat::viewer::Viewer;
 use crate::component::{Component, ComponentId, FrameContext};
@@ -83,6 +84,9 @@ pub enum ChatAction {
     Resume(String),
     /// The answer to the open permission prompt.
     Approve(ApprovalChoice),
+    /// Ctrl+T opened the task checklist (or a turn ended with it open): supply the tasks with
+    /// [`ChatScreen::show_tasks`].
+    ShowTasks,
     /// Show the tickets view.
     GoHome,
     /// Quit tm.
@@ -205,6 +209,8 @@ pub struct ChatScreen {
     mode: PermissionMode,
     queue: VecDeque<Queued>,
     last_esc: Option<Timestamp>,
+    /// The Ctrl+T task checklist, when open.
+    tasks: Option<Vec<TaskItem>>,
     /// `(prompt, tokens)` for every finished turn, for `/cost`.
     turn_costs: Vec<(String, u64)>,
     /// The running turn's prompt, for `/cost`.
@@ -243,6 +249,7 @@ impl ChatScreen {
             mode: PermissionMode::default(),
             queue: VecDeque::new(),
             last_esc: None,
+            tasks: None,
             turn_costs: Vec::new(),
             running_prompt: None,
             files: FileIndex::default(),
@@ -331,6 +338,31 @@ impl ChatScreen {
     /// Whether the transcript viewer (Ctrl+O) is open.
     pub fn is_viewer_open(&self) -> bool {
         self.viewer.is_some()
+    }
+
+    /// Show (or refresh) the Ctrl+T task checklist.
+    pub fn show_tasks(&mut self, items: Vec<TaskItem>) {
+        self.tasks = Some(items);
+    }
+
+    /// Whether the task checklist is open.
+    pub fn is_tasks_open(&self) -> bool {
+        self.tasks.is_some()
+    }
+
+    /// Whether `←` should go to tickets: the prompt is empty and nothing is open over it (a
+    /// dialog, a popup, the shortcuts panel, shell mode, history search), so the key is not
+    /// someone else's.
+    pub fn left_opens_tickets(&self) -> bool {
+        self.input.is_empty()
+            && !self.shell_mode
+            && !self.shortcuts_open
+            && self.viewer.is_none()
+            && self.approval.is_none()
+            && self.picker.is_none()
+            && self.search.is_none()
+            && !self.is_popup_open()
+            && !self.is_mention_open()
     }
 
     /// Whether a permission prompt is waiting for an answer.
@@ -541,6 +573,10 @@ impl ChatScreen {
                 self.last_turn_failed = failed;
                 if let Some((level, text)) = notice {
                     self.transcript.push(Entry::Notice { level, text });
+                }
+                if self.tasks.is_some() {
+                    // The turn may have created or finished tasks.
+                    self.actions.push_back(ChatAction::ShowTasks);
                 }
                 self.start_next_queued(now);
             }
@@ -774,7 +810,7 @@ impl ChatScreen {
                 self.popup = Popup::default();
                 match command.id {
                     CommandId::Help => self.toggle_help(),
-                    CommandId::Home => self.actions.push_back(ChatAction::GoHome),
+                    CommandId::Tickets => self.actions.push_back(ChatAction::GoHome),
                     CommandId::Exit => self.actions.push_back(ChatAction::Quit),
                     CommandId::Status => self.show_status(),
                     CommandId::Cost => self.show_cost(),
@@ -1149,6 +1185,13 @@ impl ChatScreen {
                 self.viewer = Some(Viewer::new());
                 return;
             }
+            KeyCode::Char('t') if ctrl => {
+                if self.tasks.take().is_none() {
+                    self.tasks = Some(Vec::new());
+                    self.actions.push_back(ChatAction::ShowTasks);
+                }
+                return;
+            }
             KeyCode::BackTab => {
                 self.mode = self.mode.next();
                 self.actions.push_back(ChatAction::SetMode(self.mode));
@@ -1236,9 +1279,8 @@ impl ChatScreen {
             KeyCode::Backspace if alt || ctrl => self.input.delete_word_back(),
             KeyCode::Backspace => self.input.backspace(),
             KeyCode::Delete => self.input.delete(),
-            KeyCode::Left if self.input.is_empty() && !self.shell_mode => {
-                self.actions.push_back(ChatAction::GoHome)
-            }
+            // `←` `←` on an empty prompt (tickets) is the application's: see
+            // `ChatScreen::left_opens_tickets`.
             KeyCode::Left if ctrl || alt => self.input.word_left(),
             KeyCode::Left => self.input.left(),
             KeyCode::Right if ctrl || alt => self.input.word_right(),
@@ -1774,12 +1816,31 @@ impl Component for ChatScreen {
             rest.width,
             input_height,
         );
+        let above = rest.height - input_height;
+        // The task checklist sits right above the prompt, as Claude Code's does, and never takes
+        // more than half of what the transcript has.
+        let task_lines = match &self.tasks {
+            Some(items) => {
+                tasks::lines(items, rest.width.saturating_sub(2) as usize, theme, &glyphs)
+            }
+            None => Vec::new(),
+        };
+        let tasks_height = (task_lines.len() as u16).min(above / 2);
         let transcript_area = Rect::new(
             rest.x + 1,
             rest.y,
             rest.width.saturating_sub(2),
-            rest.height - input_height,
+            above - tasks_height,
         );
+        for (i, line) in task_lines.iter().take(tasks_height as usize).enumerate() {
+            draw_line(
+                buf,
+                rest.x + 1,
+                transcript_area.y + transcript_area.height + i as u16,
+                rest.width.saturating_sub(2),
+                line,
+            );
+        }
 
         if transcript_area.height > 0 {
             if self.transcript.is_empty() && self.turn.is_none() && self.queue.is_empty() {

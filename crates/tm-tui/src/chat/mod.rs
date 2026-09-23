@@ -37,5 +37,6 @@ pub mod picker;
 pub mod sanitize;
 pub mod shortcuts;
 pub mod status;
+pub mod tasks;
 pub mod transcript;
 pub mod viewer;

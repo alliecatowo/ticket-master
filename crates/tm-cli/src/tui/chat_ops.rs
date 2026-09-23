@@ -45,6 +45,8 @@ pub(super) struct ChatExt {
     shell_task: Option<JoinHandle<()>>,
     /// The running `/compact`, which cannot be abandoned midway.
     task: Option<JoinHandle<()>>,
+    /// Tickets this conversation handed to the background (`/bg`), for the Ctrl+T checklist.
+    backgrounded: Vec<TicketId>,
     /// Where the answer to the open permission prompt goes, and what it was about.
     approval: Arc<StdMutex<Option<PendingAnswer>>>,
 }
@@ -67,6 +69,7 @@ impl ChatExt {
             interrupter: session.interrupter(),
             shell_task: None,
             task: None,
+            backgrounded: Vec::new(),
             approval: Arc::default(),
         }
     }
@@ -288,10 +291,55 @@ impl App {
             },
             ChatAction::Resume(id) => self.resume(&id),
             ChatAction::Approve(choice) => self.answer_approval(choice, now),
+            ChatAction::ShowTasks => self.show_tasks(),
             ChatAction::Send(prompt) => self.spawn_turn(prompt),
             ChatAction::Command { id, arg } => self.run_command(id, arg, now),
             ChatAction::GoHome | ChatAction::Quit => {}
         }
+    }
+
+    /// Ctrl+T: the attached ticket's subtasks and what this conversation sent to the background,
+    /// as a checklist.
+    fn show_tasks(&mut self) {
+        use tm_core::TicketState as S;
+        use tm_tui::chat::tasks::{TaskItem, TaskState};
+        let Ok(view) = self.project.store.view() else {
+            return;
+        };
+        let mut ids: Vec<TicketId> = Vec::new();
+        if let Some(ticket) = self.attached.as_ref().and_then(|t| view.tickets.get(t)) {
+            ids.extend(ticket.children.iter().cloned());
+        }
+        for id in &self.chat_ext.backgrounded {
+            if !ids.contains(id) {
+                ids.push(id.clone());
+            }
+        }
+        let items = ids
+            .iter()
+            .filter_map(|id| view.tickets.get(id))
+            .map(|t| TaskItem {
+                state: match t.state {
+                    S::Closed => TaskState::Done,
+                    S::Cancelled => TaskState::Failed,
+                    S::Leased
+                    | S::Running
+                    | S::Submitted
+                    | S::Verifying
+                    | S::Auditing
+                    | S::Recovery
+                    | S::Rework
+                    | S::Replan => TaskState::Active,
+                    S::Draft | S::Ready | S::Blocked | S::Escalated => TaskState::Pending,
+                },
+                text: format!(
+                    "{} {}",
+                    t.id,
+                    t.objective.lines().next().unwrap_or_default()
+                ),
+            })
+            .collect();
+        self.chat.show_tasks(items);
     }
 
     fn answer_approval(&mut self, choice: ApprovalChoice, _now: Timestamp) {
@@ -565,11 +613,7 @@ impl App {
             CommandId::Model => self.switch_model(&arg),
             // The chat screen answers these itself; handled anyway so the match stays exhaustive.
             CommandId::Status | CommandId::Cost => {}
-            CommandId::Home => {
-                return self
-                    .chat
-                    .push_notice(NoticeLevel::Info, "Press ← for tickets.")
-            }
+            CommandId::Tickets => return self.open_tickets(now),
             CommandId::Help => return self.chat.toggle_help(),
             CommandId::Exit => return self.quit(),
         }
@@ -616,6 +660,7 @@ impl App {
         match session.background(instruction) {
             Ok(ticket) => {
                 drop(session);
+                self.chat_ext.backgrounded.push(ticket.clone());
                 self.chat.push_notice(
                     NoticeLevel::Success,
                     format!("Moved to the background as {ticket}. Press ← to watch it."),
@@ -707,7 +752,7 @@ impl App {
         }
     }
 
-    fn attach(&mut self, arg: &str) {
+    pub(super) fn attach(&mut self, arg: &str) {
         let Ok(ticket) = arg.trim().parse::<TicketId>() else {
             self.chat.push_notice(
                 NoticeLevel::Warning,

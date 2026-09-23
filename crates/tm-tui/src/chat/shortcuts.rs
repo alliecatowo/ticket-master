@@ -25,6 +25,7 @@ fn entries(glyphs: &Glyphs) -> Vec<String> {
         format!("shift + {enter} for newline"),
         "ctrl + _ to undo".to_string(),
         "ctrl + g for $EDITOR".to_string(),
+        "ctrl + t for tasks".to_string(),
         "ctrl + y to yank".to_string(),
         "ctrl + c twice to exit".to_string(),
     ]
@@ -91,7 +92,7 @@ mod tests {
             "3 columns at 80"
         );
         let narrow = lines(40, &theme, &Glyphs::UNICODE);
-        assert_eq!(narrow.len(), 14);
+        assert_eq!(narrow.len(), 15);
         for width in [30usize, 60, 80, 100, 200] {
             for line in lines(width, &theme, &Glyphs::ASCII) {
                 assert!(line.text().is_ascii());
