@@ -595,6 +595,15 @@ genuine separate use. Full reasoning, the rejected alternative, and what this tr
   Vercel CLI authenticated here (and a Vercel MCP connector), so that may be the fastest path to the
   hosted model without the TypeSafe waitlist. Verify it before relying on it.
 
+## Parked, low priority (owner, 2026-09-23: "important but not that important")
+
+- **Web client Playwright e2e suite.** The harness is done and green: branch `web-e2e-harness`
+  (`clients/web/e2e/`, a per-worker live `tm serve` fixture, and HTTP seeding helpers). Partial specs
+  are on `web-home-e2e`, `web-e2e-detail-actions`, `web-e2e-detail-content` and `web-review-e2e`
+  (unverified WIP). Still to write: identity and errors, live/reconnect, nav and routing, and
+  responsive/a11y. Resume by merging the harness plus those branches; the workflow script is
+  `web-client-e2e` in the session's workflow scripts.
+
 ## Found live, 2026-09-23 (D-019 shell)
 
 - **`/model` lists routing candidates, not models.** With only DevPass configured the picker shows
