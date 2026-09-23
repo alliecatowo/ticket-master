@@ -101,6 +101,7 @@ const VOICE = `Voice for anything a person reads (CLI output, errors, TUI labels
 - Plain words. No internal type, enum or struct names, no {:?} debug output, no raw JSON (unless --json), no event-kind strings, no "Successfully", no stacked "Error: failed to X: error: Y".
 - Name things the way the product does: "ticket T-12 (Fix the login redirect)", "worker", "project". Use the CLI's own verbs. Short, sentence case, placeholders intact.`
 const FINDING_RULES = (max) => `Report at most ${max} tasks, most severe first, each atomic (one worker, one sitting) and self-contained: exact files to change (grep ${PRIMARY} for a message's text to find its source), the change, an observable acceptance check, the exact test command (\`mise run test:crate -- <crate>\` or \`pnpm -C clients/<x> test\`), model (haiku for mechanical edits, sonnet otherwise), builds_rust. Severity: critical = the flow does not work at all; high = works but wrong, misleading or unusable; medium = rough, confusing, missing option or affordance; low = polish. Kinds: bug, copy, hierarchy, missing, stub (looks real but isn't), ux, docs (a doc claims something false). Evidence: the command you ran or file:line, with a ≤3-line excerpt. pass=false if what you were asked to check does not work. works: short lines of what does work. Skip anything already open in ${PRIMARY}/docs/tasks/TASKS.md (\`grep '^- \\[ \\]' ${PRIMARY}/docs/tasks/TASKS.md\`). Provider/model setup UX (/connect, /provider, /config, crates/tm-provider onboarding) belongs to the owner's provider-overhaul workstream: report it only if it blocks a flow.`
+const SEARCH = `Finding code (this is how you save tokens): load the zvec-grep MCP tools with ToolSearch ("select:mcp__zvec_grep__zvec_grep_search,mcp__zvec_grep__zvec_grep_rg") and use zvec_grep_search for concepts and "where does X happen", zvec_grep_rg for exact strings, symbols and regexes, always with root "${PRIMARY}" (the indexed checkout; ${INTEG} has the same tree, so map a path there before reading or editing it in the integration worktree). A search snippet is evidence: read a file only for what the snippet lacks, and only those lines (Read with offset/limit). No broad file reads, no directory-wide cat. Never create, rebuild or drop an index.`
 const SCRATCH = `Binary: \`S=$(mktemp -d); cp ${BIN} "$S/tm"; export TM_HOME=$(mktemp -d)\`; work only inside $S (git init a tiny realistic project with one commit). Never run tm inside ${PRIMARY} or any worktree; don't run cargo. Bound long runs: \`perl -e 'alarm shift; exec @ARGV' 300 "$S/tm" ...\`.`
 const LIVE = `Real provider: load the repo credentials into that one tm process only: \`(set -a; . ${PRIMARY}/.env; set +a; exec "$S/tm" <args>)\`. Never print or copy anything from .env. If that is denied, fall back to TM_TEST_MOCK_PROVIDER=1 and say so in works.`
 
@@ -164,6 +165,7 @@ What to check: ${p.brief}
 ${SCRATCH}
 ${p.live ? LIVE : 'Use the mock provider (TM_TEST_MOCK_PROVIDER=1) unless the brief says otherwise.'}
 At most about 30 tool calls. Read code only to pin an observed defect to the file and function that must change.
+${SEARCH}
 ${VOICE}
 ${FINDING_RULES(6)}
 
@@ -172,7 +174,9 @@ ${RULES}`
 
 function sweepPrompt(s) {
   return `Sweep ONE part of the tm codebase for things that make it feel vibe-coded rather than finished: ${PRIMARY}/${s.where}. Read-only.
-Look for: stubs and placeholders that pretend to work (todo!(), unimplemented!(), "not yet", hardcoded fake values such as a cost of 0, functions that return canned data); features that exist but aren't wired to any surface (nothing calls them outside tests); two concepts that do the same thing under different names; dead code; user-facing text that is machine-speak; error handling that swallows failures; doc comments or docs that claim something the code doesn't do. Use rg and zvec-grep search; read only what you need; at most about 30 tool calls. Only report what you confirmed in the code (cite file:line).
+Look for: stubs and placeholders that pretend to work (todo!(), unimplemented!(), "not yet", hardcoded fake values such as a cost of 0, functions that return canned data); features that exist but aren't wired to any surface (nothing calls them outside tests); two concepts that do the same thing under different names; dead code; user-facing text that is machine-speak; error handling that swallows failures; doc comments or docs that claim something the code doesn't do. At most about 30 tool calls.
+${SEARCH}
+ Only report what you confirmed in the code (cite file:line).
 ${VOICE}
 ${FINDING_RULES(8)}
 
@@ -182,6 +186,7 @@ ${RULES}`
 function cliPrompt(g) {
   return `Exercise \`tm ${g.cmd}\`${g.children.length ? ` and its subcommands (${g.children.join(', ')})` : ''} as a new user would, mock provider. ${SCRATCH}
 For each: --help, one happy path (create what it needs first), one mistake (missing arg, unknown id, wrong state). Judge whether it does what its name says, whether a person understands the output and errors, whether it sits in the right place in the command tree (see the command-surfaces decision doc in ${PRIMARY}/docs/decisions if there is one), and whether any of it only pretends to work. At most about 25 commands.
+${SEARCH}
 ${VOICE}
 ${FINDING_RULES(6)}
 
@@ -192,7 +197,7 @@ async function record(label, intro, payload, idPrefix) {
   return withLock(primaryLock, () => call(`Record tasks into docs/tasks/TASKS.md in the integration worktree ${INTEG} (branch integrate; it must have no uncommitted changes other than yours).
 ${intro}
 Input (JSON): ${JSON.stringify(payload)}
-1. Read docs/tasks/README.md, section "## T — Found in live trials" of TASKS.md, and the open titles (\`grep '^- \\[ \\]' docs/tasks/TASKS.md\`).
+1. Don't read source files. Read docs/tasks/README.md, section "## T — Found in live trials" of TASKS.md, and the open titles (\`grep '^- \\[ \\]' docs/tasks/TASKS.md\`).
 2. Merge input tasks that describe the same defect; drop any already covered by an open task (you may add one clarifying sentence to that task's change line).
 3. Unique ids \`${idPrefix}-<slug>\`; deps = ids of new or open tasks it needs first.
 4. Append at the end of section T in the existing entry format, model line \`model: <m> · severity: <s> · builds Rust: <yes|no> · area: <area> · deps: <ids or none>\`, then files/change/acceptance/test/evidence lines, each entry self-contained.
@@ -208,7 +213,7 @@ Task \`${t.id}\`: its spec is the \`**${t.id}**\` entry in ${INTEG}/docs/tasks/T
 Files you own in this batch: ${owned.join(', ') || '(none declared: create or edit only files nobody else owns)'}.
 ${shared.length ? `Shared files (other tasks need them too): ${shared.join(', ')}. Do NOT edit them; put exactly what must change in each (file, where, text to add or replace) in shared_edits for the integrator.` : ''}
 Files other agents own right now (never touch): ${others.join(', ') || 'none'}.
-Don't build, run cargo or tests, commit, or touch git. You may run \`rustfmt --edition 2021 --check <file>\` for syntax, and use LSP diagnostics if you have them. Read only what you need (zvec-grep search, rg, LSP). Match the surrounding style and comment density. Add or update the unit tests that prove the acceptance check in files you own (#[cfg(test)] at the bottom of the file). A task that needs a decision doc writes the next free docs/decisions/D-NNN-*.md (\`ls ${INTEG}/docs/decisions\`; D-002's format). If the code already does what the task asks, return already-done with evidence; if only the owner can decide something, return blocked and say what.
+Don't build, run cargo or tests, commit, or touch git. You may run \`rustfmt --edition 2021 --check <file>\` for syntax, and use LSP diagnostics if you have them. ${SEARCH} LSP diagnostics and go-to-definition are fine too. Match the surrounding style and comment density. Add or update the unit tests that prove the acceptance check in files you own (#[cfg(test)] at the bottom of the file). A task that needs a decision doc writes the next free docs/decisions/D-NNN-*.md (\`ls ${INTEG}/docs/decisions\`; D-002's format). If the code already does what the task asks, return already-done with evidence; if only the owner can decide something, return blocked and say what.
 ${VOICE}
 Return id, status, files (every file changed or created), shared_edits, summary (2 sentences), tests (which tests prove it).`
 }
@@ -218,7 +223,7 @@ async function integrate(n, batch, edits) {
 Tasks: ${batch.map(t => t.id).join(', ')} (specs in ${INTEG}/docs/tasks/TASKS.md).
 1. \`cd ${INTEG}; unset CARGO_TARGET_DIR\`. Apply each report's shared_edits.
 2. \`mise run fmt\`, then \`env -u CARGO_TARGET_DIR cargo check --workspace --all-targets -j 2\`; fix errors. If client files changed, run that client's pnpm test and build.
-3. \`mise run verify\` (run it in the background and wait; it is slow). Fix what fails: compile errors, clippy, tests pinned to old message text (update them when the new text is right), hygiene. A task you can't make work with a reasonable fix: revert only its files (\`git checkout -- <files>\`, delete files it created) and report it failed with a one-line reason. Re-run until green.
+3. \`mise run verify\` (run it in the background and wait; it is slow). Fix what fails (use zvec_grep_rg to find tests pinned to a message's text instead of reading test files): compile errors, clippy, tests pinned to old message text (update them when the new text is right), hygiene. A task you can't make work with a reasonable fix: revert only its files (\`git checkout -- <files>\`, delete files it created) and report it failed with a one-line reason. Re-run until green.
 4. Commit one commit per task whose files are its own ("<type>(<scope>): <summary>" and a "Task: <id>" line), shared-file changes in a final commit. In docs/tasks/TASKS.md turn each landed task's "- [ ]" or "- [~]" into "- [x]" and append " (landed <short sha>)"; tasks an editor reported already-done get "- [x]" with " (already satisfied)"; blocked ones get "- [~]" with " (needs the owner: <what>)". Commit "docs(tasks): land batch ${n}".
 5. \`git merge --no-edit main\` (re-run affected tests if main moved), \`git -C ${PRIMARY} merge --ff-only integrate\` (if refused because of someone's local changes, leave them: main_updated=false), \`git push origin integrate:main\` (if rejected, \`git fetch origin main && git merge --no-edit origin/main\`, re-check, push; retry network errors 4 times at 2s/4s/8s/16s; never force).
 Return landed, failed ({id, reason}), green, head (short sha), pushed, main_updated, notes (≤3 lines).
@@ -291,7 +296,8 @@ async function judge(round, probeSummary, openCount) {
   return call(`You decide whether ticket-master (tm) is finished. The standard: "implemented till no issues or remaining work, and in-depth analysis finds it tasteful, coherent, and it can actually be driven through its various surfaces to work on projects end to end." Round ${round}.
 This round's probes (pass/fail and finding titles): ${JSON.stringify(probeSummary)}
 Open tasks remaining in TASKS.md: ${openCount}.
-Read ${PRIMARY}/CLAUDE.md, docs/decisions/D-019-claude-code-parity-shell.md and the command-surfaces decision doc if one exists. Then drive the product yourself for about 25 tool calls: ${SCRATCH} Try the chat (\`tm -p\`, mock), the tickets flow, \`tm serve\` briefly, and whatever the probes found weakest. Judge taste (does it feel designed: consistent names, calm clear copy, sensible defaults, no leftover scaffolding), coherence (do tickets, sessions, workers, projects, milestones and deciders fit one model?), and drivability (can a person get real work done end to end on each surface?).
+Read ${PRIMARY}/CLAUDE.md, docs/decisions/D-019-claude-code-parity-shell.md and the command-surfaces decision doc if one exists. ${SEARCH}
+Then drive the product yourself for about 25 tool calls: ${SCRATCH} Try the chat (\`tm -p\`, mock), the tickets flow, \`tm serve\` briefly, and whatever the probes found weakest. Judge taste (does it feel designed: consistent names, calm clear copy, sensible defaults, no leftover scaffolding), coherence (do tickets, sessions, workers, projects, milestones and deciders fit one model?), and drivability (can a person get real work done end to end on each surface?).
 Return done (true only if you would ship it to a demanding user as is), verdict (≤5 lines), surfaces (surface, score 1-10, note), and tasks: the gaps that stand between this and done, most important first.
 ${VOICE}
 ${FINDING_RULES(10)}
