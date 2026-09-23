@@ -779,6 +779,7 @@ impl AgentLoop {
                 stop_sequences: Vec::new(),
                 stream: false,
                 n: 1,
+                model: None,
             };
 
             let completion = match self.fabric.execute(self.role, request).await {
@@ -1801,6 +1802,7 @@ mod tests {
             stop_sequences: Vec::new(),
             stream: false,
             n: 1,
+            model: None,
         }
     }
 

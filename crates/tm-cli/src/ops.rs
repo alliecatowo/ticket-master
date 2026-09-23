@@ -835,9 +835,10 @@ pub async fn provider_status(renderer: &Renderer) -> tm_types::Result<()> {
 
 /// The fixed, tiny request `tm provider test` sends to each provider. Non-streaming, matching
 /// what `tm-agent`'s turn loop sends, so a passing test exercises the same response-parsing path
-/// a real turn does. `max_tokens` is small to keep the probe cheap; a reasoning model that spends
-/// all of it thinking comes back as `stop_reason: max_tokens`, which still counts as a successful
-/// round-trip (the provider answered and the reply parsed).
+/// a real turn does. `max_tokens` leaves a reasoning model room to think and still say "OK" (at 64
+/// it spent everything thinking and replied with nothing); one that runs out anyway comes back as
+/// `stop_reason: max_tokens`, which still counts as a successful round-trip (the provider
+/// answered and the reply parsed).
 fn provider_probe_request() -> tm_provider::CompletionRequest {
     tm_provider::CompletionRequest {
         system: None,
@@ -848,11 +849,12 @@ fn provider_probe_request() -> tm_provider::CompletionRequest {
             }],
         }],
         tools: vec![],
-        max_tokens: 64,
+        max_tokens: 1_024,
         temperature: None,
         stop_sequences: vec![],
         stream: false,
         n: 1,
+        model: None,
     }
 }
 

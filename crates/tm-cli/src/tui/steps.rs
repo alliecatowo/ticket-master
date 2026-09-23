@@ -418,6 +418,29 @@ pub(crate) fn approval_notice(tool: &str, target: &str, choice: ApprovalChoice) 
     Entry::Notice { level, text }
 }
 
+/// `/compact`'s result: `⏺ Compact` / `⎿ Compacted 12 turns`, the summary in the viewer.
+pub(crate) fn compacted_entry(compaction: &crate::agent::Compaction) -> Entry {
+    Entry::Tool(ToolCallView {
+        body: ToolBody::Summary(format!(
+            "Compacted {} (ctrl+o to see the summary)",
+            plural(compaction.turns as u64, "turn")
+        )),
+        output: compaction.summary.clone(),
+        ..ToolCallView::new(ToolStatus::Ok, "compact", "")
+    })
+}
+
+/// The note a turn that compacted the conversation before running leaves in the transcript.
+pub(crate) fn auto_compacted_notice(compaction: &crate::agent::Compaction) -> Entry {
+    Entry::Notice {
+        level: NoticeLevel::Info,
+        text: format!(
+            "Compacted {} to stay within the context window.",
+            plural(compaction.turns as u64, "earlier turn")
+        ),
+    }
+}
+
 /// A saved conversation's turns as transcript entries, for a resumed session (`tm -c`,
 /// `tm -r`, `/resume`): each prompt, then its steps; a `!` command the human ran shows as the
 /// shell block it was.

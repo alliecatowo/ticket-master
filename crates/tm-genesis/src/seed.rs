@@ -201,6 +201,7 @@ pub async fn analyze_prompt(
         stop_sequences: vec![],
         stream: false,
         n: 1,
+        model: None,
     };
 
     // Call the provider with SummarizerCheap role.

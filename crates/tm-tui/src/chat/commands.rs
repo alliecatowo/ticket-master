@@ -90,7 +90,7 @@ pub const COMMANDS: &[SlashCommand] = &[
         id: CommandId::Compact,
         name: "compact",
         aliases: &[],
-        arg: Arg::None,
+        arg: Arg::Optional("[focus]"),
         description: "Summarize the conversation to free up context",
     },
     SlashCommand {

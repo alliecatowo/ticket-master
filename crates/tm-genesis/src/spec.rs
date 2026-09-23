@@ -196,6 +196,7 @@ pub fn build_spec_request(vision: &Vision) -> tm_provider::types::CompletionRequ
         stop_sequences: vec![],
         stream: false,
         n: 1,
+        model: None,
     }
 }
 

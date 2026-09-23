@@ -45,7 +45,7 @@ use crate::chat::glyphs::Glyphs;
 use crate::chat::input::{BoxStyle, InputBox};
 use crate::chat::lines::{clear, draw_box, draw_line, draw_spans, truncate_spans, Line, Span};
 use crate::chat::mention::{self, FileIndex};
-use crate::chat::picker::{ConversationRow, PickerOutcome, ResumePicker};
+use crate::chat::picker::{ConversationRow, Picker, PickerOutcome, PickerPurpose};
 use crate::chat::shortcuts;
 use crate::chat::status::{self, PermissionMode, StatusInfo, TurnState};
 use crate::chat::transcript::{Entry, NoticeLevel, ToolCallView, ToolStatus, Transcript};
@@ -114,6 +114,11 @@ pub enum TurnUpdate {
     },
     /// A `!` command finished (or was interrupted).
     ShellFinished(ToolCallView),
+    /// A background task the screen started with [`ChatScreen::begin_task`] (`/compact`)
+    /// finished; `entry` records its result.
+    TaskFinished(Entry),
+    /// How many tokens the conversation's context now takes, for the status line.
+    Context(u64),
 }
 
 /// How long a transient status-line hint stays up.
@@ -131,11 +136,12 @@ struct TransientHint {
     until: Timestamp,
 }
 
-/// Whether the running work is a model turn or a `!` command.
+/// Whether the running work is a model turn, a `!` command, or another task (`/compact`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TurnKind {
     Agent,
     Shell,
+    Task,
 }
 
 /// The running turn's clock and current activity.
@@ -193,7 +199,7 @@ pub struct ChatScreen {
     viewer: Option<Viewer>,
     search: Option<Search>,
     approval: Option<ApprovalPrompt>,
-    picker: Option<ResumePicker>,
+    picker: Option<Picker>,
     /// `!` mode: the prompt is a shell command.
     shell_mode: bool,
     mode: PermissionMode,
@@ -362,6 +368,32 @@ impl ChatScreen {
         }
     }
 
+    /// Show a command the application runs itself (`/compact`) as running: `shown` is echoed as
+    /// the human's message and the spinner says `activity` until
+    /// [`TurnUpdate::TaskFinished`] arrives.
+    pub fn begin_task(&mut self, shown: impl Into<String>, activity: impl Into<String>, now: Timestamp) {
+        self.transcript.push(Entry::User(shown.into()));
+        self.transcript.follow();
+        self.turn = Some(RunningTurn {
+            started: now,
+            activity: activity.into(),
+            kind: TurnKind::Task,
+            interrupting: true,
+        });
+    }
+
+    /// Name the model turns now go to (after `/model`), replacing the last one that answered.
+    pub fn show_model(&mut self, model: impl Into<String>) {
+        self.status.model = model.into();
+        self.served_by = None;
+    }
+
+    /// Open the `/model` picker over `choices` (`provider/model`), `current` marked.
+    pub fn open_model_picker(&mut self, choices: Vec<String>, current: Option<&str>) {
+        self.shortcuts_open = false;
+        self.picker = Some(Picker::models(choices, current));
+    }
+
     /// Add an already-finished entry (an earlier turn of a resumed conversation).
     pub fn push_entry(&mut self, entry: Entry) {
         self.transcript.push(entry);
@@ -502,6 +534,15 @@ impl ChatScreen {
                 }
                 self.start_next_queued(now);
             }
+            TurnUpdate::TaskFinished(entry) => {
+                self.transcript.push(entry);
+                self.transcript.follow();
+                if self.turn.as_ref().is_some_and(|t| t.kind == TurnKind::Task) {
+                    self.turn = None;
+                }
+                self.start_next_queued(now);
+            }
+            TurnUpdate::Context(tokens) => self.status.context_tokens = tokens,
             TurnUpdate::ShellFinished(view) => {
                 if !self.transcript.finish_shell(view.clone()) {
                     self.transcript.push(Entry::Shell(view));
@@ -807,7 +848,7 @@ impl ChatScreen {
     /// Open the `/resume` picker over `rows` (newest first).
     pub fn open_resume_picker(&mut self, rows: Vec<ConversationRow>) {
         self.shortcuts_open = false;
-        self.picker = Some(ResumePicker::new(rows));
+        self.picker = Some(Picker::resume(rows));
     }
 
     /// Whether the `/resume` picker is open.
@@ -1047,8 +1088,15 @@ impl ChatScreen {
                 PickerOutcome::Open => {}
                 PickerOutcome::Cancelled => self.picker = None,
                 PickerOutcome::Chosen(id) => {
+                    let purpose = picker.purpose();
                     self.picker = None;
-                    self.actions.push_back(ChatAction::Resume(id));
+                    self.actions.push_back(match purpose {
+                        PickerPurpose::Resume => ChatAction::Resume(id),
+                        PickerPurpose::Model => ChatAction::Command {
+                            id: CommandId::Model,
+                            arg: id,
+                        },
+                    });
                 }
             }
             return;
@@ -1257,7 +1305,7 @@ impl ChatScreen {
         let muted = Style::default().fg(theme.muted);
         let mut rows = Vec::new();
         if let Some(turn) = &self.turn {
-            if turn.kind == TurnKind::Agent {
+            if turn.kind != TurnKind::Shell {
                 let elapsed = now.millis_since(turn.started).max(0) / 1000;
                 let clock = if elapsed >= 60 {
                     format!("{}m {:02}s", elapsed / 60, elapsed % 60)

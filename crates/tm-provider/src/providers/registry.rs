@@ -66,23 +66,16 @@
 //! candidates than any one environment actually has credentials for and still route through
 //! whichever ones are live.
 //!
-//! # IMPL: a real routing gap this agent should document, not silently paper over
+//! # One provider per slug serves every model under it
 //!
-//! [`crate::fabric::Fabric::register_provider`] keys its registry solely by
-//! [`crate::fabric::Provider::id`] (a single `&str`), and every stub struct in this crate's
-//! `from_env` bakes in one fixed `model: ModelId` at construction — exactly matching
-//! [`crate::anthropic::AnthropicProvider`]'s existing shape. If `providers.toml` ever lists two
-//! candidates under the *same* `provider` slug with two *different* models (e.g. `"openai"` /
-//! `"gpt-4o"` and `"openai"` / `"gpt-4o-mini"` for two different roles), only one of those models
-//! can actually be registered: [`crate::fabric::Fabric::register_provider`] inserts by id into a
-//! `BTreeMap`, so the second registration silently replaces the first, and *both* roles' traffic
-//! ends up hitting whichever model was registered last — not a crash, a silent misroute. Fixing
-//! this for real means changing [`crate::fabric::Fabric::register_provider`]'s keying, which is
-//! out of scope for this file (`fabric.rs` belongs to a different owner). Until that lands,
-//! [`Registry::build_fabric`] must at least detect the collision and refuse to build rather than
-//! misroute silently: when two candidates share a `provider` slug but differ in `model`, return
-//! [`crate::types::ProviderError::InvalidRequest`] naming both models and the shared slug, rather
-//! than registering the second over the first.
+//! [`crate::fabric::Fabric::register_provider`] keys providers by [`crate::fabric::Provider::id`]
+//! alone, and each provider is built for one default model. That's enough for a table that routes
+//! different roles to different models of the same provider (`openai`/`gpt-4o` for one role,
+//! `openai`/`gpt-4o-mini` for another): [`crate::fabric::Fabric::execute`] puts the routed
+//! candidate's model on the request ([`crate::types::CompletionRequest::model`]), and the provider
+//! serves that model rather than its default. So [`Registry::build_fabric`] builds each slug once,
+//! from the first candidate that names it. (Before that field existed, the second model silently
+//! lost to the first, and this module refused such tables outright.)
 
 use std::sync::Arc;
 
@@ -110,7 +103,7 @@ fn pick_completion_model(models: &[String]) -> String {
 
 /// Autodetects and constructs this crate's provider fleet from the environment, and wires a
 /// [`RoleTable`] to a ready-to-use [`Fabric`]. See the module docs for the full dispatch table
-/// and the known `provider`-slug-collision gap.
+/// and how one provider serves several models.
 pub struct Registry;
 
 impl Registry {
@@ -349,23 +342,16 @@ impl Registry {
 
     /// Build a [`Fabric`] for `table`, registering every distinct `provider` slug the table
     /// references that is currently configured, and skipping (not erroring on) any that isn't.
-    /// Errors only on the slug-collision case documented above or a `provider` slug this crate
-    /// does not recognize at all (surfaced through [`Registry::build_provider`]).
+    /// Errors only on a `provider` slug this crate does not recognize at all (surfaced through
+    /// [`Registry::build_provider`]).
     pub fn build_fabric(table: RoleTable, clock: Arc<dyn Clock>) -> Result<Fabric, ProviderError> {
         let mut distinct: std::collections::BTreeMap<String, RoleCandidate> =
             std::collections::BTreeMap::new();
         for role in tm_types::Role::ALL {
             for candidate in table.candidates_for(role) {
-                if let Some(existing) = distinct.get(&candidate.provider) {
-                    if existing.model != candidate.model {
-                        return Err(ProviderError::InvalidRequest(format!(
-                            "provider {} is routed to two different models ({} and {})",
-                            candidate.provider, existing.model, candidate.model
-                        )));
-                    }
-                } else {
-                    distinct.insert(candidate.provider.clone(), candidate.clone());
-                }
+                distinct
+                    .entry(candidate.provider.clone())
+                    .or_insert_with(|| candidate.clone());
             }
         }
 
@@ -502,11 +488,10 @@ mod tests {
         }
     }
 
-    /// Two roles routed to the same provider slug under two different models must be refused,
-    /// per the module docs' `register_provider` single-model-per-id gap, rather than silently
-    /// misrouting one role's traffic onto the other role's model.
+    /// Two roles routed to the same provider slug under two different models is a normal table:
+    /// the one provider serves both (see the module docs).
     #[test]
-    fn build_fabric_rejects_same_provider_different_model_collision() {
+    fn build_fabric_accepts_one_provider_serving_two_models() {
         let toml = r#"
             [vision.frontier]
             candidates = [
@@ -541,29 +526,9 @@ mod tests {
         "#;
         let table = RoleTable::parse(toml).expect("valid providers.toml");
         let clock = Arc::new(FixedClock::epoch());
-        let err = match Registry::build_fabric(table, clock) {
-            Ok(_) => panic!("provider/model collision unexpectedly built a fabric"),
-            Err(e) => e,
-        };
-        match err {
-            ProviderError::InvalidRequest(msg) => {
-                assert!(msg.contains("gpt-4o"));
-                assert!(msg.contains("gpt-4o-mini"));
-            }
-            other => panic!("expected InvalidRequest naming the colliding models, got {other}"),
-        }
+        assert!(Registry::build_fabric(table, clock).is_ok());
     }
 
-    /// A table with no collisions and no env vars configured should build a `Fabric` with no
-    /// providers registered rather than erroring — every candidate's backend is simply skipped.
-    ///
-    /// Deliberately does *not* use [`RoleTable::default_table`]: that table routes frontier
-    /// roles through `claude-opus-4-1` and non-frontier roles through `claude-sonnet-5`/
-    /// `claude-haiku-3.5`, all under the single `"anthropic"` slug — exactly the same-slug,
-    /// different-model shape [`build_fabric_rejects_same_provider_different_model_collision`]
-    /// covers, and exactly the gap the module docs call out as real, not hypothetical. This test
-    /// wants a table with *no* collision, to isolate the "unconfigured backend is skipped"
-    /// behavior from that separately-tested collision behavior.
     #[test]
     fn build_fabric_skips_unconfigured_providers_without_erroring() {
         let toml = r#"

@@ -229,7 +229,7 @@ fn base_status(
         global_scope: project.scope == Scope::Global,
         ticket: ticket.map(|t| t.to_string()),
         open_tickets: view.tickets.values().filter(|t| is_open(t.state)).count(),
-        tokens: 0,
+        ..StatusInfo::default()
     }
 }
 

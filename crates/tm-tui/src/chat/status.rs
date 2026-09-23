@@ -39,6 +39,8 @@ pub struct StatusInfo {
     pub open_tickets: usize,
     /// Tokens spent by this session so far.
     pub tokens: u64,
+    /// How many tokens the conversation's context took on the last turn (0: not known yet).
+    pub context_tokens: u64,
 }
 
 /// One status-bar segment.
@@ -122,6 +124,17 @@ pub fn segments(
         out.push(Segment {
             priority: 30,
             spans: vec![Span::new(format!("{} open", info.open_tickets), muted)],
+            shrinkable: false,
+        });
+    }
+
+    if info.context_tokens > 0 {
+        out.push(Segment {
+            priority: 35,
+            spans: vec![Span::new(
+                format!("{} context", format_tokens(info.context_tokens)),
+                muted,
+            )],
             shrinkable: false,
         });
     }
@@ -282,6 +295,7 @@ mod tests {
             ticket: None,
             open_tickets: 3,
             tokens: 12_345,
+            context_tokens: 0,
         }
     }
 

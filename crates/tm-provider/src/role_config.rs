@@ -237,6 +237,36 @@ impl RoleTable {
             .unwrap_or(&[])
     }
 
+    /// Put `provider`/`model` first in `role`'s candidate list, so routing tries it before
+    /// anything else (`/model` in a session). An existing entry for the same pair moves to the
+    /// front; a new one takes the current primary's concurrency, but not its price or limits,
+    /// which belong to the other model. The rest of the list stays behind it, in order, as the
+    /// fallback path.
+    pub fn prefer(&mut self, role: Role, provider: &str, model: &str) {
+        let candidates = self.roles.entry(role.as_str().to_string()).or_default();
+        let existing = candidates
+            .iter()
+            .position(|c| c.provider == provider && c.model == model);
+        let preferred = match existing {
+            Some(i) => candidates.remove(i),
+            None => RoleCandidate {
+                provider: provider.to_string(),
+                model: model.to_string(),
+                max_concurrency: candidates.first().map_or(10, |c| c.max_concurrency),
+                degraded_ok: false,
+                price: None,
+                limits: Limits::unlimited(),
+            },
+        };
+        candidates.insert(
+            0,
+            RoleCandidate {
+                degraded_ok: false,
+                ..preferred
+            },
+        );
+    }
+
     /// The built-in default table, used when no `providers.toml` exists yet.
     ///
     /// Provides one primary Anthropic candidate per role (frontier roles use Opus, cheap/fast
@@ -289,7 +319,7 @@ impl RoleTable {
                     // Cheap exploration: primary on Haiku
                     let primary = RoleCandidate {
                         provider: "anthropic".to_string(),
-                        model: "claude-haiku-3.5".to_string(),
+                        model: "claude-haiku-4-5".to_string(),
                         max_concurrency: 50,
                         degraded_ok: false,
                         price: None,
@@ -304,7 +334,7 @@ impl RoleTable {
                             primary,
                             RoleCandidate {
                                 provider: "anthropic".to_string(),
-                                model: "claude-haiku-3.5".to_string(),
+                                model: "claude-haiku-4-5".to_string(),
                                 max_concurrency: 25,
                                 degraded_ok: true,
                                 price: None,
@@ -317,7 +347,7 @@ impl RoleTable {
                     // Cheap summarization: primary on Haiku
                     let primary = RoleCandidate {
                         provider: "anthropic".to_string(),
-                        model: "claude-haiku-3.5".to_string(),
+                        model: "claude-haiku-4-5".to_string(),
                         max_concurrency: 100,
                         degraded_ok: false,
                         price: None,
@@ -353,7 +383,7 @@ impl RoleTable {
                             primary,
                             RoleCandidate {
                                 provider: "anthropic".to_string(),
-                                model: "claude-haiku-3.5".to_string(),
+                                model: "claude-haiku-4-5".to_string(),
                                 max_concurrency: 50,
                                 degraded_ok: true,
                                 price: None,
@@ -366,7 +396,7 @@ impl RoleTable {
                     // Frontier roles: strong Opus primary + Sonnet fallback if not strict
                     let primary = RoleCandidate {
                         provider: "anthropic".to_string(),
-                        model: "claude-opus-4-1".to_string(),
+                        model: "claude-opus-5-5".to_string(),
                         max_concurrency: 10,
                         degraded_ok: false,
                         price: None,
@@ -407,7 +437,7 @@ impl RoleTable {
                             primary,
                             RoleCandidate {
                                 provider: "anthropic".to_string(),
-                                model: "claude-haiku-3.5".to_string(),
+                                model: "claude-haiku-4-5".to_string(),
                                 max_concurrency: 50,
                                 degraded_ok: true,
                                 price: None,
@@ -435,6 +465,38 @@ mod tests {
         let s = table.to_toml_string().expect("default table serializes");
         let parsed = RoleTable::parse(&s).expect("default table's own TOML reparses");
         assert_eq!(table, parsed);
+    }
+
+    #[test]
+    fn prefer_moves_a_known_candidate_first_and_adds_an_unknown_one() {
+        let mut table = RoleTable::default_table_with(None);
+        let before: Vec<_> = table
+            .candidates_for(Role::CoderFast)
+            .iter()
+            .map(|c| c.model.clone())
+            .collect();
+        assert_eq!(before, ["claude-sonnet-5", "claude-haiku-4-5"]);
+
+        table.prefer(Role::CoderFast, "anthropic", "claude-haiku-4-5");
+        let after = table.candidates_for(Role::CoderFast);
+        assert_eq!(after.len(), 2, "moved, not duplicated");
+        assert_eq!(after[0].model, "claude-haiku-4-5");
+        assert!(!after[0].degraded_ok, "the chosen model is not a degrade");
+        assert_eq!(after[1].model, "claude-sonnet-5");
+
+        table.prefer(Role::CoderFast, "devpass", "muse");
+        let after = table.candidates_for(Role::CoderFast);
+        assert_eq!(after.len(), 3);
+        assert_eq!(
+            (after[0].provider.as_str(), after[0].model.as_str()),
+            ("devpass", "muse")
+        );
+        assert_eq!(
+            after[0].max_concurrency, 50,
+            "takes the old primary's concurrency"
+        );
+        assert!(after[0].price.is_none());
+        table.validate().expect("still a valid table");
     }
 
     #[test]
@@ -477,7 +539,7 @@ candidates = [
 [coder.fast]
 candidates = [
   { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 10 },
-  { provider = "anthropic", model = "claude-haiku-3.5", max_concurrency = 20, degraded_ok = true }
+  { provider = "anthropic", model = "claude-haiku-4-5", max_concurrency = 20, degraded_ok = true }
 ]
 "#;
         let table = RoleTable::parse(toml).expect("valid TOML with multiple candidates");
@@ -557,7 +619,7 @@ candidates = [
 
 [vision.frontier]
 candidates = [
-  { provider = "anthropic", model = "claude-opus-4-1", max_concurrency = 5 }
+  { provider = "anthropic", model = "claude-opus-5-5", max_concurrency = 5 }
 ]
 "#;
         let table = RoleTable::parse(toml).expect("valid TOML with multiple roles");
@@ -652,7 +714,7 @@ candidates = [
         assert_eq!(coder_fast[0].max_concurrency, 20);
         assert!(!coder_fast[0].degraded_ok);
         assert_eq!(coder_fast[1].provider, "anthropic");
-        assert_eq!(coder_fast[1].model, "claude-haiku-3.5");
+        assert_eq!(coder_fast[1].model, "claude-haiku-4-5");
         assert!(coder_fast[1].degraded_ok);
 
         // Broader invariant: with no DevPass model, *every* candidate of *every* role is still
@@ -681,7 +743,7 @@ candidates = [
         // The Anthropic fallback is left in place, untouched, so a project that also has
         // `ANTHROPIC_API_KEY` set still has a degrade path if DevPass becomes unavailable.
         assert_eq!(coder_fast[1].provider, "anthropic");
-        assert_eq!(coder_fast[1].model, "claude-haiku-3.5");
+        assert_eq!(coder_fast[1].model, "claude-haiku-4-5");
         assert!(coder_fast[1].degraded_ok);
 
         // Every other role is completely unaffected: still all-Anthropic.

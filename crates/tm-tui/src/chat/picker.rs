@@ -1,5 +1,6 @@
-//! The `/resume` picker: past conversations, newest first, each with its first message, age and
-//! turn count. ↑/↓ move, Enter resumes, Esc closes. Typing filters by message or id.
+//! The chat's pickers: `/resume` (past conversations, newest first, each with its first message,
+//! age and turn count) and `/model` (the models this session can use, the current one marked).
+//! ↑/↓ move, Enter chooses, Esc closes, typing filters.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui_core::buffer::Buffer;
@@ -11,7 +12,7 @@ use crate::chat::lines::{clear, draw_box, draw_spans, truncate_spans, Span};
 use crate::text::display_width;
 use crate::theme::Theme;
 
-/// One past conversation.
+/// One past conversation, as `/resume` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConversationRow {
     /// Its session id (`S-12`).
@@ -24,6 +25,26 @@ pub struct ConversationRow {
     pub turns: usize,
 }
 
+/// What a picker is choosing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerPurpose {
+    /// A conversation to resume.
+    Resume,
+    /// A model to switch to.
+    Model,
+}
+
+/// One pickable row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PickerRow {
+    /// What choosing it yields (a session id, a `provider/model`).
+    pub id: String,
+    /// The row's main text.
+    pub label: String,
+    /// Right-aligned, muted facts (`5m ago · 3 turns`, `current`).
+    pub meta: String,
+}
+
 /// What a key did to the picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerOutcome {
@@ -31,35 +52,92 @@ pub enum PickerOutcome {
     Open,
     /// Closed without choosing.
     Cancelled,
-    /// This conversation was chosen.
+    /// This row's id was chosen.
     Chosen(String),
 }
 
-/// The picker's state.
+/// A picker's state.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResumePicker {
-    rows: Vec<ConversationRow>,
+pub struct Picker {
+    purpose: PickerPurpose,
+    title: String,
+    empty: String,
+    rows: Vec<PickerRow>,
     filter: String,
     selected: usize,
 }
 
-impl ResumePicker {
-    /// A picker over `rows` (newest first).
+/// The `/resume` picker (kept as a name for callers).
+pub type ResumePicker = Picker;
+
+impl Picker {
+    /// The `/resume` picker over `rows` (newest first).
     pub fn new(rows: Vec<ConversationRow>) -> Self {
-        ResumePicker {
-            rows,
+        Picker::resume(rows)
+    }
+
+    /// The `/resume` picker over `rows` (newest first).
+    pub fn resume(rows: Vec<ConversationRow>) -> Self {
+        Picker {
+            purpose: PickerPurpose::Resume,
+            title: "Resume a conversation".to_string(),
+            empty: "No saved conversations in this project yet.".to_string(),
+            rows: rows
+                .into_iter()
+                .map(|r| PickerRow {
+                    meta: format!(
+                        "{} · {} turn{}",
+                        r.age,
+                        r.turns,
+                        if r.turns == 1 { "" } else { "s" }
+                    ),
+                    id: r.id,
+                    label: r.first_message,
+                })
+                .collect(),
             filter: String::new(),
             selected: 0,
         }
     }
 
-    fn visible(&self) -> Vec<&ConversationRow> {
+    /// The `/model` picker over `choices` (`provider/model`), `current` marked and selected.
+    pub fn models(choices: Vec<String>, current: Option<&str>) -> Self {
+        let selected = current
+            .and_then(|c| choices.iter().position(|m| m == c))
+            .unwrap_or(0);
+        Picker {
+            purpose: PickerPurpose::Model,
+            title: "Select a model".to_string(),
+            empty: "No configured provider offers a model.".to_string(),
+            rows: choices
+                .into_iter()
+                .map(|m| PickerRow {
+                    meta: if Some(m.as_str()) == current {
+                        "current".to_string()
+                    } else {
+                        String::new()
+                    },
+                    id: m.clone(),
+                    label: m,
+                })
+                .collect(),
+            filter: String::new(),
+            selected,
+        }
+    }
+
+    /// What this picker chooses.
+    pub fn purpose(&self) -> PickerPurpose {
+        self.purpose
+    }
+
+    fn visible(&self) -> Vec<&PickerRow> {
         let needle = self.filter.to_lowercase();
         self.rows
             .iter()
             .filter(|r| {
                 needle.is_empty()
-                    || r.first_message.to_lowercase().contains(&needle)
+                    || r.label.to_lowercase().contains(&needle)
                     || r.id.to_lowercase().contains(&needle)
             })
             .collect()
@@ -117,9 +195,9 @@ impl ResumePicker {
             .add_modifier(Modifier::BOLD);
         let muted = Style::default().fg(theme.muted);
         let title = if self.filter.is_empty() {
-            " Resume a conversation ".to_string()
+            format!(" {} ", self.title)
         } else {
-            format!(" Resume a conversation {} {} ", glyphs.sep.trim(), self.filter)
+            format!(" {} {} {} ", self.title, glyphs.sep.trim(), self.filter)
         };
         buf.set_stringn(
             outer.x + 2,
@@ -129,7 +207,7 @@ impl ResumePicker {
             accent,
         );
         let footer = format!(
-            " {} select{}enter resume{}esc close ",
+            " {} select{}enter choose{}esc close ",
             glyphs.updown, glyphs.sep, glyphs.sep
         );
         let footer_width = display_width(&footer) as u16;
@@ -144,7 +222,7 @@ impl ResumePicker {
         let inner = (width as usize).saturating_sub(4);
         if rows.is_empty() {
             let text = if self.rows.is_empty() {
-                "No saved conversations in this project yet."
+                self.empty.as_str()
             } else {
                 "Nothing matches."
             };
@@ -156,29 +234,29 @@ impl ResumePicker {
         let first = selected.saturating_sub(shown.saturating_sub(1));
         for (row, (i, r)) in rows.iter().enumerate().skip(first).take(shown).enumerate() {
             let is_selected = i == selected;
-            let meta = format!(
-                "  {} {} {} turn{}",
-                r.age,
-                glyphs.sep.trim(),
-                r.turns,
-                if r.turns == 1 { "" } else { "s" }
-            );
-            let spans = vec![
-                Span::new(
-                    if is_selected { glyphs.pointer } else { " " },
-                    Style::default().fg(theme.accent),
-                ),
-                Span::new(format!(" {:<6} ", r.id), muted),
-                Span::new(
-                    r.first_message.clone(),
-                    if is_selected { accent } else { Style::default() },
-                ),
-            ];
+            let meta = if r.meta.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", r.meta.replace('·', glyphs.sep.trim()))
+            };
+            let mut spans = vec![Span::new(
+                if is_selected { glyphs.pointer } else { " " },
+                Style::default().fg(theme.accent),
+            )];
+            if self.purpose == PickerPurpose::Resume {
+                spans.push(Span::new(format!(" {:<6} ", r.id), muted));
+            } else {
+                spans.push(Span::new(" ", muted));
+            }
+            spans.push(Span::new(
+                r.label.clone(),
+                if is_selected { accent } else { Style::default() },
+            ));
             let meta_width = display_width(&meta);
             let spans = truncate_spans(&spans, inner.saturating_sub(meta_width), glyphs.ellipsis);
             let y = outer.y + 2 + row as u16;
             draw_spans(buf, outer.x + 2, y, inner as u16, &spans);
-            if meta_width < inner {
+            if meta_width > 0 && meta_width < inner {
                 buf.set_stringn(
                     outer.x + 2 + (inner - meta_width) as u16,
                     y,
@@ -195,8 +273,8 @@ impl ResumePicker {
 mod tests {
     use super::*;
 
-    fn picker() -> ResumePicker {
-        ResumePicker::new(vec![
+    fn picker() -> Picker {
+        Picker::resume(vec![
             ConversationRow {
                 id: "S-3".into(),
                 first_message: "fix the flaky test".into(),
@@ -214,6 +292,20 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn render(p: &Picker) -> String {
+        let area = Rect::new(0, 0, 80, 12);
+        let mut buf = Buffer::empty(area);
+        p.render(area, &mut buf, &Theme::dark(), &Glyphs::UNICODE);
+        (0..12)
+            .map(|y| {
+                (0..80)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    + "\n"
+            })
+            .collect()
     }
 
     #[test]
@@ -237,21 +329,24 @@ mod tests {
 
     #[test]
     fn it_lists_first_message_age_and_turns() {
-        let p = picker();
-        let area = Rect::new(0, 0, 80, 12);
-        let mut buf = Buffer::empty(area);
-        p.render(area, &mut buf, &Theme::dark(), &Glyphs::UNICODE);
-        let text: String = (0..12)
-            .map(|y| {
-                (0..80)
-                    .map(|x| buf[(x, y)].symbol().to_string())
-                    .collect::<String>()
-                    + "\n"
-            })
-            .collect();
+        let text = render(&picker());
         assert!(text.contains("Resume a conversation"), "{text}");
         assert!(text.contains("fix the flaky test"), "{text}");
         assert!(text.contains("5m ago · 3 turns"), "{text}");
         assert!(text.contains("2d ago · 1 turn"), "{text}");
+    }
+
+    #[test]
+    fn the_model_picker_marks_and_selects_the_current_model() {
+        let mut p = Picker::models(
+            vec!["anthropic/a".into(), "devpass/b".into()],
+            Some("devpass/b"),
+        );
+        let text = render(&p);
+        assert!(text.contains("Select a model") && text.contains("current"), "{text}");
+        assert_eq!(
+            p.handle_key(&key(KeyCode::Enter)),
+            PickerOutcome::Chosen("devpass/b".into())
+        );
     }
 }

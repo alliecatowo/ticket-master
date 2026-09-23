@@ -460,7 +460,8 @@ impl Provider for AnthropicProvider {
     /// Send `req` to the Messages API, retrying on 429/5xx up to `max_retries` times, honoring
     /// `Retry-After`.
     async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
-        let wire_request = build_wire_request(&self.model, &req);
+        let model = req.model_or(&self.model);
+        let wire_request = build_wire_request(&model, &req);
         let url = format!("{}/v1/messages", self.base_url);
         let headers = build_headers(&self.api_key);
 
@@ -558,6 +559,7 @@ mod tests {
             stop_sequences: vec!["STOP".to_string()],
             stream: false,
             n: 1,
+            model: None,
         }
     }
 

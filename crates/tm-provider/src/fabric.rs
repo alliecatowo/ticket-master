@@ -117,6 +117,10 @@ pub struct ProviderRecord {
 /// roles to candidates, and the live [`FabricState`].
 pub struct Fabric {
     providers: RwLock<BTreeMap<String, ProviderRecord>>,
+    /// The table as configured; [`Fabric::prefer`] layers its choice over this, so it can be
+    /// taken back.
+    configured: RoleTable,
+    /// The table routing uses: `configured` plus any preference.
     table: RwLock<RoleTable>,
     state: RwLock<FabricState>,
     clock: Arc<dyn Clock>,
@@ -134,6 +138,7 @@ impl Fabric {
     pub fn new(table: RoleTable, clock: Arc<dyn Clock>) -> Self {
         Fabric {
             providers: RwLock::new(BTreeMap::new()),
+            configured: table.clone(),
             table: RwLock::new(table),
             state: RwLock::new(FabricState::new()),
             clock,
@@ -174,6 +179,40 @@ impl Fabric {
         self.providers
             .write()
             .insert(id, ProviderRecord { provider });
+    }
+
+    /// Route `role` to `model` before anything else (a session's `/model`), keeping the role's
+    /// configured candidates behind it as fallbacks (see [`RoleTable::prefer`]); `None` goes back
+    /// to the configured order. Replaces any earlier preference.
+    pub fn prefer(&self, role: Role, model: Option<&ModelId>) {
+        let mut table = self.configured.clone();
+        if let Some(model) = model {
+            table.prefer(role, &model.provider, &model.model);
+        }
+        *self.table.write() = table;
+        let Some(model) = model else {
+            return;
+        };
+        if self.providers.read().contains_key(&model.provider) {
+            self.state.write().register(
+                model.clone(),
+                self.clock.now(),
+                self.failure_threshold,
+                self.breaker_window,
+                self.breaker_cooldown,
+                self.ewma_alpha,
+            );
+        }
+    }
+
+    /// `role`'s candidates, in the order routing tries them.
+    pub fn candidates(&self, role: Role) -> Vec<ModelId> {
+        self.table
+            .read()
+            .candidates_for(role)
+            .iter()
+            .map(|c| ModelId::new(c.provider.clone(), c.model.clone()))
+            .collect()
     }
 
     /// The ids of every registered provider, in sorted order.
@@ -303,6 +342,11 @@ impl Fabric {
         // Redact secret-shaped substrings out of the outbound request before it reaches the
         // provider -- see this module's top docs and `tm_auth::redact`'s.
         let req = redact_completion_request(&self.redactor, req);
+        // The candidate names a model, not just a provider; the provider serves that one.
+        let req = CompletionRequest {
+            model: Some(candidate_key.model.clone()),
+            ..req
+        };
         let in_flight = InFlight {
             fabric: self,
             candidate: Some(candidate_key.clone()),
@@ -473,6 +517,7 @@ mod tests {
             stop_sequences: vec![],
             stream: false,
             n: 1,
+            model: None,
         }
     }
 
@@ -728,6 +773,74 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_provider_is_asked_for_the_model_the_table_routed_to() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        // The provider was built for `m1`; the table names `m2`.
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "mock", model = "m2", max_concurrency = 1 }"#,
+        );
+        let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
+        let provider = Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "m1"),
+            clock.clone() as Arc<dyn Clock>,
+        ));
+        let reply = provider.deterministic_completion(&CompletionRequest {
+            model: Some("m2".into()),
+            ..req()
+        });
+        provider.script_response(&req(), reply);
+        fabric.register_provider(provider.clone());
+
+        let out = fabric
+            .execute(Role::CoderFast, req())
+            .await
+            .expect("call succeeds");
+        assert_eq!(out.model, ModelId::new("mock", "m2"));
+        assert_eq!(provider.call_log()[0].model.as_deref(), Some("m2"));
+    }
+
+    #[tokio::test]
+    async fn a_preferred_model_is_routed_to_first() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "mock", model = "m1", max_concurrency = 1 }"#,
+        );
+        let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
+        let provider = Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "m1"),
+            clock.clone() as Arc<dyn Clock>,
+        ));
+        let reply = provider.deterministic_completion(&CompletionRequest {
+            model: Some("m9".into()),
+            ..req()
+        });
+        provider.script_response(&req(), reply);
+        fabric.register_provider(provider.clone());
+
+        fabric.prefer(Role::CoderFast, Some(&ModelId::new("mock", "m9")));
+        assert_eq!(
+            fabric.candidates(Role::CoderFast),
+            [ModelId::new("mock", "m9"), ModelId::new("mock", "m1")]
+        );
+        let out = fabric
+            .execute(Role::CoderFast, req())
+            .await
+            .expect("the preferred model is routable");
+        assert_eq!(out.model, ModelId::new("mock", "m9"));
+
+        fabric.prefer(Role::CoderFast, None);
+        assert_eq!(
+            fabric.candidates(Role::CoderFast),
+            [ModelId::new("mock", "m1")],
+            "taken back"
+        );
+    }
+
+    #[tokio::test]
     async fn a_cancelled_call_gives_its_concurrency_slot_back() {
         let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
         let table = table_with_candidates(
@@ -884,6 +997,7 @@ mod tests {
             stop_sequences: vec![],
             stream: false,
             n: 1,
+            model: None,
         };
 
         let _ = fabric
@@ -949,6 +1063,7 @@ mod tests {
             stop_sequences: vec![],
             stream: false,
             n: 1,
+            model: None,
         };
 
         let _ = fabric

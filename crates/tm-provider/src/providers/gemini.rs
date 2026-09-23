@@ -794,17 +794,15 @@ impl Provider for GeminiProvider {
     /// `max_retries` times, honoring `Retry-After`.
     async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
         let streaming = req.stream;
-        let wire_request = build_wire_request(&self.model, &req);
+        let model = req.model_or(&self.model);
+        let wire_request = build_wire_request(&model, &req);
         let url = if streaming {
             format!(
                 "{}/models/{}:streamGenerateContent?alt=sse",
-                self.base_url, self.model.model
+                self.base_url, model.model
             )
         } else {
-            format!(
-                "{}/models/{}:generateContent",
-                self.base_url, self.model.model
-            )
+            format!("{}/models/{}:generateContent", self.base_url, model.model)
         };
         let headers = build_headers(&self.api_key);
 
@@ -853,9 +851,9 @@ impl Provider for GeminiProvider {
                         Duration::from_secs(finished.seconds_since(started).max(0) as u64);
                     return if streaming {
                         let chunks = parse_sse_body(&body)?;
-                        assemble_streamed_completion(&chunks, &self.model, latency, finished)
+                        assemble_streamed_completion(&chunks, &model, latency, finished)
                     } else {
-                        parse_wire_response(&body, &self.model, latency, finished)
+                        parse_wire_response(&body, &model, latency, finished)
                     };
                 }
                 Err(err) => {
@@ -986,6 +984,7 @@ mod tests {
             stop_sequences: vec!["STOP".to_string()],
             stream: false,
             n: 1,
+            model: None,
         }
     }
 

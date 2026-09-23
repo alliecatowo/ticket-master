@@ -559,6 +559,7 @@ pub fn tool_label(name: &str) -> String {
         "edit.apply_patch" | "edit.write_file" => "Update".to_string(),
         "edit.create_file" => "Write".to_string(),
         "edit.delete_file" => "Delete".to_string(),
+        "compact" => "Compact".to_string(),
         n if n.starts_with("search.") => "Search".to_string(),
         n if n.starts_with("ticket.") => "Ticket".to_string(),
         n => n.to_string(),

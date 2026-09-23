@@ -37,13 +37,6 @@ const MAX_INDEXED_FILES: usize = 50_000;
 /// The most history entries read back at startup.
 const HISTORY_LOAD_LIMIT: usize = 500;
 
-/// What `/init` asks the model to do: Claude Code's `/init` is a prompt too.
-const INIT_PROMPT: &str = "Please analyze this codebase and create an AGENTS.md file in the \
-project root with the instructions a coding agent needs to work in it: how to build, test and \
-lint (the exact commands, including how to run a single test), the high-level architecture that \
-takes reading several files to understand, and any conventions or gotchas that are not obvious. \
-If an AGENTS.md or CLAUDE.md already exists, improve it rather than starting over. Keep it concise \
-and specific to this repository; do not list generic advice.";
 
 /// The chat's state on the root [`App`].
 pub(super) struct ChatExt {
@@ -53,6 +46,8 @@ pub(super) struct ChatExt {
     interrupter: TurnInterrupter,
     /// The running `!` command, so Esc can abandon it.
     shell_task: Option<JoinHandle<()>>,
+    /// The running `/compact`, which cannot be abandoned midway.
+    task: Option<JoinHandle<()>>,
     /// Where the answer to the open permission prompt goes, and what it was about.
     approval: Arc<StdMutex<Option<PendingAnswer>>>,
 }
@@ -74,6 +69,7 @@ impl ChatExt {
             history_path,
             interrupter: session.interrupter(),
             shell_task: None,
+            task: None,
             approval: Arc::default(),
         }
     }
@@ -109,6 +105,11 @@ fn show_conversation(chat: &mut ChatScreen, session: &AgentSession) {
     }
     chat.set_mode(to_ui_mode(session.mode()));
     chat.status_mut().ticket = session.attached_ticket().map(|t| t.to_string());
+    // The model turns will actually go to (a resumed conversation's `/model` choice included).
+    if let Ok(Some(model)) = session.model() {
+        chat.show_model(model.to_string());
+    }
+    chat.status_mut().context_tokens = session.context_tokens();
 }
 
 /// One persisted history line.
@@ -369,16 +370,19 @@ impl App {
         let sender = self.sender.clone();
         let session_id = self.chat.session().clone();
         let mode = to_agent_mode(self.chat.mode());
-        let answers: Arc<StdMutex<Vec<(usize, Entry)>>> = Arc::default();
+        // Notes placed among the turn's steps where they happened: permission answers and an
+        // automatic compaction.
+        let notes: Arc<StdMutex<Vec<(usize, Entry)>>> = Arc::default();
         let steps_seen: Arc<std::sync::atomic::AtomicUsize> = Arc::default();
         let mut approver = UiApprover {
             sender: sender.clone(),
             session: session_id.clone(),
             slot: Arc::clone(&self.chat_ext.approval),
-            answers: Arc::clone(&answers),
+            answers: Arc::clone(&notes),
             steps_seen: Arc::clone(&steps_seen),
         };
-        let answered = move || answers.lock().map(|a| a.clone()).unwrap_or_default();
+        let notes_for_read = Arc::clone(&notes);
+        let answered = move || notes_for_read.lock().map(|a| a.clone()).unwrap_or_default();
 
         tokio::spawn(async move {
             let mut session = agent_session.lock().await;
@@ -406,11 +410,24 @@ impl App {
                         }
                         // The approver puts the prompt on screen itself.
                         agent::TurnEvent::AwaitingApproval(_) => {}
+                        agent::TurnEvent::Compacted(compaction) => {
+                            if let Ok(mut notes) = notes.lock() {
+                                notes.push((
+                                    steps_seen.load(std::sync::atomic::Ordering::SeqCst),
+                                    steps::auto_compacted_notice(&compaction),
+                                ));
+                            }
+                        }
                     },
                     &mut approver,
                 )
                 .await;
+            let context = session.context_tokens();
             drop(session);
+            sender.send(AppMessage::Turn {
+                session: session_id.clone(),
+                update: TurnUpdate::Context(context),
+            });
 
             let (notice, failed) = match &outcome {
                 Ok(outcome) => steps::outcome_notice(outcome),
@@ -534,8 +551,11 @@ impl App {
             CommandId::Decide => self.decide(&arg),
             CommandId::Resume => self.open_resume_picker(now),
             CommandId::Bg => self.background(&arg),
-            CommandId::Init => self.chat.start_prompt("/init", INIT_PROMPT, now),
-            CommandId::Compact => self.compact(),
+            CommandId::Init => {
+                let prompt = agent::init_prompt(&self.project.root);
+                self.chat.start_prompt("/init", prompt, now);
+            }
+            CommandId::Compact => self.compact(&arg, now),
             CommandId::Model => self.switch_model(&arg),
             // The chat screen answers these itself; handled anyway so the match stays exhaustive.
             CommandId::Status | CommandId::Cost => {}
@@ -597,29 +617,85 @@ impl App {
         }
     }
 
-    /// `/compact` seam: summarizing the conversation to free context needs
-    /// `AgentSession::compact` (not built yet).
-    fn compact(&mut self) {
-        self.chat.push_notice(
-            NoticeLevel::Info,
-            "/compact is not available yet: the session cannot summarize itself. /clear starts \
-             fresh.",
-        );
+    /// `/compact [focus]`: summarize the conversation so far into a fresh start
+    /// (`AgentSession::compact`), shown as Claude Code does: "Compacting conversation…", then
+    /// `⎿ Compacted N turns`.
+    fn compact(&mut self, arg: &str, now: Timestamp) {
+        if self.chat.is_turn_running() {
+            return self.chat.push_notice(
+                NoticeLevel::Warning,
+                "A turn is running; compact once it finishes.",
+            );
+        }
+        let focus = arg.trim().to_string();
+        let shown = if focus.is_empty() {
+            "/compact".to_string()
+        } else {
+            format!("/compact {focus}")
+        };
+        self.chat.begin_task(shown, "Compacting conversation", now);
+        let agent_session = Arc::clone(&self.agent_session);
+        let sender = self.sender.clone();
+        let session_id = self.chat.session().clone();
+        self.chat_ext.task = Some(tokio::spawn(async move {
+            let mut session = agent_session.lock().await;
+            let result = session
+                .compact((!focus.is_empty()).then_some(focus.as_str()))
+                .await;
+            let context = session.context_tokens();
+            drop(session);
+            let entry = match result {
+                Ok(compaction) => steps::compacted_entry(&compaction),
+                Err(e) => Entry::Notice {
+                    level: NoticeLevel::Warning,
+                    text: format!("Could not compact: {e}"),
+                },
+            };
+            sender.send(AppMessage::Turn {
+                session: session_id.clone(),
+                update: TurnUpdate::TaskFinished(entry),
+            });
+            sender.send(AppMessage::Turn {
+                session: session_id,
+                update: TurnUpdate::Context(context),
+            });
+        }));
     }
 
-    /// `/model [name]` seam: showing works; switching needs `AgentSession::set_model` (not built
-    /// yet).
+    /// `/model [name]`: with no name, a picker over the models this session can use (the current
+    /// one marked); with one, switch to it (`AgentSession::set_model`).
     fn switch_model(&mut self, arg: &str) {
-        let current = self.chat.status().model.clone();
-        let text = if arg.trim().is_empty() {
-            format!("Model: {current}. Switching from the chat is not available yet.")
-        } else {
-            format!(
-                "Switching to {} is not available yet; still using {current}.",
-                arg.trim()
-            )
+        let Ok(mut session) = self.agent_session.try_lock() else {
+            return self.chat.push_notice(
+                NoticeLevel::Warning,
+                "A turn is running; switch models once it finishes.",
+            );
         };
-        self.chat.push_notice(NoticeLevel::Info, text);
+        if arg.trim().is_empty() {
+            let current = session.model().ok().flatten().map(|m| m.to_string());
+            match session.model_choices() {
+                Ok(choices) => {
+                    drop(session);
+                    let choices = choices.iter().map(ToString::to_string).collect();
+                    self.chat.open_model_picker(choices, current.as_deref());
+                }
+                Err(e) => self.chat.push_notice(
+                    NoticeLevel::Warning,
+                    format!("Could not list models: {e}"),
+                ),
+            }
+            return;
+        }
+        match session.set_model(arg.trim()) {
+            Ok(model) => {
+                drop(session);
+                let name = model.map_or_else(|| "the default model".to_string(), |m| m.to_string());
+                self.chat.show_model(name.clone());
+                self.chat
+                    .push_notice(NoticeLevel::Success, format!("Set model to {name}."));
+            }
+            Err(e) => self.chat.push_notice(NoticeLevel::Warning, e.to_string()),
+        }
     }
 
     fn attach(&mut self, arg: &str) {
