@@ -152,12 +152,55 @@ impl Registry {
         ]
     }
 
+    /// The model a slug takes from its own environment when it has one (`devpass`'s
+    /// `DEVPASS_MODEL`, Azure's deployment name, Bedrock's model id) — the only per-slug
+    /// model knowledge that cannot rot, because it is read live rather than hardcoded (D-022).
+    /// Empty values count as unset.
+    pub fn env_default_model(slug: &str) -> Option<String> {
+        let var = match slug {
+            "devpass" => "DEVPASS_MODEL",
+            "azure-openai" => "AZURE_OPENAI_DEPLOYMENT",
+            "bedrock" => "BEDROCK_MODEL_ID",
+            _ => return None,
+        };
+        std::env::var(var).ok().filter(|v| !v.trim().is_empty())
+    }
+
     /// Every backend [`ProviderInfo::is_configured`] currently as present in the environment.
     pub fn autodetect() -> Vec<ProviderInfo> {
         Self::known_providers()
             .into_iter()
             .filter(|info| info.is_configured())
             .collect()
+    }
+
+    /// The model `/model` offers for a configured `slug` the role table never mentions, so a
+    /// backend with credentials but no table row is still one pick away instead of invisible
+    /// (D-022). Backends serve whatever model the request names, so this is only the opening
+    /// offer — `/model <slug>/<anything>` always works once the slug is registered.
+    ///
+    /// `None` means "no honest static default": `devpass`/`azure-openai`/`bedrock` take theirs
+    /// from the environment, `vertex`/`huggingface` have no generally-right value, and the
+    /// three local backends serve whatever is pulled (see [`Registry::local_models`]). Those
+    /// slugs register without a table row: reachable explicitly, never guessed. The literals
+    /// below rot as vendors rename models; treat a `/model` failure as the signal to check,
+    /// not this table as a catalog.
+    pub fn chat_default_model(slug: &str) -> Option<&'static str> {
+        match slug {
+            "openai" => Some("gpt-4o-mini"),
+            "openrouter" => Some("openai/gpt-4o-mini"),
+            "github-models" => Some("openai/gpt-4o-mini"),
+            "groq" => Some("llama-3.3-70b-versatile"),
+            "cerebras" => Some("llama-3.3-70b"),
+            "deepseek" => Some("deepseek-chat"),
+            "mistral" => Some("mistral-small-latest"),
+            "xai" => Some("grok-3-mini"),
+            "together" => Some("meta-llama/Llama-3.3-70B-Instruct-Turbo"),
+            "fireworks" => Some("accounts/fireworks/models/llama-v3p3-70b-instruct"),
+            "gemini" => Some("gemini-2.0-flash"),
+            "cloudflare" => Some("@cf/meta/llama-3.1-8b-instruct"),
+            _ => None,
+        }
     }
 
     /// `GET /v1/models` against one of [`LOCAL_PROVIDER_IDS`], returning the model ids it lists.
@@ -402,6 +445,34 @@ mod tests {
     fn pick_completion_model_matches_embed_case_insensitively() {
         let models = vec!["Embed-Model".to_string(), "chat-model".to_string()];
         assert_eq!(pick_completion_model(&models), "chat-model");
+    }
+
+    #[test]
+    fn chat_default_models_cover_api_backends_but_never_guess_locals() {
+        for slug in ["openai", "gemini", "deepseek", "mistral", "groq"] {
+            assert!(
+                Registry::chat_default_model(slug).is_some(),
+                "{slug} needs an opening offer"
+            );
+        }
+        for slug in [
+            "devpass",
+            "azure-openai",
+            "bedrock",
+            "vertex",
+            "ollama",
+            "lm-studio",
+            "llama-cpp",
+            "huggingface",
+            "not-a-real-provider",
+        ] {
+            assert_eq!(
+                Registry::chat_default_model(slug),
+                None,
+                "{slug} must stay env- or table-driven"
+            );
+        }
+        assert_eq!(Registry::env_default_model("not-a-real-provider"), None);
     }
 
     /// Every `known_providers()` entry's `id` should be unique — a duplicate would mean two

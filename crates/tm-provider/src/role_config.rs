@@ -237,6 +237,20 @@ impl RoleTable {
             .unwrap_or(&[])
     }
 
+    /// Append `candidate` to the back of `role`'s list, unless the role already names the
+    /// same provider (under any model) — the one-provider-per-slug rule in
+    /// [`crate::providers::registry`]'s module docs means a second row for the same slug adds
+    /// no routing information, only picker noise. Used to expose an autodetected provider the
+    /// static table never mentions (`/model` across every configured backend, D-022): the
+    /// table's own primaries stay first, so the default route never changes.
+    pub fn with_fallback_candidate(&mut self, role: Role, candidate: RoleCandidate) {
+        let candidates = self.roles.entry(role.as_str().to_string()).or_default();
+        if candidates.iter().any(|c| c.provider == candidate.provider) {
+            return;
+        }
+        candidates.push(candidate);
+    }
+
     /// Put `provider`/`model` first in `role`'s candidate list, so routing tries it before
     /// anything else (`/model` in a session). An existing entry for the same pair moves to the
     /// front; a new one takes the current primary's concurrency, but not its price or limits,
@@ -465,6 +479,42 @@ mod tests {
         let s = table.to_toml_string().expect("default table serializes");
         let parsed = RoleTable::parse(&s).expect("default table's own TOML reparses");
         assert_eq!(table, parsed);
+    }
+
+    #[test]
+    fn fallback_candidates_append_once_and_never_reorder_primaries() {
+        let mut table = RoleTable::default_table_with(None);
+        let primary = table.candidates_for(Role::CoderFast)[0].clone();
+        table.with_fallback_candidate(
+            Role::CoderFast,
+            RoleCandidate {
+                provider: "openai".to_string(),
+                model: "gpt-4o-mini".to_string(),
+                max_concurrency: 10,
+                degraded_ok: false,
+                price: None,
+                limits: Limits::unlimited(),
+            },
+        );
+        table.with_fallback_candidate(
+            Role::CoderFast,
+            RoleCandidate {
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                max_concurrency: 10,
+                degraded_ok: false,
+                price: None,
+                limits: Limits::unlimited(),
+            },
+        );
+        let rows = table.candidates_for(Role::CoderFast);
+        assert_eq!(rows[0], primary, "the primary never moves");
+        assert_eq!(
+            rows.iter().filter(|c| c.provider == "openai").count(),
+            1,
+            "one row per slug, the first model wins"
+        );
+        table.validate().expect("augmented table stays valid");
     }
 
     #[test]

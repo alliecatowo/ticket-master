@@ -1568,36 +1568,135 @@ const TEST_MOCK_PROVIDER_ENV: &str = "TM_TEST_MOCK_PROVIDER";
 ///   ignored if not), so any *other* role a ticket names (`tm run`/`tm sched run` share this same
 ///   function, see `crates/tm-cli/src/dispatch.rs`) still gets Anthropic service if a key is
 ///   also present — only [`AGENT_ROLE`]'s own default candidate actually changes.
-/// - Otherwise: a single real `AnthropicProvider` bound to [`AGENT_MODEL`], exactly as before
-///   DevPass support existed. `AnthropicProvider::from_env`'s error (typically a missing
-///   `ANTHROPIC_API_KEY`) is surfaced directly in this branch, unchanged.
+/// - Otherwise: every other configured, tool-capable backend registers best-effort, and
+///   the default turn points at the first registered candidate when the table primary has
+///   no credentials. A missing key for one provider never fails construction for the rest.
 pub(crate) fn build_fabric(clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric>> {
     if std::env::var_os(TEST_MOCK_PROVIDER_ENV).is_some() {
         return Ok(Arc::new(build_mock_fabric(clock)));
     }
-    let table = RoleTable::default_table();
+    let mut table = RoleTable::default_table();
+    // Expose every configured, tool-capable backend the static table never mentions as an
+    // AGENT_ROLE fallback, so `/model` lists it and turns can route to it. Only appends:
+    // the table's own primaries stay first, so the default route never changes.
+    for info in tm_provider::Registry::autodetect() {
+        if info.id == "devpass" || info.id == "anthropic" || !info.capabilities.tool_use {
+            continue;
+        }
+        if table_model_for(&table, info.id).is_some() {
+            continue;
+        }
+        let model = tm_provider::Registry::env_default_model(info.id)
+            .or_else(|| tm_provider::Registry::chat_default_model(info.id).map(str::to_string));
+        if let Some(model) = model {
+            table.with_fallback_candidate(
+                AGENT_ROLE,
+                tm_provider::RoleCandidate {
+                    provider: info.id.to_string(),
+                    model,
+                    max_concurrency: 10,
+                    degraded_ok: false,
+                    price: None,
+                    limits: tm_provider::role_config::Limits::unlimited(),
+                },
+            );
+        }
+    }
     let fabric = Fabric::new(table, clock.clone());
 
+    // DevPass registers when fully configured (a half-set DevPass is an explicit user
+    // mistake, so its error still propagates); Anthropic is best-effort from here on.
     if DevPassProvider::preferred_model().is_some() {
         let devpass = DevPassProvider::from_env(clock.clone())
             .map_err(|e| TmError::Provider(e.to_string()))?;
         fabric.register_provider(Arc::new(devpass));
-        // Best-effort: a role other than AGENT_ROLE may still be routed to `anthropic` (that
-        // part of the table is untouched by DevPass preference), so register it too if it
-        // happens to be available — but never let its absence fail fabric construction, since
-        // the whole point of DevPass preference is running without an Anthropic credential.
-        if let Ok(anthropic) =
-            AnthropicProvider::from_env(ModelId::new("anthropic", AGENT_MODEL), clock)
-        {
-            fabric.register_provider(Arc::new(anthropic));
+    }
+    if let Ok(anthropic) =
+        AnthropicProvider::from_env(ModelId::new("anthropic", AGENT_MODEL), clock.clone())
+    {
+        fabric.register_provider(Arc::new(anthropic));
+    }
+    // Every other configured backend the table references: register best-effort, skipping
+    // (never failing on) any single failure, so one broken backend never bricks the session.
+    for info in tm_provider::Registry::autodetect() {
+        if info.id == "devpass" || info.id == "anthropic" || !info.capabilities.tool_use {
+            continue;
         }
-    } else {
-        let provider = AnthropicProvider::from_env(ModelId::new("anthropic", AGENT_MODEL), clock)
-            .map_err(|e| TmError::Provider(e.to_string()))?;
-        fabric.register_provider(Arc::new(provider));
+        if fabric.provider_ids().iter().any(|id| id == info.id) {
+            continue;
+        }
+        let model = fabric_model_for(&fabric, info.id).unwrap_or_else(|| "default".to_string());
+        match tm_provider::Registry::build_provider(
+            &tm_provider::RoleCandidate {
+                provider: info.id.to_string(),
+                model,
+                max_concurrency: 10,
+                degraded_ok: false,
+                price: None,
+                limits: tm_provider::role_config::Limits::unlimited(),
+            },
+            clock.clone(),
+        ) {
+            Ok(provider) => fabric.register_provider(provider),
+            Err(e) => {
+                tracing::debug!(provider = info.id, error = %e, "skipping backend that failed to construct")
+            }
+        }
+    }
+
+    if fabric.provider_ids().is_empty() {
+        return Err(TmError::Provider(
+            "no provider is configured, so no turn can run. Connect one with `/connect` in \
+             the chat, or `tm auth <provider>` for setup instructions (e.g. ANTHROPIC_API_KEY, \
+             OPENAI_API_KEY, GEMINI_API_KEY — `tm provider detect` lists every backend and what \
+             it needs)."
+                .to_string(),
+        ));
+    }
+    // The default turn must point at something live: when the table primary has no
+    // credentials but a fallback does, prefer the first registered candidate.
+    if let Some(first) =
+        first_registered_candidate(&fabric.candidates(AGENT_ROLE), &fabric.provider_ids())
+    {
+        let primary_live = fabric
+            .candidates(AGENT_ROLE)
+            .into_iter()
+            .next()
+            .is_some_and(|c| c.provider == first.provider && c.model == first.model);
+        if !primary_live {
+            fabric.prefer(AGENT_ROLE, Some(&first.clone()));
+        }
     }
 
     Ok(Arc::new(fabric))
+}
+
+/// The first model in `candidates` whose provider is registered, if any — the default turn's
+/// fallback when the table primary has no credentials (D-022). Pure, so the routing rule is
+/// unit-testable without touching the environment.
+fn first_registered_candidate(candidates: &[ModelId], registered: &[String]) -> Option<ModelId> {
+    candidates
+        .iter()
+        .find(|c| registered.iter().any(|id| id == &c.provider))
+        .cloned()
+}
+
+/// The model `table` already routes to `slug` under any role, if it names the slug at all.
+fn table_model_for(table: &RoleTable, slug: &str) -> Option<String> {
+    tm_types::Role::ALL
+        .iter()
+        .flat_map(|role| table.candidates_for(*role))
+        .find(|c| c.provider == slug)
+        .map(|c| c.model.clone())
+}
+
+/// The model the live `fabric` routes to `slug` under [`AGENT_ROLE`], if any.
+fn fabric_model_for(fabric: &Fabric, slug: &str) -> Option<String> {
+    fabric
+        .candidates(AGENT_ROLE)
+        .into_iter()
+        .find(|c| c.provider == slug)
+        .map(|c| c.model)
 }
 
 /// The [`TEST_MOCK_PROVIDER_ENV`] fabric: a `mock`/`m1` candidate for [`AGENT_ROLE`] backed by
@@ -1898,6 +1997,30 @@ mod tests {
     use std::path::Path;
     use tm_core::{ExecutorRequirements, RetryPolicy, TicketKind, VerificationPolicy};
     use tm_types::{CounterIds, FixedClock, ParticipantId, Timestamp, Tolerance};
+
+    #[test]
+    fn first_registered_candidate_picks_the_first_live_row() {
+        let candidates = vec![
+            ModelId::new("anthropic", "claude-sonnet-5"),
+            ModelId::new("openai", "gpt-4o-mini"),
+        ];
+        assert_eq!(
+            first_registered_candidate(&candidates, &["openai".to_string()]),
+            Some(ModelId::new("openai", "gpt-4o-mini"))
+        );
+        assert_eq!(
+            first_registered_candidate(
+                &candidates,
+                &["anthropic".to_string(), "openai".to_string()]
+            ),
+            Some(ModelId::new("anthropic", "claude-sonnet-5"))
+        );
+        assert_eq!(
+            first_registered_candidate(&candidates, &[]),
+            None,
+            "nothing registered means no fallback"
+        );
+    }
 
     fn open_test_project(dir: &Path) -> Project {
         let store = Arc::new(tm_core::Store::open(dir).expect("open store"));
