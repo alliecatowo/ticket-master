@@ -63,7 +63,7 @@ impl StdinApprovalSink {
     /// runtime the dispatcher's background tasks share.
     fn prompt_blocking(objective: &str, context_pack: &str) -> io::Result<Option<String>> {
         let mut stdout = io::stdout();
-        writeln!(stdout, "\n--- human-required ticket ---")?;
+        writeln!(stdout, "\n--- this ticket needs a human ---")?;
         writeln!(stdout, "{objective}")?;
         writeln!(stdout, "{context_pack}")?;
         write!(
@@ -130,7 +130,7 @@ pub struct HeadlessApprovalSink;
 impl HumanApprovalSink for HeadlessApprovalSink {
     async fn escalate(&self, task: &ExecutorTask) -> tm_types::Result<Option<HumanDecision>> {
         Err(tm_types::TmError::Io(format!(
-            "{} needs a human, and this process has no terminal to ask on; run it with `tm run {}`",
+            "Ticket {} needs a human, but this process has no terminal to ask on. Run `tm run {}` instead.",
             task.ticket, task.ticket
         )))
     }
