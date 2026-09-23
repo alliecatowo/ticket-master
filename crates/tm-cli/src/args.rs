@@ -945,6 +945,17 @@ pub struct ServeArgs {
     /// Bind address, e.g. `127.0.0.1:4477`. Defaults to loopback on an ephemeral port.
     #[arg(long, value_name = "ADDR")]
     pub addr: Option<String>,
+    /// Open the web client in a browser once the server is up.
+    #[arg(long)]
+    pub open: bool,
+    /// Don't work tickets in this process (by default `tm serve` runs the scheduler, so work
+    /// created from the web client gets done).
+    #[arg(long)]
+    pub no_workers: bool,
+    /// The built web client to serve at `/app/` (default: `TM_WEB_DIR`, else `clients/web/dist`
+    /// in the checkout `tm` was built from).
+    #[arg(long, value_name = "DIR")]
+    pub web_dir: Option<std::path::PathBuf>,
 }
 
 /// `tm events ...`

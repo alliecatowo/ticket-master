@@ -56,6 +56,11 @@ never drift between sessions:
 - `mise run dev` — same, with `RUST_LOG=tm=debug,tm_core=debug,tm_agent=debug` piped to
   `/tmp/tm-dev.log` instead of the alt-screen (so debug output doesn't corrupt the TUI's frame).
 - `mise run doctor` — `tm doctor` against the current directory.
+- `tm serve [--open] [--no-workers] [--web-dir DIR]` — the HTTP API plus the web client at
+  `/app/` (build it first: `pnpm -C clients/web install && pnpm -C clients/web build`). It also
+  works ready tickets in-process, like the TUI does, so a ticket created and activated from the web
+  client actually runs; `--no-workers` turns that off. A `POST /tickets` with only `kind`,
+  `objective` and `actor` gets the same worker defaults as `tm ticket new`.
 - `mise run docs:wiki` — regenerate `docs/wiki/` (`tm wiki generate`); pass `-- --dry-run` to
   preview without writing (see "Navigation" below).
 

@@ -271,7 +271,7 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
         }
         Some(Command::Serve(args)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
-            serve::serve(&args, &opened, renderer).await
+            serve::serve(&args, std::sync::Arc::new(opened), renderer).await
         }
         Some(Command::Events(cmd)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;

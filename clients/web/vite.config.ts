@@ -4,9 +4,9 @@ import react from "@vitejs/plugin-react";
 
 // Vite + React config for the Ticketmaster project canvas.
 //
-// This app is served two ways:
-//  - `tm serve --open`: `tm-server` serves the built `dist/` as static assets and the API from
-//    the same origin, so `apiBase` defaults to `""` (same-origin, relative paths).
+// This app is served two ways, both under `/app/` so its routes never collide with the API's:
+//  - `tm serve --open`: `tm serve` serves the built `dist/` at `/app/` and the API from the same
+//    origin, so `apiBase` defaults to `""` (same-origin, relative paths).
 //  - `pnpm dev`: the Vite dev server proxies `/health`, `/events`, `/tickets`, etc. to a `tm
 //    serve` instance running on VITE_TM_SERVER (default http://127.0.0.1:4173) so the same
 //    same-origin client code works unmodified in dev.
@@ -32,6 +32,7 @@ const API_PATHS = [
 ];
 
 export default defineConfig({
+  base: "/app/",
   plugins: [react()],
   server: {
     proxy: Object.fromEntries(
