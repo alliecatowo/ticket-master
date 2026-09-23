@@ -119,7 +119,9 @@ impl StdioClientTransport {
     /// [`Framing::ContentLength`] to match its default.
     pub fn spawn(command: &[String], framing: Framing) -> Result<Self> {
         let Some((program, args)) = command.split_first() else {
-            return Err(TmError::parse("stdio MCP server command must be non-empty"));
+            return Err(TmError::parse(
+                "MCP server command is empty; specify a program to run",
+            ));
         };
         let mut child = Command::new(program)
             .args(args)
@@ -128,16 +130,16 @@ impl StdioClientTransport {
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| TmError::Io(format!("failed to spawn MCP server {program:?}: {e}")))?;
+            .map_err(|e| TmError::Io(format!("couldn't start MCP server {program:?}: {e}")))?;
 
         let stdin = child
             .stdin
             .take()
-            .ok_or_else(|| TmError::invariant("spawned child has no stdin handle"))?;
+            .ok_or_else(|| TmError::invariant("MCP server process has no stdin to write to"))?;
         let stdout = child
             .stdout
             .take()
-            .ok_or_else(|| TmError::invariant("spawned child has no stdout handle"))?;
+            .ok_or_else(|| TmError::invariant("MCP server process has no stdout to read from"))?;
 
         Ok(StdioClientTransport {
             inner: FramedTransport::new(stdout, stdin, framing),
@@ -270,17 +272,19 @@ impl SseClientTransport {
     /// on first use rather than here.
     pub async fn connect(sse_url: &str) -> Result<Self> {
         let base_url = reqwest::Url::parse(sse_url)
-            .map_err(|e| TmError::parse(format!("invalid SSE URL {sse_url:?}: {e}")))?;
+            .map_err(|e| TmError::parse(format!("{sse_url:?} isn't a valid URL: {e}")))?;
         let client = reqwest::Client::new();
         let stream = client
             .get(base_url.clone())
             .header("Accept", "text/event-stream")
             .send()
             .await
-            .map_err(|e| TmError::Provider(format!("SSE connect to {sse_url}: {e}")))?;
+            .map_err(|e| {
+                TmError::Provider(format!("couldn't connect to MCP server at {sse_url}: {e}"))
+            })?;
         if !stream.status().is_success() {
             return Err(TmError::Provider(format!(
-                "SSE connect to {sse_url}: server returned {}",
+                "MCP server at {sse_url} rejected the connection (status {})",
                 stream.status()
             )));
         }
@@ -300,11 +304,9 @@ impl SseClientTransport {
                 self.buf.drain(..consumed);
                 return Ok(Some(events.remove(0)));
             }
-            let Some(chunk) = self
-                .stream
-                .chunk()
-                .await
-                .map_err(|e| TmError::Provider(format!("SSE stream read: {e}")))?
+            let Some(chunk) = self.stream.chunk().await.map_err(|e| {
+                TmError::Provider(format!("lost connection to the MCP server: {e}"))
+            })?
             else {
                 return Ok(None);
             };
@@ -327,17 +329,17 @@ impl SseClientTransport {
             return Ok(url.clone());
         }
         let event = self.next_sse_event().await?.ok_or_else(|| {
-            TmError::Provider("SSE stream closed before an endpoint event".into())
+            TmError::Provider("MCP server closed the connection before it was ready".into())
         })?;
         if event.event != "endpoint" {
             return Err(TmError::Provider(format!(
-                "expected an `endpoint` event first, got `{}`",
+                "MCP server sent `{}` before it was ready to receive requests",
                 event.event
             )));
         }
         let resolved = self.base_url.join(&event.data).map_err(|e| {
             TmError::parse(format!(
-                "endpoint event data {:?} is not a valid URL or path: {e}",
+                "MCP server sent an invalid address ({:?}): {e}",
                 event.data
             ))
         })?;
@@ -359,10 +361,12 @@ impl Transport for SseClientTransport {
             .body(body)
             .send()
             .await
-            .map_err(|e| TmError::Provider(format!("SSE POST to {endpoint}: {e}")))?;
+            .map_err(|e| {
+                TmError::Provider(format!("couldn't reach the MCP server at {endpoint}: {e}"))
+            })?;
         if !response.status().is_success() {
             return Err(TmError::Provider(format!(
-                "SSE POST to {endpoint}: server returned {}",
+                "MCP server at {endpoint} rejected the request (status {})",
                 response.status()
             )));
         }
