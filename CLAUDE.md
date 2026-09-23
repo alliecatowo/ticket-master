@@ -49,10 +49,21 @@ never drift between sessions:
   `.claude/worktrees/` the same way.
 - `mise run tui` — build and launch the ratatui TUI against the current directory's project. It
   opens on the chat (`docs/decisions/D-018-tui-chat-first-shell.md`): nothing typed is a shortcut;
-  on an empty prompt `/` opens commands, `?` help, `←` the sessions & tickets home (also Ctrl+T or
-  `/home`); Enter sends, Shift+Enter/Ctrl+J newline; quit is Ctrl+C twice, Ctrl+D on an empty
-  prompt, or `/exit`. `cargo run -p tm-tui --example chat_demo` plays a scripted turn (tool calls,
-  Markdown) through the real chat screen, for looking at rendering without a model.
+  on an empty prompt `/` opens commands, `?` help, and `←` twice the tickets screen (the first
+  press says "Press ← again to open tickets"; also Ctrl+T or `/tickets`); Enter sends,
+  Shift+Enter/Ctrl+J newline; quit is Ctrl+C twice, Ctrl+D on an empty prompt, or `/exit`. The
+  tickets screen is Claude Code's `claude agents` view with tickets as rows
+  (`docs/decisions/D-019-claude-code-parity-shell.md` §2 and its "Implemented: tickets screen"):
+  groups Needs input / Working / Ready for review / Queued / Completed, a dispatch input at the
+  bottom (Enter creates and queues a ticket), Space peeks, Enter/→ attaches the chat, Ctrl+X twice
+  cancels, `a`/`r` accept/reject a submission, `b` the Kanban board, `?` shortcuts, Esc back. While
+  the TUI is open a scheduler runs in-process (`sched::spawn_background_runner`), so dispatched
+  tickets get worked; the header says so if it could not start. `cargo run -p tm-tui --example
+  chat_demo` plays a scripted turn (tool calls, Markdown) through the real chat screen, for
+  looking at rendering without a model.
+- `tm tickets` opens the TUI straight onto the tickets screen (Esc goes to a fresh chat);
+  `tm tickets --json` prints open tickets as a JSON array and exits (`--all` adds closed and
+  cancelled), like `claude agents --json`, and never creates a project just to print `[]`.
 - `mise run dev` — same, with `RUST_LOG=tm=debug,tm_core=debug,tm_agent=debug` piped to
   `/tmp/tm-dev.log` instead of the alt-screen (so debug output doesn't corrupt the TUI's frame).
 - `mise run doctor` — `tm doctor` against the current directory.

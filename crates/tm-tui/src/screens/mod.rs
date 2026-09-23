@@ -20,11 +20,8 @@ pub mod command_palette;
 pub mod dashboard;
 /// The diff viewer screen, browsing changed files and their diffs.
 pub mod diff_viewer;
-/// The cross-session "agents" view, one `←` away from the chat: sessions, background tickets, and
-/// active workers.
-pub mod home;
 /// The Kanban board: tickets as cards in columns named after their real `tm_core::TicketState`,
-/// reachable from `home` via `tm-cli`'s own navigation chord (`tm-cli`'s `tui.rs` owns *when* a
+/// reachable from `tickets` via `tm-cli`'s own navigation chord (`tm-cli`'s `tui.rs` owns *when* a
 /// screen is on screen; this crate only supplies the screen itself, plain-data-in like every
 /// other screen here).
 pub mod kanban;
@@ -34,5 +31,8 @@ pub mod session_stream;
 pub mod ticket_detail;
 /// The ticket dependency graph screen.
 pub mod ticket_graph;
+/// The tickets screen, `←` `←` away from the chat and what `tm tickets` opens: Claude Code's agent
+/// view (`claude agents`) with Ticketmaster tickets as its rows (D-019 §2).
+pub mod tickets;
 /// The verification ladder: a ticket's ordered verification steps and their status.
 pub mod verification_ladder;

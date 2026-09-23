@@ -133,6 +133,98 @@ each has its own test.
 - A ticketless chat turn's context pack is 3k tokens (a ticket's is 8k); every token of it rides
   along on every step of the turn.
 
+## Implemented: tickets screen (2026-09-22)
+
+Section 2 is built. It is a clone of the agent view as documented at
+<https://code.claude.com/docs/en/agent-view> and shown in that page's screenshot, with tickets as
+the rows.
+
+- **Screen.** `crates/tm-tui/src/screens/tickets.rs` (`TicketsScreen`) replaces D-018's
+  `screens/home.rs`, which is deleted along with its "Sessions" section and the `logged_sessions`
+  query.
+  - **Header:** a ticket-stub mark, `Ticketmaster vX.Y.Z`, `model · cwd`, and the counts
+    (`2 needs input · 1 working · …`). It compacts to one line under 18 rows or 40 columns.
+  - **Groups:** Needs input, Working, Ready for review, Queued, Completed. Enter on a heading
+    collapses it. Completed fills the space the live groups leave and folds into `… N more`.
+    That row, or the heading itself when there is no room, expands with Enter, and the fold never
+    hides the selected row.
+  - **Rows:** a glyph (animated `✽` while a worker works it, `✻` when a worker holds it without
+    working, `∙` with no worker), then the id and title (the objective's first clause, at most 32
+    columns, width-safe), then the summary, then an age aligned right. The age freezes at the
+    run's length once completed.
+  - **Colours** come from the theme: Needs input yellow, Working accent, Review green, Queued
+    dim, failures red, stopped grey.
+  - **Selection** is keyed by ticket id. It follows a ticket into another group. If the ticket
+    disappears, the selection lands on whatever now sits at its old position.
+- **Keys.**
+  - ↑/↓ move the selection.
+  - Space toggles the peek panel. The panel shows the row's summary, then the objective, state
+    and attempts, time waiting, latest activity, failures, submission, and evidence. ↑/↓ walk
+    ticket to ticket with it open.
+  - Enter or `→` attaches the chat to the ticket (`AgentSession::attach_ticket`) and posts a
+    one-line `Recap of T-n: …`. Opening tickets from an attached chat selects that ticket.
+  - Ctrl+X, then Ctrl+X again within 2 s, cancels the ticket. Esc disarms.
+  - `a` accepts and `r` rejects (`Store::accept`/`reject`). Reject asks for the reason in the
+    input and refuses an empty one.
+  - `b` opens the board and `?` shows shortcuts.
+  - Esc closes the peek panel, then clears the input, then returns to the chat.
+  - Ctrl+C clears the input first, then counts toward quitting.
+  - Shift+Enter and Ctrl+J insert a newline.
+- **Dispatch.** Typing and pressing Enter calls `tickets::create_and_queue`. That is
+  `create_worker_ticket` (the defaults `tm ticket new` and `/bg` share) plus `Store::activate`.
+  The new row is then selected. The footer says "Dispatched T-n to a background worker", or, if
+  no worker can run it, "Queued T-n. No worker is running here: tm sched run".
+- **Summaries.** `crates/tm-cli/src/tickets/overview.rs` produces them for both the TUI and
+  `--json`, so the two cannot disagree. `ActivityIndex` folds the log's
+  `command.started`/`goal.step_added`/`ticket.submitted`/`ticket.escalated`/`ticket.cancelled`/
+  `ticket.retry_scheduled`/`ticket.leased`/`approval.*` events incrementally. It reads up to the
+  head it saw first, so a concurrent append is never skipped. What each group's rows say:
+  - **Working:** the latest command (`$ cargo test`) or goal step. A working-state ticket with no
+    live lease says its lease lapsed rather than pretending it is being worked.
+  - **Review:** the submission summary.
+  - **Failed or retrying:** the failure, and `retrying in Ns`.
+  - **Escalated:** the reason, and `gave up after N attempts: …` when retries ran out.
+  - **Awaiting approval:** only while a worker is actually mid-run (leased or running). A new
+    lease clears a dead attempt's unanswered approval.
+  - **Queued with no worker anywhere:** "queued, no worker running (tm sched run)".
+  - **Stopped:** the cancel reason.
+  - Event-derived text is sanitized and collapsed to one line.
+- **Navigation.**
+  - In the chat, the first `←` on an empty prompt shows the urgent status hint "Press ← again to
+    open tickets". A second press within 2 s opens tickets. `tm-cli`'s `App` intercepts this, so
+    the chat screen was not edited.
+  - Ctrl+T and `/tickets` still open it.
+  - `tm tickets` (`args.rs`, `main.rs`) opens the TUI on the tickets screen (`tui::run_tickets`),
+    and Esc goes to a fresh chat.
+  - `tm tickets --json [--all]` prints `TicketOverview`s. With no project it prints `[]` and
+    creates nothing. Without a tty and without `--json`, it prints a grouped plain list.
+- **Background work (§4).** The TUI starts `sched::spawn_background_runner` (2 s interval) at
+  launch and aborts it on exit. If the scheduler cannot start, its error shows in the header, in
+  the warning colour.
+- **Tests.**
+  - Unit tests for grouping, summaries, the activity fold, title, age, rendering at 80x24 and
+    smaller in Unicode and ASCII, peek, Ctrl+X, a/r gating, folding, the empty state, and
+    selection stability.
+  - Pty tests through the real binary: `crates/tm-cli/tests/tui_tickets.rs` (grouping, dispatch,
+    peek, Ctrl+X twice, accept and reject, attach recap, `--json`/`--all`/no project) and the
+    updated `tui_navigation.rs` (double `←`, Ctrl+T, `/tickets`, board and detail, Esc chain).
+
+**Known gaps, stated plainly:**
+- **`b` collides with typing.** The dispatch input always has focus, so `b` on an empty input
+  opens the board. A task typed starting with "b" loses its first letter to the board. `a`/`r`
+  have the same collision, but only on a Ready-for-review row. The brief asked for bare-letter
+  keys, and Claude Code's agent view avoids them. If this bites, the fix is Ctrl-chords.
+- **The peek panel has no reply input.** Claude Code's has one. Answering an escalation means
+  attaching.
+- **No filters or pinning.** The `a:`/`s:` filters, Ctrl+S grouping by directory, Ctrl+T pin,
+  Ctrl+R rename, and Shift+↑/↓ reorder are not implemented. Ctrl+T keeps its D-018 meaning (tickets
+  and back), which conflicts with §1's "Ctrl+T toggles the task checklist". The chat track has to
+  settle that.
+- **Summaries are mechanical,** not Haiku-written as Claude Code's are.
+- **Chat text still says "sessions & tickets" and `/home`** in its welcome card, `/home`'s
+  description, and a doc link in `screens/chat.rs`. That file belongs to the chat track and was
+  left alone.
+
 ## What this costs, stated plainly
 
 - It's a lot of surface. Several items need new core support: cancelling a turn mid-flight,
