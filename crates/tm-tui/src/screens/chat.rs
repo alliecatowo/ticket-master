@@ -1450,6 +1450,9 @@ impl ChatScreen {
         if let Some(branch) = &self.status.branch {
             place.push_str(&format!(" ({branch})"));
         }
+        // A long path loses its start, not its end: the project and branch are what identify it.
+        let room = (area.width as usize).saturating_sub(4 + 7);
+        let place = truncate_left(&place, room, glyphs.ellipsis);
         let card: Vec<Line> = vec![
             Line::from_spans(vec![
                 Span::new(format!("{} ", glyphs.star), accent),
@@ -1644,6 +1647,25 @@ impl ChatScreen {
             }
         }
     }
+}
+
+/// `text` cut from the left to `width` columns, marked with `ellipsis`.
+fn truncate_left(text: &str, width: usize, ellipsis: &str) -> String {
+    if display_width(text) <= width {
+        return text.to_string();
+    }
+    let budget = width.saturating_sub(display_width(ellipsis));
+    let mut kept: Vec<&str> = Vec::new();
+    let mut used = 0;
+    for g in crate::text::graphemes(text).iter().rev() {
+        if used + g.width > budget {
+            break;
+        }
+        used += g.width;
+        kept.push(g.text);
+    }
+    kept.reverse();
+    format!("{ellipsis}{}", kept.concat())
 }
 
 impl Component for ChatScreen {

@@ -178,7 +178,7 @@ fn full_tool_lines(view: &ToolCallView, width: usize, theme: &Theme, glyphs: &Gl
     let mut out = Vec::new();
     // The header (`⏺ Bash(cmd)`), then the real tool name so nothing is hidden by the label.
     out.extend(status.into_iter().take(3));
-    if tool_label(&view.name) != view.name {
+    if tool_label(&view.name) != view.name && view.name != "shell" {
         out.push(Line::plain(format!("  {}", view.name), muted));
     }
     if let Some(detail) = &view.detail {

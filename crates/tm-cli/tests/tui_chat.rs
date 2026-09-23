@@ -1,6 +1,7 @@
 //! The chat screen's discoverability surfaces, end to end against the real compiled `tm` binary
-//! (`docs/decisions/D-018-tui-chat-first-shell.md`): `/` on an empty prompt opens the command
-//! popup, typing filters it, Enter runs the selected command; `?` on an empty prompt opens help.
+//! (`docs/decisions/D-018-tui-chat-first-shell.md`, `docs/decisions/D-019-claude-code-parity-
+//! shell.md`): `/` on an empty prompt opens the command popup, typing filters it, Enter runs the
+//! selected command; `?` on an empty prompt opens the shortcuts panel.
 
 mod support;
 
@@ -19,7 +20,7 @@ fn has(screen: &[String], needle: &str) -> bool {
 }
 
 #[test]
-fn slash_popup_filters_and_enter_runs_the_command_and_question_mark_opens_help() {
+fn slash_popup_filters_and_enter_runs_the_command_and_question_mark_opens_shortcuts() {
     let project = init_project();
     let tm_home = tempfile::tempdir().expect("tempdir");
 
@@ -30,30 +31,31 @@ fn slash_popup_filters_and_enter_runs_the_command_and_question_mark_opens_help()
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TM_TEST_MOCK_PROVIDER", "1");
     cmd.env("TM_HOME", tm_home.path());
+    cmd.env("TM_NOTIFY", "0");
     let mut pty = support::Pty::spawn(cmd, 100, 30).expect("spawn `tm` inside a pty");
     let _ = pty.wait_for("Ask tm anything", Duration::from_secs(10));
 
-    // `/` opens the popup listing every command with its description.
+    // `/` opens the popup listing the commands with their descriptions.
     pty.write(b"/").expect("type /");
-    let screen = pty.wait_for("/attach <ticket>", Duration::from_secs(5));
+    let screen = pty.wait_for("/resume", Duration::from_secs(5));
     assert!(
-        has(&screen, "/attach <ticket>") && has(&screen, "/help") && has(&screen, "/clear"),
+        has(&screen, "/help") && has(&screen, "/clear") && has(&screen, "/resume"),
         "`/` must open the command popup, got: {screen:?}"
     );
     assert!(
-        has(&screen, "Attach this conversation to a ticket"),
+        has(&screen, "Start a fresh conversation"),
         "each command carries a one-line description, got: {screen:?}"
     );
 
     // Typing filters it.
     pty.write(b"cle").expect("filter");
-    let screen = pty.wait_until_gone("/attach <ticket>", Duration::from_secs(5));
+    let screen = pty.wait_until_gone("/resume", Duration::from_secs(5));
     assert!(
         has(&screen, "/clear"),
         "the filter keeps the match, got: {screen:?}"
     );
     assert!(
-        !has(&screen, "/attach <ticket>"),
+        !has(&screen, "/resume"),
         "the filter drops non-matches, got: {screen:?}"
     );
 
@@ -64,31 +66,29 @@ fn slash_popup_filters_and_enter_runs_the_command_and_question_mark_opens_help()
         has(&screen, "Fresh conversation"),
         "Enter in the popup must run the command, got: {screen:?}"
     );
-    assert!(
-        !has(&screen, "/attach <ticket>"),
-        "the popup closes, got: {screen:?}"
-    );
 
-    // `?` on the empty prompt opens help; Esc closes it.
+    // `?` on the empty prompt opens the shortcuts panel; `?` again closes it.
     pty.write(b"?").expect("type ?");
-    let screen = pty.wait_for("tm help", Duration::from_secs(5));
+    let screen = pty.wait_for("! for bash mode", Duration::from_secs(5));
     assert!(
-        has(&screen, "tm help"),
-        "`?` must open help, got: {screen:?}"
+        has(&screen, "! for bash mode")
+            && has(&screen, "@ for file paths")
+            && has(&screen, "double tap esc to clear input")
+            && has(&screen, "shift + tab to cycle modes"),
+        "`?` must open the shortcuts panel, got: {screen:?}"
     );
+    pty.write(b"?").expect("type ? again");
+    let screen = pty.wait_until_gone("! for bash mode", Duration::from_secs(5));
     assert!(
-        has(&screen, "Sessions & tickets") && has(&screen, "ctrl+c twice"),
-        "help explains keys and how sessions relate to tickets, got: {screen:?}"
+        !has(&screen, "! for bash mode"),
+        "? closes the panel, got: {screen:?}"
     );
-    pty.write(&[0x1b]).expect("Esc");
-    let screen = pty.wait_until_gone("tm help", Duration::from_secs(5));
-    assert!(!has(&screen, "tm help"), "Esc closes help, got: {screen:?}");
 
     // `?` inside a message is just a character.
     pty.write(b"why?").expect("type a question");
     let screen = pty.wait_for("why?", Duration::from_secs(5));
     assert!(
-        has(&screen, "why?") && !has(&screen, "tm help"),
+        has(&screen, "why?") && !has(&screen, "! for bash mode"),
         "got: {screen:?}"
     );
 

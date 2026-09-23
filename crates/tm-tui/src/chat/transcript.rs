@@ -293,6 +293,12 @@ impl Transcript {
             .find(|e| matches!(e, Entry::Shell(v) if v.status == ToolStatus::Running));
         match running {
             Some(entry) => {
+                let mut view = view;
+                if let (true, Entry::Shell(was)) = (view.target.is_empty(), &*entry) {
+                    // An interruption knows nothing about the command; keep what was shown.
+                    view.target = was.target.clone();
+                    view.input = was.input.clone();
+                }
                 *entry = Entry::Shell(view).sanitized();
                 self.touch();
                 true
@@ -553,7 +559,8 @@ fn assistant_lines(text: &str, width: usize, theme: &Theme, glyphs: &Glyphs) -> 
 /// `Update`. Tools with no Claude Code counterpart keep their own name.
 pub fn tool_label(name: &str) -> String {
     match name {
-        "shell.run" | "test.run" | "build.run" => "Bash".to_string(),
+        // `shell` is the human's own `!` command.
+        "shell.run" | "test.run" | "build.run" | "shell" => "Bash".to_string(),
         "fs.read" | "fs.read_range" => "Read".to_string(),
         "fs.list" => "List".to_string(),
         "edit.apply_patch" | "edit.write_file" => "Update".to_string(),
