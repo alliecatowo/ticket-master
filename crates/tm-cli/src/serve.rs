@@ -37,7 +37,7 @@ pub async fn serve(
             Ok(handle) => Some(handle),
             Err(e) => {
                 renderer.note(&format!(
-                    "Not working tickets: {e}. Tickets can still be created and reviewed."
+                    "Couldn't start working tickets: {e}. You can still create and review them."
                 ));
                 None
             }
@@ -136,12 +136,12 @@ fn parse_bind_addr(addr: Option<&str>) -> tm_types::Result<SocketAddr> {
     match addr {
         Some(s) => s.parse().map_err(|_e| {
             tm_types::TmError::parse(format!(
-                "bind address {s:?}: expected a socket address like 127.0.0.1:4477"
+                "\"{s}\" isn't a valid address to bind to; try something like 127.0.0.1:4477"
             ))
         }),
         None => "127.0.0.1:0".parse().map_err(|_e| {
             tm_types::TmError::invariant(
-                "default loopback:ephemeral socket address should always parse",
+                "internal error: the default loopback address failed to parse",
             )
         }),
     }
