@@ -36,7 +36,10 @@ use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, EventStream};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    EventStream,
+};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{execute, terminal};
 use futures::StreamExt;
@@ -115,6 +118,11 @@ fn teardown_terminal(mouse_enabled: bool) {
             eprintln!("tm-tui: failed to disable mouse capture during teardown: {err}");
         }
     }
+    // Always sent, whether or not enabling it succeeded: disabling an already-disabled mode is a
+    // no-op on every terminal, and leaving it on would wrap the shell's next paste in markers.
+    if let Err(err) = execute!(stdout, DisableBracketedPaste) {
+        eprintln!("tm-tui: failed to disable bracketed paste during teardown: {err}");
+    }
     if let Err(err) = execute!(stdout, LeaveAlternateScreen) {
         eprintln!("tm-tui: failed to leave alternate screen during teardown: {err}");
     }
@@ -129,6 +137,10 @@ fn teardown_terminal(mouse_enabled: bool) {
 fn setup_terminal(want_mouse: bool) -> io::Result<bool> {
     terminal::enable_raw_mode()?;
     execute!(io::stdout(), EnterAlternateScreen)?;
+    // Bracketed paste delivers a paste as one `InputEvent::Paste` instead of a burst of
+    // keystrokes, so a multi-line paste into the chat prompt cannot submit at its first newline.
+    // Best-effort: a terminal that ignores the mode just keeps sending keystrokes.
+    let _ = execute!(io::stdout(), EnableBracketedPaste);
     let mouse_enabled = if want_mouse {
         execute!(io::stdout(), EnableMouseCapture).is_ok()
     } else {

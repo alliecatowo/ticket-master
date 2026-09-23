@@ -47,7 +47,12 @@ never drift between sessions:
 - `mise run clean` — `rm -rf target`. This machine runs tight on disk; do this after a verify
   pass lands, not mid-build. `mise run worktree:clean` sweeps every worktree under
   `.claude/worktrees/` the same way.
-- `mise run tui` — build and launch the ratatui TUI against the current directory's project.
+- `mise run tui` — build and launch the ratatui TUI against the current directory's project. It
+  opens on the chat (`docs/decisions/D-018-tui-chat-first-shell.md`): nothing typed is a shortcut;
+  on an empty prompt `/` opens commands, `?` help, `←` the sessions & tickets home (also Ctrl+T or
+  `/home`); Enter sends, Shift+Enter/Ctrl+J newline; quit is Ctrl+C twice, Ctrl+D on an empty
+  prompt, or `/exit`. `cargo run -p tm-tui --example chat_demo` plays a scripted turn (tool calls,
+  Markdown) through the real chat screen, for looking at rendering without a model.
 - `mise run dev` — same, with `RUST_LOG=tm=debug,tm_core=debug,tm_agent=debug` piped to
   `/tmp/tm-dev.log` instead of the alt-screen (so debug output doesn't corrupt the TUI's frame).
 - `mise run doctor` — `tm doctor` against the current directory.

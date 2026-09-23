@@ -31,6 +31,8 @@
 //!   (`SIGTERM`/`SIGHUP` restore, `SIGTSTP`/`SIGCONT` suspend/resume) ratatui's panic hook does
 //!   not cover.
 //! - [`caps`] — terminal capability detection and colour degradation.
+//! - [`chat`] — the conversation widgets behind the chat screen: transcript, Markdown, prompt
+//!   editor, slash commands, status bar.
 //! - [`text`] — grapheme segmentation, display width, and wrapping.
 //! - [`theme`] — the palette, layout helpers, and animation.
 //! - [`widgets_data`] — tables, lists, trees, and forms.
@@ -43,6 +45,7 @@
 #![warn(missing_docs)]
 
 pub mod caps;
+pub mod chat;
 pub mod component;
 pub mod event;
 pub mod runtime;

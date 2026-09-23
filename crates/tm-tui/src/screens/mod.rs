@@ -11,14 +11,17 @@
 //! One file per screen so the implementing agent for this part can work across all of them
 //! without collisions.
 
+/// The default screen bare `tm` opens into: a Claude-Code-style conversation with a prompt box, a
+/// `/` command popup, a `?` help overlay, and a status bar.
+pub mod chat;
 /// The command palette overlay: fuzzy-searchable actions and navigation.
 pub mod command_palette;
 /// The ticket/session overview: a ticket table on the left, a session list on the right.
 pub mod dashboard;
 /// The diff viewer screen, browsing changed files and their diffs.
 pub mod diff_viewer;
-/// The default screen bare `tm` opens into: the chat input, the running turn's live output, and
-/// the dashboard alongside it.
+/// The cross-session "agents" view, one `←` away from the chat: sessions, background tickets, and
+/// active workers.
 pub mod home;
 /// The Kanban board: tickets as cards in columns named after their real `tm_core::TicketState`,
 /// reachable from `home` via `tm-cli`'s own navigation chord (`tm-cli`'s `tui.rs` owns *when* a

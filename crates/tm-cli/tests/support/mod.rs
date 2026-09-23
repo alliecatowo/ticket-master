@@ -146,6 +146,54 @@ impl Pty {
         }
     }
 
+    /// Whether the child is still running right now — the direct way to assert "that keystroke
+    /// did not quit", rather than inferring it from what happens to be on screen.
+    #[allow(dead_code)]
+    pub fn is_running(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
+
+    /// Whether the terminal is currently showing the alternate screen (a TUI is up). After a
+    /// clean exit this must be false: the TUI restored the shell's own screen.
+    #[allow(dead_code)]
+    pub fn alternate_screen(&mut self) -> bool {
+        let _ = self.screen();
+        self.parser.screen().alternate_screen()
+    }
+
+    /// Wait until the child has written nothing new for `quiet`, bounded by `timeout` — for
+    /// asserting on what did *not* happen after a keystroke (the screen settled without it).
+    #[allow(dead_code)]
+    pub fn settle(&mut self, quiet: Duration, timeout: Duration) -> Vec<String> {
+        let deadline = Instant::now() + timeout;
+        let mut last_len = self.output.lock().map(|b| b.len()).unwrap_or(0);
+        let mut last_change = Instant::now();
+        loop {
+            thread::sleep(Duration::from_millis(20));
+            let len = self.output.lock().map(|b| b.len()).unwrap_or(0);
+            if len != last_len {
+                last_len = len;
+                last_change = Instant::now();
+            }
+            if last_change.elapsed() >= quiet || Instant::now() >= deadline {
+                return self.screen();
+            }
+        }
+    }
+
+    /// Block until `screen()` no longer contains `pattern` or `timeout` elapses.
+    #[allow(dead_code)]
+    pub fn wait_until_gone(&mut self, pattern: &str, timeout: Duration) -> Vec<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let screen = self.screen();
+            if !screen.iter().any(|line| line.contains(pattern)) || Instant::now() >= deadline {
+                return screen;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     /// Block until `screen()` contains `pattern` or `timeout` elapses, returning the screen
     /// either way so a timeout assertion failure shows what was actually displayed.
     pub fn wait_for(&mut self, pattern: &str, timeout: Duration) -> Vec<String> {

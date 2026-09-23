@@ -1,6 +1,9 @@
 # D-006 — A real navigation shell and Kanban board for the TUI
 
-**Status:** accepted · **Date:** 2026-09-19 · **Supersedes:** nothing (extends D-002)
+**Status:** accepted, partly superseded · **Date:** 2026-09-19 · **Supersedes:** nothing (extends
+D-002) · **Superseded in part by:** D-018 (points 3, 3b and 5: bare `tm` now opens a chat-first
+screen, `Home` is the cross-session view, and nothing typed is a shortcut — see
+`docs/decisions/D-018-tui-chat-first-shell.md`)
 
 ## Context
 

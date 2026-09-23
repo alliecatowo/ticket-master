@@ -19,7 +19,7 @@ fn init_project() -> tempfile::TempDir {
 }
 
 #[test]
-fn bare_tm_on_a_real_tty_launches_the_dashboard_not_the_plain_loop() {
+fn bare_tm_on_a_real_tty_launches_the_chat_not_the_plain_loop() {
     let project = init_project();
     // Repo scope via `--project` never reads `$TM_HOME` (D-003's `resolve_scope` returns before
     // consulting it), but every test spawning the real binary sets it to a tempdir regardless so
@@ -32,29 +32,51 @@ fn bare_tm_on_a_real_tty_launches_the_dashboard_not_the_plain_loop() {
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
     cmd.env("TM_HOME", tm_home.path());
+    cmd.env("TM_TEST_MOCK_PROVIDER", "1");
 
     let mut pty = support::Pty::spawn(cmd, 80, 24).expect("spawn `tm` inside a pty");
 
-    let screen = pty.wait_for("Tickets", Duration::from_secs(10));
+    // The chat is the default screen (D-018): the prompt box's placeholder and the status bar's
+    // model segment, with zero keys pressed.
+    let screen = pty.wait_for("Ask tm anything", Duration::from_secs(10));
     assert!(
-        screen.iter().any(|line| line.contains("Tickets")),
-        "a bare `tm` on a real tty must reach the dashboard's \"Tickets\" pane heading \
-         (screens/dashboard.rs), got: {screen:?}"
+        screen.iter().any(|line| line.contains("Ask tm anything")),
+        "a bare `tm` on a real tty must open the chat's prompt box, got: {screen:?}"
     );
     assert!(
-        screen.iter().any(|line| line.contains("Sessions")),
-        "the dashboard's second pane heading must also be on screen, got: {screen:?}"
+        screen.iter().any(|line| line.contains("mock/m1")),
+        "the status bar must name the model, got: {screen:?}"
     );
     assert!(
         !screen.iter().any(|line| line.trim() == "tm>"),
         "a real tty must not fall through to the plain agent loop's prompt, got: {screen:?}"
     );
+    assert!(
+        pty.alternate_screen(),
+        "the TUI runs in the alternate screen"
+    );
 
-    pty.write(b"q").expect("send the quit key");
+    // Ctrl+C twice (within the quit window) is the quit chord; exit 0 and the shell's own screen
+    // restored.
+    pty.write(&[0x03]).expect("first ctrl-c");
+    let screen = pty.wait_for("Press Ctrl+C again", Duration::from_secs(5));
+    assert!(
+        screen
+            .iter()
+            .any(|line| line.contains("Press Ctrl+C again to quit")),
+        "the first Ctrl+C must explain how to quit, not quit, got: {screen:?}"
+    );
+    assert!(pty.is_running(), "one Ctrl+C must not quit");
+    pty.write(&[0x03]).expect("second ctrl-c");
     let exited_cleanly = pty
         .wait(Duration::from_secs(10))
-        .expect("the tm process must exit after `q`");
-    assert!(exited_cleanly, "`tm` must exit 0 after the quit keybinding");
+        .expect("the tm process must exit after Ctrl+C twice");
+    assert!(exited_cleanly, "`tm` must exit 0 after Ctrl+C twice");
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !pty.alternate_screen(),
+        "exiting must leave the alternate screen (terminal restored)"
+    );
 }
 
 #[test]
