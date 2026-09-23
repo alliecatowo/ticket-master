@@ -27,6 +27,286 @@ Trial agents drive each surface for real (ticket request → implementation → 
   acceptance: `mise run release` builds a tarball whose `share/tm/web/index.html` exists and which contains no `.env`/`.tm`; a test covers the installed-layout lookup in `serve.rs`; README and docs/install.md agree with each other and with release.yml.
   test: `mise run test:crate -- tm-cli`
 
+- [ ] **s1-surfaces-decision-doc** — Write the command-surfaces decision doc (next free D-NNN)
+  model: sonnet · severity: high · builds Rust: no · area: docs · deps: none
+  files: `docs/decisions/D-0NN-command-surfaces.md`, `docs/decisions/D-019-claude-code-parity-shell.md`, `CLAUDE.md`
+  change: Run `ls docs/decisions` and take the next free number (another track may claim the next-lowest first — re-check before naming the file). Write the design in the D-002 format (Status, Date, Supersedes, then Context, Decision, Why, "What this costs, stated plainly"). The Decision section covers: the visible/hidden CLI tree (daily/planning/serving/more groups, `#[command(hide = true)]` plumbing verbs), the slash-command table (existing plus `/context`, `/todos`, `/memory`, `/export`, `/doctor`, `/permissions`, `/review`, `/search`, `/run`, `/ticket`, `/board`, `/milestones`, `/timeline`, `/deps`, `/workflow`), the Tickets-hub tab strip (Tickets · Board · Milestones · Timeline · Graph), the one-set-of-display-labels rule, and ticket due dates. Add a one-line pointer in D-019's command list and in CLAUDE.md's surface paragraph.
+  acceptance: The new file exists with the D-002 section headings. D-019 and CLAUDE.md reference it by its real number. `mise run hygiene` passes (no dangling D-NNN).
+  test: `mise run hygiene`
+  evidence: `ls docs/decisions | tail -2` -> D-022-unified-provider-model-config-ux.md, D-023-capacity-wait-is-not-a-failed-attempt.md
+
+- [ ] **s1-dep-rm-emit-removed-event** — tm dep rm silently does nothing: emit ticket.dependency_removed
+  model: sonnet · severity: critical · builds Rust: yes · area: cli/tickets · deps: s1-surfaces-decision-doc
+  files: `crates/tm-core/src/store.rs`, `crates/tm-cli/src/tickets.rs`
+  change: `dep_rm` in tickets.rs (~line 835) writes a `dependencies` field through `update_ticket`, but materialize never reads that field — edges live in `ticket_deps` and are only removed by the TicketDependencyRemoved event (materialize.rs:210, payload TicketDependencyRemovedPayload). Add `Store::remove_dependency(ticket, depends_on, actor)` next to `add_dependency` (store.rs:728); it returns not_found when the edge is absent and otherwise emits TicketDependencyRemovedPayload. Rewrite `dep_rm` to call it. Add a store unit test (add, rm, then view.graph has no edge).
+  acceptance: In a tempdir project: `tm dep add T-2 T-1`, `tm dep rm T-2 T-1`, then `tm --json dep graph` lists no T-2->T-1 edge. Running rm a second time gives a clear "no dependency T-2 -> T-1" error.
+  test: `mise run test:crate -- tm-core && mise run test:crate -- tm-cli`
+  evidence: `sed -n 847,872p crates/tm-cli/src/tickets.rs` -> `let fields = serde_json::json!({"dependencies": updated_edges}); project.store.update_ticket(&ticket, fields, ...)` (materialize only deletes on EventKind::TicketDependencyRemoved). Confirmed independently: "tm dep rm T-2 T-1 --plain followed by tm dep graph --json still shows the edge."
+
+- [ ] **s1-display-labels** — One set of human display labels for ticket state, kind, milestone state, dep kind, budget and authority
+  model: sonnet · severity: critical · builds Rust: yes · area: cli · deps: s1-surfaces-decision-doc
+  files: `crates/tm-cli/src/render.rs`, `crates/tm-cli/src/tickets.rs`
+  change: Add `pub fn state_label(TicketState)`, `kind_label`, `milestone_state_label`, `dep_kind_label` (Hard -> "blocks", Loop -> "loop"), `budget_label` ("unlimited" for u64::MAX, else e.g. "50k tokens, 20 steps, $2.00") and `authority_label` in render.rs. Labels are lowercase and match exactly what `tm ticket list --state` parses (tickets.rs:590). Replace `format!("{:?}", t.kind/t.state)` at tickets.rs:336-337, 654, and the milestone list (~941). Add a test that feeds every TicketState's label back through the `--state` parser.
+  acceptance: `tm ticket list` shows `draft`/`ready`/`in progress`-style lowercase states. `tm milestone list` shows `open`, not `Open`. Every label round-trips through `--state`.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `grep -n '{:?}' crates/tm-cli/src/tickets.rs` -> 336/337/941 debug-format State/Kind/milestone state.
+
+- [ ] **s1-ticket-show-human** — tm ticket show prints Rust Debug structs; render a readable summary
+  model: sonnet · severity: critical · builds Rust: yes · area: cli/tickets · deps: s1-display-labels
+  files: `crates/tm-cli/src/tickets.rs`
+  change: Rewrite the text branch of `ticket show` (tickets.rs:368-384). Show State, Kind, Objective, Milestone, Depends on, Children as `T-4, T-5` (or `none`), Budget via budget_label, Authority via authority_label. Collapse Resources, Executor, Verification and Retry Policy to one plain line each (e.g. "Verification: tests must pass", "Retries: up to 3 attempts"), or omit when default. JSON output unchanged except budget renders as null/"unlimited" in text only. Also fix the objective-truncation byte-slice at tickets.rs:327-328 to use `.chars().take(47)` instead of `&[..47]`, which panics on multi-byte UTF-8 (emoji/accents). Add a unit test asserting no `{`, `Some(` or `18446744073709551615` in the output, and a test that a multi-byte objective doesn't panic.
+  acceptance: `tm ticket show T-1` in a tempdir project has no braces, `Some(` or u64::MAX; lines read like `Budget: unlimited`. `tm ticket new "😀😀😀…30 chars"` then `tm ticket list` doesn't panic.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `grep -n 'Authority:\|Budget:' crates/tm-cli/src/tickets.rs` -> 378/382 debug format; multiple independent trial agents confirmed the same `Authority { repository: RepoAuthority { ... } }` output; byte-slice truncation confirmed at tickets.rs:327-328.
+
+- [ ] **s1-transition-error-copy** — Invalid ticket transitions explain the state and the next command
+  model: sonnet · severity: high · builds Rust: yes · area: cli/tickets · deps: s1-display-labels
+  files: `crates/tm-cli/src/tickets.rs`, `crates/tm-types/src/error.rs`, `crates/tm-core/src/machine.rs`
+  change: `InvalidTransition { from, trigger }` (tm-core/src/machine.rs:16) carries no ticket id, so build the friendly text in the CLI layer: a helper in tickets.rs mapping a TmError::InvalidTransition from accept/reject/retry/activate/close/cancel/reopen/submit to a sentence like "T-3 is a draft, so it can't be accepted. Activate it first: tm ticket activate T-3", using state_label plus a small table of which verb is valid from each state. Change the `#[error("invalid transition: {0}")]` prefix (error.rs:25) to "can't do that from this state: {0}". Cover submit-without-evidence ("invariant violated: submission requires at least one evidence artifact") with "Provide at least one piece of evidence (code changes, test results, or documentation) with `tm ticket attach T-N --evidence <path>` before submitting."
+  acceptance: `tm ticket accept T-1` on a draft prints a sentence naming the state and the next command; no `InvalidTransition`, `trigger`, `invariant violated`, or raw enum Debug (e.g. "Ready on Activate") anywhere in the output.
+  test: `mise run test:crate -- tm-cli && mise run test:crate -- tm-core`
+  evidence: `grep -n 'invalid transition' crates/tm-types/src/error.rs` -> 25: `#[error("invalid transition: {0}")]`; five independent trial agents hit the same "no transition from Draft on VerificationStarted"/"Ready on Activate" text.
+
+- [ ] **s1-dep-graph-human** — tm dep graph prints DependencyGraph Debug and ignores its root argument
+  model: sonnet · severity: high · builds Rust: yes · area: cli/tickets · deps: s1-display-labels, s1-dep-rm-emit-removed-event
+  files: `crates/tm-cli/src/tickets.rs`, `crates/tm-cli/src/tui.rs`
+  change: In `dep_graph` (tickets.rs ~884-905), replace `{:?}` of view.graph with an indented, human list: each edge as `T-A (objective) -> T-B (objective)` using dep_kind_label, sourced from view.tickets. When a TICKET argument is given, filter to only its transitive dependencies/dependents (today the code computes a subgraph label but still returns the full graph). Validate the root ticket exists (TmError::not_found otherwise). With no edges: "No dependencies yet. Add one: tm dep add <ticket> <depends-on>". Fix the Kanban column title at tui.rs:337 (`format!("{state:?}")`) to use state_label.
+  acceptance: `tm dep graph T-2` prints only T-2's subgraph as readable lines, no Rust struct syntax. `tm dep graph T-99` errors "not found: ticket T-99" instead of returning the full graph. Kanban columns read `ready`, not `Ready`.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `sed -n 896,904p crates/tm-cli/src/tickets.rs` -> `format!("Dependency graph (subgraph from {}):\n{:?}", ticket, view.graph)`; confirmed `tm dep graph T-2` still returns the unfiltered graph.
+
+- [ ] **s1-milestone-new-show** — Add tm milestone new/show and validate --milestone on ticket new
+  model: sonnet · severity: critical · builds Rust: yes · area: cli/milestones · deps: s1-display-labels
+  files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/tickets.rs`, `CLAUDE.md`
+  change: Add `MilestoneCommand::New { title, --ticket <T>... }` with `create` as a visible alias, calling the existing `Store::create_milestone` (store.rs:1694) and printing "Created M-1: <title>". Add `Show(MilestoneRefArgs)` printing title, state and member tickets with state labels plus a done/total count. When `milestone list` is empty: "No milestones yet. Create one: tm milestone new \"<title>\"". Make `tm ticket new --milestone M-9` fail with "no milestone M-9. Run `tm milestone list`..." when M-9 doesn't exist (today it's silently dropped). Add a CLAUDE.md line.
+  acceptance: In a tempdir: `tm milestone new "v0" --ticket T-1` then `tm milestone show M-1` lists T-1. `tm ticket new x --milestone M-99` errors clearly instead of silently creating the ticket with no milestone.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `grep -n 'List\|Close\|Reopen'` in MilestoneCommand (args.rs:535-541) -> only List/Close/Reopen, no New/Create/Show; `Store::create_milestone` exists at store.rs:1694 with no CLI caller; confirmed `tm ticket new "..." --milestone M-1` with no milestones creates the ticket and silently drops the milestone.
+
+- [ ] **s1-help-text-scrub-and-hygiene** — Strip D-NNN, crate paths and type names from user-facing help, and add a hygiene check for it
+  model: sonnet · severity: high · builds Rust: yes · area: cli/copy · deps: s1-milestone-new-show
+  files: `crates/tm-cli/src/args.rs`, `crates/xtask/src/hygiene.rs`
+  change: Rewrite every `///` doc comment on clap items in args.rs mentioning `D-0NN`, `crates/`, `docs/decisions`, `tm_*::`, backticked crate names, or jargon ("honestly refused", "bare-`tm` loop", "snapshot-tested", "assimilate", "chunks"). Move rationale to plain `//` comments for maintainers. E.g. Tickets becomes "Open the tickets view (or print tickets with --json)"; the `--project` flag drops `[crate::project::resolve_scope]`/`[crate::project::locate]`/"(unchanged since before D-003)" for plain English ("walking up for a `.tm` directory, then falling back to a project kept under $TM_HOME"); `--plain` drops "(D-002, ...)"; `--json` drops "snapshot-tested"; `tm computer`'s `--headless` help changes "honestly refused on macOS" to "not supported on macOS" (4 occurrences), and its module doc drops the backticks around `tm-computer`. Add a hygiene check flagging `D-\d{3}|crates/|docs/decisions|tm_[a-z]+::` inside `///` lines of crates/tm-cli/src/args.rs only.
+  acceptance: `tm --help` and every `tm <verb> --help` contain no D-0, crates/ or `tm_` paths. `mise run hygiene` fails when one is reintroduced.
+  test: `mise run hygiene && mise run test:crate -- tm-cli`
+  evidence: `grep -nE 'D-0[0-9]{2}' crates/tm-cli/src/args.rs` -> 114, 324, plus `--project`'s rustdoc-style `[crate::project::resolve_scope]`/`[crate::project::locate]` links, confirmed by seven independent trial agents across different CLI verbs; `honestly refused on macOS` at 4 sites in ComputerSnapshotArgs/ComputerClickArgs/ComputerTypeArgs/ComputerKeyArgs.
+
+- [ ] **s1-cli-tree-regroup** — Group tm --help into daily/planning/serving/more and hide plumbing verbs as aliases
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: s1-help-text-scrub-and-hygiene
+  files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/tests/tui_launch.rs`, `CLAUDE.md`
+  change: Use `display_order` so daily verbs (`tm`, `-p`, `init`, `status`, `tickets`, `ticket`, `run`, `search`, `symbol`, `doctor`) come first, then planning (`milestone`, `dep`, `decision`), then serving (`serve`, `mcp`). Add `#[command(hide = true)]` to `lease`, `harness`, `bench`, `browser`, `computer`, `sched plan/tick`, `events replay/verify`, `ticket submit/delegate` — all must still run. Add an `after_help` "More commands" list. Give `tm search` `--exact`/`--semantic` flags; keep `--mode` as a hidden alias. Don't touch `provider` or `auth`.
+  acceptance: `tm --help` lists ~16 commands, grouped. `tm lease list` and `tm sched tick` still work. `tm search --exact foo` equals `tm search --mode exact foo`.
+  test: `mise run test:crate -- tm-cli`
+  evidence: current CLI has 31 top-level verbs, all visible; finding: "Search command UX: --mode flag less discoverable than subcommand style."
+
+- [ ] **s1-tickets-json-shape** — tm tickets --json and tm ticket list --json disagree on fields
+  model: haiku · severity: medium · builds Rust: yes · area: cli · deps: s1-display-labels
+  files: `crates/tm-cli/src/tickets/overview.rs`, `crates/tm-cli/src/tickets.rs`
+  change: Make `tm tickets --json` serialize the same view struct as `tm ticket list --json`, including `title` (short_title of the objective, overview.rs:531) and state_label strings. Extend whichever struct is missing fields rather than creating a third one. Add a test deserializing both outputs into one struct.
+  acceptance: `tm tickets --json | jq '.[0]|keys'` and `tm --json ticket list | jq '.[0]|keys'` have identical key sets, and `title` is populated (not null) in both.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `tm tickets --json` shows `"title": "Fix the login redirect"` while `tm ticket list --json` shows `"title": null` for the same ticket; overview.rs:69-70 `pub title: String` only exists on the overview view.
+
+- [ ] **s1-ticket-due-date** — Tickets get an optional due date (tm ticket new/edit --due)
+  model: sonnet · severity: medium · builds Rust: yes · area: cli/tickets · deps: s1-cli-tree-regroup
+  files: `crates/tm-core/src/ticket.rs`, `crates/tm-core/src/materialize.rs`, `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/tickets.rs`, `CLAUDE.md`
+  change: Add `due: Option<chrono::NaiveDate>` (serde default) to Ticket (near `milestone`, ticket.rs:367). Persist through the existing ticket.created/ticket.updated field paths, migrating materialize.rs if tickets are stored per column. Add `--due YYYY-MM-DD` to `ticket new`/`ticket edit` (`--due none` clears it). Show it in `ticket show`/`ticket list`. A milestone's due date is the max of its tickets' due dates in `milestone show`. Parse errors say "use YYYY-MM-DD, e.g. 2026-10-01".
+  acceptance: `tm ticket new x --due 2026-10-01` then `tm ticket show T-1` shows `Due: 2026-10-01`, surviving a replay/view rebuild.
+  test: `mise run test:crate -- tm-core && mise run test:crate -- tm-cli`
+  evidence: `grep -n 'due' crates/tm-types/src` -> no matches; probe deps-sched: "Add due-date field and CLI support to tickets."
+
+- [ ] **s1-tui-hub-tabs** — Tickets hub gets a tab strip: Tickets, Board, Milestones, Timeline, Graph
+  model: sonnet · severity: high · builds Rust: yes · area: tui · deps: s1-dep-graph-human
+  files: `crates/tm-tui/src/screens/tickets.rs`, `crates/tm-cli/src/tui.rs`, `crates/tm-cli/src/tui/tickets_view.rs`, `crates/tm-cli/tests/tui_navigation.rs`
+  change: Render a tab strip in the tickets screen header. Tab/Shift+Tab (currently ignored at tickets.rs:786) cycle ScreenId among Tickets, Kanban, Milestones, Timeline, Graph. The last three show a "coming next" placeholder until their own tasks land. Ctrl+B still jumps to Board; Esc from any tab goes back to chat. Fix the stale module doc at tui.rs:18 ("`b` opens the Kanban board"; it is actually Ctrl+B). Extend tui_navigation.rs with Tab-cycling coverage.
+  acceptance: In `mise run tui` (tempdir project), `/tickets` then Tab moves the highlighted tab and the screen. The navigation test passes.
+  test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
+  evidence: `grep -n 'Tab' crates/tm-tui/src/screens/tickets.rs` -> 786: `KeyCode::Tab | KeyCode::BackTab => {}`; ScreenId (tui.rs:405) has only Chat/Tickets/Kanban/Detail; tester (TUI): "missing the project-management views (milestones, timeline, calendar)."
+
+- [ ] **s1-tui-milestones-view** — Milestones tab: progress per milestone, Enter filters tickets
+  model: sonnet · severity: medium · builds Rust: yes · area: tui · deps: s1-tui-hub-tabs, s1-milestone-new-show, s1-ticket-due-date
+  files: `crates/tm-tui/src/screens/milestones.rs`, `crates/tm-tui/src/screens/mod.rs`, `crates/tm-cli/src/tui.rs`
+  change: New screen, one row per milestone: title, state label, a done/total progress bar, derived due date, sourced from ProjectView.milestones. Enter returns to Tickets filtered to that milestone (header shows the filter); Esc clears it. Empty state: "No milestones. Create one with tm milestone new". Add a buffer-render unit test at the bottom of the file.
+  acceptance: With two milestones in a tempdir project, the Milestones tab shows both with correct counts; Enter narrows the Tickets list.
+  test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
+  evidence: `ls crates/tm-tui/src/screens` -> no milestone screen exists yet.
+
+- [ ] **s1-tui-timeline-view** — Timeline tab: ticket bars from the event log, today line, due markers, month grid
+  model: sonnet · severity: medium · builds Rust: yes · area: tui · deps: s1-tui-hub-tabs, s1-ticket-due-date
+  files: `crates/tm-tui/src/screens/timeline.rs`, `crates/tm-tui/src/screens/mod.rs`, `crates/tm-cli/src/tickets/overview.rs`, `crates/tm-cli/src/tui.rs`
+  change: Ticket has no created/closed timestamps, so extend the existing event fold in tickets/overview.rs (`apply(kind, subject, ts, payload)`, line 220) to record first-seen and closed-at per ticket. Render one bar per ticket from created to closed (or now), grouped by milestone, with a today line and a due-date mark. `+`/`-` zoom between day/week/month; month zoom is the calendar grid (due tickets listed per day). Timeline has no text input so plain keys are safe. Use a fixed clock for unit tests.
+  acceptance: A render test with three tickets at fixed timestamps shows bars in the right columns with a due marker; the Timeline tab shows real tickets in a tempdir project.
+  test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
+  evidence: `grep 'created_at|closed_at' crates/tm-core/src/ticket.rs` -> none; overview.rs:220 already folds events with timestamps.
+
+- [ ] **s1-tui-graph-tab-prune-dead-screens** — Wire the unused ticket_graph screen as the Graph tab; delete dead dashboard/command_palette
+  model: sonnet · severity: medium · builds Rust: yes · area: tui · deps: s1-tui-hub-tabs
+  files: `crates/tm-tui/src/screens/ticket_graph.rs`, `crates/tm-tui/src/screens/dashboard.rs`, `crates/tm-tui/src/screens/command_palette.rs`, `crates/tm-tui/src/screens/mod.rs`, `crates/tm-tui/src/screens/kanban.rs`, `crates/tm-tui/src/screens/ticket_detail.rs`, `crates/tm-cli/src/tui.rs`
+  change: Feed `screens/ticket_graph.rs` from view.graph with labelled nodes and make it the Graph tab; Enter on a node opens ticket detail. Delete `dashboard.rs` and `command_palette.rs` (grep shows no users outside their own files besides doc links in kanban.rs:5,37 and ticket_detail.rs:121 — fix those doc references too). Re-grep `dashboard\|command_palette` across `crates` once more right before deleting.
+  acceptance: The Graph tab shows the dependency edges of a tempdir project; dashboard.rs and command_palette.rs are gone with no dangling doc links, and the workspace builds.
+  test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
+  evidence: `grep -rn 'dashboard::\|ticket_graph::\|command_palette' crates` (excluding own files) -> only doc comments in kanban.rs:5 and ticket_detail.rs:121; ScreenId has no Graph variant.
+
+- [ ] **s1-slash-pm-views** — Slash commands /board /milestones /timeline /deps /ticket /run
+  model: sonnet · severity: medium · builds Rust: yes · area: tui/chat · deps: s1-tui-milestones-view, s1-tui-timeline-view, s1-tui-graph-tab-prune-dead-screens
+  files: `crates/tm-tui/src/chat/commands.rs`, `crates/tm-cli/src/tui/slash_views.rs`, `crates/tm-cli/src/tui/chat_ops.rs`, `crates/tm-cli/src/tui.rs`, `CLAUDE.md`
+  change: This is the first of four chained slash tasks that all edit commands.rs — run them in order. Add CommandIds/COMMANDS rows for board, milestones, timeline, deps, `ticket <T>` (prints ticket-show text inline in the transcript) and `run <T>` (activates and queues the ticket, replying "Queued T-3; watch it in /tickets"). Put handlers in a new file, slash_views.rs; keep each arm in chat_ops.rs's match (~line 582) to one line. chat_ops.rs has uncommitted edits in the (untouched, per CLAUDE.md) `odw-integrate` worktree, so keep that diff minimal — this task must not touch `.claude/worktrees/odw-*`. Any count test must use `COMMANDS.len()`. Update CLAUDE.md's slash list.
+  acceptance: Typing `/mil` in the chat shows /milestones in the popup, and Enter opens the Milestones tab. `/ticket T-1` prints a readable summary.
+  test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
+  evidence: `crates/tm-tui/src/chat/commands.rs` CommandId has 17 variants (Help..Exit) with no PM views, no /ticket and no /run.
+
+- [ ] **s1-slash-context-todos** — /context shows token use by section and the ticket's prefetched context pack; /todos
+  model: sonnet · severity: high · builds Rust: yes · area: tui/chat · deps: s1-slash-pm-views
+  files: `crates/tm-tui/src/chat/commands.rs`, `crates/tm-cli/src/tui/slash_views.rs`, `crates/tm-cli/src/tui/chat_ops.rs`, `CLAUDE.md`
+  change: `/context` prints a table into the transcript: context-window size, and tokens used by system prompt, instructions (AGENTS.md), tools, conversation, free space, from the session's real token counts. When a ticket is attached, also list that ticket's context-pack sections (prefetched files/symbols) with a token count each, reusing tm-context's section accounting (`crates/tm-context/src/tokens.rs` SectionKind) — don't invent numbers. `/todos` toggles the Ctrl+T checklist.
+  acceptance: In a chat attached to a ticket, `/context` lists the prefetched items with token counts that sum to the displayed total.
+  test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
+  evidence: probe prefetch (pass=false): "Add a way to see a ticket's context pack (what was prefetched) and its token cost."
+
+- [ ] **s1-slash-search-review** — /search <q> inline hybrid code search, and /review of the working-tree diff
+  model: sonnet · severity: medium · builds Rust: yes · area: tui/chat · deps: s1-slash-context-todos
+  files: `crates/tm-tui/src/chat/commands.rs`, `crates/tm-cli/src/tui/slash_views.rs`, `crates/tm-cli/src/tui/chat_ops.rs`, `CLAUDE.md`
+  change: `/search <q>` runs the same hybrid search `tm search` uses (crates/tm-cli/src/search.rs) against the project and prints the top 10 as `path:line  snippet`. When the index is not built yet, say so instead of printing an empty list (distinguish "not indexed" from "no matches" — same fix needed in s1-search-hybrid-empty-snippet's snippet plumbing). `/review [focus]` sends a turn asking the agent to review `git diff HEAD`, the way `/init` sends init_prompt.
+  acceptance: `/search dependency graph` in a tempdir project with code lists matching paths with snippets. `/review` starts a turn whose prompt includes the diff.
+  test: `mise run test:crate -- tm-cli`
+  evidence: probe nav-semantic: "Distinguish 'index not built yet' from 'no matches' in tm search output"; the chat has no search command today.
+
+- [ ] **s1-slash-memory-export-doctor-perms-workflow** — /memory, /export, /doctor, /permissions, /workflow
+  model: sonnet · severity: medium · builds Rust: yes · area: tui/chat · deps: s1-slash-search-review, s1-surfaces-decision-doc
+  files: `crates/tm-tui/src/chat/commands.rs`, `crates/tm-cli/src/tui/slash_views.rs`, `crates/tm-cli/src/tui/chat_ops.rs`, `CLAUDE.md`, `docs/decisions/D-0NN-command-surfaces.md`
+  change: `/memory` opens the project's AGENTS.md in $EDITOR through the existing Ctrl+G editor path (creating it if absent). `/export [path]` writes the transcript as markdown (default `tm-session-<id>.md` in cwd) and replies with the path. `/doctor` runs the same checks as `tm doctor`, printed pass/fail. `/permissions` shows the current auto/plan/ask mode and what each allows; `/permissions <mode>` sets it, same as Shift+Tab. `/workflow [name]` with no name lists workflows like `tm workflow list`; with a name, starts it as a background ticket. Mark the command-surfaces decision doc "Implemented" for the slash table.
+  acceptance: Each command appears in the `/` popup and does what it says in a tempdir project. `/export` writes a readable .md file.
+  test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
+  evidence: finding (workflow): "Add /workflow slash command to chat for discovering and running workflows"; CommandId lacks Memory/Export/Doctor/Permissions/Workflow.
+
+- [ ] **s1-id-parse-and-lease-error-copy** — Plain-language errors for milestone/ticket/decision/lease ID parsing and lease conflicts
+  model: haiku · severity: low · builds Rust: yes · area: cli/copy · deps: s1-milestone-new-show
+  files: `crates/tm-types/src/id.rs`, `crates/tm-core/src/lease.rs`, `crates/tm-cli/src/tickets.rs`
+  change: In the `id_newtype!` macro (id.rs ~109-114), replace the internal type name in the format string with a user-friendly noun per type ("Ticket identifier", "Milestone identifier", "Decision identifier", "Lease identifier", "Actor") so e.g. `tm decision show invalid-id` says "Decision identifier must look like D-<n>, got \"invalid-id\"" instead of "DecisionId must look like...". Do the same for ParticipantId/LeaseId's format-string errors ("lease IDs start with L- followed by 12 hex digits" instead of dumping the pattern). Replace the lease-acquire-on-already-leased error (currently AcquireError::NotReady, displaying as "ticket T-3 is not Ready" even when the real cause is an active lease) with "T-3 is already being worked by <holder> until <time>" — check for an existing lease before the Ready check, or special-case the message.
+  acceptance: `tm ticket show foo` and `tm decision show foo` print one plain sentence with an example id and no Rust type names. `tm lease acquire <already-leased-ticket>` names the existing lease holder, not "not Ready".
+  test: `mise run test:crate -- tm-types && mise run test:crate -- tm-core && mise run test:crate -- tm-cli`
+  evidence: findings: "Invalid decision ID error shows internal type name instead of plain language" (`error: parse: DecisionId must look like D-<n>, got "invalid-id"`); "Technical format strings in ID validation error messages" (LeaseId/ParticipantId); lease: `tm lease acquire T-1 --actor agent:mock/worker-2` on an already-leased ticket returns `error: conflict: ticket T-1 is not Ready`.
+
+- [ ] **s1-status-since-hours-error** — tm status --since-hours rejects bad input with a Rust parse error
+  model: haiku · severity: medium · builds Rust: yes · area: cli/copy · deps: none
+  files: `crates/tm-cli/src/args.rs`
+  change: Replace the default u64 parser for `since_hours` with a custom clap `value_parser` that validates a positive u64 and returns "Expected a positive integer (hours)" on failure, instead of surfacing the raw Rust parse error.
+  acceptance: `tm status --since-hours invalid` prints "Expected a positive integer (hours)" (or equivalent plain text), not "invalid digit found in string".
+  test: `mise run test:crate -- tm-cli`
+  evidence: `tm status --since-hours invalid` -> `error: invalid value 'invalid' for '--since-hours <HOURS>': invalid digit found in string`.
+
+- [ ] **s1-events-sched-copy-and-quiet** — Humanize tm events show output and fix sched plan/tick's --quiet and event-name jargon
+  model: sonnet · severity: high · builds Rust: yes · area: cli/copy · deps: none
+  files: `crates/tm-cli/src/ops.rs`, `crates/tm-cli/src/sched.rs`
+  change: In `tm events show`, change `format!("{:?}", event.kind)` (ops.rs ~2248) to the Display impl (dotted event names like `ticket.leased` instead of debug `TicketLeased`), and humanize field labels ("Sequence"/"Type"/"Related to"/"When" instead of "Seq"/"Kind"/"Subject"/"Timestamp"). In sched.rs, add `if !renderer.is_quiet()` guards before `renderer.emit()` in `sched_plan` (~line 90) and `sched_tick` (~line 117), matching the pattern already used in `sched_run` (~line 185). Reword `event_to_summary` (sched.rs:728-755): 'Ticked' -> 'Scheduler ticked', with detail "No work to do" (0 actions), "1 action queued", or "N actions queued" instead of "N actions planned at <ISO timestamp>".
+  acceptance: `tm events show 1` prints `Type: ticket.leased`, not `Kind: TicketLeased`. `tm sched plan --quiet`/`tm sched tick --quiet` produce no output on success. `tm sched tick` reads "Scheduler ticked: No work to do right now" instead of "Ticked: 0 actions planned at 2026-...".
+  test: `mise run test:crate -- tm-cli`
+  evidence: `tm events show 1` -> `Kind: TicketLeased` (should be `ticket.leased`); `tm sched tick --quiet` still prints `Ticked: 0 actions planned at 2026-09-23T21:01:58.400868Z`.
+
+- [ ] **s1-search-hybrid-empty-snippet** — Hybrid search results show an empty snippet column
+  model: haiku · severity: medium · builds Rust: yes · area: cli/search · deps: none
+  files: `crates/tm-cli/src/search.rs`, `crates/tm-codeintel/src/api.rs`, `crates/tm-codeintel/src/hybrid.rs`
+  change: Hybrid search's human output shows an empty Snippet column (JSON confirms `"snippet": ""` always). Exact/regex modes properly show the matched line (`h.line_text`). Fix hybrid to extract the snippet from the hit data or source file at the matched line, same pattern as exact mode (search.rs ~line 180).
+  acceptance: `tm search --mode hybrid "println"` shows code text in the Snippet column, matching what exact mode shows for the same hit; JSON output's `snippet` field is non-empty.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `tm search --mode hybrid "println"` -> Location/Score/Snippet with an empty Snippet column, while `tm search --mode exact "println"` shows the code.
+
+- [ ] **s1-symbol-error-exit-codes** — Symbol lookups fail silently: "Symbol not found" exits 0
+  model: haiku · severity: medium · builds Rust: yes · area: cli/symbol · deps: none
+  files: `crates/tm-cli/src/search.rs`
+  change: In symbol_def/refs/callers/callees (search.rs ~384/429/473/519), replace "Symbol not found"/"No outline entries found" with "No symbol named `{name}` in this project", and exit 1 instead of 0. In symbol_outline (~545), distinguish "File {path} not found" from "File {path} contains no top-level definitions" and exit 1 in both cases. --json output keeps the same exit-1 behavior with an empty array/null.
+  acceptance: `tm symbol def nonexistent_fn` prints the plain message and exits 1. `tm symbol outline no/such/file.rs` distinguishes missing-file from no-definitions and exits 1.
+  test: `mise run test:crate -- tm-cli`
+  evidence: "Symbol not found" and "No outline entries found" both exit 0 in four separate trial runs across the symbol/init/attach groups.
+
+- [ ] **s1-decision-supersedes-and-list-copy** — Superseding decision loses the supersedes link; decision list shows the wrong column
+  model: sonnet · severity: high · builds Rust: yes · area: cli/decision · deps: none
+  files: `crates/tm-events/src/payload.rs`, `crates/tm-core/src/store.rs`, `crates/tm-core/src/materialize.rs`, `crates/tm-cli/src/tickets.rs`
+  change: Add `supersedes: Option<DecisionId>` to `DecisionCreatedPayload`; populate it in `store.supersede()` and INSERT the real value in materialize (instead of always NULL). Also fix `decision_list()`'s Summary column, which renders `d.subject` (the semantic class, e.g. "decision") instead of `d.decision` (the actual decision text) — use `d.decision`, truncated to 40 chars as before.
+  acceptance: `tm decision supersede D-001 'Use MongoDB'` creates D-002; `tm decision show D-002` (text and `--json`) shows "Supersedes: D-001" / `"supersedes": "D-001"`. `tm decision list` shows the decision text in Summary, not "decision".
+  test: `mise run test:crate -- tm-core && mise run test:crate -- tm-cli`
+  evidence: after `decision supersede D-001 'Use MongoDB'`, both text and JSON `decision show D-002` omit D-001, and the DB stores `supersedes=NULL`; `tm decision list` shows `D-001  Superseded  decision` / `D-002  Active  decision` instead of the actual text.
+
+- [ ] **s1-workflow-error-message-ux** — Workflow-not-found error dumps an internal filesystem path
+  model: haiku · severity: medium · builds Rust: yes · area: cli/copy · deps: none
+  files: `crates/tm-cli/src/workflow.rs`
+  change: Replace the raw io-error message on a missing workflow definition ("Failed to read workflow \"<name>\" at /path/...: No such file or directory (os error 2)") with "Workflow '<name>' not found. Define it in .tm/workflows/<name>.toml".
+  acceptance: `tm workflow show nonexistent` prints the plain sentence, with no filesystem path or "os error" text.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `tm workflow show nonexistent` -> `error: storage: Failed to read workflow "nonexistent" at /path/.../nonexistent.toml: No such file or directory (os error 2)`.
+
+- [ ] **s1-mirror-status-and-push-clarity** — mirror status hides configured adapters; push/pull give no reason for a zero count; link doesn't warn on unset credentials
+  model: sonnet · severity: high · builds Rust: yes · area: cli/mirror · deps: none
+  files: `crates/tm-cli/src/ops.rs`
+  change: `tm mirror status` reports only ticket-level external-id links, so after `tm mirror link github` it still says "No active mirror links" even though `mirror.toml` has a real, enabled adapter — add an adapters section to status output (JSON too) showing each configured adapter and its enabled state, distinct from ticket sync status. Make `mirror push`/`mirror pull`'s "0 pushed, 0 degraded" output name the reason (no mirrors configured vs no tickets eligible vs all already synced) instead of a bare count. In `mirror link`, check whether the env vars referenced by `--credential field=ENV_VAR` are actually set, and if not, print a non-fatal warning ("credential field \"owner\" references env var TM_GITHUB_OWNER which is not set") so the misconfiguration surfaces at link time, not first at push time.
+  acceptance: After `tm mirror link github` with no tickets synced, `tm mirror status` shows the github adapter as configured. `tm mirror push` with nothing to do explains why. `tm mirror link github --credential owner=TM_GITHUB_OWNER` with TM_GITHUB_OWNER unset prints a warning naming the unset var, and still succeeds.
+  test: `mise run test:crate -- tm-cli`
+  evidence: after linking github, `tm mirror status` still returns `{"mirrors": []}` and "No active mirror links" despite `mirror.toml` containing `[adapters.github]` with `enabled=true`; `mirror push` prints "Mirror push completed: 0 pushed, 0 degraded" with no explanation; `mirror link` succeeds silently with unset `TM_GITHUB_OWNER`/`TM_GITHUB_REPO`, which only surfaces later as "Skipped adapter \"github\": ... is not set" on push.
+
+- [ ] **s1-templates-io-error-message** — Missing template source file shows a raw OS error
+  model: haiku · severity: medium · builds Rust: yes · area: cli/copy · deps: none
+  files: `crates/tm-templates/src/manifest.rs`
+  change: Change the `TmError::Io(format!("reading {}: {e}", manifest_path.display()))` at manifest.rs:63 to "template source not found: {} (manifest.toml)" — no OS error code, no "io:" prefix — matching the style of other not-found errors in this codebase.
+  acceptance: `tm templates list` against a missing template directory shows "error: template source not found: /path/to/template (manifest.toml)", no OS error code.
+  test: `mise run test:crate -- tm-templates`
+  evidence: `tm templates list` with a missing template dir -> `error: io: reading /path/to/missing-template/manifest.toml: No such file or directory (os error 2)`.
+
+- [ ] **s1-provider-project-quiet-flags** — provider and project commands ignore --quiet
+  model: haiku · severity: high · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/ops.rs`, `crates/tm-cli/src/project.rs`
+  change: `provider_list`, `provider_detect`, `provider_status` and `provider_test` print their table unconditionally; wrap the table emission with `if !renderer.is_quiet()`, only suppressing `provider test`'s "ok" lines while keeping errors. `project_list()`/`project_show()` use `renderer.emit(&entries, "no global projects yet")`, which always prints the fallback narration regardless of `--quiet` — switch to the pattern used elsewhere (`renderer.emit(&json, "")`) so `--quiet` suppresses narration but not the payload, per render.rs's own documented contract (lines 5-8). While here, reword "no global projects yet" to explain what a global project is in plain terms ("no projects in $TM_HOME yet").
+  acceptance: `tm provider list --quiet`, `tm provider detect --quiet`, `tm provider status --quiet`, `tm project list --quiet`, `tm project show --quiet` produce no output on success; `--json` output is unaffected; non-quiet behavior is unchanged.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `tm provider list --quiet` still prints the full table; `tm project list --quiet` still prints "no global projects yet"; `tm project show --quiet` still prints the full path.
+
+- [ ] **s1-harness-missing-file-errors** — tm harness show/set/promote crash on a raw OS error when harness.toml doesn't exist
+  model: haiku · severity: high · builds Rust: yes · area: cli/copy · deps: none
+  files: `crates/tm-cli/src/ops.rs`
+  change: `harness_show` (~line 1130), `harness_set` (~1162) and `harness_promote` (~1325) all propagate "storage: Failed to read harness.toml: No such file or directory (os error 2)" instead of handling the missing-file case, unlike `config_cmd.rs::load_harness_config` (~line 200) which already checks `!path.is_file()` and returns `HarnessConfig::default()`. Make `harness_show` follow that same pattern (display defaults). Make `harness_set` use `HarnessConfig::default()` as its base when the file is missing, so it can bootstrap a fresh harness.toml with one key set. Make `harness_promote` give a clear message instead ("No harness configuration found. Use `tm harness set <key> <value>` to create one before promoting an epoch."), since promote has no sensible default to act on.
+  acceptance: `tm harness show` on a fresh project prints default config in TOML, not an OS error. `tm harness set routing_weights.recency 0.5` on a fresh project succeeds and creates harness.toml. `tm harness promote 1 --force` on a fresh project explains it needs a harness config first.
+  test: `mise run test:crate -- tm-cli`
+  evidence: all three commands currently return `error: storage: Failed to read harness.toml: No such file or directory (os error 2)` on a freshly-initialized project.
+
+- [ ] **s1-bench-compare-human-output** — tm bench compare's human output omits the actual comparison
+  model: haiku · severity: high · builds Rust: yes · area: cli/bench · deps: none
+  files: `crates/tm-cli/src/ops.rs`
+  change: `bench_compare` (ops.rs:1672-1694) computes a `PromotionReport` with `aggregate_gain`, `candidate_improved` and per-task deltas, but the human-readable branch (~1688-1691) only prints epoch numbers ("Comparison: X vs Y"). Render whether the candidate improved (yes/no), the aggregate gain as a signed delta, and a brief per-task summary (or at least an improved/regressed count) when `task_deltas` is non-empty. The JSON output already has everything; just expose it in text.
+  acceptance: `tm bench compare a.json b.json` shows candidate-improved status and the aggregate score delta in plain text, not just epoch numbers.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `tm bench compare report1.json report2.json` -> "Comparison: 0 vs 0" while the JSON shows `{"aggregate_gain": 0.0, "candidate_improved": false, "task_deltas": [["hello-world", 0.0]]}`.
+
+- [ ] **s1-browser-toml-error-message** — Missing browser.toml error teaches TOML syntax instead of pointing at docs
+  model: haiku · severity: medium · builds Rust: yes · area: cli/copy · deps: none
+  files: `crates/tm-cli/src/drive.rs`
+  change: Replace the current message ("add a [managed] table with `version` and `sha256`, or a [remote_cdp] table with `ws_url`, and list the ones you configure in `fallback_order`") with something that names the file and points at documentation instead of teaching TOML inline: "Create a browser.toml file with a provider configuration. See SPEC.md §19.1a for examples (managed: pinned Chrome download, remote-cdp: existing browser endpoint)."
+  acceptance: `tm browser open <url>` without browser.toml names the file to create and points to SPEC.md §19.1a, without using `[managed]`/`fallback_order`-style TOML syntax in the error text itself.
+  test: manual: `S=$(mktemp -d); export TM_HOME=$(mktemp -d) TM_TEST_MOCK_PROVIDER=1; cd $S && git init -q && git config user.email t@t && git config user.name t && echo x>r && git add r && git commit -qm x && tm init -q && tm browser open https://example.com`
+  evidence: current error: "not found: browser.toml /path/to/browser.toml; add a [managed] table with `version` and `sha256`, or a [remote_cdp] table with `ws_url`, and list the ones you configure in `fallback_order`".
+
+- [ ] **s1-mcp-exit-code-on-parse-error** — tm mcp exits 0 on a JSON-RPC parse error / EOF
+  model: haiku · severity: high · builds Rust: yes · area: cli/mcp · deps: none
+  files: `crates/tm-mcp/src/main.rs`
+  change: When `tm mcp` hits EOF or invalid JSON on stdin before handling any successful JSON-RPC call, it prints an error but exits 0, breaking script error handling. Exit 1 in that case.
+  acceptance: `echo '' | tm mcp` and `echo 'invalid' | tm mcp` both exit non-zero.
+  test: `echo '' | tm mcp; test $? -ne 0`
+  evidence: `echo '' | tm mcp` prints "error: parse: EOF while parsing a value at line 1 column 0" and exits 0.
+
+- [ ] **s1-attach-output-copy-and-dedup** — tm attach output uses unexplained jargon and double-lists case-variant filenames
+  model: haiku · severity: medium · builds Rust: yes · area: cli/attach · deps: none
+  files: `crates/tm-cli/src/ops.rs`
+  change: Replace "indexed 1 files, 1 chunks, 1 commits ingested (symbol graph built: true)" with plain wording, e.g. "Indexed 1 file with 1 commit. Code navigation is ready." Separately, the attach doc-listing table shows both `README.md` and `readme.md` as distinct rows on a case-insensitive filesystem; dedupe by case-insensitive path before printing.
+  acceptance: `tm attach .` output has no "chunks"/"symbol graph" jargon. On a project with README.md, the doc table lists it once.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `tm attach .` -> "indexed 1 files, 1 chunks, 1 commits ingested (symbol graph built: true)"; doc table shows both "README.md  Readme" and "readme.md  Readme" for the same file.
+
+- [ ] **s1-io-error-wrapping-and-empty-objective** — Wrap low-level IO/git errors for users; reject empty ticket objectives
+  model: sonnet · severity: medium · builds Rust: yes · area: cli/copy · deps: none
+  files: `crates/tm-cli/src/main.rs`, `crates/tm-core/src/history.rs`, `crates/tm-cli/src/tickets.rs`
+  change: Wrap the bare IO error path in main.rs so e.g. `tm attach /nonexistent/path` says "The path /nonexistent/path does not exist. Check the path and try again." instead of "error: io: No such file or directory (os error 2)". Wrap git2 NotFound errors at the `tm history why <path>` call site as "File does not exist in repository history."; other git2 errors become "Unable to read file history — repository may be corrupted." (log the raw error via tracing for debugging). Separately, in `ticket_new` (tickets.rs ~392), reject an empty or whitespace-only `--objective`/positional objective with "Objective cannot be empty — describe what the ticket should accomplish." instead of silently creating a blank-objective ticket.
+  acceptance: `tm attach /nonexistent/path` gives the plain-English path message. `tm history why nonexistent.txt` gives "File does not exist in repository history.", no git2 class/code numbers. `tm ticket new ''` and `tm ticket new '   '` both fail with the objective error; `tm ticket new 'Valid'` still succeeds.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `tm attach /nonexistent/path` -> "error: io: No such file or directory (os error 2)"; `tm history why nonexistent.txt` -> "error: storage: git2: the path ... does not exist in the given tree; class=Tree (14); code=NotFound (-3)"; `tm ticket new ''` creates a ticket with an empty objective column.
+
 ## Owner asks (2026-09-23)
 
 - Actual ticket flow works end to end: request → implementation → verification → finished, from the chat, the tickets screen, `tm serve` and `tm mcp`.
