@@ -85,7 +85,11 @@ mod tests {
         assert!(wide[0].text().contains("! for bash mode"));
         assert!(wide[0].text().contains("double tap esc to clear input"));
         assert!(wide[1].text().contains("shift + tab to cycle modes"));
-        assert_eq!(lines(80, &theme, &Glyphs::UNICODE).len(), 5, "3 columns at 80");
+        assert_eq!(
+            lines(80, &theme, &Glyphs::UNICODE).len(),
+            5,
+            "3 columns at 80"
+        );
         let narrow = lines(40, &theme, &Glyphs::UNICODE);
         assert_eq!(narrow.len(), 14);
         for width in [30usize, 60, 80, 100, 200] {

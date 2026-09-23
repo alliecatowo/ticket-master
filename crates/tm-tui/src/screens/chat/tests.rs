@@ -202,7 +202,11 @@ fn bang_on_an_empty_prompt_is_shell_mode_and_enter_runs_the_command() {
         &mut chat,
         &env,
         TurnUpdate::ShellFinished(ToolCallView::command(
-            "shell", "ls -la", 0, "a.txt\nb.txt\n", "",
+            "shell",
+            "ls -la",
+            0,
+            "a.txt\nb.txt\n",
+            "",
         )),
     );
     assert!(!chat.is_turn_running());
@@ -268,16 +272,28 @@ fn shift_tab_cycles_the_mode_and_the_status_line_shows_it() {
     let mut chat = screen();
     let status_row = |chat: &ChatScreen| render(chat, &env, 100, 24)[23].clone();
     assert!(status_row(&chat).contains("? for shortcuts"));
-    press(&mut chat, &env, chord(KeyCode::BackTab, KeyModifiers::SHIFT));
+    press(
+        &mut chat,
+        &env,
+        chord(KeyCode::BackTab, KeyModifiers::SHIFT),
+    );
     assert_eq!(chat.mode(), PermissionMode::Plan);
     assert!(
         status_row(&chat).contains("⏸ plan mode on (shift+tab to cycle)"),
         "{}",
         status_row(&chat)
     );
-    press(&mut chat, &env, chord(KeyCode::BackTab, KeyModifiers::SHIFT));
+    press(
+        &mut chat,
+        &env,
+        chord(KeyCode::BackTab, KeyModifiers::SHIFT),
+    );
     assert!(status_row(&chat).contains("⏵ ask mode on"));
-    press(&mut chat, &env, chord(KeyCode::BackTab, KeyModifiers::SHIFT));
+    press(
+        &mut chat,
+        &env,
+        chord(KeyCode::BackTab, KeyModifiers::SHIFT),
+    );
     assert!(status_row(&chat).contains("? for shortcuts"));
     assert_eq!(
         chat.take_actions(),
@@ -318,14 +334,21 @@ fn ctrl_c_closes_dialogs_first_then_interrupts_then_clears() {
     let mut chat = screen();
     press(&mut chat, &env, ctrl('o'));
     assert!(chat.is_viewer_open());
-    assert!(!chat.on_ctrl_c(now, 1_000), "closing a dialog does not arm quit");
+    assert!(
+        !chat.on_ctrl_c(now, 1_000),
+        "closing a dialog does not arm quit"
+    );
     assert!(!chat.is_viewer_open());
 
     type_text(&mut chat, &env, "half written");
     assert!(chat.on_ctrl_c(now, 1_000));
     assert_eq!(chat.input_text(), "");
     let rows = render(&chat, &env, 100, 24);
-    assert!(rows[23].contains("Press Ctrl+C again to quit"), "{}", rows[23]);
+    assert!(
+        rows[23].contains("Press Ctrl+C again to quit"),
+        "{}",
+        rows[23]
+    );
     press(&mut chat, &env, key(KeyCode::Up));
     assert_eq!(chat.input_text(), "half written");
 
@@ -348,7 +371,10 @@ fn ctrl_o_opens_the_viewer_with_full_output_and_q_closes_it() {
         "",
     )));
     let compact = screen_text(&render(&chat, &env, 80, 24));
-    assert!(compact.contains("… +8 lines (ctrl+o to expand)"), "{compact}");
+    assert!(
+        compact.contains("… +8 lines (ctrl+o to expand)"),
+        "{compact}"
+    );
     assert!(!compact.contains("row 12"));
 
     press(&mut chat, &env, ctrl('o'));
@@ -358,7 +384,11 @@ fn ctrl_o_opens_the_viewer_with_full_output_and_q_closes_it() {
     assert!(full.contains("shell.run"), "{full}");
     press(&mut chat, &env, key(KeyCode::Char('q')));
     assert!(!chat.is_viewer_open());
-    assert_eq!(chat.input_text(), "", "q closed the viewer, it was not typed");
+    assert_eq!(
+        chat.input_text(),
+        "",
+        "q closed the viewer, it was not typed"
+    );
 }
 
 #[test]
@@ -478,15 +508,24 @@ fn at_opens_file_completion_and_tab_inserts_the_path() {
     type_text(&mut chat, &env, "look at @inp");
     assert!(chat.is_mention_open());
     let text = screen_text(&render(&chat, &env, 80, 24));
-    assert!(text.contains("input.rs") && text.contains("src/chat/"), "{text}");
+    assert!(
+        text.contains("input.rs") && text.contains("src/chat/"),
+        "{text}"
+    );
     press(&mut chat, &env, key(KeyCode::Tab));
     assert_eq!(chat.input_text(), "look at @src/chat/input.rs ");
     assert!(!chat.is_mention_open());
 
     type_text(&mut chat, &env, "and @READ");
     press(&mut chat, &env, key(KeyCode::Enter));
-    assert_eq!(chat.input_text(), "look at @src/chat/input.rs and @README.md ");
-    assert!(chat.take_actions().is_empty(), "Enter inserted, it did not send");
+    assert_eq!(
+        chat.input_text(),
+        "look at @src/chat/input.rs and @README.md "
+    );
+    assert!(
+        chat.take_actions().is_empty(),
+        "Enter inserted, it did not send"
+    );
 }
 
 #[test]
@@ -513,7 +552,11 @@ fn ctrl_r_searches_history_and_tab_accepts() {
     let text = screen_text(&render(&chat, &env, 80, 24));
     assert!(text.contains("search history: run"), "{text}");
     press(&mut chat, &env, ctrl('r'));
-    assert_eq!(chat.input_text(), "run the tests", "ctrl+r steps to older matches");
+    assert_eq!(
+        chat.input_text(),
+        "run the tests",
+        "ctrl+r steps to older matches"
+    );
     press(&mut chat, &env, key(KeyCode::Tab));
     assert_eq!(chat.input_text(), "run the tests");
     type_text(&mut chat, &env, "!");
@@ -522,7 +565,7 @@ fn ctrl_r_searches_history_and_tab_accepts() {
     press(&mut chat, &env, ctrl('u'));
     press(&mut chat, &env, ctrl('r'));
     type_text(&mut chat, &env, "zzz");
-    assert!(chat.on_ctrl_c(env.clock.now(), 1_000) == false);
+    assert!(!chat.on_ctrl_c(env.clock.now(), 1_000));
     assert_eq!(chat.input_text(), "", "ctrl+c cancels and restores");
 }
 
@@ -536,8 +579,16 @@ fn emacs_keys_edit_the_prompt() {
     assert_eq!(chat.input_text(), "");
     press(&mut chat, &env, ctrl('y'));
     assert_eq!(chat.input_text(), "hello brave world");
-    press(&mut chat, &env, chord(KeyCode::Char('b'), KeyModifiers::ALT));
-    press(&mut chat, &env, chord(KeyCode::Char('d'), KeyModifiers::ALT));
+    press(
+        &mut chat,
+        &env,
+        chord(KeyCode::Char('b'), KeyModifiers::ALT),
+    );
+    press(
+        &mut chat,
+        &env,
+        chord(KeyCode::Char('d'), KeyModifiers::ALT),
+    );
     assert_eq!(chat.input_text(), "hello brave ");
     press(&mut chat, &env, ctrl('7'));
     assert_eq!(chat.input_text(), "hello brave world", "ctrl+_ undoes");
@@ -598,7 +649,10 @@ fn the_permission_prompt_replaces_the_input_and_numbers_answer_it() {
     assert!(chat.is_awaiting_approval());
     let text = screen_text(&render(&chat, &env, 80, 24));
     assert!(text.contains("Do you want to proceed?"), "{text}");
-    assert!(text.contains("2. Yes, and don't ask again this session"), "{text}");
+    assert!(
+        text.contains("2. Yes, and don't ask again this session"),
+        "{text}"
+    );
     assert!(!text.contains("Ask tm anything"), "{text}");
     type_text(&mut chat, &env, "2");
     assert_eq!(

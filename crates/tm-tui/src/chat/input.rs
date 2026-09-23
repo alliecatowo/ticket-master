@@ -407,9 +407,7 @@ impl InputBox {
 
     fn word_end_after(&self, from: usize) -> usize {
         let after = &self.text[from..];
-        let skip = after
-            .find(is_word_char)
-            .unwrap_or(after.len());
+        let skip = after.find(is_word_char).unwrap_or(after.len());
         let rest = &after[skip..];
         let word = rest.find(|c: char| !is_word_char(c)).unwrap_or(rest.len());
         from + skip + word

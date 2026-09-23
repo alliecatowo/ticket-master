@@ -508,7 +508,10 @@ fn band_lines(text: &str, mark: &str, mark_style: Style, width: usize, theme: &T
     let mut out = Vec::new();
     for (i, source) in text.lines().enumerate() {
         let prefix = if i == 0 {
-            vec![Span::new(prefix_text.clone(), mark_style.patch(band_bg(band)))]
+            vec![Span::new(
+                prefix_text.clone(),
+                mark_style.patch(band_bg(band)),
+            )]
         } else {
             vec![Span::new(indent.clone(), band)]
         };
@@ -731,11 +734,15 @@ fn tint(base: Color, over: Color, alpha: f32) -> Option<Color> {
 /// The styles of a removed and an added diff line: a dark red/green band on a true-colour theme,
 /// red/green text otherwise.
 pub fn diff_styles(theme: &Theme) -> (Style, Style) {
-    let band = |accent: Color| match tint(theme.background, accent, 0.25) {
+    let band = |accent: Color, indexed: u8| match tint(theme.background, accent, 0.25) {
         Some(bg) => Style::default().fg(theme.foreground).bg(bg),
+        // A 256-colour terminal: xterm's dark red (52) and dark green (22) bands.
+        None if matches!(theme.background, Color::Indexed(_)) => Style::default()
+            .fg(theme.foreground)
+            .bg(Color::Indexed(indexed)),
         None => Style::default().fg(accent),
     };
-    (band(theme.danger), band(theme.success))
+    (band(theme.danger, 52), band(theme.success, 22))
 }
 
 /// An edit's diff lines, numbered, capped at [`DIFF_PREVIEW_LINES`].
@@ -854,7 +861,10 @@ mod tests {
     use crate::chat::diff::parse_unified;
 
     fn texts(lines: &[Line]) -> Vec<String> {
-        lines.iter().map(|l| l.text().trim_end().to_string()).collect()
+        lines
+            .iter()
+            .map(|l| l.text().trim_end().to_string())
+            .collect()
     }
 
     fn tool(status: ToolStatus, name: &str, target: &str, detail: Option<&str>) -> ToolCallView {
@@ -1090,13 +1100,7 @@ mod tests {
         let entries = [
             Entry::User("fix it".to_string()),
             Entry::Tool(tool(ToolStatus::Ok, "fs.read", "calc.py", None)),
-            Entry::Tool(ToolCallView::command(
-                "shell.run",
-                "pytest",
-                0,
-                "ok\n",
-                "",
-            )),
+            Entry::Tool(ToolCallView::command("shell.run", "pytest", 0, "ok\n", "")),
             Entry::Assistant("Done.".to_string()),
         ];
         let lines = layout_entries(entries.iter(), 60, &theme, &Glyphs::UNICODE);

@@ -135,7 +135,9 @@ fn completed_view(name: &str, target: &str, result: &Value) -> ToolCallView {
             "Returned"
         };
         return ToolCallView {
-            body: ToolBody::Summary(format!("{what} more than can be shown (stored as {artifact})")),
+            body: ToolBody::Summary(format!(
+                "{what} more than can be shown (stored as {artifact})"
+            )),
             ..base(ToolStatus::Ok)
         };
     }
@@ -687,7 +689,10 @@ mod tests {
             completed(json!({"results": [1, 2, 3]})),
         ));
         assert_eq!(search.target, "\"divide by zero\"");
-        assert_eq!(search.body, ToolBody::Summary("Found 3 results".to_string()));
+        assert_eq!(
+            search.body,
+            ToolBody::Summary("Found 3 results".to_string())
+        );
 
         let denied = tool_view(&call(
             "shell.run",

@@ -409,7 +409,10 @@ mod tests {
     #[test]
     fn modes_show_claude_code_indicators() {
         let theme = Theme::dark();
-        assert_eq!(PermissionMode::Auto.indicator(&theme, &Glyphs::UNICODE), None);
+        assert_eq!(
+            PermissionMode::Auto.indicator(&theme, &Glyphs::UNICODE),
+            None
+        );
         let text = |mode: PermissionMode| -> String {
             mode.indicator(&theme, &Glyphs::UNICODE)
                 .map(|spans| spans.iter().map(|s| s.text.as_str()).collect())

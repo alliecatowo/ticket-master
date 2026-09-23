@@ -151,7 +151,9 @@ impl Picker {
             KeyCode::Up if count > 0 => self.selected = (self.selected + count - 1) % count,
             KeyCode::Down if count > 0 => self.selected = (self.selected + 1) % count,
             KeyCode::Enter => {
-                if let Some(row) = self.visible().get(self.selected.min(count.saturating_sub(1)))
+                if let Some(row) = self
+                    .visible()
+                    .get(self.selected.min(count.saturating_sub(1)))
                 {
                     return PickerOutcome::Chosen(row.id.clone());
                 }
@@ -189,7 +191,12 @@ impl Picker {
             height,
         );
         clear(buf, outer);
-        draw_box(buf, outer, &glyphs.border, Style::default().fg(theme.accent));
+        draw_box(
+            buf,
+            outer,
+            &glyphs.border,
+            Style::default().fg(theme.accent),
+        );
         let accent = Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD);
@@ -250,7 +257,11 @@ impl Picker {
             }
             spans.push(Span::new(
                 r.label.clone(),
-                if is_selected { accent } else { Style::default() },
+                if is_selected {
+                    accent
+                } else {
+                    Style::default()
+                },
             ));
             let meta_width = display_width(&meta);
             let spans = truncate_spans(&spans, inner.saturating_sub(meta_width), glyphs.ellipsis);
@@ -343,7 +354,10 @@ mod tests {
             Some("devpass/b"),
         );
         let text = render(&p);
-        assert!(text.contains("Select a model") && text.contains("current"), "{text}");
+        assert!(
+            text.contains("Select a model") && text.contains("current"),
+            "{text}"
+        );
         assert_eq!(
             p.handle_key(&key(KeyCode::Enter)),
             PickerOutcome::Chosen("devpass/b".into())

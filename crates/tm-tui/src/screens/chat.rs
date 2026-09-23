@@ -359,7 +359,12 @@ impl ChatScreen {
 
     /// Send `text` as a turn on the human's behalf (a command that is really a prompt, such as
     /// `/init`), echoed as `shown`; queued if a turn is running.
-    pub fn start_prompt(&mut self, shown: impl Into<String>, text: impl Into<String>, now: Timestamp) {
+    pub fn start_prompt(
+        &mut self,
+        shown: impl Into<String>,
+        text: impl Into<String>,
+        now: Timestamp,
+    ) {
         let (shown, text) = (shown.into(), text.into());
         if self.turn.is_some() {
             self.queue.push_back(Queued::Prompt { shown, text });
@@ -371,7 +376,12 @@ impl ChatScreen {
     /// Show a command the application runs itself (`/compact`) as running: `shown` is echoed as
     /// the human's message and the spinner says `activity` until
     /// [`TurnUpdate::TaskFinished`] arrives.
-    pub fn begin_task(&mut self, shown: impl Into<String>, activity: impl Into<String>, now: Timestamp) {
+    pub fn begin_task(
+        &mut self,
+        shown: impl Into<String>,
+        activity: impl Into<String>,
+        now: Timestamp,
+    ) {
         self.transcript.push(Entry::User(shown.into()));
         self.transcript.follow();
         self.turn = Some(RunningTurn {
@@ -547,7 +557,11 @@ impl ChatScreen {
                 if !self.transcript.finish_shell(view.clone()) {
                     self.transcript.push(Entry::Shell(view));
                 }
-                if self.turn.as_ref().is_some_and(|t| t.kind == TurnKind::Shell) {
+                if self
+                    .turn
+                    .as_ref()
+                    .is_some_and(|t| t.kind == TurnKind::Shell)
+                {
                     self.turn = None;
                 }
                 self.start_next_queued(now);
@@ -910,7 +924,9 @@ impl ChatScreen {
                 self.mention.selected = (self.mention.selected + 1) % count;
                 true
             }
-            KeyCode::Tab | KeyCode::Enter if count > 0 && !key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Tab | KeyCode::Enter
+                if count > 0 && !key.modifiers.contains(KeyModifiers::SHIFT) =>
+            {
                 let path = &matches[self.mention.selected.min(count - 1)];
                 self.input
                     .replace_before_cursor(start, &mention::completion(path));
@@ -997,7 +1013,14 @@ impl ChatScreen {
             _ => return,
         }
         // Clamp the skip to the matches that exist.
-        let count = self.search_matches(&self.search.as_ref().map_or(String::new(), |s| s.query.clone())).len();
+        let count = self
+            .search_matches(
+                &self
+                    .search
+                    .as_ref()
+                    .map_or(String::new(), |s| s.query.clone()),
+            )
+            .len();
         if let Some(search) = &mut self.search {
             search.skip = search.skip.min(count.saturating_sub(1));
         }
@@ -1225,8 +1248,7 @@ impl ChatScreen {
             KeyCode::Up if shift => self.transcript.scroll_up(1),
             KeyCode::Down if shift => self.transcript.scroll_down(1),
             KeyCode::Up => {
-                if !self.queue.is_empty() && (self.input.is_empty() || self.input.on_first_row())
-                {
+                if !self.queue.is_empty() && (self.input.is_empty() || self.input.on_first_row()) {
                     self.take_back_queue();
                 } else if self.input.is_empty() || self.input.on_first_row() {
                     self.input.history_prev();
@@ -1301,7 +1323,13 @@ impl ChatScreen {
 
     /// The rows under the transcript: the running turn's spinner (Claude Code's
     /// `✻ Thinking… (12s · 1.2k tokens · esc to interrupt)`), then anything queued, dimmed.
-    fn tail_lines(&self, width: usize, theme: &Theme, glyphs: &Glyphs, now: Timestamp) -> Vec<Line> {
+    fn tail_lines(
+        &self,
+        width: usize,
+        theme: &Theme,
+        glyphs: &Glyphs,
+        now: Timestamp,
+    ) -> Vec<Line> {
         let muted = Style::default().fg(theme.muted);
         let mut rows = Vec::new();
         if let Some(turn) = &self.turn {
@@ -1320,7 +1348,7 @@ impl ChatScreen {
                         status::format_tokens(self.live_tokens)
                     ));
                 }
-                if !turn.interrupting {
+                if !turn.interrupting && self.approval.is_none() {
                     facts.push_str(&format!("{}esc to interrupt", glyphs.sep));
                 }
                 if !self.transcript.is_empty() {
@@ -1492,7 +1520,12 @@ impl ChatScreen {
             return;
         }
         let outer = Rect::new(area.x, area.y, box_width, card.len() as u16 + 2);
-        draw_box(buf, outer, &glyphs.border, Style::default().fg(theme.accent));
+        draw_box(
+            buf,
+            outer,
+            &glyphs.border,
+            Style::default().fg(theme.accent),
+        );
         for (i, line) in card.iter().enumerate() {
             draw_spans(
                 buf,
@@ -1527,7 +1560,11 @@ impl ChatScreen {
                 break;
             }
             let line = format!("{}. {tip}", i + 1);
-            let line = truncate(&line, area.width.saturating_sub(1) as usize, glyphs.ellipsis);
+            let line = truncate(
+                &line,
+                area.width.saturating_sub(1) as usize,
+                glyphs.ellipsis,
+            );
             buf.set_stringn(
                 area.x + 1,
                 y,
@@ -1598,7 +1635,11 @@ impl ChatScreen {
                 Span::new(pad, Style::default()),
                 Span::new(
                     description.clone(),
-                    if *is_selected { Style::default() } else { muted },
+                    if *is_selected {
+                        Style::default()
+                    } else {
+                        muted
+                    },
                 ),
             ];
             draw_spans(
@@ -1715,12 +1756,7 @@ impl Component for ChatScreen {
             area.width,
             footer_height.min(area.height),
         );
-        let rest = Rect::new(
-            area.x,
-            area.y,
-            area.width,
-            area.height - footer_area.height,
-        );
+        let rest = Rect::new(area.x, area.y, area.width, area.height - footer_area.height);
 
         let input_height = match &self.approval {
             Some(prompt) => prompt
@@ -1821,7 +1857,13 @@ impl Component for ChatScreen {
             status::render(buf, footer_area, &left, &segments, theme, &glyphs);
         } else {
             for (i, line) in panel.iter().take(footer_area.height as usize).enumerate() {
-                draw_line(buf, footer_area.x, footer_area.y + i as u16, footer_area.width, line);
+                draw_line(
+                    buf,
+                    footer_area.x,
+                    footer_area.y + i as u16,
+                    footer_area.width,
+                    line,
+                );
             }
         }
 

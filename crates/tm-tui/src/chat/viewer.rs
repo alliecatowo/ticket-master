@@ -85,19 +85,22 @@ impl Viewer {
             area.height - 2,
         );
         let width = body.width as usize;
-        let stale = !matches!(&*self.cache.borrow(), Some((w, v, _)) if *w == width && *v == version);
+        let stale =
+            !matches!(&*self.cache.borrow(), Some((w, v, _)) if *w == width && *v == version);
         if stale {
-            *self.cache.borrow_mut() = Some((
-                width,
-                version,
-                viewer_lines(entries, width, theme, glyphs),
-            ));
+            *self.cache.borrow_mut() =
+                Some((width, version, viewer_lines(entries, width, theme, glyphs)));
         }
         let cache = self.cache.borrow();
         let lines: &[Line] = cache.as_ref().map_or(&[], |(_, _, l)| l.as_slice());
         self.last_view.set((lines.len(), body.height as usize));
         let top = self.current_top();
-        for (row, line) in lines.iter().skip(top).take(body.height as usize).enumerate() {
+        for (row, line) in lines
+            .iter()
+            .skip(top)
+            .take(body.height as usize)
+            .enumerate()
+        {
             draw_line(buf, body.x, body.y + row as u16, body.width, line);
         }
 

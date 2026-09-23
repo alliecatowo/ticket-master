@@ -24,9 +24,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 use super::{steps, App};
-use crate::agent::{
-    self, AgentSession, ApprovalAnswer, Approver, PermissionMode, TurnInterrupter,
-};
+use crate::agent::{self, AgentSession, ApprovalAnswer, Approver, PermissionMode, TurnInterrupter};
 use crate::project::Project;
 use crate::render::Renderer;
 
@@ -36,7 +34,6 @@ const MAX_INDEXED_FILES: usize = 50_000;
 
 /// The most history entries read back at startup.
 const HISTORY_LOAD_LIMIT: usize = 500;
-
 
 /// The chat's state on the root [`App`].
 pub(super) struct ChatExt {
@@ -298,7 +295,12 @@ impl App {
     }
 
     fn answer_approval(&mut self, choice: ApprovalChoice, _now: Timestamp) {
-        let pending = self.chat_ext.approval.lock().ok().and_then(|mut s| s.take());
+        let pending = self
+            .chat_ext
+            .approval
+            .lock()
+            .ok()
+            .and_then(|mut s| s.take());
         let Some(pending) = pending else {
             return;
         };
@@ -455,7 +457,11 @@ impl App {
 
     /// Swap in `fresh` as the conversation (after `/clear`, `/resume`), keeping the chat's
     /// permission mode unless the new session carries its own.
-    fn install_session(&mut self, fresh: AgentSession, keep_mode: bool) -> Result<SessionId, String> {
+    fn install_session(
+        &mut self,
+        fresh: AgentSession,
+        keep_mode: bool,
+    ) -> Result<SessionId, String> {
         if self.chat.is_turn_running() {
             return Err("A turn is running; wait for it to finish first.".to_string());
         }
@@ -559,7 +565,11 @@ impl App {
             CommandId::Model => self.switch_model(&arg),
             // The chat screen answers these itself; handled anyway so the match stays exhaustive.
             CommandId::Status | CommandId::Cost => {}
-            CommandId::Home => return self.chat.push_notice(NoticeLevel::Info, "Press ← for tickets."),
+            CommandId::Home => {
+                return self
+                    .chat
+                    .push_notice(NoticeLevel::Info, "Press ← for tickets.")
+            }
             CommandId::Help => return self.chat.toggle_help(),
             CommandId::Exit => return self.quit(),
         }
@@ -679,10 +689,9 @@ impl App {
                     let choices = choices.iter().map(ToString::to_string).collect();
                     self.chat.open_model_picker(choices, current.as_deref());
                 }
-                Err(e) => self.chat.push_notice(
-                    NoticeLevel::Warning,
-                    format!("Could not list models: {e}"),
-                ),
+                Err(e) => self
+                    .chat
+                    .push_notice(NoticeLevel::Warning, format!("Could not list models: {e}")),
             }
             return;
         }

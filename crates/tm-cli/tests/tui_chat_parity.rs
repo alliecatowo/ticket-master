@@ -78,7 +78,10 @@ fn bang_runs_a_shell_command_and_shows_it_as_a_bash_block_then_ctrl_o_expands_it
     pty.write(b"seq 1 30").expect("type command");
     pty.write(b"\r").expect("enter");
     let screen = pty.wait_for("+26 lines (ctrl+o to expand)", WAIT);
-    assert!(has(&screen, "! seq 1 30"), "the command is echoed: {screen:?}");
+    assert!(
+        has(&screen, "! seq 1 30"),
+        "the command is echoed: {screen:?}"
+    );
     assert!(has(&screen, "⎿  1"), "output hangs under ⎿: {screen:?}");
     assert!(
         has(&screen, "… +26 lines (ctrl+o to expand)"),
@@ -91,7 +94,10 @@ fn bang_runs_a_shell_command_and_shows_it_as_a_bash_block_then_ctrl_o_expands_it
     assert!(has(&screen, "q/esc close"), "{screen:?}");
     pty.write(b"G").expect("bottom");
     let screen = pty.wait_for("    30", WAIT);
-    assert!(has(&screen, "    30"), "the viewer has the full output: {screen:?}");
+    assert!(
+        has(&screen, "    30"),
+        "the viewer has the full output: {screen:?}"
+    );
     pty.write(b"q").expect("q");
     let screen = pty.wait_until_gone("q/esc close", WAIT);
     assert!(!prompt_row(&screen).contains('q'), "{screen:?}");
@@ -111,7 +117,10 @@ fn at_completes_a_file_path_and_tab_inserts_it() {
 
     pty.write(b"look at @zebra").expect("type mention");
     let screen = pty.wait_for("zebra_module.rs", WAIT);
-    assert!(has(&screen, "src/"), "the popup shows the directory: {screen:?}");
+    assert!(
+        has(&screen, "src/"),
+        "the popup shows the directory: {screen:?}"
+    );
     pty.write(b"\t").expect("tab");
     let screen = pty.wait_for("@src/zebra_module.rs", WAIT);
     assert!(
@@ -134,23 +143,35 @@ fn history_recalls_with_up_searches_with_ctrl_r_and_survives_a_restart() {
 
     pty.write(b"\x1b[A").expect("up");
     let screen = pty.wait_for("│ › second prompt beta", WAIT);
-    assert!(prompt_row(&screen).contains("second prompt beta"), "{screen:?}");
+    assert!(
+        prompt_row(&screen).contains("second prompt beta"),
+        "{screen:?}"
+    );
     pty.write(&[0x15]).expect("ctrl-u");
 
     pty.write(&[0x12]).expect("ctrl-r");
     pty.write(b"alp").expect("query");
     let screen = pty.wait_for("search history: alp", WAIT);
-    assert!(prompt_row(&screen).contains("first prompt alpha"), "{screen:?}");
+    assert!(
+        prompt_row(&screen).contains("first prompt alpha"),
+        "{screen:?}"
+    );
     pty.write(b"\t").expect("accept");
     let screen = pty.wait_until_gone("search history", WAIT);
-    assert!(prompt_row(&screen).contains("first prompt alpha"), "{screen:?}");
+    assert!(
+        prompt_row(&screen).contains("first prompt alpha"),
+        "{screen:?}"
+    );
     quit(&mut pty);
 
     // A new run of tm in the same project remembers.
     let mut pty = spawn(project.path(), tm_home.path());
     pty.write(b"\x1b[A").expect("up");
     let screen = pty.wait_for("│ › second prompt beta", WAIT);
-    assert!(prompt_row(&screen).contains("second prompt beta"), "{screen:?}");
+    assert!(
+        prompt_row(&screen).contains("second prompt beta"),
+        "{screen:?}"
+    );
     quit(&mut pty);
 }
 
@@ -184,7 +205,10 @@ fn ctrl_c_clears_first_and_exits_on_the_second_press() {
     let _ = pty.wait_for("half a thought", WAIT);
     pty.write(&[0x03]).expect("ctrl-c");
     let screen = pty.wait_for("Press Ctrl+C again to quit", WAIT);
-    assert!(!prompt_row(&screen).contains("half a thought"), "{screen:?}");
+    assert!(
+        !prompt_row(&screen).contains("half a thought"),
+        "{screen:?}"
+    );
     assert!(pty.is_running(), "one Ctrl+C with text only clears it");
     pty.write(&[0x03]).expect("ctrl-c again");
     assert!(pty.wait(WAIT).expect("wait"), "the second press exits");
@@ -201,7 +225,10 @@ fn shift_tab_cycles_the_mode_indicator_and_question_mark_shows_shortcuts() {
     assert!(has(&screen, "⏸ plan mode on"), "{screen:?}");
     pty.write(b"\x1b[Z").expect("shift-tab");
     let screen = pty.wait_for("ask mode on", WAIT);
-    assert!(has(&screen, "⏵ ask mode on (shift+tab to cycle)"), "{screen:?}");
+    assert!(
+        has(&screen, "⏵ ask mode on (shift+tab to cycle)"),
+        "{screen:?}"
+    );
     pty.write(b"\x1b[Z").expect("shift-tab");
     let screen = pty.wait_until_gone("ask mode on", WAIT);
     assert!(has(&screen, "? for shortcuts"), "{screen:?}");

@@ -15,9 +15,9 @@ pub type FileIndex = Arc<OnceLock<Vec<String>>>;
 /// A mention starts the prompt or follows whitespace, and runs to the cursor.
 pub fn token_at(text: &str, cursor: usize) -> Option<(usize, &str)> {
     let before = text.get(..cursor)?;
-    let start = before
-        .rfind(char::is_whitespace)
-        .map_or(0, |i| i + before[i..].chars().next().map_or(1, char::len_utf8));
+    let start = before.rfind(char::is_whitespace).map_or(0, |i| {
+        i + before[i..].chars().next().map_or(1, char::len_utf8)
+    });
     let token = &before[start..];
     let query = token.strip_prefix('@')?;
     Some((start, query))
@@ -118,7 +118,10 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         assert_eq!(rank(&files, "main", 2)[0], "src/main.rs");
-        assert_eq!(rank(&files, "mention", 3), vec!["crates/tm-tui/src/chat/mention.rs"]);
+        assert_eq!(
+            rank(&files, "mention", 3),
+            vec!["crates/tm-tui/src/chat/mention.rs"]
+        );
         assert_eq!(rank(&files, "cargo", 1), vec!["Cargo.toml"]);
         assert!(rank(&files, "zzz", 5).is_empty());
         assert_eq!(rank(&files, "", 10).len(), 5, "an empty query lists files");

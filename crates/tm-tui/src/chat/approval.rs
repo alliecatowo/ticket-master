@@ -24,7 +24,9 @@ use ratatui_core::layout::Rect;
 use ratatui_core::style::{Modifier, Style};
 
 use crate::chat::glyphs::Glyphs;
-use crate::chat::lines::{clear, draw_box, draw_spans, truncate_spans, wrap_with_prefix, Line, Span};
+use crate::chat::lines::{
+    clear, draw_box, draw_spans, truncate_spans, wrap_with_prefix, Line, Span,
+};
 use crate::chat::transcript::tool_label;
 use crate::theme::Theme;
 
@@ -118,7 +120,10 @@ impl ApprovalPrompt {
     fn body(&self, width: usize, theme: &Theme, glyphs: &Glyphs) -> Vec<Line> {
         let bold = Style::default().add_modifier(Modifier::BOLD);
         let muted = Style::default().fg(theme.muted);
-        let mut out = vec![Line::plain(self.title(), bold.fg(theme.warning)), Line::blank()];
+        let mut out = vec![
+            Line::plain(self.title(), bold.fg(theme.warning)),
+            Line::blank(),
+        ];
         if !self.request.target.is_empty() {
             let mut rows = wrap_with_prefix(
                 &[Span::new(self.request.target.clone(), Style::default())],
@@ -222,14 +227,24 @@ mod tests {
     #[test]
     fn numbers_pick_and_arrows_move() {
         let mut p = prompt();
-        assert_eq!(p.handle_key(&key(KeyCode::Char('2'))), Some(ApprovalChoice::YesForSession));
+        assert_eq!(
+            p.handle_key(&key(KeyCode::Char('2'))),
+            Some(ApprovalChoice::YesForSession)
+        );
         assert_eq!(p.handle_key(&key(KeyCode::Esc)), Some(ApprovalChoice::No));
         assert_eq!(p.handle_key(&key(KeyCode::Down)), None);
         assert_eq!(p.handle_key(&key(KeyCode::Down)), None);
         assert_eq!(p.handle_key(&key(KeyCode::Enter)), Some(ApprovalChoice::No));
         assert_eq!(p.handle_key(&key(KeyCode::Up)), None);
-        assert_eq!(p.handle_key(&key(KeyCode::Enter)), Some(ApprovalChoice::YesForSession));
-        assert_eq!(p.handle_key(&key(KeyCode::Char('x'))), None, "typing is ignored");
+        assert_eq!(
+            p.handle_key(&key(KeyCode::Enter)),
+            Some(ApprovalChoice::YesForSession)
+        );
+        assert_eq!(
+            p.handle_key(&key(KeyCode::Char('x'))),
+            None,
+            "typing is ignored"
+        );
     }
 
     #[test]

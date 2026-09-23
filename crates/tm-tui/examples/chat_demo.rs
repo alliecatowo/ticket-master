@@ -117,11 +117,13 @@ fn script() -> Vec<Vec<Entry>> {
 }
 
 impl Demo {
-    fn play(&self) {
+    /// Play the script from step `from`; it stops at a permission prompt after step 3 and
+    /// carries on (from step 4) once the prompt is answered.
+    fn play(&self, from: usize) {
         let sender = self.sender.clone();
         let session = self.chat.session().clone();
         tokio::spawn(async move {
-            for (i, entries) in script().into_iter().enumerate() {
+            for (i, entries) in script().into_iter().enumerate().skip(from) {
                 tokio::time::sleep(Duration::from_millis(900)).await;
                 sender.send(AppMessage::Turn {
                     session: session.clone(),
@@ -141,6 +143,7 @@ impl Demo {
                             reason: "network access needs approval".to_string(),
                         }),
                     });
+                    return;
                 }
             }
             sender.send(AppMessage::Turn {
@@ -196,12 +199,14 @@ impl Component for Demo {
         let propagation = self.chat.handle_event(event, ctx);
         for action in self.chat.take_actions() {
             match action {
-                ChatAction::Send(_) => self.play(),
+                ChatAction::Send(_) => self.play(0),
                 ChatAction::Shell(command) => self.fake_shell(command),
                 ChatAction::Quit => self.shutdown.notify_one(),
-                ChatAction::Approve(choice) => self
-                    .chat
-                    .push_notice(NoticeLevel::Info, format!("You chose {choice:?}.")),
+                ChatAction::Approve(choice) => {
+                    self.chat
+                        .push_notice(NoticeLevel::Info, format!("You chose {choice:?}."));
+                    self.play(3);
+                }
                 _ => self
                     .chat
                     .push_notice(NoticeLevel::Info, "Not wired in this demo."),
