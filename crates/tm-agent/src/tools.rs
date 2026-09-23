@@ -48,6 +48,7 @@ use tm_context::command::{
     self, ArtifactStream, CommandCache, CommandExecutor, CommandSpec, Query as CommandQuery,
     QueryAnswer,
 };
+use tm_core::artifact::hash_bytes;
 use tm_core::{
     ArtifactKind, ContextRef, EvidenceKind, ExecutorRequirements, RetryPolicy, Store, TicketKind,
     VerificationPolicy,
@@ -743,6 +744,17 @@ fn patch_json(p: &crate::patch::Patch) -> Value {
     })
 }
 
+/// The JSON Schema description of an edit tool's `expected_hash`, with `when` saying whether this
+/// tool needs it. The model has to learn from the schema alone where the hash comes from: without
+/// it, one computed its own sha256 and burned ~175k tokens trying md5, sha1 and friends.
+fn expected_hash_description(when: &str) -> String {
+    format!(
+        "The `hash` fs.read or fs.stat returned for this file; it guards against editing a file \
+         that changed since you read it. {when} Copy it from that result, never compute it \
+         yourself. After a successful edit, the result's `hash_after` is the file's new hash."
+    )
+}
+
 /// Edit conflicts and out-of-scope writes are actionable feedback for the model, not dispatch
 /// failures, so a [`crate::patch::PatchOutcome`] is always turned into a `Completed`-shaped
 /// value rather than propagated as an error.
@@ -1102,11 +1114,15 @@ impl BuiltinCapability {
                     }))
                     .collect::<Vec<_>>()))
             }
+            // Every read hands back `hash`: the exact `expected_hash` the edit tools check, always
+            // of the whole file (for `fs.read_range` too, never just the slice), so the model
+            // copies it instead of guessing a hash format (see `crate::patch::Edit`).
             ToolName::FsRead => {
                 let path = get_str(input, "path")?;
                 let full = resolve_repo_path(patch_engine.root(), path)?;
                 let content = std::fs::read_to_string(&full)?;
-                Ok(json!({"path": path, "content": content}))
+                let hash = hash_bytes(content.as_bytes());
+                Ok(json!({"path": path, "content": content, "hash": hash}))
             }
             ToolName::FsReadRange => {
                 let path = get_str(input, "path")?;
@@ -1121,9 +1137,10 @@ impl BuiltinCapability {
                     )));
                 }
                 let slice = String::from_utf8_lossy(&bytes[byte_start..byte_end]).into_owned();
-                Ok(
-                    json!({"path": path, "byte_start": byte_start, "byte_end": byte_end, "content": slice}),
-                )
+                Ok(json!({
+                    "path": path, "byte_start": byte_start, "byte_end": byte_end,
+                    "content": slice, "hash": hash_bytes(&bytes),
+                }))
             }
             ToolName::FsList => {
                 let path = get_str(input, "path")?;
@@ -1143,6 +1160,10 @@ impl BuiltinCapability {
                 let path = get_str(input, "path")?;
                 let full = resolve_repo_path(patch_engine.root(), path)?;
                 match std::fs::metadata(&full) {
+                    Ok(meta) if meta.is_file() => Ok(json!({
+                        "path": path, "exists": true, "is_dir": false, "len": meta.len(),
+                        "hash": hash_bytes(&std::fs::read(&full)?),
+                    })),
                     Ok(meta) => Ok(json!({
                         "path": path, "exists": true, "is_dir": meta.is_dir(), "len": meta.len(),
                     })),
@@ -1152,6 +1173,12 @@ impl BuiltinCapability {
                     Err(e) => Err(TmError::from(e)),
                 }
             }
+            // `expected_hash` stays mandatory here (the schema requires it, and the patch engine
+            // refuses an existing file edited without one). Unlike a unified-diff hunk, these
+            // edits carry no context lines to re-anchor against: they are bare byte offsets, so a
+            // file that changed since the read would take the splice at the wrong bytes, silently.
+            // The hash is the only drift detection this tool has, and fs.read now hands it over,
+            // so requiring it costs the model nothing.
             ToolName::EditApplyPatch => {
                 let path = get_string(input, "path")?;
                 let mut expected_hash = get_opt_string(input, "expected_hash");
@@ -1656,7 +1683,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::FsRead.as_str(),
-                description: "Read a repository-relative file's full text content.",
+                description: "Read a repository-relative file's full text content. Also returns `hash`, the file's content hash: pass it as `expected_hash` to edit.apply_patch, edit.write_file or edit.delete_file.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -1667,7 +1694,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::FsReadRange.as_str(),
-                description: "Read a byte range `[byte_start, byte_end)` of a file.",
+                description: "Read a byte range `[byte_start, byte_end)` of a file. `hash` covers the whole file, not just the range, and is the value the edit tools' `expected_hash` takes.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1693,7 +1720,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::FsStat.as_str(),
-                description: "Metadata (existence, size, kind) for a repository-relative path.",
+                description: "Metadata (existence, size, kind) for a repository-relative path; for a file, also its `hash`, the value the edit tools' `expected_hash` takes.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {"path": {"type": "string"}},
@@ -1704,7 +1731,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::EditApplyPatch.as_str(),
-                description: "Apply one or more byte-range replacements to a file, conflict-checked.",
+                description: "Replace byte ranges in an existing file. Offsets are byte offsets into the content fs.read returned. Edits apply in order, each against the file as the previous edit left it, so list them from the end of the file backwards to keep the earlier offsets valid. Requires `expected_hash` from fs.read.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1721,22 +1748,34 @@ impl CapabilityProvider for BuiltinCapability {
                                 "required": ["byte_start", "byte_end", "replacement"]
                             }
                         },
-                        "expected_hash": {"type": ["string", "null"]}
+                        "expected_hash": {
+                            "type": "string",
+                            "description": expected_hash_description(
+                                "Required: these edits are bare byte offsets, and the hash is what \
+                                 stops them landing on the wrong bytes."
+                            ),
+                        }
                     },
-                    "required": ["path", "edits"]
+                    "required": ["path", "edits", "expected_hash"]
                 }),
                 cost: CostClass::Mutating,
                 requires: requirement_for(ToolName::EditApplyPatch),
             },
             ToolSchema {
                 name: ToolName::EditWriteFile.as_str(),
-                description: "Overwrite a file's entire content, conflict-checked.",
+                description: "Overwrite a file's entire content, or create the file if it does not exist yet. Conflict-checked against `expected_hash`.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
                         "content": {"type": "string"},
-                        "expected_hash": {"type": ["string", "null"]}
+                        "expected_hash": {
+                            "type": ["string", "null"],
+                            "description": expected_hash_description(
+                                "Required when the file exists; omit it only to create a file \
+                                 that does not exist yet."
+                            ),
+                        }
                     },
                     "required": ["path", "content"]
                 }),
@@ -1745,7 +1784,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::EditCreateFile.as_str(),
-                description: "Create a new file; fails as a conflict if the path already exists.",
+                description: "Create a new file; fails as a conflict if the path already exists. Takes no hash. To change an existing file, use edit.write_file or edit.apply_patch with the `hash` from fs.read.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1759,14 +1798,17 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::EditDeleteFile.as_str(),
-                description: "Delete a file, conflict-checked against its last-observed content hash.",
+                description: "Delete a file, conflict-checked against `expected_hash`.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
                         "path": {"type": "string"},
-                        "expected_hash": {"type": ["string", "null"]}
+                        "expected_hash": {
+                            "type": "string",
+                            "description": expected_hash_description("Required."),
+                        }
                     },
-                    "required": ["path"]
+                    "required": ["path", "expected_hash"]
                 }),
                 cost: CostClass::Mutating,
                 requires: requirement_for(ToolName::EditDeleteFile),
@@ -3151,6 +3193,223 @@ mod tests {
         match outcome {
             ToolOutcome::Completed { result, .. } => assert_eq!(result["applied"], false),
             other => panic!("expected Completed(applied=false), got {other:?}"),
+        }
+    }
+
+    /// Dispatch one call that must complete, returning its result.
+    async fn dispatch_completed(h: &Harness, name: &str, input: Value) -> Value {
+        match h.registry.dispatch(&call(name, input), &h.ctx()).await {
+            ToolOutcome::Completed { result, .. } => result,
+            other => panic!("{name}: expected Completed, got {other:?}"),
+        }
+    }
+
+    /// The `hash` field of an `fs.read` of `path`.
+    async fn read_hash(h: &Harness, path: &str) -> String {
+        let read = dispatch_completed(h, "fs.read", json!({"path": path})).await;
+        read["hash"]
+            .as_str()
+            .unwrap_or_else(|| panic!("fs.read returns a hash: {read}"))
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn fs_read_fs_read_range_and_fs_stat_all_return_the_whole_file_hash() {
+        let h = Harness::new();
+        std::fs::write(
+            h.root().join("calc.py"),
+            "def sub(a, b):\n    return a - b\n",
+        )
+        .unwrap();
+        let from_read = read_hash(&h, "calc.py").await;
+        let stat = dispatch_completed(&h, "fs.stat", json!({"path": "calc.py"})).await;
+        let range = dispatch_completed(
+            &h,
+            "fs.read_range",
+            json!({"path": "calc.py", "byte_start": 0, "byte_end": 3}),
+        )
+        .await;
+        assert_eq!(range["content"], "def");
+        assert_eq!(stat["hash"], from_read.as_str(), "{stat}");
+        assert_eq!(
+            range["hash"],
+            from_read.as_str(),
+            "a ranged read still hashes the whole file: {range}"
+        );
+        let dir = dispatch_completed(&h, "fs.stat", json!({"path": "."})).await;
+        assert!(dir.get("hash").is_none(), "a directory has no hash: {dir}");
+    }
+
+    #[tokio::test]
+    async fn the_hash_fs_read_returns_is_what_every_edit_tool_accepts() {
+        let h = Harness::new();
+        let file = h.root().join("calc.py");
+        let original = "def sub(a, b):\n    return a - b\n";
+        std::fs::write(&file, original).unwrap();
+
+        let hash = read_hash(&h, "calc.py").await;
+        let start = original.find("a - b").unwrap();
+        let patched = dispatch_completed(
+            &h,
+            "edit.apply_patch",
+            json!({
+                "path": "calc.py",
+                "edits": [{"byte_start": start, "byte_end": start + 5, "replacement": "b - a"}],
+                "expected_hash": hash,
+            }),
+        )
+        .await;
+        assert_eq!(patched["edits"][0]["applied"], true, "{patched}");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "def sub(a, b):\n    return b - a\n"
+        );
+        let after_patch = read_hash(&h, "calc.py").await;
+        assert_eq!(
+            patched["edits"][0]["patch"]["hash_after"],
+            after_patch.as_str(),
+            "hash_after is the same value the next fs.read returns"
+        );
+
+        let written = dispatch_completed(
+            &h,
+            "edit.write_file",
+            json!({"path": "calc.py", "content": "x = 1\n", "expected_hash": after_patch}),
+        )
+        .await;
+        assert_eq!(written["applied"], true, "{written}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "x = 1\n");
+
+        let before_delete = read_hash(&h, "calc.py").await;
+        let deleted = dispatch_completed(
+            &h,
+            "edit.delete_file",
+            json!({"path": "calc.py", "expected_hash": before_delete}),
+        )
+        .await;
+        assert_eq!(deleted["applied"], true, "{deleted}");
+        assert!(!file.exists());
+    }
+
+    #[tokio::test]
+    async fn a_stale_or_self_computed_hash_conflicts_and_says_to_re_read() {
+        let h = Harness::new();
+        let file = h.root().join("calc.py");
+        std::fs::write(&file, "one\n").unwrap();
+        let stale = read_hash(&h, "calc.py").await;
+        std::fs::write(&file, "two\n").unwrap();
+        let current = read_hash(&h, "calc.py").await;
+
+        let attempts = [
+            (
+                "edit.apply_patch",
+                json!({"path": "calc.py", "expected_hash": stale,
+                       "edits": [{"byte_start": 0, "byte_end": 3, "replacement": "six"}]}),
+            ),
+            (
+                "edit.write_file",
+                json!({"path": "calc.py", "content": "six\n", "expected_hash": stale}),
+            ),
+            (
+                "edit.delete_file",
+                json!({"path": "calc.py", "expected_hash": stale}),
+            ),
+            // What the live model did: hashed the file itself with sha256.
+            (
+                "edit.write_file",
+                json!({"path": "calc.py", "content": "six\n", "expected_hash":
+                       "e1a894e0bd5a36f3c5c2e7a2d26e0d6f1d4e7c1b9f3b2a1c0d9e8f7a6b5c4d3e"}),
+            ),
+        ];
+        for (name, input) in attempts {
+            let result = dispatch_completed(&h, name, input).await;
+            let outcome = if name == "edit.apply_patch" {
+                result["edits"][0].clone()
+            } else {
+                result
+            };
+            assert_eq!(outcome["applied"], false, "{name}: {outcome}");
+            let error = outcome["error"].as_str().unwrap_or_default();
+            assert!(error.starts_with("conflict at calc.py"), "{name}: {error}");
+            assert!(error.contains("fs.read"), "{name}: {error}");
+            assert!(
+                !error.contains(&current),
+                "{name}: the current hash is withheld so a retry must re-read: {error}"
+            );
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_patch_without_a_hash_is_refused_with_directions() {
+        let h = Harness::new();
+        std::fs::write(h.root().join("calc.py"), "one\n").unwrap();
+        let result = dispatch_completed(
+            &h,
+            "edit.apply_patch",
+            json!({"path": "calc.py",
+                   "edits": [{"byte_start": 0, "byte_end": 3, "replacement": "six"}]}),
+        )
+        .await;
+        let edit = &result["edits"][0];
+        assert_eq!(edit["applied"], false, "{result}");
+        assert!(
+            edit["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("fs.read"),
+            "{result}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(h.root().join("calc.py")).unwrap(),
+            "one\n"
+        );
+    }
+
+    #[test]
+    fn every_edit_tool_says_where_expected_hash_comes_from() {
+        let h = Harness::new();
+        let defs = h.registry.tool_defs();
+        for (name, required) in [
+            ("edit.apply_patch", true),
+            ("edit.write_file", false),
+            ("edit.delete_file", true),
+        ] {
+            let def = defs
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("{name} is offered"));
+            let description = def.input_schema["properties"]["expected_hash"]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}: expected_hash has a description"));
+            assert!(
+                description.contains(
+                    "The `hash` fs.read or fs.stat returned for this file; it guards against \
+                     editing a file that changed since you read it."
+                ),
+                "{name}: {description}"
+            );
+            let required_fields = def.input_schema["required"].as_array().unwrap();
+            assert_eq!(
+                required_fields.contains(&json!("expected_hash")),
+                required,
+                "{name}: {}",
+                def.input_schema
+            );
+            if !required {
+                assert!(
+                    description.contains("omit it only"),
+                    "{name}: {description}"
+                );
+            }
+        }
+        for name in ["fs.read", "fs.stat"] {
+            let def = defs.iter().find(|d| d.name == name).unwrap();
+            assert!(
+                def.description.contains("`hash`"),
+                "{name}: {}",
+                def.description
+            );
         }
     }
 
