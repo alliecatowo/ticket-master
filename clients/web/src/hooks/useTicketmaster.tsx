@@ -8,81 +8,91 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { TicketmasterClient } from "../api/client";
-import { ProjectStore, type ProjectStoreSnapshot } from "../api/store";
-import type { PresenceSnapshot, TransitionRequest } from "../api/types";
+import {
+  describeError,
+  TicketmasterClient,
+  type DispatchResult,
+  type TicketAction,
+} from "../api/client";
+import { actorFor, loadHandle, saveHandle } from "../api/identity";
+import { LiveProject, type ConnectionStatus, type LiveState } from "../api/live";
+import type { ProjectStoreSnapshot } from "../api/store";
+import type { PresenceSnapshot, TicketId } from "../api/types";
 
-export type ConnectionStatus = "connecting" | "live" | "reconnecting" | "error";
+export type { ConnectionStatus };
 
-const ACTOR_STORAGE_KEY = "tm.web.actor";
-const DEFAULT_ACTOR = "human:web";
+export interface Notice {
+  id: number;
+  tone: "good" | "bad" | "info";
+  text: string;
+}
 
 interface TicketmasterContextValue {
   client: TicketmasterClient;
   status: ConnectionStatus;
   error: string | null;
+  retryAt: number | null;
+  /** Whether `GET /state` has loaded at least once. */
+  loaded: boolean;
   store: ProjectStoreSnapshot;
   presence: PresenceSnapshot;
+  /** The human handle; mutations act as `human:<handle>`. */
+  handle: string;
   actor: string;
-  setActor: (actor: string) => void;
-  transition: (ticket: string, body: TransitionRequest) => Promise<void>;
+  setHandle: (handle: string) => void;
+  /** Perform a ticket action as the current human. Throws a user-facing Error on failure. */
+  act: (ticket: TicketId, action: TicketAction) => Promise<void>;
+  dispatch: (objective: string) => Promise<DispatchResult>;
+  /** Epoch millis, ticking every few seconds, for ages and countdowns. */
+  now: number;
+  notices: Notice[];
+  notify: (tone: Notice["tone"], text: string) => void;
+  dismiss: (id: number) => void;
 }
 
 const TicketmasterContext = createContext<TicketmasterContextValue | null>(null);
 
-const EMPTY_STORE: ProjectStoreSnapshot = { head: 0, tickets: new Map(), recentEvents: [] };
 const EMPTY_PRESENCE: PresenceSnapshot = { participants: [], path_leases: [] };
 
 /**
- * Owns one `TicketmasterClient`, one `ProjectStore`, and the SSE subscription that keeps it
- * live. Every view reads from this context rather than talking to the client directly, so
- * connection lifecycle and reconnect state live in exactly one place.
+ * Owns one `TicketmasterClient` and one `LiveProject` (the `/state` + `/events` loop that keeps
+ * the store live and reconnects). Every view reads from this context, so connection lifecycle,
+ * reconnect state and identity live in exactly one place.
  */
-export function TicketmasterProvider({ children }: { children: ReactNode }) {
-  const client = useMemo(() => new TicketmasterClient(), []);
-  const storeRef = useRef(new ProjectStore());
-  const [store, setStore] = useState<ProjectStoreSnapshot>(EMPTY_STORE);
-  const [presence, setPresence] = useState<PresenceSnapshot>(EMPTY_PRESENCE);
-  const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [error, setError] = useState<string | null>(null);
-  const [actor, setActorState] = useState<string>(
-    () => localStorage.getItem(ACTOR_STORAGE_KEY) ?? DEFAULT_ACTOR,
+export function TicketmasterProvider({
+  children,
+  client: injected,
+}: {
+  children: ReactNode;
+  client?: TicketmasterClient;
+}) {
+  const client = useMemo(
+    () => injected ?? new TicketmasterClient({ handle: loadHandle() }),
+    [injected],
   );
+  const live = useMemo(() => new LiveProject(client), [client]);
+  const [liveState, setLiveState] = useState<LiveState>(() => ({
+    status: "connecting",
+    error: null,
+    retryAt: null,
+    loaded: false,
+    store: live.store.snapshot(),
+  }));
+  const [presence, setPresence] = useState<PresenceSnapshot>(EMPTY_PRESENCE);
+  const [handle, setHandleState] = useState(client.handle);
+  const [now, setNow] = useState(() => Date.now());
+  const [notices, setNotices] = useState<Notice[]>([]);
+  const noticeId = useRef(0);
 
-  const setActor = useCallback((next: string) => {
-    localStorage.setItem(ACTOR_STORAGE_KEY, next);
-    setActorState(next);
-  }, []);
+  useEffect(() => live.start(setLiveState), [live]);
 
   useEffect(() => {
-    const controller = new AbortController();
-
-    async function run() {
-      try {
-        const snapshot = await client.getState();
-        storeRef.current.seed(snapshot);
-        setStore(storeRef.current.snapshot());
-        setStatus("live");
-        setError(null);
-
-        for await (const event of client.subscribe(snapshot.head, controller.signal)) {
-          if (storeRef.current.apply(event)) setStore(storeRef.current.snapshot());
-          setStatus("live");
-        }
-      } catch (err) {
-        if (controller.signal.aborted) return;
-        setStatus("error");
-        setError(err instanceof Error ? err.message : String(err));
-      }
-    }
-
-    run();
-    return () => controller.abort();
-  }, [client]);
+    const id = setInterval(() => setNow(Date.now()), 5000);
+    return () => clearInterval(id);
+  }, []);
 
   // Presence is polled rather than streamed: it's derived server-side from a TTL sweep
-  // (`crates/tm-server/src/presence.rs`), not an event-sourced projection, so there is nothing
-  // to reconcile from the event log for it.
+  // (`crates/tm-server/src/presence.rs`), not an event-sourced projection.
   useEffect(() => {
     let cancelled = false;
     async function poll() {
@@ -90,10 +100,10 @@ export function TicketmasterProvider({ children }: { children: ReactNode }) {
         const snapshot = await client.getPresence();
         if (!cancelled) setPresence(snapshot);
       } catch {
-        // Presence is best-effort UI chrome; a failed poll just leaves the last-known snapshot.
+        // Best-effort chrome; a failed poll keeps the last snapshot.
       }
     }
-    poll();
+    void poll();
     const id = setInterval(poll, 5000);
     return () => {
       cancelled = true;
@@ -101,19 +111,72 @@ export function TicketmasterProvider({ children }: { children: ReactNode }) {
     };
   }, [client]);
 
-  const transition = useCallback(
-    async (ticket: string, body: TransitionRequest) => {
-      await client.transition(ticket, body);
-      // Optimistic-update-then-reconcile per SPEC.md §18.2: the SSE subscription above will
-      // deliver the resulting ticket.state_changed event and reconcile the store; nothing to do
-      // here beyond letting the mutation's own errors propagate to the caller.
+  const setHandle = useCallback(
+    (next: string) => {
+      const saved = saveHandle(next);
+      client.handle = saved;
+      setHandleState(saved);
+    },
+    [client],
+  );
+
+  const dismiss = useCallback((id: number) => {
+    setNotices((all) => all.filter((n) => n.id !== id));
+  }, []);
+
+  const notify = useCallback(
+    (tone: Notice["tone"], text: string) => {
+      const id = ++noticeId.current;
+      setNotices((all) => [...all.slice(-3), { id, tone, text }]);
+      setTimeout(() => dismiss(id), tone === "bad" ? 9000 : 5000);
+    },
+    [dismiss],
+  );
+
+  const act = useCallback(
+    async (ticket: TicketId, action: TicketAction) => {
+      try {
+        // The resulting events arrive over the stream and reconcile the store; there is no
+        // separate speculative local state to drift from it.
+        await client.act(ticket, action);
+      } catch (err) {
+        throw new Error(describeError(err));
+      }
+    },
+    [client],
+  );
+
+  const dispatch = useCallback(
+    async (objective: string) => {
+      try {
+        return await client.dispatch(objective);
+      } catch (err) {
+        throw new Error(describeError(err));
+      }
     },
     [client],
   );
 
   const value = useMemo<TicketmasterContextValue>(
-    () => ({ client, status, error, store, presence, actor, setActor, transition }),
-    [client, status, error, store, presence, actor, setActor, transition],
+    () => ({
+      client,
+      status: liveState.status,
+      error: liveState.error,
+      retryAt: liveState.retryAt,
+      loaded: liveState.loaded,
+      store: liveState.store,
+      presence,
+      handle,
+      actor: actorFor(handle),
+      setHandle,
+      act,
+      dispatch,
+      now,
+      notices,
+      notify,
+      dismiss,
+    }),
+    [client, liveState, presence, handle, setHandle, act, dispatch, now, notices, notify, dismiss],
   );
 
   return <TicketmasterContext.Provider value={value}>{children}</TicketmasterContext.Provider>;

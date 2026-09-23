@@ -61,13 +61,39 @@ export interface Ticket {
   success: unknown[];
   verification: unknown;
   budget: unknown;
-  retry: unknown;
+  retry: RetryPolicy | null;
   cycle: unknown | null;
   attempts: number;
-  failures: unknown[];
+  failures: FailureRecord[];
   priority: number;
   created: string;
   updated: string;
+}
+
+/** `tm_core::ticket::FailureRecord`, as `GET /state` and `ticket.updated` carry it. */
+export interface FailureRecord {
+  /** snake_case `FailureClass`: `other`, `verification_failed`, ... */
+  class: string;
+  detail: string;
+  at: string;
+  attempt: number;
+}
+
+export interface RetryPolicy {
+  max_attempts: number;
+  base_delay_seconds: number;
+  backoff_multiplier: number;
+  max_delay_seconds: number;
+}
+
+/** One piece of evidence attached to a ticket (`evidence_json` in routes.rs). */
+export interface Evidence {
+  ticket: TicketId;
+  kind: string;
+  artifact: ArtifactId;
+  produced_by: ParticipantId;
+  ts: string;
+  summary: string;
 }
 
 export interface Lease {
@@ -122,7 +148,7 @@ export interface StateSnapshot {
   decisions: Decision[];
   milestones: Milestone[];
   artifacts: Artifact[];
-  evidence: unknown[];
+  evidence: Evidence[];
   budgets: Budget[];
 }
 
@@ -165,9 +191,28 @@ export interface WireEvent {
   payload: unknown;
 }
 
-/** Body for `POST /tickets/:id/transition`; externally tagged, snake_case (see routes.rs). */
+/**
+ * Body for `POST /tickets/:id/transition`: externally tagged, snake_case (`TransitionRequest` in
+ * `crates/tm-server/src/routes.rs`). Only the variants this client sends are listed. `accept`,
+ * `reject` and `retry` are human-only: the actor must be `human:<handle>` or the server answers
+ * 403.
+ */
 export type TransitionRequest =
   | { activate: { actor: ParticipantId } }
-  | { close: { reason?: string | null; actor: ParticipantId } }
-  | { cancel: { reason?: string | null; actor: ParticipantId } }
-  | { reopen: { reason?: string | null; actor: ParticipantId } };
+  | { accept: { note: string | null; actor: ParticipantId } }
+  | { reject: { reason: string; actor: ParticipantId } }
+  | { retry: { guidance: string | null; actor: ParticipantId } }
+  | { cancel: { reason: string | null; actor: ParticipantId } };
+
+/** Body for `POST /tickets`; everything else defaults to what `tm ticket new` gives. */
+export interface CreateTicketRequest {
+  kind: TicketKind;
+  objective: string;
+  actor: ParticipantId;
+}
+
+/** `POST /tickets`'s 201 body. */
+export interface CreateTicketResponse {
+  ticket: Ticket;
+  events: WireEvent[];
+}

@@ -40,8 +40,8 @@ export function BacklogView() {
   const groups = useMemo(() => groupBacklog(filtered), [filtered]);
 
   return (
-    <section data-testid="backlog-view">
-      <h1>Backlog</h1>
+    <section className="page" data-testid="backlog-view">
+      <h1 className="page__title">Backlog</h1>
       <div className="backlog-filters">
         <FilterSelect
           label="Milestone"

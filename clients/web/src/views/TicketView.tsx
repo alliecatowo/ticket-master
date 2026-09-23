@@ -1,119 +1,286 @@
 import { useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
-import { useTicketmaster } from "../hooks/useTicketmaster";
+import { Link, useParams } from "react-router-dom";
 import { PresenceBar } from "../components/PresenceBar";
-import type { TransitionRequest } from "../api/types";
+import { TicketActions } from "../components/TicketActions";
+import { StateBadge, WorkerGlyph } from "../components/TicketRow";
+import { useTicketmaster } from "../hooks/useTicketmaster";
+import { describeEvent } from "./timelineModel";
+import {
+  choicesFor,
+  compactAge,
+  GROUP_LABEL,
+  overviewOf,
+  type TicketOverview,
+} from "./ticketsModel";
 
 /**
- * Objective, state, authority, evidence, failures, artifacts, event history (SPEC.md §18.2).
- *
- * Evidence and artifacts are read from `store.recentEvents` (this session's live tail) plus the
- * ticket's own `failures` field — there is no dedicated "evidence for ticket X" endpoint, so a
- * ticket's full historical evidence/artifact list before this client connected is not shown here
- * (see README's "not built" list for the full caveat).
+ * One ticket: objective, state and attempts, failure history, the submission and its evidence,
+ * the event timeline, and the actions its state allows (the TUI's peek, as a page).
  */
 export function TicketView() {
   const { id } = useParams<{ id: string }>();
-  const { store, transition, actor } = useTicketmaster();
-  const [pending, setPending] = useState<string | null>(null);
-  const [mutationError, setMutationError] = useState<string | null>(null);
-
+  const { store, now, loaded } = useTicketmaster();
   const ticket = id ? store.tickets.get(id) : undefined;
-  const history = useMemo(
-    () => store.recentEvents.filter((e) => e.subject === id),
-    [store.recentEvents, id],
-  );
+  const overview = useMemo(() => (ticket ? overviewOf(ticket, store, now) : undefined), [ticket, store, now]);
 
-  if (!ticket) {
+  if (!ticket || !overview) {
     return (
-      <section data-testid="ticket-view">
-        <h1>Ticket {id}</h1>
-        <p className="hint">Not found in the current materialized view.</p>
+      <section className="page" data-testid="ticket-view">
+        <BackLink />
+        <h1 className="page__title">{id}</h1>
+        <p className="hint">{loaded ? "No ticket with this id in this project." : "Loading…"}</p>
       </section>
     );
   }
 
-  async function run(kind: string, body: TransitionRequest) {
-    setPending(kind);
-    setMutationError(null);
-    try {
-      await transition(ticket!.id, body);
-    } catch (err) {
-      setMutationError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setPending(null);
-    }
-  }
-
   return (
-    <section data-testid="ticket-view">
-      <h1>
-        {ticket.id} <span className="ticket-state">{ticket.state}</span>
-      </h1>
-      <p>{ticket.objective}</p>
-      <PresenceBar ticket={ticket.id} />
+    <section className="page" data-testid="ticket-view">
+      <BackLink />
+      <header className="detail__header">
+        <div className="detail__heading">
+          <div className="detail__ids">
+            <WorkerGlyph overview={overview} />
+            <span className="detail__id">{overview.id}</span>
+            <StateBadge state={overview.state} />
+            <span className={`detail__group detail__group--${overview.group}`}>
+              {GROUP_LABEL[overview.group]}
+            </span>
+          </div>
+          <h1 className="detail__title">{overview.title}</h1>
+          <p className={`detail__summary tone--${overview.tone}`}>{overview.summary}</p>
+        </div>
+      </header>
 
-      <div className="ticket-actions">
-        <button
-          disabled={pending !== null || ticket.state !== "draft"}
-          onClick={() => run("activate", { activate: { actor } })}
-        >
-          {pending === "activate" ? "Activating…" : "Activate"}
-        </button>
-        <button
-          disabled={pending !== null || ticket.state === "closed" || ticket.state === "cancelled"}
-          onClick={() => run("close", { close: { actor, reason: "closed from web canvas" } })}
-        >
-          {pending === "close" ? "Closing…" : "Close"}
-        </button>
-        <button
-          disabled={pending !== null || ticket.state !== "closed"}
-          onClick={() => run("reopen", { reopen: { actor, reason: "reopened from web canvas" } })}
-        >
-          {pending === "reopen" ? "Reopening…" : "Reopen"}
-        </button>
+      <ActionPanel overview={overview} />
+
+      <div className="detail__grid">
+        <div className="detail__main">
+          <Card title="Objective">
+            <p className="prose">{overview.objective}</p>
+          </Card>
+
+          {(overview.submission || overview.evidence.length > 0) && (
+            <Card title="Submission">
+              {overview.submission ? (
+                <p className="prose">{overview.submission}</p>
+              ) : (
+                <p className="hint">No summary recorded.</p>
+              )}
+              {overview.evidence.length > 0 && (
+                <ul className="evidence">
+                  {overview.evidence.map((e, i) => (
+                    <li key={`${e.artifact}-${i}`}>
+                      <span className="chip">{e.kind}</span>
+                      <code>{e.artifact}</code>
+                      <span className="evidence__summary">{e.summary}</span>
+                      <span className="muted">by {e.produced_by}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </Card>
+          )}
+
+          <Card title={`Failures${overview.failures.length ? ` (${overview.failures.length})` : ""}`}>
+            {overview.failures.length === 0 ? (
+              <p className="hint">None recorded.</p>
+            ) : (
+              <ol className="failures">
+                {overview.failures.map((f, i) => (
+                  <li key={i}>
+                    <span className="failures__attempt">Attempt {f.attempt}</span>
+                    <span className="chip chip--bad">{f.class.replace(/_/g, " ")}</span>
+                    <span className="failures__detail">{f.detail}</span>
+                    <time className="muted" dateTime={f.at} title={new Date(f.at).toLocaleString()}>
+                      {compactAge(now - Date.parse(f.at))} ago
+                    </time>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </Card>
+
+          <Timeline ticketId={overview.id} />
+        </div>
+
+        <aside className="detail__side">
+          <Card title="Details">
+            <dl className="facts">
+              <dt>State</dt>
+              <dd>{overview.state}</dd>
+              <dt>Attempts</dt>
+              <dd>
+                {overview.attempts} of {overview.maxAttempts}
+              </dd>
+              <dt>Worker</dt>
+              <dd>{overview.worker ?? <span className="muted">none</span>}</dd>
+              {overview.latestActivity && (
+                <>
+                  <dt>Latest</dt>
+                  <dd className="mono">{overview.latestActivity}</dd>
+                </>
+              )}
+              {overview.waitingSince && (
+                <>
+                  <dt>Waiting</dt>
+                  <dd>
+                    {compactAge(now - Date.parse(overview.waitingSince))}{" "}
+                    {overview.waitingFor === "approval" ? "for an approval" : "since it escalated"}
+                  </dd>
+                </>
+              )}
+              <dt>Kind</dt>
+              <dd>{ticket.kind}</dd>
+              <dt>Priority</dt>
+              <dd>{ticket.priority}</dd>
+              <dt>Created</dt>
+              <dd title={new Date(ticket.created).toLocaleString()}>{compactAge(now - Date.parse(ticket.created))} ago</dd>
+              <dt>Updated</dt>
+              <dd title={new Date(ticket.updated).toLocaleString()}>{compactAge(now - Date.parse(ticket.updated))} ago</dd>
+              {ticket.milestone && (
+                <>
+                  <dt>Milestone</dt>
+                  <dd>{ticket.milestone}</dd>
+                </>
+              )}
+              {ticket.parent && (
+                <>
+                  <dt>Parent</dt>
+                  <dd>
+                    <Link to={`/ticket/${ticket.parent}`}>{ticket.parent}</Link>
+                  </dd>
+                </>
+              )}
+              {ticket.children.length > 0 && (
+                <>
+                  <dt>Children</dt>
+                  <dd>
+                    {ticket.children.map((c, i) => (
+                      <span key={c}>
+                        {i > 0 && ", "}
+                        <Link to={`/ticket/${c}`}>{c}</Link>
+                      </span>
+                    ))}
+                  </dd>
+                </>
+              )}
+              {ticket.dependencies.length > 0 && (
+                <>
+                  <dt>Depends on</dt>
+                  <dd>
+                    {ticket.dependencies.map((d, i) => (
+                      <span key={d}>
+                        {i > 0 && ", "}
+                        <Link to={`/ticket/${d}`}>{d}</Link>
+                      </span>
+                    ))}
+                  </dd>
+                </>
+              )}
+            </dl>
+          </Card>
+          <Card title="Presence">
+            <PresenceBar ticket={overview.id} />
+          </Card>
+        </aside>
       </div>
-      {mutationError && <p className="error">Mutation failed: {mutationError}</p>}
+    </section>
+  );
+}
 
-      <dl className="ticket-fields">
-        <dt>Kind</dt>
-        <dd>{ticket.kind}</dd>
-        <dt>Authority</dt>
-        <dd>
-          <code>{JSON.stringify(ticket.authority)}</code>
-        </dd>
-        <dt>Milestone</dt>
-        <dd>{ticket.milestone ?? "—"}</dd>
-        <dt>Priority</dt>
-        <dd>{ticket.priority}</dd>
-        <dt>Attempts</dt>
-        <dd>{ticket.attempts}</dd>
-      </dl>
+function BackLink() {
+  return (
+    <Link to="/" className="back">
+      ← Tickets
+    </Link>
+  );
+}
 
-      <h2>Failures</h2>
-      {ticket.failures.length === 0 ? (
-        <p className="hint">None recorded.</p>
-      ) : (
-        <ul>
-          {ticket.failures.map((f, i) => (
-            <li key={i}>
-              <code>{JSON.stringify(f)}</code>
-            </li>
-          ))}
-        </ul>
+function Card({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="card">
+      <h2 className="card__title">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+const PANEL_COPY: Record<string, { title: string; body: (o: TicketOverview) => string }> = {
+  submitted: {
+    title: "Waiting for your review",
+    body: () => "Accept closes the ticket. Reject sends it back to a worker with your reason.",
+  },
+  escalated: {
+    title: "Needs your decision",
+    body: (o) =>
+      `The worker stopped after ${o.attempts} attempt${o.attempts === 1 ? "" : "s"}. Retry gives it a fresh round of attempts; guidance is added to the objective for the next one.`,
+  },
+  draft: {
+    title: "Draft, not queued",
+    body: () => "Queue it and a background worker picks it up.",
+  },
+};
+
+/** The state's choices up front, like the TUI's peek, with Cancel beside them. */
+function ActionPanel({ overview }: { overview: TicketOverview }) {
+  const copy = PANEL_COPY[overview.state];
+  const hasChoices = choicesFor(overview.state).length > 0;
+  if (!hasChoices) {
+    return (
+      <div className="panel panel--quiet">
+        <TicketActions overview={overview} />
+      </div>
+    );
+  }
+  return (
+    <div className={`panel panel--${overview.group}`} data-testid="action-panel">
+      {copy && (
+        <div className="panel__copy">
+          <p className="panel__title">{copy.title}</p>
+          <p className="panel__body">{copy.body(overview)}</p>
+        </div>
       )}
+      <TicketActions overview={overview} keys />
+    </div>
+  );
+}
 
-      <h2>Event history (this session)</h2>
-      {history.length === 0 ? (
-        <p className="hint">No events observed for this ticket since the client connected.</p>
+function Timeline({ ticketId }: { ticketId: string }) {
+  const { store, now } = useTicketmaster();
+  const [all, setAll] = useState(false);
+  const entries = useMemo(
+    () => (store.timelines.get(ticketId) ?? []).map(describeEvent).reverse(),
+    [store.timelines, ticketId],
+  );
+  const shown = all ? entries : entries.filter((e) => !e.minor);
+  const hidden = entries.length - shown.length;
+  return (
+    <section className="card">
+      <div className="card__head">
+        <h2 className="card__title">Timeline</h2>
+        {(hidden > 0 || all) && (
+          <button type="button" className="linkish" onClick={() => setAll(!all)}>
+            {all ? "Hide bookkeeping" : `Show all ${entries.length} events`}
+          </button>
+        )}
+      </div>
+      {shown.length === 0 ? (
+        <p className="hint">No events for this ticket yet.</p>
       ) : (
-        <ul>
-          {history.map((event) => (
-            <li key={event.seq}>
-              #{event.seq} {event.kind} — {event.actor} — {event.ts}
+        <ol className="timeline">
+          {shown.map((e) => (
+            <li key={e.seq} className={`timeline__item tone--${e.tone}`}>
+              <span className="timeline__dot" aria-hidden />
+              <span className="timeline__text">{e.text}</span>
+              <span className="timeline__meta">
+                {e.actor} ·{" "}
+                <time dateTime={e.ts} title={`#${e.seq} · ${new Date(e.ts).toLocaleString()}`}>
+                  {compactAge(now - Date.parse(e.ts))} ago
+                </time>
+              </span>
             </li>
           ))}
-        </ul>
+        </ol>
       )}
     </section>
   );
