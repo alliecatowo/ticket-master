@@ -37,14 +37,14 @@ pub struct TicketWorktree {
 fn require_usable_git_repo(root: &Path) -> tm_types::Result<()> {
     let repo = git2::Repository::open(root).map_err(|_| {
         TmError::parse(format!(
-            "--worktree requires a real git repository at {}; none found (run `git init` first, \
-             or drop --worktree to run against the main checkout)",
+            "--worktree needs a real git repository at {}, but none was found. Run `git init` \
+             first, or drop --worktree to run against the main checkout.",
             root.display()
         ))
     })?;
     if repo.is_bare() {
         return Err(TmError::parse(format!(
-            "--worktree requires a non-bare git repository at {}; found a bare repository",
+            "--worktree needs a non-bare git repository at {}, but found a bare one.",
             root.display()
         )));
     }
@@ -54,8 +54,8 @@ fn require_usable_git_repo(root: &Path) -> tm_types::Result<()> {
     // "invalid reference: HEAD" stderr.
     if repo.head().is_err() {
         return Err(TmError::parse(format!(
-            "--worktree requires at least one commit at {} (HEAD does not resolve yet); commit \
-             something first, or drop --worktree",
+            "--worktree needs at least one commit at {} (HEAD doesn't resolve yet). Commit \
+             something first, or drop --worktree.",
             root.display()
         )));
     }
@@ -76,8 +76,8 @@ fn require_usable_git_repo(root: &Path) -> tm_types::Result<()> {
 pub fn create(project: &Project, ticket: &TicketId) -> tm_types::Result<TicketWorktree> {
     if project.scope != Scope::Repo {
         return Err(TmError::parse(
-            "--worktree requires a repo-scoped project (run `tm init` first); a global-scope \
-             project has no repo-local .tm/ to nest a worktree under"
+            "--worktree needs a repo-scoped project. Run `tm init` here first; a global-scope \
+             project has no repo-local .tm/ to nest a worktree under."
                 .to_string(),
         ));
     }
