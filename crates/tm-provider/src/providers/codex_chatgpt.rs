@@ -68,6 +68,7 @@ use crate::types::{
     Candidate, Completion, CompletionRequest, ContentBlock, EmbedRequest, Embeddings, Message,
     MessageRole, ModelId, ProviderError, StopReason, Usage,
 };
+use crate::wire_names::WireNames;
 
 /// The real Codex CLI ChatGPT-subscription backend — see this module's docs for how this was
 /// determined.
@@ -258,10 +259,12 @@ impl Provider for CodexChatGptProvider {
             .await
             .map_err(|e| ProviderError::AuthFailed(e.to_string()))?;
         let model = req.model.as_deref().unwrap_or(&self.model);
-        let wire_request = build_wire_request(model, &req);
+        let names = WireNames::for_request(&req);
+        let wire_request = build_wire_request_with_names(model, &req, &names);
         let headers = self.build_headers(credential.expose_secret())?;
         let (body, latency, received_at) = self.send_with_retry(&headers, &wire_request).await?;
         assemble_streamed_completion(&body, model, self.id(), latency, received_at)
+            .map(|c| names.decode_completion(c))
     }
 
     async fn embed(&self, _req: EmbedRequest) -> Result<Embeddings, ProviderError> {
@@ -546,7 +549,23 @@ fn build_wire_input(messages: &[Message]) -> Vec<WireInputItem> {
 /// `instructions` field (empty is dropped, matching
 /// [`crate::providers::compat::build_wire_request`]'s empty-system handling). `req.stream` is
 /// deliberately **not** consulted — see this module's top docs, "Streaming, always".
+///
+/// Tool names go on the wire through [`WireNames::for_request`]: the Responses API requires
+/// `^[a-zA-Z0-9_-]{1,64}$`, which tm's dotted names fail (see [`crate::wire_names`]).
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_wire_request(model: &str, req: &CompletionRequest) -> WireRequest {
+    build_wire_request_with_names(model, req, &WireNames::for_request(req))
+}
+
+/// [`build_wire_request`] with an explicit name map, so [`CodexChatGptProvider::complete`] can
+/// decode the response with the same one.
+fn build_wire_request_with_names(
+    model: &str,
+    req: &CompletionRequest,
+    names: &WireNames,
+) -> WireRequest {
+    let req = names.encode_request(req);
+    let req = req.as_ref();
     WireRequest {
         model: model.to_string(),
         input: build_wire_input(&req.messages),
@@ -1164,5 +1183,62 @@ mod tests {
         let events = parse_sse_body(sse.as_bytes()).expect("parses");
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].kind, "response.created");
+    }
+
+    // ---- tool names on the wire ----
+
+    #[test]
+    fn build_wire_request_sends_only_valid_tool_names_consistent_with_history() {
+        let mut req = sample_request();
+        req.tools[0].name = "fs.read".to_string();
+        req.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "fs.read".to_string(),
+                input: serde_json::json!({}),
+            }],
+        });
+        let wire = build_wire_request("gpt-test", &req);
+        assert_eq!(wire.tools[0].name, "fs_read");
+        let history: Vec<&str> = wire
+            .input
+            .iter()
+            .filter_map(|item| match item {
+                WireInputItem::FunctionCall { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(history, vec!["fs_read"]);
+    }
+
+    #[test]
+    fn a_streamed_function_call_maps_back_to_the_dotted_name() {
+        let mut req = sample_request();
+        req.tools[0].name = "shell.run".to_string();
+        let names = WireNames::for_request(&req);
+        let _wire = build_wire_request_with_names("gpt-test", &req, &names);
+        let body = concat!(
+            "data: {\"type\": \"response.created\"}\n\n",
+            "data: {\"type\": \"response.completed\", \"response\": {\"status\": \"completed\", \"output\": [",
+            "{\"type\": \"function_call\", \"call_id\": \"call_7\", \"name\": \"shell_run\", \"arguments\": \"{}\"}",
+            "]}}\n\n",
+        );
+        let completion = assemble_streamed_completion(
+            body.as_bytes(),
+            "gpt-test",
+            "codex-chatgpt",
+            Duration::ZERO,
+            Timestamp::EPOCH,
+        )
+        .map(|c| names.decode_completion(c))
+        .expect("assembles");
+        match &completion.candidates[0].content[0] {
+            ContentBlock::ToolUse { id, name, .. } => {
+                assert_eq!(id, "call_7");
+                assert_eq!(name, "shell.run");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
     }
 }

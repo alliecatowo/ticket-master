@@ -19,6 +19,7 @@ use crate::fabric::Provider;
 use crate::types::{
     Completion, CompletionRequest, EmbedRequest, Embeddings, ModelId, ProviderError,
 };
+use crate::wire_names::WireNames;
 
 /// The Anthropic Messages API endpoint this provider targets.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -274,8 +275,24 @@ fn wire_to_content_block(block: &WireContentBlock) -> crate::types::ContentBlock
 /// `req.n` has no direct Messages API equivalent (the API always returns one candidate); this
 /// function always produces a single-candidate wire request, and callers wanting multiple
 /// candidates must issue multiple requests.
+///
+/// Tool names go on the wire through [`WireNames::for_request`] (dotted tm names are not valid
+/// Messages API tool names; see [`crate::wire_names`]).
 pub fn build_wire_request(model: &ModelId, req: &CompletionRequest) -> WireRequest {
+    build_wire_request_with_names(model, req, &WireNames::for_request(req))
+}
+
+/// [`build_wire_request`] with an explicit name map, so [`AnthropicProvider::complete`] can decode
+/// the response with the same one.
+pub fn build_wire_request_with_names(
+    model: &ModelId,
+    req: &CompletionRequest,
+    names: &WireNames,
+) -> WireRequest {
     use crate::types::MessageRole;
+
+    let req = names.encode_request(req);
+    let req = req.as_ref();
 
     let mut system_parts: Vec<String> = Vec::new();
     if let Some(system) = &req.system {
@@ -461,7 +478,8 @@ impl Provider for AnthropicProvider {
     /// `Retry-After`.
     async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
         let model = req.model_or(&self.model);
-        let wire_request = build_wire_request(&model, &req);
+        let names = WireNames::for_request(&req);
+        let wire_request = build_wire_request_with_names(&model, &req, &names);
         let url = format!("{}/v1/messages", self.base_url);
         let headers = build_headers(&self.api_key);
 
@@ -508,7 +526,8 @@ impl Provider for AnthropicProvider {
                     let finished = self.clock.now();
                     let latency =
                         Duration::from_secs(finished.seconds_since(started).max(0) as u64);
-                    return parse_wire_response(&body, latency, finished);
+                    return parse_wire_response(&body, latency, finished)
+                        .map(|c| names.decode_completion(c));
                 }
                 Err(err) => {
                     if err.is_retryable() && attempt < self.max_retries {
@@ -888,5 +907,91 @@ mod tests {
         .expect("builds provider");
         provider.set_max_retries(7);
         assert_eq!(provider.max_retries, 7);
+    }
+
+    fn dotted_tool_request() -> CompletionRequest {
+        let mut req = sample_request();
+        req.tools = ["fs.read", "fs_read", "shell.run"]
+            .iter()
+            .map(|n| ToolDef {
+                name: n.to_string(),
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object"}),
+            })
+            .collect();
+        req.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "toolu_01".to_string(),
+                name: "fs.read".to_string(),
+                input: serde_json::json!({"path": "a"}),
+            }],
+        });
+        req.messages.push(Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "toolu_01".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "ok".to_string(),
+                }],
+                is_error: false,
+            }],
+        });
+        req
+    }
+
+    #[test]
+    fn build_wire_request_sends_only_valid_tool_names_consistent_with_history() {
+        let model = ModelId::new("anthropic", "claude-sonnet-5");
+        let wire = build_wire_request(&model, &dotted_tool_request());
+        let tool_names: Vec<&str> = wire.tools.iter().map(|t| t.name.as_str()).collect();
+        for name in &tool_names {
+            assert!(crate::wire_names::is_valid_wire_name(name), "{name}");
+        }
+        assert_eq!(tool_names, vec!["fs_read_2", "fs_read", "shell_run"]);
+        let history_name = wire
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|b| match b {
+                WireContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .expect("history tool use");
+        assert_eq!(history_name, "fs_read_2");
+        let body = serde_json::to_string(&wire).expect("serializes");
+        assert!(!body.contains("fs.read") && !body.contains("shell.run"), "{body}");
+    }
+
+    #[test]
+    fn a_response_tool_call_maps_back_to_the_dotted_name() {
+        let model = ModelId::new("anthropic", "claude-sonnet-5");
+        let req = dotted_tool_request();
+        let names = WireNames::for_request(&req);
+        let _wire = build_wire_request_with_names(&model, &req, &names);
+        let body = r#"{
+            "model": "claude-sonnet-5",
+            "content": [
+                {"type": "tool_use", "id": "toolu_02", "name": "fs_read_2", "input": {}},
+                {"type": "tool_use", "id": "toolu_03", "name": "fs_read", "input": {}},
+                {"type": "tool_use", "id": "toolu_04", "name": "shell_run", "input": {}},
+                {"type": "tool_use", "id": "toolu_05", "name": "invented", "input": {}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        }"#;
+        let completion = names.decode_completion(
+            parse_wire_response(body.as_bytes(), Duration::ZERO, tm_types::Timestamp::EPOCH)
+                .expect("parses"),
+        );
+        let called: Vec<&str> = completion.candidates[0]
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(called, vec!["fs.read", "fs_read", "shell.run", "invented"]);
     }
 }
