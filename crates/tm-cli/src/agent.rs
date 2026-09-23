@@ -1234,6 +1234,10 @@ impl AgentSession {
             self.project.store.clone(),
         )
         .with_oversight(oversight)
+        // Tools resolve paths against the project root the prompt names as the working
+        // directory (and `!` shell mode runs in), not the process's cwd, which differs whenever
+        // `tm` was started from a subdirectory of the project.
+        .with_root(self.project.root.clone())
         .with_prompt_fragments({
             let mut fragments = tm_agent::chat_fragments(&self.chat_environment(ticket.as_ref()));
             if self.mode == PermissionMode::Plan {
@@ -2457,7 +2461,7 @@ mod tests {
     fn last_hash(seen: &str) -> String {
         let at = seen
             .rfind("\"hash\"")
-            .expect("a tool result carried a hash");
+            .unwrap_or_else(|| panic!("no hash in the tool results: {seen}"));
         seen[at + "\"hash\"".len()..]
             .chars()
             .skip_while(|c| !c.is_ascii_hexdigit())
