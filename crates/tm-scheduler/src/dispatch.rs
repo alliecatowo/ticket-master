@@ -71,10 +71,10 @@ impl ExecutorRegistry {
 #[derive(Debug, thiserror::Error)]
 pub enum DispatchError {
     /// No executor is registered for the ticket's required role.
-    #[error("no executor registered for role {0}")]
+    #[error("no worker is set up for role {0}")]
     NoExecutorForRole(Role),
     /// A candidate executor's declared capabilities do not satisfy the ticket's requirements.
-    #[error("executor capability mismatch: {0}")]
+    #[error("no worker can handle this ticket: {0}")]
     CapabilityMismatch(#[from] crate::select::CapabilityMismatch),
     /// The underlying `tm-core` call failed.
     #[error(transparent)]
@@ -298,7 +298,7 @@ async fn run_and_report(
             if let Err(store_err) = store.record_failure(
                 &ticket,
                 FailureClass::Other,
-                format!("context pack compilation failed: {e}"),
+                format!("couldn't put together context for this ticket: {e}"),
                 holder,
             ) {
                 tracing::warn!(%ticket, error = %store_err, "record_failure after pack compilation failure also failed");
@@ -396,7 +396,7 @@ async fn report_outcome(
                 if let Err(store_err) = store.record_failure(
                     ticket,
                     FailureClass::AuthorityDenied,
-                    format!("return-scope validation failed: {violation}"),
+                    format!("the change touched files outside what this ticket is allowed to write: {violation}"),
                     holder,
                 ) {
                     tracing::warn!(%ticket, error = %store_err, "record_failure after return-scope violation also failed");
@@ -441,7 +441,7 @@ async fn report_outcome(
                     if let Err(store_err) = store.record_failure(
                         ticket,
                         FailureClass::Other,
-                        format!("failed to store patch evidence: {e}"),
+                        format!("couldn't save the patch as evidence: {e}"),
                         holder,
                     ) {
                         tracing::warn!(%ticket, error = %store_err, "record_failure after patch-storage failure also failed");
@@ -455,7 +455,8 @@ async fn report_outcome(
             if let Err(store_err) = store.record_failure(
                 ticket,
                 FailureClass::Other,
-                "executor reported success but produced no evidence".to_string(),
+                "the worker said it finished but left no evidence (patch, summary, etc.)"
+                    .to_string(),
                 holder,
             ) {
                 tracing::warn!(%ticket, error = %store_err, "record_failure for evidence-less success also failed");
