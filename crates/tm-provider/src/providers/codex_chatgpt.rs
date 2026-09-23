@@ -257,10 +257,11 @@ impl Provider for CodexChatGptProvider {
             .credential()
             .await
             .map_err(|e| ProviderError::AuthFailed(e.to_string()))?;
-        let wire_request = build_wire_request(&self.model, &req);
+        let model = req.model.as_deref().unwrap_or(&self.model);
+        let wire_request = build_wire_request(model, &req);
         let headers = self.build_headers(credential.expose_secret())?;
         let (body, latency, received_at) = self.send_with_retry(&headers, &wire_request).await?;
-        assemble_streamed_completion(&body, &self.model, self.id(), latency, received_at)
+        assemble_streamed_completion(&body, model, self.id(), latency, received_at)
     }
 
     async fn embed(&self, _req: EmbedRequest) -> Result<Embeddings, ProviderError> {
@@ -819,6 +820,7 @@ mod tests {
             stop_sequences: vec!["STOP".to_string()],
             stream: false,
             n: 1,
+            model: None,
         }
     }
 

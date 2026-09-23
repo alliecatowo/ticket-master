@@ -28,13 +28,13 @@ candidates = [
 ]
 ```
 
-Known gap: `Fabric::register_provider` keys its registry by provider slug alone, and every
-backend below bakes in one fixed model at construction time. If two roles route to the same
-`provider` slug under two *different* models, only one model actually gets registered and both
-roles' traffic silently goes to whichever was registered last. `Registry::build_fabric` detects
-this at build time and refuses to build (returns `ProviderError::InvalidRequest` naming both
-models) rather than misrouting silently — it does not fix the underlying single-model-per-slug
-limitation, which lives in `fabric.rs`.
+Each candidate's `model` is the model that answers: `Fabric::execute` puts the routed candidate's
+model on the request (`CompletionRequest::model`), and every backend serves that model rather than
+the one it was built for. So two roles can route to one `provider` slug under two different models
+(`openai`/`gpt-4o` and `openai`/`gpt-4o-mini`), and one registered provider serves both. (Until
+2026-09-22 the model named here was ignored: each backend served its construction-time model, and
+`Registry::build_fabric` refused tables that named two models under one slug.) A session's
+`/model` choice uses the same path: `Fabric::prefer` puts the chosen model first for the chat role.
 
 ## Anthropic
 
@@ -245,9 +245,8 @@ limitation, which lives in `fabric.rs`.
 - Module: `crates/tm-provider/src/providers/compat.rs` (`DevPassProvider`, a thin named wrapper
   over `CompatProvider::from_env_prefix`)
 - Env vars: `DEVPASS_API_KEY` (required); `DEVPASS_BASE_URL` (required, no trailing slash);
-  `DEVPASS_MODEL` (required — read directly from the environment, **not** from a
-  `providers.toml` candidate's `model` field, since this backend has no per-candidate model
-  parameter)
+  `DEVPASS_MODEL` (required — the default model; a request routed to another `devpass`
+  candidate, or a `/model devpass/<name>` choice, is served by that model instead)
 - Free tier: depends entirely on the operator-controlled gateway this points at
 - Capabilities: completion, embedding, streaming, tool use
 - `CompatProvider::from_env_prefix` itself (not registered under its own slug) is the generic

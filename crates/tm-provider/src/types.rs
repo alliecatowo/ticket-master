@@ -88,6 +88,22 @@ pub struct CompletionRequest {
     pub stream: bool,
     /// How many independent completions to request.
     pub n: u32,
+    /// Which of the provider's models serves this request, when not the one it was built for.
+    /// [`crate::Fabric`] sets it to the model its role table routed to, so a role candidate's
+    /// `model` is the model that actually answers; `None` means the provider's own default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+impl CompletionRequest {
+    /// The model to serve this request with: `default` (the provider's own), with its model name
+    /// replaced by [`CompletionRequest::model`] when that's set.
+    pub fn model_or(&self, default: &ModelId) -> ModelId {
+        match &self.model {
+            Some(model) => ModelId::new(default.provider.clone(), model.clone()),
+            None => default.clone(),
+        }
+    }
 }
 
 /// Why a completion stopped generating.
@@ -469,6 +485,7 @@ mod tests {
             stop_sequences: vec![],
             stream: false,
             n: 1,
+            model: None,
         };
         assert_eq!(req.max_tokens, 1024);
         assert_eq!(req.n, 1);

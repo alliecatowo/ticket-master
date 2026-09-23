@@ -833,6 +833,7 @@ mod tests {
             stop_sequences: vec![],
             stream: false,
             n: 1,
+            model: None,
         };
         let completion = Completion {
             model: ModelId::new("test", "model"),

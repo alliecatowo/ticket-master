@@ -31,10 +31,16 @@ pub type RequestHash = u64;
 /// because `CompletionRequest`'s fields are declared in a fixed order and serde_json preserves
 /// struct field order), then hashes the bytes with `std::hash::DefaultHasher`.
 pub fn hash_request(req: &CompletionRequest) -> RequestHash {
+    // `model` is left out: `Fabric` fills it in on the way to the provider, and a script is keyed
+    // on the request its caller built.
+    let req = CompletionRequest {
+        model: None,
+        ..req.clone()
+    };
     // Invariant: `CompletionRequest` contains no map with non-string keys and no type whose
     // `Serialize` impl can fail, so serialization to a `String` cannot error.
     let json =
-        serde_json::to_string(req).expect("CompletionRequest serialization should never fail");
+        serde_json::to_string(&req).expect("CompletionRequest serialization should never fail");
     let mut hasher = std::hash::DefaultHasher::new();
     json.as_bytes().hash(&mut hasher);
     hasher.finish()
@@ -148,7 +154,7 @@ impl MockProvider {
     ///
     /// Derives a short deterministic text body from `hash_request(req)`, wraps it in a single
     /// `Text` content block with `StopReason::EndTurn`, estimates `Usage` from input message
-    /// byte lengths plus a fixed output token count, and uses `self.model.clone()`,
+    /// byte lengths plus a fixed output token count, and uses the request's model (else `self.model`),
     /// `self.default_latency`, and `received_at: self.clock.now()`.
     pub fn deterministic_completion(&self, req: &CompletionRequest) -> Completion {
         let hash = hash_request(req);
@@ -174,7 +180,7 @@ impl MockProvider {
         let output_tokens = 10u32;
 
         Completion {
-            model: self.model.clone(),
+            model: req.model_or(&self.model),
             candidates: vec![Candidate {
                 content: vec![ContentBlock::Text { text }],
                 stop_reason: StopReason::EndTurn,
@@ -316,6 +322,7 @@ mod tests {
             stop_sequences: vec![],
             stream: false,
             n: 1,
+            model: None,
         }
     }
 

@@ -305,27 +305,16 @@ impl Provider for CompatProvider {
     }
 
     async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
-        let wire_request = build_wire_request(&self.config.model, &req);
+        let model = req.model.as_deref().unwrap_or(&self.config.model);
+        let wire_request = build_wire_request(model, &req);
         let url = self.url(&self.config.chat_path);
         let (body, latency, received_at) = self.send_with_retry(&url, &wire_request).await?;
 
         if req.stream {
             let chunks = parse_sse_body(&body)?;
-            assemble_streamed_completion(
-                &chunks,
-                &self.config.model,
-                &self.config.id,
-                latency,
-                received_at,
-            )
+            assemble_streamed_completion(&chunks, model, &self.config.id, latency, received_at)
         } else {
-            parse_wire_response(
-                &body,
-                &self.config.model,
-                &self.config.id,
-                latency,
-                received_at,
-            )
+            parse_wire_response(&body, model, &self.config.id, latency, received_at)
         }
     }
 
@@ -1300,6 +1289,7 @@ mod tests {
             stop_sequences: vec!["STOP".to_string()],
             stream: false,
             n: 1,
+            model: None,
         }
     }
 

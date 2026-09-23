@@ -31,13 +31,9 @@ use tm_types::{
 use crate::project::Project;
 use crate::render::Renderer;
 
-/// The concrete Anthropic model this session's coder role is bound to when DevPass is not
-/// configured as the default (see [`build_fabric`]). `Fabric`'s provider registry keys by
-/// provider slug rather than model, so absent DevPass, this is the model every request this
-/// session issues is actually served by, regardless of which candidate a role table names. When
-/// `DEVPASS_API_KEY`/`DEVPASS_BASE_URL`/`DEVPASS_MODEL` are all set, [`build_fabric`] instead
-/// registers a [`DevPassProvider`] and [`RoleTable::default_table`] routes [`AGENT_ROLE`] to it,
-/// so this constant is not consulted at all for that request.
+/// The model the Anthropic provider is built for when DevPass is not configured (see
+/// [`build_fabric`]). Requests name the model the role table routed to, so this is only the
+/// provider's fallback default.
 pub(crate) const AGENT_MODEL: &str = "claude-sonnet-5";
 
 /// The role the interactive/scriptable session executes turns as: well-specified implementation
@@ -227,6 +223,9 @@ struct SavedSession {
     attached_ticket: Option<TicketId>,
     #[serde(default)]
     mode: PermissionMode,
+    /// The `/model` choice, if the human made one.
+    #[serde(default)]
+    model: Option<ModelId>,
     turns: Vec<tm_agent::ConversationTurn>,
 }
 
@@ -337,6 +336,93 @@ fn shell_context_message(run: &ShellRun) -> String {
     out
 }
 
+/// What `/compact` asks the model for.
+const COMPACT_PROMPT: &str = "Summarize the conversation below so that it can continue from your \
+summary alone. Keep everything needed to carry on the work: what the user asked for and why, \
+decisions made, files read or changed (with paths), commands run and their results, errors and \
+how they were fixed, what is done, what is still pending, and what was happening at the very end. \
+Quote exact names, paths and values. Write it as notes, not a story, and don't add anything the \
+conversation doesn't say.";
+
+/// Heads the summary that replaces a compacted conversation, so the model knows what it's reading.
+const COMPACTED_MARKER: &str =
+    "[This conversation was compacted. A summary of everything before this point:]";
+
+/// Once a turn's context reaches this many tokens, the next turn compacts the conversation first.
+const AUTO_COMPACT_TOKENS: u64 = 150_000;
+
+/// What [`AgentSession::compact`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Compaction {
+    /// How many turns the summary replaced.
+    pub turns: usize,
+    /// The summary the conversation now starts from.
+    pub summary: String,
+    /// Tokens the summarizing call used.
+    pub tokens: u64,
+}
+
+/// `turns` as plain text for summarizing: messages, replies, and each tool call with a bounded
+/// view of its result.
+fn conversation_transcript(turns: &[tm_agent::ConversationTurn]) -> String {
+    const MAX_RESULT_CHARS: usize = 2_000;
+    let mut out = String::new();
+    for turn in turns {
+        out.push_str(&format!("User: {}\n", turn.user_message));
+        for step in &turn.steps {
+            if let Some(text) = step
+                .assistant_text
+                .as_deref()
+                .filter(|t| !t.trim().is_empty())
+            {
+                out.push_str(&format!("Assistant: {text}\n"));
+            }
+            for call in &step.tool_calls {
+                let result = match &call.resolution {
+                    ToolCallResolution::Completed { result, .. } => result.to_string(),
+                    ToolCallResolution::Denied { reason } => format!("denied: {reason}"),
+                    ToolCallResolution::Errored { detail } => format!("error: {detail}"),
+                };
+                let result = match result.char_indices().nth(MAX_RESULT_CHARS) {
+                    Some((cut, _)) => format!("{}… [truncated]", &result[..cut]),
+                    None => result,
+                };
+                out.push_str(&format!(
+                    "Tool call {}({}) -> {result}\n",
+                    call.tool_name, call.input
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// The prompt `/init` sends: write, or improve, the file of instructions tm (and other coding
+/// agents) read at the start of every session in this project.
+pub fn init_prompt(root: &std::path::Path) -> String {
+    let target = ["AGENTS.md", "CLAUDE.md"]
+        .into_iter()
+        .find(|name| root.join(name).is_file());
+    let task = match target {
+        Some(name) => format!(
+            "Read the existing {name} and improve it: correct anything the code no longer \
+             supports and add what's missing."
+        ),
+        None => "Create an AGENTS.md file at the repository root.".to_string(),
+    };
+    format!(
+        "{task} It's read at the start of every coding session in this repository, so it should \
+         hold what a capable engineer new to this codebase needs and can't quickly get from \
+         reading one file:\n\
+         1. The commands to build, lint, and test, including how to run a single test.\n\
+         2. The high-level architecture: how the main parts fit together and where they live.\n\
+         3. Conventions and rules the code follows that aren't obvious from any one file.\n\n\
+         Look at the build files, README, existing docs, and any tool config (.cursor/rules, \
+         .github/copilot-instructions.md, CLAUDE.md, AGENTS.md) first. Keep it short. Don't list \
+         every file, repeat generic advice, or invent anything you can't see in the repository."
+    )
+}
+
 /// What the conversation shows the model after a turn the human interrupted.
 const INTERRUPTED_MARKER: &str = "[Request interrupted by user]";
 
@@ -355,6 +441,8 @@ pub(crate) enum TurnEvent {
     // unboxed `Ticket` here would size every `TurnEvent` — including the common `Steps` case —
     // to the largest variant's footprint (`clippy::large_enum_variant`).
     TicketResolved(Box<Ticket>),
+    /// The conversation had grown large enough that it was compacted before this turn ran.
+    Compacted(Compaction),
     /// The cumulative steps of the run so far (assistant text plus tool calls), exactly as
     /// [`AgentOutcome::steps`] reports them at each point this fires: once after the whole turn
     /// completes with no approval needed, or once per suspend/resume round trip when one is.
@@ -398,6 +486,8 @@ pub struct AgentSession {
     interrupter: TurnInterrupter,
     /// When this conversation started (kept across `--resume`).
     started: Timestamp,
+    /// The model the human picked with `/model`; `None` follows the role table.
+    model: Option<ModelId>,
 }
 
 impl AgentSession {
@@ -422,6 +512,7 @@ impl AgentSession {
             mode: PermissionMode::default(),
             approved_for_session: std::collections::BTreeSet::new(),
             interrupter: TurnInterrupter::default(),
+            model: None,
         }
     }
 
@@ -442,6 +533,7 @@ impl AgentSession {
         resumed.conversation = saved.turns;
         resumed.mode = saved.mode;
         resumed.attached_ticket = saved.attached_ticket;
+        resumed.model = saved.model;
         Ok(resumed)
     }
 
@@ -462,6 +554,162 @@ impl AgentSession {
     /// Change the permission mode for the following turns.
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.mode = mode;
+    }
+
+    /// The fabric a turn runs on: the scripted one a test installed, or one built from the
+    /// environment, with the session's `/model` choice routed to first.
+    fn fabric(&self) -> tm_types::Result<Arc<Fabric>> {
+        let fabric = match &self.fabric_override {
+            Some(fabric) => Arc::clone(fabric),
+            None => build_fabric(self.project.clock.clone())?,
+        };
+        fabric.prefer(AGENT_ROLE, self.model.as_ref());
+        Ok(fabric)
+    }
+
+    /// The model turns go to first: the `/model` choice, else the role table's primary.
+    pub fn model(&self) -> tm_types::Result<Option<ModelId>> {
+        Ok(self.fabric()?.candidates(AGENT_ROLE).into_iter().next())
+    }
+
+    /// What `/model` offers: this session's candidates whose provider is configured, in routing
+    /// order.
+    pub fn model_choices(&self) -> tm_types::Result<Vec<ModelId>> {
+        let fabric = self.fabric()?;
+        let configured = fabric.provider_ids();
+        let mut choices: Vec<ModelId> = Vec::new();
+        for model in fabric.candidates(AGENT_ROLE) {
+            if configured.contains(&model.provider) && !choices.contains(&model) {
+                choices.push(model);
+            }
+        }
+        Ok(choices)
+    }
+
+    /// Switch models for the following turns (`/model <spec>`). `spec` is `provider/model`, a
+    /// bare model name (one of [`AgentSession::model_choices`], else a model of the current
+    /// model's provider), or `default` to go back to the role table's choice. Returns the model
+    /// now in use.
+    ///
+    /// # Errors
+    /// The named provider isn't configured, so a turn could never reach it.
+    pub fn set_model(&mut self, spec: &str) -> tm_types::Result<Option<ModelId>> {
+        let spec = spec.trim();
+        if spec.is_empty() || spec.eq_ignore_ascii_case("default") {
+            self.model = None;
+            self.save_best_effort();
+            return self.model();
+        }
+        let fabric = self.fabric()?;
+        let configured = fabric.provider_ids();
+        let chosen = match spec.split_once('/') {
+            Some((provider, model)) if configured.iter().any(|p| p == provider) => {
+                ModelId::new(provider, model)
+            }
+            Some((provider, _)) => {
+                return Err(TmError::Provider(format!(
+                    "no provider `{provider}` is configured (configured: {})",
+                    configured.join(", ")
+                )))
+            }
+            None => {
+                let choices = self.model_choices()?;
+                match choices.iter().find(|m| m.model == spec) {
+                    Some(model) => model.clone(),
+                    None => {
+                        let current = choices.first().ok_or_else(|| {
+                            TmError::Provider("no model provider is configured".into())
+                        })?;
+                        ModelId::new(current.provider.clone(), spec)
+                    }
+                }
+            }
+        };
+        self.model = Some(chosen.clone());
+        self.save_best_effort();
+        Ok(Some(chosen))
+    }
+
+    /// Replace the conversation so far with a summary of it (`/compact`), so later turns carry
+    /// a few thousand tokens of history instead of all of it. `instructions` says what the
+    /// summary should focus on.
+    ///
+    /// # Errors
+    /// There's nothing to compact yet, or the model call failed or came back empty; the
+    /// conversation is left as it was.
+    pub async fn compact(&mut self, instructions: Option<&str>) -> tm_types::Result<Compaction> {
+        if self.conversation.is_empty() {
+            return Err(TmError::conflict("nothing to compact yet"));
+        }
+        let mut prompt = format!(
+            "{COMPACT_PROMPT}\n\n<conversation>\n{}</conversation>",
+            conversation_transcript(&self.conversation)
+        );
+        if let Some(instructions) = instructions.filter(|i| !i.trim().is_empty()) {
+            prompt.push_str(&format!(
+                "\n\nThe user asked the summary to focus on: {}",
+                instructions.trim()
+            ));
+        }
+        let request = tm_provider::CompletionRequest {
+            system: Some(
+                "You summarize coding conversations so they can continue with less context.".into(),
+            ),
+            messages: vec![tm_provider::Message {
+                role: tm_provider::MessageRole::User,
+                content: vec![tm_provider::ContentBlock::Text { text: prompt }],
+            }],
+            tools: Vec::new(),
+            max_tokens: 8_192,
+            temperature: None,
+            stop_sequences: Vec::new(),
+            stream: false,
+            n: 1,
+            model: None,
+        };
+        let completion = self.fabric()?.execute(AGENT_ROLE, request).await?;
+        let summary = completion
+            .candidates
+            .first()
+            .map(|c| {
+                c.content
+                    .iter()
+                    .filter_map(|b| match b {
+                        tm_provider::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        let summary = summary.trim();
+        if summary.is_empty() {
+            return Err(TmError::Provider(
+                "the model returned an empty summary; the conversation was left as it was".into(),
+            ));
+        }
+        let turns = self.conversation.len();
+        self.conversation = vec![tm_agent::ConversationTurn {
+            user_message: format!("{COMPACTED_MARKER}\n\n{summary}"),
+            steps: Vec::new(),
+        }];
+        self.save_best_effort();
+        Ok(Compaction {
+            turns,
+            summary: summary.to_string(),
+            tokens: u64::from(completion.usage.input_tokens)
+                + u64::from(completion.usage.output_tokens),
+        })
+    }
+
+    /// How many tokens the conversation's context took on its most recent model call: the size
+    /// the next turn starts from.
+    pub fn context_tokens(&self) -> u64 {
+        self.conversation
+            .iter()
+            .rev()
+            .find_map(|turn| turn.steps.last())
+            .map_or(0, |step| step.spend.tokens)
     }
 
     /// A handle that interrupts this session's running turn (see [`TurnInterrupter`]). Take it
@@ -554,6 +802,7 @@ impl AgentSession {
             updated: self.project.clock.now(),
             attached_ticket: self.attached_ticket.clone(),
             mode: self.mode,
+            model: self.model.clone(),
             turns: self.conversation.clone(),
         };
         let path = dir.join(format!("{}.json", self.session));
@@ -778,6 +1027,10 @@ impl AgentSession {
                     // Ticket resolution prints nothing in the plain loop today; the TUI is the
                     // first caller that needs to react to it (refreshing its ticket pane).
                     TurnEvent::TicketResolved(_) => {}
+                    TurnEvent::Compacted(compaction) => renderer.note(&format!(
+                        "(compacted {} earlier turns to save context)",
+                        compaction.turns
+                    )),
                     // Cumulative: print only the steps not shown yet, as they arrive.
                     TurnEvent::Steps(steps) => {
                         for step in steps.iter().skip(printed) {
@@ -865,6 +1118,14 @@ impl AgentSession {
         };
         let prompt = prompt_owned.as_str();
 
+        if self.context_tokens() >= AUTO_COMPACT_TOKENS {
+            // Best effort: a failed summary leaves the conversation whole, and the turn still runs.
+            match self.compact(None).await {
+                Ok(compaction) => on_event(TurnEvent::Compacted(compaction)),
+                Err(e) => tracing::warn!(error = %e, "auto-compact failed"),
+            }
+        }
+
         let ticket = self.attached_ticket_record()?;
         if let Some(ticket) = &ticket {
             on_event(TurnEvent::TicketResolved(Box::new(ticket.clone())));
@@ -892,10 +1153,7 @@ impl AgentSession {
             None => compile_session(prompt, &view, &ci, budget, SignalWeights::default(), &[])?,
         };
 
-        let fabric = match &self.fabric_override {
-            Some(fabric) => Arc::clone(fabric),
-            None => build_fabric(self.project.clock.clone())?,
-        };
+        let fabric = self.fabric()?;
         let command_cache: Arc<dyn CommandCache + Send + Sync> =
             Arc::new(MemoryCommandCache::new(self.project.ids.clone()));
         let command_executor: Arc<dyn CommandExecutor + Send + Sync> =
@@ -2069,6 +2327,7 @@ mod tests {
             &self,
             req: tm_provider::CompletionRequest,
         ) -> Result<tm_provider::Completion, tm_provider::ProviderError> {
+            let served_by = req.model_or(&ModelId::new("mock", "m1"));
             self.log.lock().unwrap().push(req);
             let next = self.script.lock().unwrap().pop_front();
             let (content, stop_reason) = match next {
@@ -2101,7 +2360,7 @@ mod tests {
                 ),
             };
             Ok(tm_provider::Completion {
-                model: ModelId::new("mock", "m1"),
+                model: served_by,
                 candidates: vec![tm_provider::Candidate {
                     content,
                     stop_reason,
@@ -2681,5 +2940,139 @@ mod tests {
             }
             other => panic!("expected AGENT_ROLE to route to devpass, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn model_picks_the_model_turns_go_to_and_survives_resume() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut session, provider) = session_with(dir.path(), vec![Scripted::Text("hi")]);
+        assert_eq!(session.model().unwrap(), Some(ModelId::new("mock", "m1")));
+
+        let chosen = session
+            .set_model("m2")
+            .expect("a model of the configured provider");
+        assert_eq!(chosen, Some(ModelId::new("mock", "m2")));
+        assert_eq!(
+            session.model_choices().unwrap(),
+            [ModelId::new("mock", "m2"), ModelId::new("mock", "m1")]
+        );
+        let outcome = session
+            .run_turn_streaming("hello", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+        assert_eq!(outcome.steps()[0].served_by, "mock/m2");
+        assert_eq!(provider.log.lock().unwrap()[0].model.as_deref(), Some("m2"));
+
+        let err = session
+            .set_model("nowhere/x")
+            .expect_err("unconfigured provider");
+        assert!(err.to_string().contains("nowhere"), "{err}");
+
+        let resumed = AgentSession::resume(
+            Arc::clone(&session.project),
+            Renderer::from_flags(false, true, true),
+            session.session_id(),
+        )
+        .expect("resumes");
+        assert_eq!(resumed.model, Some(ModelId::new("mock", "m2")));
+
+        assert_eq!(
+            session.set_model("default").unwrap(),
+            Some(ModelId::new("mock", "m1"))
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_replaces_the_conversation_with_the_models_summary() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut session, provider) = session_with(
+            dir.path(),
+            vec![
+                Scripted::Text("first reply"),
+                Scripted::Text("THE SUMMARY"),
+                Scripted::Text("carrying on"),
+            ],
+        );
+        assert!(
+            session.compact(None).await.is_err(),
+            "nothing to compact yet"
+        );
+        session
+            .run_turn_streaming("question alpha", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+
+        let compaction = session
+            .compact(Some("the alpha question"))
+            .await
+            .expect("compacts");
+        assert_eq!(compaction.turns, 1);
+        assert_eq!(compaction.summary, "THE SUMMARY");
+        let asked = request_text(&provider.log.lock().unwrap()[1]);
+        assert!(asked.contains("User: question alpha"), "{asked}");
+        assert!(asked.contains("Assistant: first reply"), "{asked}");
+        assert!(asked.contains("focus on: the alpha question"), "{asked}");
+        assert!(
+            provider.log.lock().unwrap()[1].tools.is_empty(),
+            "a summary needs no tools"
+        );
+
+        session
+            .run_turn_streaming("next question", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+        let next = request_text(&provider.log.lock().unwrap()[2]);
+        assert!(next.contains("THE SUMMARY"), "{next}");
+        assert!(
+            !next.contains("question alpha"),
+            "the old turns are gone: {next}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_compacts_first_once_the_context_is_large() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (mut session, provider) = session_with(
+            dir.path(),
+            vec![
+                Scripted::Text("first reply"),
+                Scripted::Text("THE SUMMARY"),
+                Scripted::Text("carrying on"),
+            ],
+        );
+        session
+            .run_turn_streaming("question alpha", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+        assert!(session.context_tokens() < AUTO_COMPACT_TOKENS);
+        if let Some(step) = session.conversation[0].steps.last_mut() {
+            step.spend.tokens = AUTO_COMPACT_TOKENS;
+        }
+
+        let mut compacted = None;
+        session
+            .run_turn_streaming(
+                "next question",
+                |event| {
+                    if let TurnEvent::Compacted(c) = event {
+                        compacted = Some(c);
+                    }
+                },
+                |_| Ok(false),
+            )
+            .await
+            .expect("turn runs");
+        assert_eq!(compacted.map(|c| c.turns), Some(1));
+        let turn = request_text(&provider.log.lock().unwrap()[2]);
+        assert!(turn.contains("THE SUMMARY"), "{turn}");
+        assert!(!turn.contains("question alpha"), "{turn}");
+    }
+
+    #[test]
+    fn init_improves_an_existing_instructions_file_or_creates_agents_md() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        assert!(init_prompt(dir.path()).starts_with("Create an AGENTS.md"));
+        std::fs::write(dir.path().join("CLAUDE.md"), "# notes\n").expect("write");
+        assert!(init_prompt(dir.path()).starts_with("Read the existing CLAUDE.md"));
     }
 }

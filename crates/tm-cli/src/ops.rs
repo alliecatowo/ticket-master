@@ -853,6 +853,7 @@ fn provider_probe_request() -> tm_provider::CompletionRequest {
         stop_sequences: vec![],
         stream: false,
         n: 1,
+        model: None,
     }
 }
 

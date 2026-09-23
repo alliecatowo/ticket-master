@@ -795,6 +795,8 @@ impl App {
                                 id: ticket.id.clone(),
                             });
                         }
+                        // The chat screen reports compaction itself once it wires `/compact`.
+                        agent::TurnEvent::Compacted(_) => {}
                         agent::TurnEvent::Steps(so_far) => {
                             latest = so_far;
                             sender.send(AppMessage::Turn {

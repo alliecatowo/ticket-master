@@ -278,6 +278,7 @@ fn build_compile_request(
         stop_sequences: vec![],
         stream: false,
         n: 1,
+        model: None,
     }
 }
 

@@ -858,8 +858,9 @@ impl Provider for VertexProvider {
     /// Send `req` to `generateContent`, retrying on 429/5xx up to `max_retries` times, honoring
     /// `Retry-After`, exactly the pattern `crate::anthropic::AnthropicProvider::complete` uses.
     async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
+        let model = req.model_or(&self.model);
         let wire_request = build_vertex_request(&req);
-        let url = format!("{}/{}:generateContent", self.base_url, self.model.model);
+        let url = format!("{}/{}:generateContent", self.base_url, model.model);
 
         let mut attempt: u32 = 0;
         loop {
@@ -904,7 +905,7 @@ impl Provider for VertexProvider {
                     let finished = self.clock.now();
                     let latency =
                         Duration::from_secs(finished.seconds_since(started).max(0) as u64);
-                    return parse_vertex_response(&body, &self.model, latency, finished);
+                    return parse_vertex_response(&body, &model, latency, finished);
                 }
                 Err(err) => {
                     if err.is_retryable() && attempt < self.max_retries {
@@ -996,6 +997,7 @@ mod tests {
             stop_sequences: vec!["STOP".to_string()],
             stream: false,
             n: 1,
+            model: None,
         }
     }
 

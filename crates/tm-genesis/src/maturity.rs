@@ -255,6 +255,7 @@ markdown formatting or code fences.",
         stop_sequences: vec![],
         stream: false,
         n: 1,
+        model: None,
     };
 
     let completion = provider

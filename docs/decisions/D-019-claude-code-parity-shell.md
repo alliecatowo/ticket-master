@@ -113,6 +113,25 @@ each has its own test.
   ticketless turn now gets the project root's instructions at all: before this, instructions were
   only discovered from paths a ticket claimed, so chat saw none.
 - `-p` is no longer a global flag, so subcommand `--help` output stays uncluttered.
+- **`/model`.** `AgentSession::set_model("provider/model" | "model" | "default")`, plus
+  `model()` and `model_choices()`. The choice is saved with the conversation, and
+  `tm_provider::Fabric::prefer` routes the chat role to it first, keeping the configured candidates
+  behind it as fallbacks. Building this exposed a real bug: the fabric chose a `(provider, model)`
+  candidate but handed only the request to the provider, which always served the model it was
+  built with. So every role table's `model` field did nothing (the "Haiku fallback" was Sonnet),
+  and `Registry` refused tables that named two models under one provider rather than misroute.
+  `CompletionRequest::model` now carries the routed model to every backend; see
+  `docs/providers.md`. The default table's stale ids (`claude-haiku-3.5`, `claude-opus-4-1`) became
+  `claude-haiku-4-5` and `claude-opus-5-5` in the same change, since they now actually get sent.
+- **`/compact` and auto-compact.** `AgentSession::compact(instructions)` asks the model to
+  summarize a plain-text transcript of the conversation (no tool blocks, so any provider accepts
+  it) and replaces the conversation with that summary. Once a turn's context reaches 150k tokens,
+  the next turn compacts first and reports `TurnEvent::Compacted`. A failed or empty summary
+  leaves the conversation whole.
+- **`/init`.** `init_prompt(root)` is the turn `/init` sends: improve the existing `AGENTS.md`
+  or `CLAUDE.md`, or create `AGENTS.md`.
+- A ticketless chat turn's context pack is 3k tokens (a ticket's is 8k); every token of it rides
+  along on every step of the turn.
 
 ## What this costs, stated plainly
 
