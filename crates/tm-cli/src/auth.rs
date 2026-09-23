@@ -60,44 +60,93 @@ pub async fn auth(args: &AuthArgs, renderer: &Renderer) -> tm_types::Result<()> 
     }
 }
 
+/// One env var's setup row: name, whether it is required, and whether it is set.
+/// Values are never carried here — only presence — so this is safe to render anywhere,
+/// including the TUI transcript.
+pub struct EnvSetupRow {
+    /// The variable's name (`ANTHROPIC_API_KEY`).
+    pub name: &'static str,
+    /// Whether the provider needs it.
+    pub required: bool,
+    /// Whether it is set in the current environment.
+    pub configured: bool,
+}
+
+/// The current per-variable setup rows for `info` (D-021): the same rows `tm auth`
+/// prints, factored out so the chat's `/connect` renders byte-identical instructions.
+pub fn env_setup_rows(info: &tm_provider::ProviderInfo) -> Vec<EnvSetupRow> {
+    info.env_vars
+        .iter()
+        .map(|v| EnvSetupRow {
+            name: v.name,
+            required: v.required,
+            configured: EnvApiKey::new(v.name).resolve().is_ok(),
+        })
+        .collect()
+}
+
+/// Render API-key setup instructions from a display name, one row per variable, and the
+/// row data — the exact text `tm auth <provider>` prints, shared with `/connect` so the
+/// two surfaces can never disagree. Descriptions come from the registry; statuses are
+/// present/absent only, never a value.
+pub fn format_auth_instructions(
+    display_name: &str,
+    descriptions: &[(&'static str, &'static str)],
+    rows: &[EnvSetupRow],
+) -> String {
+    let mut lines = vec![format!(
+        "{display_name} authenticates via API key. No interactive login needed — set the \
+         environment variable(s) below and `tm` reads them directly."
+    )];
+    for row in rows {
+        let description = descriptions
+            .iter()
+            .find(|(name, _)| *name == row.name)
+            .map(|(_, d)| *d)
+            .unwrap_or("");
+        let status = if row.configured {
+            "configured"
+        } else {
+            "not set"
+        };
+        let req = if row.required { "required" } else { "optional" };
+        lines.push(format!("  {} ({req}, {status}): {description}", row.name));
+    }
+    lines.join("\n")
+}
+
 /// The [`tm_auth::CredentialKind::ApiKey`] case: no interactive flow, just instructions plus
 /// current per-variable configuration status (present/absent only — never a value).
 fn auth_api_key(info: &tm_provider::ProviderInfo, renderer: &Renderer) -> tm_types::Result<()> {
-    let rows: Vec<_> = info
+    let rows = env_setup_rows(info);
+    let descriptions: Vec<(&'static str, &'static str)> = info
         .env_vars
         .iter()
-        .map(|v| {
-            let configured = EnvApiKey::new(v.name).resolve().is_ok();
-            (v.name, v.required, v.description, configured)
-        })
+        .map(|v| (v.name, v.description))
         .collect();
 
     if renderer.is_json() {
         let json = serde_json::json!({
             "provider": info.id,
             "kind": "api_key",
-            "env_vars": rows.iter().map(|(name, required, description, configured)| {
+            "env_vars": rows.iter().map(|row| {
+                let description = descriptions
+                    .iter()
+                    .find(|(name, _)| *name == row.name)
+                    .map(|(_, d)| *d)
+                    .unwrap_or("");
                 serde_json::json!({
-                    "name": name,
-                    "required": required,
+                    "name": row.name,
+                    "required": row.required,
                     "description": description,
-                    "configured": configured,
+                    "configured": row.configured,
                 })
             }).collect::<Vec<_>>(),
         });
         renderer.emit(&json, "")?;
     } else {
-        let mut lines = vec![format!(
-            "{} authenticates via API key. No interactive login needed — set the \
-             environment variable(s) below and `tm` reads them directly.",
-            info.display_name
-        )];
-        for (name, required, description, configured) in &rows {
-            let status = if *configured { "configured" } else { "not set" };
-            let req = if *required { "required" } else { "optional" };
-            lines.push(format!("  {name} ({req}, {status}): {description}"));
-        }
-        renderer.emit(&(), &lines.join("\n"))?;
+        let text = format_auth_instructions(info.display_name, &descriptions, &rows);
+        renderer.emit(&(), &text)?;
     }
     Ok(())
 }
@@ -105,6 +154,42 @@ fn auth_api_key(info: &tm_provider::ProviderInfo, renderer: &Renderer) -> tm_typ
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_instructions_render_names_and_status_without_values() {
+        let rows = vec![
+            EnvSetupRow {
+                name: "ANTHROPIC_API_KEY",
+                required: true,
+                configured: false,
+            },
+            EnvSetupRow {
+                name: "ANTHROPIC_BASE_URL",
+                required: false,
+                configured: true,
+            },
+        ];
+        let text = format_auth_instructions(
+            "Anthropic",
+            &[
+                ("ANTHROPIC_API_KEY", "Bearer API key"),
+                ("ANTHROPIC_BASE_URL", "Override the default"),
+            ],
+            &rows,
+        );
+        assert!(
+            text.contains("Anthropic authenticates via API key."),
+            "{text}"
+        );
+        assert!(
+            text.contains("ANTHROPIC_API_KEY (required, not set): Bearer API key"),
+            "{text}"
+        );
+        assert!(
+            text.contains("ANTHROPIC_BASE_URL (optional, configured): Override the default"),
+            "{text}"
+        );
+    }
 
     #[test]
     fn credential_kind_for_every_known_provider_is_api_key_today() {

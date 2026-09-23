@@ -27,6 +27,7 @@
 //! [`QUIT_WINDOW_MILLIS`], Ctrl+D on an empty prompt, and `/exit`.
 
 mod chat_ops;
+mod config_cmd;
 mod steps;
 mod tickets_view;
 

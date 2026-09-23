@@ -21,6 +21,12 @@ pub enum CommandId {
     Status,
     /// This session's tokens, turn by turn.
     Cost,
+    /// Connect a provider: pick one, see what to set (D-021).
+    Connect,
+    /// Which provider answers this chat, and what is configured (D-021).
+    Provider,
+    /// Show and edit project configuration (D-021).
+    Config,
     /// Write an instructions file for this project.
     Init,
     /// Hand work to a background worker as a ticket.
@@ -113,6 +119,27 @@ pub const COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         arg: Arg::None,
         description: "Tokens this session has used, turn by turn",
+    },
+    SlashCommand {
+        id: CommandId::Connect,
+        name: "connect",
+        aliases: &["auth"],
+        arg: Arg::Optional("[provider]"),
+        description: "Connect a provider: pick one, see what to set",
+    },
+    SlashCommand {
+        id: CommandId::Provider,
+        name: "provider",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Which provider answers this chat, and what is configured",
+    },
+    SlashCommand {
+        id: CommandId::Config,
+        name: "config",
+        aliases: &["settings"],
+        arg: Arg::Optional("[show|get|set]"),
+        description: "Show and edit project configuration",
     },
     SlashCommand {
         id: CommandId::Init,
@@ -295,12 +322,15 @@ mod tests {
 
     #[test]
     fn prefix_filters_and_ranks_name_before_alias() {
-        assert_eq!(names(&filter("de")), vec!["detach", "decide", "model"]);
+        assert_eq!(
+            names(&filter("de")),
+            vec!["detach", "decide", "model", "provider"]
+        );
         assert_eq!(names(&filter("att")), vec!["attach"]);
         let home = filter("hom");
         assert_eq!(names(&home), vec!["tickets"]);
         assert_eq!(home[0].via_alias, Some("home"));
-        assert_eq!(names(&filter("re")), vec!["resume"]);
+        assert_eq!(names(&filter("re")), vec!["resume", "provider"]);
     }
 
     #[test]
@@ -330,6 +360,27 @@ mod tests {
         assert!(
             matches!(parse("/tickets"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Tickets)
         );
+        assert!(
+            matches!(parse("/connect"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Connect && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/connect anthropic"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Connect && arg == "anthropic")
+        );
+        assert!(
+            matches!(parse("/auth openai"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Connect && arg == "openai")
+        );
+        assert!(
+            matches!(parse("/provider"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Provider)
+        );
+        assert!(
+            matches!(parse("/config"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Config && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/config get routing_weights.recency"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Config && arg == "get routing_weights.recency")
+        );
+        assert!(
+            matches!(parse("/settings"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Config)
+        );
         assert_eq!(parse("/nope"), Some(Parsed::Unknown("nope".to_string())));
         assert_eq!(parse("not a command"), None);
         assert_eq!(parse("/"), None);
@@ -349,7 +400,8 @@ mod tests {
             "/model [model]"
         );
         for name in [
-            "help", "clear", "resume", "compact", "model", "status", "cost", "init", "bg", "exit",
+            "help", "clear", "resume", "compact", "model", "status", "cost", "connect", "provider",
+            "config", "init", "bg", "exit",
         ] {
             assert!(lookup(name).is_some(), "/{name} is a command");
         }

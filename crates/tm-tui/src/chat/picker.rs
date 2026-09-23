@@ -1,5 +1,6 @@
 //! The chat's pickers: `/resume` (past conversations, newest first, each with its first message,
-//! age and turn count) and `/model` (the models this session can use, the current one marked).
+//! age and turn count), `/model` (the models this session can use, the current one marked) and
+//! `/connect` (known providers with their configuration status, the current one marked).
 //! ↑/↓ move, Enter chooses, Esc closes, typing filters.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -33,6 +34,19 @@ pub enum PickerPurpose {
     Resume,
     /// A model to switch to.
     Model,
+    /// A provider to connect (D-021).
+    Provider,
+}
+
+/// One provider, as `/connect` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderRow {
+    /// The provider slug choosing it yields (`anthropic`).
+    pub id: String,
+    /// Its display name (`Anthropic`).
+    pub display_name: String,
+    /// Right-aligned status (`configured`, `not configured`, `current`).
+    pub status: String,
 }
 
 /// One pickable row.
@@ -120,6 +134,32 @@ impl Picker {
                     },
                     id: m.clone(),
                     label: sanitize(&m).replace('\n', " "),
+                })
+                .collect(),
+            filter: String::new(),
+            selected,
+        }
+    }
+
+    /// The `/connect` picker over `rows` (provider slugs), `current` marked and selected.
+    pub fn providers(rows: Vec<ProviderRow>, current: Option<&str>) -> Self {
+        let selected = current
+            .and_then(|c| rows.iter().position(|r| r.id == c))
+            .unwrap_or(0);
+        Picker {
+            purpose: PickerPurpose::Provider,
+            title: "Connect a provider".to_string(),
+            empty: "No known providers.".to_string(),
+            rows: rows
+                .into_iter()
+                .map(|r| PickerRow {
+                    meta: if Some(r.id.as_str()) == current {
+                        "current".to_string()
+                    } else {
+                        r.status
+                    },
+                    id: r.id,
+                    label: r.display_name,
                 })
                 .collect(),
             filter: String::new(),
@@ -346,6 +386,36 @@ mod tests {
         assert!(text.contains("fix the flaky test"), "{text}");
         assert!(text.contains("5m ago · 3 turns"), "{text}");
         assert!(text.contains("2d ago · 1 turn"), "{text}");
+    }
+
+    #[test]
+    fn the_provider_picker_marks_the_current_provider_and_chooses_slugs() {
+        let mut p = Picker::providers(
+            vec![
+                ProviderRow {
+                    id: "anthropic".into(),
+                    display_name: "Anthropic".into(),
+                    status: "not configured".into(),
+                },
+                ProviderRow {
+                    id: "devpass".into(),
+                    display_name: "DevPass".into(),
+                    status: "configured".into(),
+                },
+            ],
+            Some("devpass"),
+        );
+        let text = render(&p);
+        assert!(
+            text.contains("Connect a provider")
+                && text.contains("Anthropic")
+                && text.contains("current"),
+            "{text}"
+        );
+        assert_eq!(
+            p.handle_key(&key(KeyCode::Enter)),
+            PickerOutcome::Chosen("devpass".into())
+        );
     }
 
     #[test]

@@ -538,6 +538,26 @@ fn availability_label(availability: tm_provider::Availability) -> &'static str {
     }
 }
 
+/// Load the role table the turn path routes through: the project's `harness.toml` parsed as
+/// a [`tm_provider::RoleTable`] when it exists, else [`tm_provider::RoleTable::default_table`]
+/// (D-021: shared with the chat's `/provider` and `/config` so all three surfaces route
+/// identically).
+pub(crate) fn load_role_table(
+    project: Option<&Project>,
+) -> tm_types::Result<tm_provider::RoleTable> {
+    let harness_path = project.map(|p| p.state_dir.join("harness.toml"));
+    match harness_path.filter(|path| path.is_file()) {
+        Some(path) => {
+            let harness_content = fs::read_to_string(&path).map_err(|e| {
+                tm_types::TmError::storage(format!("Failed to read harness.toml: {e}"))
+            })?;
+            tm_provider::RoleTable::parse(&harness_content)
+                .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))
+        }
+        None => Ok(tm_provider::RoleTable::default_table()),
+    }
+}
+
 /// `tm provider list`
 ///
 /// # IMPL
@@ -551,17 +571,7 @@ fn availability_label(availability: tm_provider::Availability) -> &'static str {
 /// With no project, or a project without its own `harness.toml`, this lists the default table,
 /// which is what every turn actually routes through in that case.
 pub async fn provider_list(project: Option<&Project>, renderer: &Renderer) -> tm_types::Result<()> {
-    let harness_path = project.map(|p| p.state_dir.join("harness.toml"));
-    let role_table = match harness_path.filter(|path| path.is_file()) {
-        Some(path) => {
-            let harness_content = fs::read_to_string(&path).map_err(|e| {
-                tm_types::TmError::storage(format!("Failed to read harness.toml: {e}"))
-            })?;
-            tm_provider::RoleTable::parse(&harness_content)
-                .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?
-        }
-        None => tm_provider::RoleTable::default_table(),
-    };
+    let role_table = load_role_table(project)?;
 
     let known = tm_provider::Registry::known_providers();
     let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::SystemClock);

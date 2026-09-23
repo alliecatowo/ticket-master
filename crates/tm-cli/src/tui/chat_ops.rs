@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use tm_tui::chat::approval::ApprovalChoice;
 use tm_tui::chat::commands::CommandId;
 use tm_tui::chat::mention::FileIndex;
-use tm_tui::chat::picker::ConversationRow;
+use tm_tui::chat::picker::{ConversationRow, ProviderRow};
 use tm_tui::chat::status::PermissionMode as UiMode;
 use tm_tui::chat::transcript::{Entry, NoticeLevel, ToolCallView, ToolStatus};
 use tm_tui::event::AppMessage;
@@ -23,8 +23,9 @@ use tm_types::{SessionId, TicketId, Timestamp};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use super::{steps, App};
+use super::{config_cmd, steps, App};
 use crate::agent::{self, AgentSession, ApprovalAnswer, Approver, PermissionMode, TurnInterrupter};
+use crate::auth::{env_setup_rows, format_auth_instructions};
 use crate::project::Project;
 use crate::render::Renderer;
 
@@ -616,6 +617,9 @@ impl App {
             }
             CommandId::Compact => self.compact(&arg, now),
             CommandId::Model => self.switch_model(&arg),
+            CommandId::Connect => self.connect_provider(&arg),
+            CommandId::Provider => self.show_provider(),
+            CommandId::Config => self.config_cmd(&arg),
             // The chat screen answers these itself; handled anyway so the match stays exhaustive.
             CommandId::Status | CommandId::Cost => {}
             CommandId::Tickets => return self.open_tickets(now),
@@ -754,6 +758,179 @@ impl App {
                     .push_notice(NoticeLevel::Success, format!("Set model to {name}."));
             }
             Err(e) => self.chat.push_notice(NoticeLevel::Warning, e.to_string()),
+        }
+    }
+
+    /// The session's current `provider/model`, or `None` (with a notice) while a turn
+    /// holds the session lock.
+    fn session_model(&mut self) -> Option<String> {
+        match self.agent_session.try_lock() {
+            Ok(session) => session.model().ok().flatten().map(|m| m.to_string()),
+            Err(_) => {
+                self.chat.push_notice(
+                    NoticeLevel::Warning,
+                    "A turn is running; try again once it finishes.",
+                );
+                None
+            }
+        }
+    }
+
+    /// What the chat honestly claims about a backend without probing it: local backends
+    /// are flagged unprobed (required-env presence means nothing there — see
+    /// [`tm_provider::ProviderInfo::is_configured`]), the rest by required-env presence.
+    /// Never a reachability claim: that needs a network probe the chat refuses to run on
+    /// the UI thread.
+    fn provider_env_status(info: &tm_provider::ProviderInfo) -> String {
+        if tm_provider::LOCAL_PROVIDER_IDS.contains(&info.id) {
+            "local (unprobed)".to_string()
+        } else if info.is_configured() {
+            "configured".to_string()
+        } else {
+            "not configured".to_string()
+        }
+    }
+
+    /// `/connect [provider]`: bare, a picker over every known provider (current marked);
+    /// named, that provider's `tm auth` setup instructions rendered in-chat. Keys are
+    /// never shown, only present/absent — and newly set variables apply to the next turn,
+    /// no restart needed (the fabric is built per turn).
+    fn connect_provider(&mut self, arg: &str) {
+        let slug = arg.trim();
+        if slug.is_empty() {
+            let current = self
+                .session_model()
+                .and_then(|m| m.split_once('/').map(|(p, _)| p.to_string()));
+            let rows = tm_provider::Registry::known_providers()
+                .into_iter()
+                .map(|info| ProviderRow {
+                    status: Self::provider_env_status(&info),
+                    id: info.id.to_string(),
+                    display_name: info.display_name.to_string(),
+                })
+                .collect();
+            self.chat.open_provider_picker(rows, current.as_deref());
+            return;
+        }
+        let known = tm_provider::Registry::known_providers();
+        let Some(info) = known.iter().find(|i| i.id.eq_ignore_ascii_case(slug)) else {
+            return self.chat.push_notice(
+                NoticeLevel::Warning,
+                format!(
+                    "Unknown provider \"{slug}\" — /connect with no argument lists every known provider."
+                ),
+            );
+        };
+        let rows = env_setup_rows(info);
+        let descriptions: Vec<(&'static str, &'static str)> = info
+            .env_vars
+            .iter()
+            .map(|v| (v.name, v.description))
+            .collect();
+        self.chat.push_notice(
+            NoticeLevel::Info,
+            format_auth_instructions(info.display_name, &descriptions, &rows),
+        );
+        if rows.iter().filter(|r| r.required).all(|r| r.configured) {
+            self.chat.push_notice(
+                NoticeLevel::Success,
+                format!(
+                    "{} is already connected — the next turn can route to it. \
+                     Verify with `tm provider test {}` (one tiny billed call).",
+                    info.display_name, info.id
+                ),
+            );
+        } else {
+            self.chat.push_notice(
+                NoticeLevel::Info,
+                "Set the missing variable(s) above — the next turn picks them up, no restart needed.",
+            );
+        }
+    }
+
+    /// `/provider`: which `provider/model` answers this chat, which backends have their
+    /// environment present, and how many more are known. Env presence only, never a probe
+    /// and never a billed call.
+    fn show_provider(&mut self) {
+        let Some(model) = self.session_model() else {
+            return;
+        };
+        self.chat.push_notice(
+            NoticeLevel::Info,
+            format!("This chat is answered by {model}."),
+        );
+        let known = tm_provider::Registry::known_providers();
+        let mut configured: Vec<&str> = Vec::new();
+        let mut local: Vec<&str> = Vec::new();
+        let mut rest = 0;
+        for info in &known {
+            if tm_provider::LOCAL_PROVIDER_IDS.contains(&info.id) {
+                if info.is_configured() {
+                    local.push(info.id);
+                } else {
+                    rest += 1;
+                }
+            } else if info.is_configured() {
+                configured.push(info.id);
+            } else {
+                rest += 1;
+            }
+        }
+        if configured.is_empty() && local.is_empty() {
+            self.chat.push_notice(
+                NoticeLevel::Warning,
+                "No provider environment is set — /connect to add one.".to_string(),
+            );
+        } else {
+            let mut line = String::new();
+            if !configured.is_empty() {
+                line.push_str(&format!("Configured: {}.", configured.join(", ")));
+            }
+            if !local.is_empty() {
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&format!(
+                    "Local (unprobed — nothing here confirms a server is listening): {}.",
+                    local.join(", ")
+                ));
+            }
+            self.chat.push_notice(NoticeLevel::Info, line);
+        }
+        if rest > 0 {
+            self.chat.push_notice(
+                NoticeLevel::Info,
+                format!("{rest} more known providers — /connect lists them all."),
+            );
+        }
+    }
+
+    /// `/config ...`: dashboard, dotted-key get, or `tm harness set`-identical set.
+    fn config_cmd(&mut self, arg: &str) {
+        match config_cmd::parse_config_args(arg) {
+            config_cmd::ConfigAction::Show => {
+                let session = self.chat.session().to_string();
+                let model = self.session_model().unwrap_or_else(|| "?".to_string());
+                let ticket = self.attached.as_ref().map(|t| t.to_string());
+                for (level, text) in
+                    config_cmd::dashboard(&self.project, &session, &model, ticket.as_deref())
+                {
+                    self.chat.push_notice(level, text);
+                }
+            }
+            config_cmd::ConfigAction::Get(key) => {
+                let (level, text) = config_cmd::config_get(&self.project, &key);
+                self.chat.push_notice(level, text);
+            }
+            config_cmd::ConfigAction::Set(key, value) => {
+                let (level, text) = config_cmd::config_set(&self.project, &key, &value);
+                self.chat.push_notice(level, text);
+            }
+            config_cmd::ConfigAction::Help => self.chat.push_notice(
+                NoticeLevel::Info,
+                "Usage: /config [show] · /config get <dotted.key> · /config set <key> <toml-value>"
+                    .to_string(),
+            ),
         }
     }
 

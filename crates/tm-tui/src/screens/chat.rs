@@ -45,7 +45,7 @@ use crate::chat::glyphs::Glyphs;
 use crate::chat::input::{BoxStyle, InputBox};
 use crate::chat::lines::{clear, draw_box, draw_line, draw_spans, truncate_spans, Line, Span};
 use crate::chat::mention::{self, FileIndex};
-use crate::chat::picker::{ConversationRow, Picker, PickerOutcome, PickerPurpose};
+use crate::chat::picker::{ConversationRow, Picker, PickerOutcome, PickerPurpose, ProviderRow};
 use crate::chat::shortcuts;
 use crate::chat::status::{self, PermissionMode, StatusInfo, TurnState};
 use crate::chat::tasks::{self, TaskItem};
@@ -453,6 +453,12 @@ impl ChatScreen {
     pub fn open_model_picker(&mut self, choices: Vec<String>, current: Option<&str>) {
         self.shortcuts_open = false;
         self.picker = Some(Picker::models(choices, current));
+    }
+
+    /// Open the `/connect` picker over `rows` (provider slugs), `current` marked.
+    pub fn open_provider_picker(&mut self, rows: Vec<ProviderRow>, current: Option<&str>) {
+        self.shortcuts_open = false;
+        self.picker = Some(Picker::providers(rows, current));
     }
 
     /// Add an already-finished entry (an earlier turn of a resumed conversation).
@@ -1175,6 +1181,10 @@ impl ChatScreen {
                         PickerPurpose::Resume => ChatAction::Resume(id),
                         PickerPurpose::Model => ChatAction::Command {
                             id: CommandId::Model,
+                            arg: id,
+                        },
+                        PickerPurpose::Provider => ChatAction::Command {
+                            id: CommandId::Connect,
                             arg: id,
                         },
                     });

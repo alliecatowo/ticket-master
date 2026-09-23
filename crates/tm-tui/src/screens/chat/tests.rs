@@ -475,6 +475,15 @@ fn new_commands_reach_the_application() {
         ("/compact", CommandId::Compact, ""),
         ("/model", CommandId::Model, ""),
         ("/model devpass/x", CommandId::Model, "devpass/x"),
+        ("/connect", CommandId::Connect, ""),
+        ("/connect anthropic", CommandId::Connect, "anthropic"),
+        ("/provider", CommandId::Provider, ""),
+        ("/config", CommandId::Config, ""),
+        (
+            "/config get schema_version",
+            CommandId::Config,
+            "get schema_version",
+        ),
         ("/init", CommandId::Init, ""),
         ("/bg ship it", CommandId::Bg, "ship it"),
         ("/resume", CommandId::Resume, ""),
@@ -677,6 +686,32 @@ fn the_resume_picker_lists_conversations_and_enter_resumes() {
     assert!(text.contains("refactor the parser"), "{text}");
     press(&mut chat, &env, key(KeyCode::Enter));
     assert_eq!(chat.take_actions(), vec![ChatAction::Resume("S-7".into())]);
+    assert!(!chat.is_picker_open());
+}
+
+#[test]
+fn the_provider_picker_lists_providers_and_enter_connects() {
+    let env = Env::new();
+    let mut chat = screen();
+    chat.open_provider_picker(
+        vec![crate::chat::picker::ProviderRow {
+            id: "anthropic".into(),
+            display_name: "Anthropic".into(),
+            status: "not configured".into(),
+        }],
+        None,
+    );
+    let text = screen_text(&render(&chat, &env, 80, 24));
+    assert!(text.contains("Connect a provider"), "{text}");
+    assert!(text.contains("Anthropic"), "{text}");
+    press(&mut chat, &env, key(KeyCode::Enter));
+    assert_eq!(
+        chat.take_actions(),
+        vec![ChatAction::Command {
+            id: CommandId::Connect,
+            arg: "anthropic".to_string()
+        }]
+    );
     assert!(!chat.is_picker_open());
 }
 
