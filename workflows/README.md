@@ -62,3 +62,21 @@ git push origin main
 integration worktree. A failed release job is not a published working binary — inspect
 each asset and smoke-test it before updating README install claims. Do not run
 `mise run worktree:clean` while the five active worktrees still contain changes.
+
+# `tasks-all.workflow.js`: work off docs/tasks/TASKS.md (Claude Code Workflow)
+
+A Claude Code `Workflow` script, not an ODW one. Each round has four steps:
+
+1. It builds `tm`, and six Sonnet testers drive each surface for real: the ticket flow, Genesis,
+   the TUI, the server with the web client and MCP, code navigation, and the CLI with settings
+   and project management.
+2. It records their findings as tasks in section T of `docs/tasks/TASKS.md`.
+3. It implements every open task. Each task gets its own Sonnet or Haiku worker in its own
+   worktree, with at most two Rust builds at once.
+4. Merges happen one at a time in the primary checkout, and each checks its task off. A full
+   `mise run verify` and a push run every six merges.
+
+Rounds repeat until a round finds nothing critical or high, three rounds at most. TASKS.md is the
+only resume state. After a usage-limit halt, relaunch it fresh with a new `args.stamp` and
+`args.skipFirstTrial: true`, rather than `resumeFromRunId`. `args.planTasks` carries the plan
+tasks' dependency and file metadata.
