@@ -368,11 +368,8 @@ pub(crate) fn outcome_notice(outcome: &AgentOutcome) -> (Option<(NoticeLevel, St
             )),
             true,
         ),
-        AgentOutcome::Failed { class, detail, .. } => (
-            Some((
-                NoticeLevel::Error,
-                format!("The turn failed ({class:?}): {detail}"),
-            )),
+        AgentOutcome::Failed { detail, .. } => (
+            Some((NoticeLevel::Error, format!("The turn failed: {detail}"))),
             true,
         ),
         AgentOutcome::Interrupted { .. } => (
@@ -789,8 +786,9 @@ mod tests {
             detail: "provider unreachable".to_string(),
         });
         assert!(failed);
-        assert!(notice
-            .is_some_and(|(level, text)| level == NoticeLevel::Error
-                && text.contains("provider unreachable")));
+        assert!(
+            notice.is_some_and(|(level, text)| level == NoticeLevel::Error
+                && text == "The turn failed: provider unreachable")
+        );
     }
 }
