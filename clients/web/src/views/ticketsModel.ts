@@ -258,10 +258,14 @@ export interface TicketOverview {
   submittedAt: string | null;
   evidence: Evidence[];
   created: string;
+  /** The later of the projection's `updated` and the last event about the ticket. */
   updated: string;
   /** Since creation; frozen at the run's length once completed. */
   ageMs: number;
 }
+
+/** How many characters of the objective's first clause a row shows. */
+export const ROW_TITLE_WIDTH = 44;
 
 function liveHolder(leases: Map<string, LiveLease>, ticket: TicketId, now: number): string | null {
   for (const lease of leases.values()) {
@@ -272,7 +276,8 @@ function liveHolder(leases: Map<string, LiveLease>, ticket: TicketId, now: numbe
 
 export function overviewOf(ticket: Ticket, store: ProjectStoreSnapshot, now: number): TicketOverview {
   const activity = store.activity.get(ticket.id) ?? {};
-  const worker = liveHolder(store.leases, ticket.id, now);
+  // A closed or cancelled ticket has no worker, even if a lease on it has not lapsed yet.
+  const worker = isTerminal(ticket.state) ? null : liveHolder(store.leases, ticket.id, now);
   const openDependencies = ticket.dependencies.filter((d) => {
     const dep = store.tickets.get(d);
     return dep !== undefined && dep.state !== "closed";
@@ -282,8 +287,12 @@ export function overviewOf(ticket: Ticket, store: ProjectStoreSnapshot, now: num
   const group = groupFor(ticket.state, awaitingApproval);
   const { text, tone } = summaryFor(ticket, { activity, worker, openDependencies, now });
   const created = Date.parse(ticket.created);
-  const updated = Date.parse(ticket.updated);
-  const ageMs = Math.max(0, (group === "completed" ? updated : now) - created) || 0;
+  // The projection's `updated` is not bumped by every state change (a close or cancel leaves
+  // it where it was), so the log's last event about the ticket is the better "last touched".
+  const timeline = store.timelines.get(ticket.id);
+  const lastEventAt = timeline?.length ? timeline[timeline.length - 1].ts : null;
+  const lastTouched = lastEventAt && Date.parse(lastEventAt) > Date.parse(ticket.updated) ? lastEventAt : ticket.updated;
+  const ageMs = Math.max(0, (group === "completed" ? Date.parse(lastTouched) : now) - created) || 0;
   let waitingFor: TicketOverview["waitingFor"] = null;
   let waitingSince: string | null = null;
   if (group === "needs_input") {
@@ -295,7 +304,8 @@ export function overviewOf(ticket: Ticket, store: ProjectStoreSnapshot, now: num
   const retry = ticket.retry as { max_attempts?: number } | null;
   return {
     id: ticket.id,
-    title: shortTitle(oneLine(ticket.objective)) || ticket.id,
+    // The TUI fits 32 columns; a browser row has room for more before the summary.
+    title: shortTitle(oneLine(ticket.objective), ROW_TITLE_WIDTH) || ticket.id,
     objective: ticket.objective.trim(),
     state: ticket.state,
     group,
@@ -316,7 +326,7 @@ export function overviewOf(ticket: Ticket, store: ProjectStoreSnapshot, now: num
     submittedAt: activity.submittedAt ?? null,
     evidence: store.evidence.filter((e) => e.ticket === ticket.id),
     created: ticket.created,
-    updated: ticket.updated,
+    updated: lastTouched,
     ageMs,
   };
 }

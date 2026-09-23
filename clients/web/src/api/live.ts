@@ -23,7 +23,7 @@ export interface LiveProjectOptions {
   now?: () => number;
 }
 
-const DEFAULT_BACKOFF = [1000, 2000, 5000, 10000];
+const DEFAULT_BACKOFF = [1000, 2000, 3000, 5000];
 
 /**
  * Keeps a `ProjectStore` live against `tm serve`: read `GET /state`, stream `GET /events` from
@@ -39,6 +39,8 @@ export class LiveProject {
   private readonly backoff: number[];
   private readonly flushMs: number;
   private readonly now: () => number;
+  /** Ends the current backoff wait early, when there is one. */
+  private wake: (() => void) | null = null;
 
   constructor(
     private readonly client: TicketmasterClient,
@@ -49,6 +51,11 @@ export class LiveProject {
     this.backoff = options.backoffMs?.length ? options.backoffMs : DEFAULT_BACKOFF;
     this.flushMs = options.flushMs ?? 50;
     this.now = options.now ?? Date.now;
+  }
+
+  /** Stop waiting out the backoff and reconnect now (the banner's "Retry now"). */
+  retryNow(): void {
+    this.wake?.();
   }
 
   /** Start the loop; `listener` gets every state change. Returns a function that stops it. */
@@ -108,7 +115,11 @@ export class LiveProject {
             retryAt: this.now() + delay,
             store: this.store.snapshot(),
           });
-          await sleep(delay, signal);
+          await new Promise<void>((resolve) => {
+            this.wake = resolve;
+            void sleep(delay, signal).then(resolve);
+          });
+          this.wake = null;
         }
       }
     };

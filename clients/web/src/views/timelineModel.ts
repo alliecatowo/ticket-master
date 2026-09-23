@@ -41,6 +41,12 @@ function field(event: WireEvent, name: string): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+/** `Label: text`, or just `Label` when the event carried no text (an empty reason, say). */
+function labelled(label: string, text: string | undefined): string {
+  const t = oneLine(text ?? "");
+  return t ? `${label}: ${t}` : label;
+}
+
 export function describeEvent(event: WireEvent): TimelineEntry {
   const base = { seq: event.seq, ts: event.ts, actor: event.actor, kind: event.kind };
   const entry = (text: string, tone: TimelineTone = "normal", minor = false): TimelineEntry => ({
@@ -52,7 +58,7 @@ export function describeEvent(event: WireEvent): TimelineEntry {
   const payload = (event.payload ?? {}) as Record<string, unknown>;
   switch (event.kind) {
     case "ticket.created":
-      return entry(`Created: ${field(event, "title") ?? ""}`);
+      return entry(labelled("Created", field(event, "title")));
     case "ticket.updated": {
       const fields = (payload.fields ?? {}) as Record<string, unknown>;
       if (fields.evidence_attached) {
@@ -74,15 +80,15 @@ export function describeEvent(event: WireEvent): TimelineEntry {
     case "ticket.lease_expired":
       return entry("Lease expired", "bad");
     case "ticket.submitted":
-      return entry(`Submitted: ${field(event, "summary") ?? ""}`, "good");
+      return entry(labelled("Submitted", field(event, "summary")), "good");
     case "ticket.verified":
       return entry("Verified", "good");
     case "ticket.verification_failed":
-      return entry(`Rejected: ${field(event, "reason") ?? ""}`, "bad");
+      return entry(labelled("Rejected", field(event, "reason")), "bad");
     case "ticket.audited":
       return entry("Audited", "good");
     case "ticket.audit_rejected":
-      return entry(`Audit rejected: ${field(event, "reason") ?? ""}`, "bad");
+      return entry(labelled("Audit rejected", field(event, "reason")), "bad");
     case "ticket.closed": {
       const reason = field(event, "reason");
       return entry(reason ? `Closed: ${reason}` : "Closed", "good");
@@ -94,11 +100,11 @@ export function describeEvent(event: WireEvent): TimelineEntry {
     case "ticket.reopened":
       return entry("Reopened");
     case "ticket.failed":
-      return entry(`Failed: ${field(event, "reason") ?? ""}`, "bad");
+      return entry(labelled("Failed", field(event, "reason")), "bad");
     case "ticket.retry_scheduled":
       return entry(`Retry ${payload.attempt ?? ""} scheduled`, "muted");
     case "ticket.escalated":
-      return entry(`Escalated: ${field(event, "reason") ?? ""}`, "bad");
+      return entry(labelled("Escalated", field(event, "reason")), "bad");
     case "ticket.budget_exhausted":
       return entry("Budget exhausted", "bad");
     case "ticket.budget_handoff":
@@ -110,9 +116,9 @@ export function describeEvent(event: WireEvent): TimelineEntry {
     case "ticket.dependency_added":
       return entry(`Now depends on ${field(event, "depends_on") ?? ""}`);
     case "goal.set":
-      return entry(`Goal: ${field(event, "text") ?? ""}`, "muted", true);
+      return entry(labelled("Goal", field(event, "text")), "muted", true);
     case "goal.step_added":
-      return entry(`Step: ${field(event, "text") ?? ""}`);
+      return entry(labelled("Step", field(event, "text")));
     case "goal.step_completed":
       return entry("Step done", "muted", true);
     case "goal.claimed_complete":
@@ -122,13 +128,15 @@ export function describeEvent(event: WireEvent): TimelineEntry {
     case "command.completed":
       return entry(`Finished $ ${field(event, "command") ?? ""}`, "muted", true);
     case "approval.requested":
-      return entry(`Asked for approval: ${field(event, "note") ?? ""}`);
+      return entry(labelled("Asked for approval", field(event, "note")));
     case "approval.decided":
       return entry(payload.approved ? "Approval granted" : "Approval denied", payload.approved ? "good" : "bad");
     case "provider.selected":
       return entry(`Model ${field(event, "provider") ?? ""}/${field(event, "model") ?? ""}`, "muted");
     case "usage.recorded":
       return entry(`${payload.tokens ?? 0} tokens`, "muted");
+    case "provider.exhausted":
+      return entry(labelled(`Provider ${field(event, "provider") ?? ""} exhausted`, field(event, "reason")), "muted", true);
     case "session.started":
       return entry(`Session ${field(event, "session") ?? ""} started`, "muted");
     case "session.ended":

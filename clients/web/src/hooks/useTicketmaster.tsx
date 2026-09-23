@@ -48,6 +48,8 @@ interface TicketmasterContextValue {
   notices: Notice[];
   notify: (tone: Notice["tone"], text: string) => void;
   dismiss: (id: number) => void;
+  /** Skip the reconnect backoff and try again now. */
+  retryNow: () => void;
 }
 
 const TicketmasterContext = createContext<TicketmasterContextValue | null>(null);
@@ -175,8 +177,9 @@ export function TicketmasterProvider({
       notices,
       notify,
       dismiss,
+      retryNow: () => live.retryNow(),
     }),
-    [client, liveState, presence, handle, setHandle, act, dispatch, now, notices, notify, dismiss],
+    [client, live, liveState, presence, handle, setHandle, act, dispatch, now, notices, notify, dismiss],
   );
 
   return <TicketmasterContext.Provider value={value}>{children}</TicketmasterContext.Provider>;

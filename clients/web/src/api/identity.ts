@@ -8,16 +8,20 @@
 export const DEFAULT_HANDLE = "web";
 export const HANDLE_STORAGE_KEY = "tm.web.actor";
 
+/** Longest handle kept; the rest is dropped (it shows in every event's actor column). */
+export const MAX_HANDLE_LENGTH = 40;
+
 /**
- * Turn whatever the user typed (or an older stored value) into a valid handle: trimmed, a pasted
- * `human:` prefix removed, runs of whitespace joined with `-`, and `web` when nothing is left.
- * The server only requires the handle to be non-empty (`ParticipantId`'s validator in
- * `crates/tm-types/src/id.rs`).
+ * Turn whatever the user typed (or an older stored value) into a valid handle: control characters
+ * dropped, trimmed, a pasted `human:` prefix removed, runs of whitespace joined with `-`, at most
+ * `MAX_HANDLE_LENGTH` characters, and `web` when nothing is left. The server only requires the
+ * handle to be non-empty (`ParticipantId`'s validator in `crates/tm-types/src/id.rs`).
  */
 export function normalizeHandle(input: string | null | undefined): string {
-  let handle = (input ?? "").trim();
-  if (handle.toLowerCase().startsWith("human:")) handle = handle.slice("human:".length).trim();
-  handle = handle.replace(/\s+/g, "-");
+  // eslint-disable-next-line no-control-regex
+  let handle = (input ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim();
+  while (handle.toLowerCase().startsWith("human:")) handle = handle.slice("human:".length).trim();
+  handle = [...handle.replace(/\s+/g, "-")].slice(0, MAX_HANDLE_LENGTH).join("");
   return handle.length > 0 ? handle : DEFAULT_HANDLE;
 }
 

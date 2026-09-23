@@ -311,6 +311,18 @@ kbd {
   text-align: center;
 }
 
+.banner__retry {
+  font: inherit;
+  font-weight: 560;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
 /* ---------------------------------------------------------------- page scaffolding */
 
 .page__header {
@@ -1281,6 +1293,10 @@ kbd {
     order: 3;
     flex-basis: 100%;
     margin: 0 -0.5rem;
+    /* The links scroll sideways; fade the edge so a cut-off link reads as "more this way". */
+    mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 2.5rem), transparent);
+    padding-right: 2rem;
   }
 
   .topbar__meta {
@@ -1335,6 +1351,7 @@ kbd {
 
   .failures li {
     grid-template-columns: auto minmax(0, 1fr);
+    justify-items: start;
   }
 
   .timeline__item {

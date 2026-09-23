@@ -9,7 +9,9 @@ import {
   choicesFor,
   compactAge,
   GROUP_LABEL,
+  oneLine,
   overviewOf,
+  shortTitle,
   type TicketOverview,
 } from "./ticketsModel";
 
@@ -46,7 +48,7 @@ export function TicketView() {
               {GROUP_LABEL[overview.group]}
             </span>
           </div>
-          <h1 className="detail__title">{overview.title}</h1>
+          <h1 className="detail__title">{shortTitle(oneLine(overview.objective), 96) || overview.id}</h1>
           <p className={`detail__summary tone--${overview.tone}`}>{overview.summary}</p>
         </div>
       </header>
@@ -136,7 +138,7 @@ export function TicketView() {
               <dt>Created</dt>
               <dd title={new Date(ticket.created).toLocaleString()}>{compactAge(now - Date.parse(ticket.created))} ago</dd>
               <dt>Updated</dt>
-              <dd title={new Date(ticket.updated).toLocaleString()}>{compactAge(now - Date.parse(ticket.updated))} ago</dd>
+              <dd title={new Date(overview.updated).toLocaleString()}>{compactAge(now - Date.parse(overview.updated))} ago</dd>
               {ticket.milestone && (
                 <>
                   <dt>Milestone</dt>
@@ -269,7 +271,7 @@ function Timeline({ ticketId }: { ticketId: string }) {
       ) : (
         <ol className="timeline">
           {shown.map((e) => (
-            <li key={e.seq} className={`timeline__item tone--${e.tone}`}>
+            <li key={e.seq} className={`timeline__item tone--${e.tone}`} data-seq={e.seq}>
               <span className="timeline__dot" aria-hidden />
               <span className="timeline__text">{e.text}</span>
               <span className="timeline__meta">

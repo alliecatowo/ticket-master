@@ -20,7 +20,7 @@ export function Notices() {
 
 /** A strip under the top bar while the client cannot reach `tm serve`. */
 export function ConnectionBanner() {
-  const { status, error, retryAt, loaded } = useTicketmaster();
+  const { status, error, retryAt, loaded, retryNow } = useTicketmaster();
   const [, tick] = useState(0);
   useEffect(() => {
     if (status === "live") return;
@@ -33,7 +33,10 @@ export function ConnectionBanner() {
     <div className="banner" role="alert" data-testid="connection-banner">
       <strong>{loaded ? "Lost the connection to tm serve." : "Can't reach tm serve."}</strong>{" "}
       {error} {seconds > 0 ? `Retrying in ${seconds}s.` : "Retrying…"}
-      {loaded && " What you see may be out of date."}
+      {loaded && " What you see may be out of date."}{" "}
+      <button type="button" className="banner__retry" onClick={retryNow}>
+        Retry now
+      </button>
     </div>
   );
 }
