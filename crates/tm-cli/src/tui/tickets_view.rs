@@ -153,7 +153,7 @@ pub(super) fn recap(o: &TicketOverview) -> String {
     )];
     parts.push(o.summary.clone());
     if let Some(latest) = o.latest_activity.as_ref().filter(|l| **l != o.summary) {
-        parts.push(format!("latest {latest}"));
+        parts.push(format!("latest: {latest}"));
     }
     if let Some(failure) = o.failures.last() {
         if !o.summary.contains(&failure.detail) {
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(
             text,
             "Recap of T-3: ready · attempt 1 of 3 · attempt 1 failed: timeout · retrying · \
-             latest $ cargo test"
+             latest: $ cargo test"
         );
         assert!(!text.contains('\n'));
     }
