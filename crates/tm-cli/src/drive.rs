@@ -245,7 +245,9 @@ pub async fn browser_open(
         .await?
         .first()
         .map(|t| t.id.0.clone())
-        .ok_or_else(|| TmError::invariant("no tabs after navigate"))?;
+        .ok_or_else(|| {
+            TmError::invariant("browser opened but reported no tabs; try `tm browser open` again")
+        })?;
 
     let state = BrowserSessionState {
         ws_url: "".to_string(),
@@ -265,7 +267,7 @@ pub async fn browser_open(
 pub async fn browser_snapshot(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let _session_state = load_browser_session(project)?;
 
-    renderer.note("(snapshot: would reattach and snapshot here)");
+    renderer.note("browser snapshot isn't implemented yet");
     Ok(())
 }
 
