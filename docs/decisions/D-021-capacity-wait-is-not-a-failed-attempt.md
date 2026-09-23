@@ -46,9 +46,9 @@ change there fails a test instead of quietly bringing the bug back.
 
 - **Not scheduler admission control.** The scheduler can't see provider capacity:
   `SchedulerView` carries no fabric state, and the fabric lives inside each executor. Admission
-  also couldn't cover the other `Wait` causes (per-minute quota, an open breaker, the chat
-  session sharing the same fabric). Throttling tickets to the provider's concurrency would also
-  serialize tool execution, which uses no provider slot.
+  also couldn't cover the other `Wait` causes (per-minute quota, an open breaker). Throttling
+  tickets to the provider's concurrency would also serialize tool execution, which uses no
+  provider slot.
 - **Not "record the failure without spending an attempt".** Recording is too late: by then the
   attempt has ended. The worker gave up on a turn it could have finished a second later, and the
   ticket returned to `Ready` behind a retry delay. The log would also fill with "failures" that
@@ -68,8 +68,11 @@ change there fails a test instead of quietly bringing the bug back.
   belongs to the provider track.
 - **Matching the error by text is fragile.** The test above is the guard. A typed `Wait` error
   from `Fabric::execute` would remove the need for it, and is the natural follow-up.
-- **A waiting chat turn looks idle.** It says nothing for up to the allowance (Esc still
-  interrupts it). Only a `tracing::debug!` line records the wait.
+- **A waiting chat turn looks idle.** It says nothing for up to the allowance. Esc still
+  interrupts it, because the turn is dropped from a `select!`. Only a `tracing::debug!` line
+  records the wait. The chat builds its own fabric (`AgentSession`), separate from the
+  dispatcher's, so a chat turn and a ticket never wait on each other. The flip side: they don't
+  share one concurrency limit either.
 - **Many leased tickets can sit `Running` without doing anything.** The scheduler still leases up
   to its in-flight limit, and the extra tickets wait inside their turns. Each wait holds a lease,
   kept alive by the dispatcher's heartbeat.

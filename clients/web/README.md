@@ -109,7 +109,8 @@ Differences from the TUI, on purpose:
   adopted it yet:
   - `GET /tickets/{id}/events?after=<seq>&limit=<n>` returns `{events, next}`: one page of that
     ticket's own events, oldest first, in the same wire shape as the other event lists. Pass
-    `next` back as `after` until it is `null`. `after` is exclusive, like `/events?from=`.
+    `next` back as `after` until it is `null`. `after` is exclusive, like `/events?from=`, and
+    `from` is accepted as the same cursor.
   - `GET /health` and `GET /state` include `workers: true|false`: whether this `tm serve` works
     ready tickets. It is `false` under `--no-workers`, and also when the runner couldn't start.
     With it, "waiting for a worker" could say "no worker is running" instead.

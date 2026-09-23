@@ -775,10 +775,11 @@ async fn transition_ticket(
 }
 
 /// `GET /tickets/{id}/events`'s query: an exclusive `after` cursor (the last `seq` the client
-/// has, like `GET /events?from=`) and a page size capped at the server's replay page size.
+/// has; `from` is accepted as the same thing, matching `GET /events?from=`) and a page size
+/// capped at the server's replay page size.
 #[derive(Debug, Default, Deserialize)]
 struct TicketEventsQuery {
-    #[serde(default)]
+    #[serde(default, alias = "from")]
     after: Option<u64>,
     #[serde(default)]
     limit: Option<usize>,
@@ -1409,6 +1410,22 @@ mod tests {
             }
         }
         assert_eq!(seen, all_first, "every event once, oldest first");
+
+        // `from` is the same exclusive cursor as `after`, as on `GET /events`.
+        let page = |q: &str| {
+            let query: axum::extract::Query<TicketEventsQuery> =
+                axum::extract::Query::try_from_uri(&format!("/x?{q}").parse().expect("uri"))
+                    .expect("query parses");
+            ticket_events(State(state.clone()), Path(first.clone()), query)
+        };
+        let Json(by_from) = page(&format!("from={}&limit=2", all_first[0]))
+            .await
+            .expect("page");
+        let Json(by_after) = page(&format!("after={}&limit=2", all_first[0]))
+            .await
+            .expect("page");
+        assert_eq!(by_from, by_after);
+        assert_eq!(by_from["events"][0]["seq"].as_u64(), Some(all_first[1]));
 
         let err = ticket_events(
             State(state.clone()),
