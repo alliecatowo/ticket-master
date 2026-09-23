@@ -518,7 +518,7 @@ These sets are what the free Kaggle fine-tune (§9) trains on: a tm-specific Lay
     1024 tokens caps it naturally), no persistence of `state` by default, redaction, and
     Cloudflare in front for rate limiting.
   - **Cost.** A CPU Modal container costs about $0.13 per warm hour (§9). At Laya's 200 to 460ms
-    per decision on CPU, that is on the order of $0.00002 to $0.00005 per decision while warm.
+    per decision on CPU, that is roughly $0.000007 to $0.000016 per decision while warm.
     Idle warm time dominates.
 - **Beyond routing.** A decider-first agent loop, where every step begins with a free
   sub-10ms "what kind of step is this" and the frontier model is invoked only for generation.
@@ -530,10 +530,10 @@ These sets are what the free Kaggle fine-tune (§9) trains on: a tm-specific Lay
 
 | Path | What | Pros | Cons | When |
 |---|---|---|---|---|
-| **A. laya-mlx Python sidecar** over stdio JSON Lines | the published port, used as is | works this week, fastest verified numbers | Python 3.11+ runtime and environment to manage, Apple-only | **first** |
+| **A. laya-mlx Python sidecar** over stdio JSON Lines | the published port, used as is | works this week, fastest verified numbers | Python 3.11+ runtime and environment to manage, Apple-only; **unverified that laya-mlx can load or convert our own fine-tuned checkpoint** (it documents only the three published ones) | **first** |
 | **B. Swift MLX sidecar** | port ModernBERT and the head to MLX Swift | one signed binary, no Python | a real port; no one has done it | only if Python hurts |
 | **C. `mlx-rs`** (unofficial MLX bindings through mlx-c, v0.25) | in-process MLX from Rust | no sidecar | we write the model port; bindings are pre-1.0 | later |
-| **D. candle**, whose `candle_transformers::models::modernbert` exists | pure Rust, Metal on Mac, **CPU on Linux and CI** | one static binary, works off-Apple | we port the decision head (two transformer layers, option-marker scorer) ourselves; unverified that laya-mlx can load a custom fine-tune | the **native** end state |
+| **D. candle**, whose `candle_transformers::models::modernbert` exists | pure Rust, Metal on Mac, **CPU on Linux and CI** | one static binary, works off-Apple | we port the decision head (two transformer layers, option-marker scorer) ourselves | the **native** end state |
 | **E. Hosted** (Jev, Cloudflare, Modal) | HTTP | zero install | network, cost, redaction required | zero-shot and background work |
 
 - **Non-Apple machines and CI.** Tests always use `MockDecisionProvider`. A Linux developer uses
@@ -568,6 +568,11 @@ These sets are what the free Kaggle fine-tune (§9) trains on: a tm-specific Lay
 - **Laya is not useful out of the box.** It is near chance zero-shot. Every local win waits on
   labels (weeks of shadow mode) and a fine-tune. Until then the only zero-shot path is Jev, which
   is waitlisted, closed, off-box, and new enough that its prices and terms may change.
+- **The fine-tune may not run where we want it.** The local plan is shadow labels, then a
+  Kaggle fine-tune, then running it through laya-mlx. laya-mlx documents only the three published
+  checkpoints. If it can't load or convert our fine-tuned one, the local win waits for the candle
+  port (path D), or we run the fine-tune through PyTorch `laya` or Modal instead. Check this
+  before collecting weeks of labels on the assumption.
 - **Small context and few options.** 512 tokens and weak many-option accuracy force deterministic
   pre-chunking and pre-filtering at every site. That is design work at each site, not a drop-in.
 - **Calibration is a claim until we measure it.** Every "high confidence" threshold is fitted per

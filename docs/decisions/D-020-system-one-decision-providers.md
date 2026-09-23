@@ -91,6 +91,9 @@ neither yet.
 - **No zero-shot local win.** Laya needs weeks of shadow labels and a fine-tune before it helps.
   The zero-shot path is Jev: closed, waitlisted, off-box, and too new to trust its prices or
   terms to stay put.
+- **The fine-tune may not load on MLX.** laya-mlx documents only the three published
+  checkpoints. Whether it can load or convert a tm fine-tuned Laya is unverified. If it can't,
+  local fine-tuned inference waits for a candle port, or runs through PyTorch `laya` or Modal.
 - **Small context and few options** (512 to 1024 tokens, weak beyond about 10 options). Every
   site needs deterministic chunking or pre-filtering, which is design work per site.
 - **SPEC §0 gains an inference site.** It is contained by the event and replay rule, but it is a
