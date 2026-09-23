@@ -120,7 +120,7 @@ impl ApprovalPrompt {
             "Update" | "Write" | "Delete" if !self.request.target.is_empty() => {
                 format!("Do you want to make this edit to {}?", self.request.target)
             }
-            _ => format!("Do you want to allow {}?", self.request.tool),
+            label => format!("Do you want to allow {label}?"),
         }
     }
 
