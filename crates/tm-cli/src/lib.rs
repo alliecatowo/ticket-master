@@ -22,6 +22,7 @@
 //! - [`drive`] — the `browser` and `computer` command groups over `tm-browser`/`tm-computer`.
 //! - [`wiki`] — the `wiki generate` command (`SPEC.md` §26) over `tm-wiki`.
 //! - [`serve`] — the `serve` command.
+//! - [`mcp`] — the `mcp` command: the project as an MCP server for Claude Code.
 //! - [`agent`] — the bare-`tm` interactive coding client and its `tm -p` scriptable form.
 //! - [`tui`] — the bare-`tm` ratatui TUI mode (D-002) and the `should_launch` gate that decides
 //!   between it and [`agent`]'s plain loop.
@@ -41,6 +42,7 @@ pub mod args;
 pub mod auth;
 pub mod dispatch;
 pub mod drive;
+pub mod mcp;
 pub mod ops;
 pub mod project;
 pub mod render;

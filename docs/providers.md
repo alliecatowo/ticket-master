@@ -36,6 +36,33 @@ the one it was built for. So two roles can route to one `provider` slug under tw
 `Registry::build_fabric` refused tables that named two models under one slug.) A session's
 `/model` choice uses the same path: `Fabric::prefer` puts the chosen model first for the chat role.
 
+### Tool names on the wire
+
+tm's tools are dotted (`fs.read`, `ticket.create_child`), and real APIs reject that: Anthropic's
+Messages API requires a tool name to match `^[a-zA-Z0-9_-]{1,128}$`, OpenAI's Chat Completions
+and Responses APIs `^[a-zA-Z0-9_-]{1,64}$` (every OpenAI-compatible backend, DevPass included,
+inherits that). Until 2026-09-23 no provider mapped names, so every Anthropic- or OpenAI-backed
+turn that offered tools was rejected with a 400.
+
+Each real provider now rewrites names at its own wire boundary through
+`crates/tm-provider/src/wire_names.rs`'s `WireNames`: a per-request, reversible map built from
+the request's tool definitions and every `ToolUse` name in its history (so a call made in an
+earlier turn, even to a tool no longer offered, goes out under the same name as the matching
+definition). A name that already matches `[A-Za-z0-9_-]{1,64}` passes through unchanged; any other
+has each disallowed character replaced by `_` and is truncated to 64 characters (the tighter
+limit, used for every provider), with `_2`, `_3`, ... appended on a collision. The map depends only
+on the set of names, never their order. Tool calls in the response (streamed or not) are mapped
+back to tm's names; a name the map doesn't know (a model inventing a tool, or echoing the dotted
+name it saw in the prompt) comes back as itself, so the agent's dispatcher reports it as an
+unknown tool exactly as before.
+
+It lives in the providers, not in `Fabric`, because it is a wire concern and `MockProvider` keys
+its scripts on a hash of the whole request: scripted tests see tm's own names. Anthropic, every
+compat backend, Codex/ChatGPT, Gemini and Vertex all apply it. Gemini would accept dots, but it
+still gets the same map: its own rule also requires a leading letter or underscore and caps the
+length, and one rule everywhere is simpler than a per-provider exception, since valid names are
+never touched anyway.
+
 ## Anthropic
 
 - Slug: `anthropic`

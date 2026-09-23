@@ -66,6 +66,8 @@ pub fn capture_workspace_snapshot(repo_root: &Path) -> Option<WorkspaceSnapshot>
     match Command::new("git")
         .args(["update-ref", &git_ref, &sha])
         .current_dir(repo_root)
+        // Never the parent's stdout: under `tm mcp` that is the JSON-RPC stream.
+        .stdout(std::process::Stdio::null())
         .status()
     {
         Ok(status) if status.success() => {}

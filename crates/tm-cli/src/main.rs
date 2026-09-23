@@ -10,7 +10,7 @@ use clap::Parser;
 use tm_cli::args::{Cli, Command};
 use tm_cli::project;
 use tm_cli::render::Renderer;
-use tm_cli::{agent, auth, drive, ops, sched, search, serve, tickets, tui, wiki, workflow};
+use tm_cli::{agent, auth, drive, mcp, ops, sched, search, serve, tickets, tui, wiki, workflow};
 
 #[cfg(feature = "otel")]
 mod otel;
@@ -287,6 +287,10 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
         Some(Command::Serve(args)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
             serve::serve(&args, std::sync::Arc::new(opened), renderer).await
+        }
+        Some(Command::Mcp(args)) => {
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
+            mcp::mcp(&args, std::sync::Arc::new(opened)).await
         }
         Some(Command::Events(cmd)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;

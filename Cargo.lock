@@ -3878,6 +3878,7 @@ dependencies = [
  "tm-events",
  "tm-genesis",
  "tm-harness",
+ "tm-mcp",
  "tm-mirror",
  "tm-notify",
  "tm-provider",

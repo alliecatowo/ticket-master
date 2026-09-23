@@ -47,6 +47,7 @@ use crate::types::{
     Candidate, Completion, CompletionRequest, ContentBlock, EmbedRequest, Embeddings, Message,
     MessageRole, ModelId, ProviderError, StopReason, Usage,
 };
+use crate::wire_names::WireNames;
 
 /// Default request timeout for the underlying HTTP client.
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
@@ -306,16 +307,20 @@ impl Provider for CompatProvider {
 
     async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
         let model = req.model.as_deref().unwrap_or(&self.config.model);
-        let wire_request = build_wire_request(model, &req);
+        let names = WireNames::for_request(&req);
+        let wire_request = build_wire_request_with_names(model, &req, &names);
         let url = self.url(&self.config.chat_path);
         let (body, latency, received_at) = self.send_with_retry(&url, &wire_request).await?;
 
-        if req.stream {
-            let chunks = parse_sse_body(&body)?;
-            assemble_streamed_completion(&chunks, model, &self.config.id, latency, received_at)
-        } else {
-            parse_wire_response(&body, model, &self.config.id, latency, received_at)
-        }
+        parse_completion_body(
+            &body,
+            req.stream,
+            model,
+            &self.config.id,
+            latency,
+            received_at,
+            &names,
+        )
     }
 
     async fn embed(&self, req: EmbedRequest) -> Result<Embeddings, ProviderError> {
@@ -851,7 +856,22 @@ pub fn build_wire_messages(messages: &[Message]) -> Vec<WireMessage> {
 
 /// Build the wire request body for `req` against `model`. `req.n` maps directly to the wire `n`
 /// field (unlike `crate::anthropic`, Chat Completions natively supports multiple candidates).
+///
+/// Tool names go on the wire through [`WireNames::for_request`]: OpenAI requires
+/// `^[a-zA-Z0-9_-]{1,64}$`, which tm's dotted names fail (see [`crate::wire_names`]).
 pub fn build_wire_request(model: &str, req: &CompletionRequest) -> WireRequest {
+    build_wire_request_with_names(model, req, &WireNames::for_request(req))
+}
+
+/// [`build_wire_request`] with an explicit name map, so [`CompatProvider::complete`] can decode
+/// the response (streamed or not) with the same one.
+pub fn build_wire_request_with_names(
+    model: &str,
+    req: &CompletionRequest,
+    names: &WireNames,
+) -> WireRequest {
+    let req = names.encode_request(req);
+    let req = req.as_ref();
     let mut messages = Vec::new();
     if let Some(system) = &req.system {
         if !system.is_empty() {
@@ -989,6 +1009,28 @@ pub fn parse_wire_response(
         latency,
         received_at,
     })
+}
+
+/// Parse a successful chat body — SSE chunks when `stream`, one JSON response otherwise — and map
+/// every tool call's wire name back through `names`, the map [`build_wire_request_with_names`]
+/// sent the request with. This is [`CompatProvider::complete`]'s whole response path, kept pure so
+/// both branches are tested without a network.
+pub fn parse_completion_body(
+    body: &[u8],
+    stream: bool,
+    requested_model: &str,
+    provider_id: &str,
+    latency: Duration,
+    received_at: tm_types::Timestamp,
+    names: &WireNames,
+) -> Result<Completion, ProviderError> {
+    let completion = if stream {
+        let chunks = parse_sse_body(body)?;
+        assemble_streamed_completion(&chunks, requested_model, provider_id, latency, received_at)
+    } else {
+        parse_wire_response(body, requested_model, provider_id, latency, received_at)
+    }?;
+    Ok(names.decode_completion(completion))
 }
 
 /// Parse `body` (an embeddings response) into provider-independent [`Embeddings`], restoring
@@ -1971,5 +2013,131 @@ mod tests {
             Some("devpass-default-model".to_string())
         );
         clear_devpass_pref_env();
+    }
+
+    // ---- tool names on the wire ----
+
+    fn dotted_tool_request(stream: bool) -> CompletionRequest {
+        let mut req = sample_request();
+        req.stream = stream;
+        req.tools = ["fs.read", "ticket.create_child", "fs_read"]
+            .iter()
+            .map(|n| ToolDef {
+                name: n.to_string(),
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object"}),
+            })
+            .collect();
+        req.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "fs.read".to_string(),
+                input: serde_json::json!({"path": "a"}),
+            }],
+        });
+        req.messages.push(Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "ok".to_string(),
+                }],
+                is_error: false,
+            }],
+        });
+        req
+    }
+
+    #[test]
+    fn build_wire_request_sends_only_valid_tool_names_consistent_with_history() {
+        let wire = build_wire_request("gpt-test", &dotted_tool_request(false));
+        let tool_names: Vec<&str> = wire
+            .tools
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
+        assert_eq!(
+            tool_names,
+            vec!["fs_read_2", "ticket_create_child", "fs_read"]
+        );
+        for name in &tool_names {
+            assert!(crate::wire_names::is_valid_wire_name(name), "{name}");
+        }
+        let history: Vec<&str> = wire
+            .messages
+            .iter()
+            .flat_map(|m| &m.tool_calls)
+            .map(|tc| tc.function.name.as_str())
+            .collect();
+        assert_eq!(history, vec!["fs_read_2"]);
+        let body = serde_json::to_string(&wire).expect("serializes");
+        assert!(!body.contains("fs.read") && !body.contains("ticket.create_child"));
+    }
+
+    #[test]
+    fn parse_completion_body_maps_a_non_streamed_tool_call_back() {
+        let req = dotted_tool_request(false);
+        let names = WireNames::for_request(&req);
+        let body = r#"{
+            "model": "gpt-test",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": null, "tool_calls": [
+                    {"id": "call_2", "type": "function", "function": {"name": "ticket_create_child", "arguments": "{}"}},
+                    {"id": "call_3", "type": "function", "function": {"name": "fs_read", "arguments": "{}"}},
+                    {"id": "call_4", "type": "function", "function": {"name": "fs_read_2", "arguments": "{}"}}
+                ]},
+                "finish_reason": "tool_calls"
+            }]
+        }"#;
+        let completion = parse_completion_body(
+            body.as_bytes(),
+            false,
+            "gpt-test",
+            "openai",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+            &names,
+        )
+        .expect("parses");
+        let called: Vec<&str> = completion.candidates[0]
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(called, vec!["ticket.create_child", "fs_read", "fs.read"]);
+    }
+
+    #[test]
+    fn parse_completion_body_maps_a_streamed_tool_call_back() {
+        let req = dotted_tool_request(true);
+        let names = WireNames::for_request(&req);
+        let body = concat!(
+            "data: {\"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"id\": \"call_9\", \"function\": {\"name\": \"ticket_create_child\", \"arguments\": \"\"}}]}}]}\n\n",
+            "data: {\"choices\": [{\"index\": 0, \"delta\": {\"tool_calls\": [{\"index\": 0, \"function\": {\"arguments\": \"{}\"}}]}}]}\n\n",
+            "data: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"tool_calls\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let completion = parse_completion_body(
+            body.as_bytes(),
+            true,
+            "gpt-test",
+            "openai",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+            &names,
+        )
+        .expect("assembles");
+        match &completion.candidates[0].content[0] {
+            ContentBlock::ToolUse { id, name, .. } => {
+                assert_eq!(id, "call_9");
+                assert_eq!(name, "ticket.create_child");
+            }
+            other => panic!("expected tool use block, got {other:?}"),
+        }
     }
 }

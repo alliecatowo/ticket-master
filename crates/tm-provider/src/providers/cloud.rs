@@ -32,6 +32,7 @@ use crate::types::{
     Candidate, Completion, CompletionRequest, ContentBlock, EmbedRequest, Embeddings, MessageRole,
     ModelId, ProviderError, StopReason, Usage,
 };
+use crate::wire_names::WireNames;
 
 /// Default Azure OpenAI API version, absent `AZURE_OPENAI_API_VERSION`.
 const AZURE_DEFAULT_API_VERSION: &str = "2024-10-21";
@@ -859,7 +860,9 @@ impl Provider for VertexProvider {
     /// `Retry-After`, exactly the pattern `crate::anthropic::AnthropicProvider::complete` uses.
     async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
         let model = req.model_or(&self.model);
-        let wire_request = build_vertex_request(&req);
+        // Same tool-name mapping as `crate::providers::gemini` (see `crate::wire_names`).
+        let names = WireNames::for_request(&req);
+        let wire_request = build_vertex_request(&names.encode_request(&req));
         let url = format!("{}/{}:generateContent", self.base_url, model.model);
 
         let mut attempt: u32 = 0;
@@ -905,7 +908,8 @@ impl Provider for VertexProvider {
                     let finished = self.clock.now();
                     let latency =
                         Duration::from_secs(finished.seconds_since(started).max(0) as u64);
-                    return parse_vertex_response(&body, &model, latency, finished);
+                    return parse_vertex_response(&body, &model, latency, finished)
+                        .map(|c| names.decode_completion(c));
                 }
                 Err(err) => {
                     if err.is_retryable() && attempt < self.max_retries {
