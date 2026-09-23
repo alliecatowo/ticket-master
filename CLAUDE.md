@@ -9,6 +9,8 @@ never drift between sessions:
 
 - `mise run build` — build just the `tm` binary (fast default).
 - `mise run build:all` — build the whole workspace.
+- `mise run build:release` — optimized release build of just the `tm` binary (what the release pipeline ships).
+- Releases: `.github/workflows/release.yml` runs on `v*` tags and attaches `tm-<target>.tar.gz` per OS to the GitHub Release (`git tag vX.Y.Z && git push origin vX.Y.Z`). The root README's install section names those assets — keep the two in sync.
 - `mise run test` — `cargo test --workspace`.
 - `mise run test:crate -- <crate>` — one crate's tests.
 - `mise run test:otel` — clippy + test `tm-cli`'s opt-in OpenTelemetry export path

@@ -26,22 +26,57 @@ workers as **tickets**, review their submissions, and keep shipping.
 > project with a **live provider** — no mocks, no scripted turns.
 > Full session + reproduction notes: [`docs/showcase/`](docs/showcase/).
 
-![Hero: slash-command popup, /status, a live provider answer, and a live shell tool call](docs/showcase/tui-hero.gif)
+![Live turn: @calc.py completion, file reads, live crash repro, ticket-aware answer](docs/showcase/tui-live.gif)
 
 <details>
-<summary><b>🎬 More clips — tickets, Kanban, transcript viewer</b></summary>
+<summary><b>🎬 More clips — accept a submission, dispatch a background worker</b></summary>
 <br/>
 
-| Tickets + shortcuts + Kanban | Transcript + tasks |
+| Review: peek + accept | Dispatch: worker runs live |
 | --- | --- |
-| ![Tickets screen with shortcuts overlay and Kanban board](docs/showcase/tui-tickets.gif) | ![Transcript viewer and task checklist](docs/showcase/tui-transcript-tasks.gif) |
-| `/tickets` → `?` shortcuts → `Ctrl+B` board | `Ctrl+O` transcript → `Ctrl+T` checklist |
+| ![Tickets screen: peek T-2's submission, press 1, it closes](docs/showcase/tui-accept.gif) | ![Dispatch T-3, watch its worker run doctest and pytest live in the row](docs/showcase/tui-dispatch.gif) |
+| `/tickets` → `Space` peek → `1` accept | dispatch input → worker verifies in the row |
 
 Prefer video? Same clips as WebM:
-[`tui-hero.webm`](docs/showcase/tui-hero.webm) ·
-[`tui-tickets.webm`](docs/showcase/tui-tickets.webm) ·
-[`tui-transcript-tasks.webm`](docs/showcase/tui-transcript-tasks.webm) ·
-full session [`tui-hero.cast`](docs/showcase/tui-hero.cast) (`asciinema play` it).
+[`tui-live.webm`](docs/showcase/tui-live.webm) ·
+[`tui-accept.webm`](docs/showcase/tui-accept.webm) ·
+[`tui-dispatch.webm`](docs/showcase/tui-dispatch.webm) ·
+full session [`tui-live.cast`](docs/showcase/tui-live.cast) (`asciinema play` it).
+
+</details>
+
+---
+
+## 📦 Install
+
+<details open>
+<summary><b>Option A — download a release (recommended)</b></summary>
+<br/>
+
+Prebuilt `tm` binaries ship with every [GitHub release](https://github.com/alliecatowo/ticket-master/releases)
+for `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`:
+
+```sh
+# Apple Silicon example — pick the asset matching your machine
+curl -sL https://github.com/alliecatowo/ticket-master/releases/latest/download/tm-aarch64-apple-darwin.tar.gz | tar -xz
+./tm --version && ./tm init
+```
+
+</details>
+
+<details>
+<summary><b>Option B — build from source</b></summary>
+
+Requires Rust 1.85+ ([`mise`](https://mise.jdx.dev/) provides it: `mise install`):
+
+```sh
+git clone git@github.com:alliecatowo/ticket-master.git && cd ticket-master
+mise install
+mise run build            # debug build of just the `tm` binary
+./target/debug/tm init
+```
+
+Prefer an optimized binary? `mise run build:release` (≈ `cargo build --release -p tm-cli`).
 
 </details>
 
@@ -138,6 +173,10 @@ Full matrix: [`docs/providers.md`](docs/providers.md).
 | [`CLAUDE.md`](CLAUDE.md) | Dev-workflow bible: mise tasks, worktrees, TUI reference |
 
 </details>
+
+## 🧮 Calc helpers
+
+`calc.div(a, b)` returns `a / b` and raises `ValueError("division by zero")` when `b` is zero — check the divisor or catch `ValueError` before dividing.
 
 ---
 

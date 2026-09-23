@@ -38,6 +38,10 @@ run = "cargo build -p tm-cli -j 2"
 description = "Build the entire workspace"
 run = "cargo build --workspace -j 2"
 
+[tasks."build:release"]
+description = "Optimized release build of just the tm binary (what the release pipeline ships)"
+run = "cargo build --release -p tm-cli -j 2"
+
 [tasks.test]
 description = "Run the whole workspace test suite"
 run = "cargo test --workspace -j 2"
