@@ -5,8 +5,10 @@
 //! grouped by state (**Needs input**, **Working**, **Ready for review**, **Queued**,
 //! **Completed**), one row per ticket (a status glyph, id and short title, a one-line summary, and
 //! an age aligned right), a dispatch input between two rules at the bottom, and a footer of key
-//! hints. Space opens a peek panel; Enter or `→` attaches; Ctrl+X cancels (twice); `a`/`r` accept or
-//! reject a submission; `?` lists every shortcut.
+//! hints. Space opens a peek panel; Enter or `→` attaches; Ctrl+X cancels (twice); in a review ticket's
+//! peek, `1`/`2` accept or reject its submission; Ctrl+B opens the board; `?` lists every
+//! shortcut. Like Claude Code's agent view, no plain letter is a shortcut: typed text always goes
+//! to the dispatch input.
 //!
 //! Like every screen here it is plain data in: `tm-cli` builds [`TicketsData`] from the project's
 //! real state and executes the [`TicketsAction`]s this screen records. This module decides only
@@ -89,7 +91,9 @@ impl Group {
                 "Tickets waiting on you: an escalation, or an approval only you can give."
             }
             Group::Working => "Tickets a background worker is running right now.",
-            Group::Review => "Submitted work for you to accept (a) or reject (r).",
+            Group::Review => {
+                "Submitted work for you to review: space, then 1 to accept or 2 to reject."
+            }
             Group::Queued => {
                 "Tickets waiting for a worker: ready, blocked, or retrying after a failure."
             }
@@ -670,6 +674,7 @@ impl TicketsScreen {
                 // The application's own chords (Ctrl+C clear/exit, Ctrl+T back to chat).
                 KeyCode::Char('c') | KeyCode::Char('t') => return Propagation::Propagate,
                 KeyCode::Char('x') => self.cancel_pressed(now),
+                KeyCode::Char('b') => self.actions.push_back(TicketsAction::OpenBoard),
                 KeyCode::Char('j') => self.input.insert("\n"),
                 KeyCode::Char('u') => self.input.clear(),
                 KeyCode::Char('w') => self.input.delete_word_back(),
@@ -708,13 +713,13 @@ impl TicketsScreen {
             // Space on a heading does nothing rather than start a task with a blank.
             KeyCode::Char(' ') if empty => {}
             KeyCode::Char('?') if empty => self.help_open = true,
-            KeyCode::Char('b') if empty => self.actions.push_back(TicketsAction::OpenBoard),
-            KeyCode::Char('a') if empty && self.selected_is_review() => {
+            // A review ticket's peek offers its choices numbered, like a permission prompt.
+            KeyCode::Char('1') if empty && self.reviewing() => {
                 if let Some(id) = self.selected_ticket().map(str::to_string) {
                     self.actions.push_back(TicketsAction::Accept(id));
                 }
             }
-            KeyCode::Char('r') if empty && self.selected_is_review() => {
+            KeyCode::Char('2') if empty && self.reviewing() => {
                 self.reject_for = self.selected_ticket().map(str::to_string);
             }
             KeyCode::Char(_) if alt => {}
@@ -731,6 +736,11 @@ impl TicketsScreen {
     fn selected_is_review(&self) -> bool {
         self.selected_row()
             .is_some_and(|r| r.group == Group::Review)
+    }
+
+    /// The peek is open on a ticket that's ready for review, so `1`/`2` answer it.
+    fn reviewing(&self) -> bool {
+        self.peek_open && self.selected_is_review()
     }
 
     fn enter(&mut self, now: Timestamp) {
@@ -1141,6 +1151,18 @@ impl TicketsScreen {
         let text_w = width.saturating_sub(label_w + 2).max(8);
         let muted = Style::default().fg(theme.muted);
         let mut lines = Vec::new();
+        if row.group == Group::Review {
+            // First, so a long peek never scrolls the choices out of view.
+            lines.push(Line::from_spans(vec![
+                Span::new("1. Accept", Style::default().fg(theme.success)),
+                Span::new("   ", muted),
+                Span::new(
+                    "2. Reject, with a reason the next attempt sees",
+                    Style::default(),
+                ),
+            ]));
+            lines.push(Line::from_spans(vec![Span::new(String::new(), muted)]));
+        }
         for item in &row.peek {
             let style = match item.tint {
                 Tint::Failure => Style::default().fg(theme.danger),
@@ -1233,9 +1255,11 @@ impl TicketsScreen {
                 "ctrl+x",
                 "cancel the ticket (press again within 2s to confirm)",
             ),
-            ("a", "accept a ticket that is ready for review"),
-            ("r", "reject it, with a reason the next attempt sees"),
-            ("b", "open the Kanban board"),
+            (
+                "space, then 1 / 2",
+                "accept or reject a ticket that is ready for review",
+            ),
+            ("ctrl+b", "open the Kanban board"),
             ("enter on a heading", "collapse or expand the group"),
             ("shift+enter  ctrl+j", "newline in the dispatch input"),
             ("esc", "close peek, clear the input, or go back to the chat"),
@@ -1339,11 +1363,16 @@ impl TicketsScreen {
             ]
         } else {
             match (&self.selected, self.selected_row()) {
-                (_, Some(row)) if row.group == Group::Review => vec![
+                (_, Some(row)) if row.group == Group::Review && self.peek_open => vec![
+                    "1 to accept",
+                    "2 to reject",
                     "enter to open",
-                    "a to accept",
-                    "r to reject",
-                    "space to peek",
+                    "space to close",
+                ],
+                (_, Some(row)) if row.group == Group::Review => vec![
+                    "space to review",
+                    "enter to open",
+                    "ctrl+x to cancel",
                     "? for shortcuts",
                 ],
                 (_, Some(_)) if self.peek_open => vec![
@@ -1365,11 +1394,15 @@ impl TicketsScreen {
                     vec!["enter to collapse", "esc to go back", "? for shortcuts"]
                 }
                 (Some(Sel::More), _) => {
-                    vec!["enter to show all", "b for the board", "? for shortcuts"]
+                    vec![
+                        "enter to show all",
+                        "ctrl+b for the board",
+                        "? for shortcuts",
+                    ]
                 }
                 _ => vec![
                     "type a task",
-                    "b for the board",
+                    "ctrl+b for the board",
                     "esc to go back",
                     "? for shortcuts",
                 ],
@@ -1877,19 +1910,25 @@ mod tests {
     }
 
     #[test]
-    fn a_and_r_act_only_on_a_review_row_with_an_empty_input() {
+    fn a_review_tickets_peek_answers_1_and_2_and_letters_are_always_text() {
         let env = Env::new(true);
         let mut s = screen();
-        // T-4 (needs input) is selected: `a` is text.
-        press(&mut s, &env, KeyCode::Char('a'));
-        assert_eq!(s.input_text(), "a");
+        // On a review row with the peek closed, `1` and letters are text.
+        assert!(s.select_ticket("T-5"));
+        for c in ['a', 'r', 'b', '1'] {
+            press(&mut s, &env, KeyCode::Char(c));
+        }
+        assert_eq!(s.input_text(), "arb1");
         assert!(s.take_actions().is_empty());
         press(&mut s, &env, KeyCode::Esc);
-        assert!(s.select_ticket("T-5"));
-        press(&mut s, &env, KeyCode::Char('a'));
+
+        press(&mut s, &env, KeyCode::Char(' '));
+        let text = render(&s, 100, 40, true).join("\n");
+        assert!(text.contains("1. Accept"), "{text}");
+        press(&mut s, &env, KeyCode::Char('1'));
         assert_eq!(s.take_actions(), vec![TicketsAction::Accept("T-5".into())]);
 
-        press(&mut s, &env, KeyCode::Char('r'));
+        press(&mut s, &env, KeyCode::Char('2'));
         let text = render(&s, 100, 40, true).join("\n");
         assert!(text.contains("Why reject T-5?"), "{text}");
         press(&mut s, &env, KeyCode::Enter);
@@ -1915,7 +1954,7 @@ mod tests {
         assert!(s.take_actions().is_empty());
         press(&mut s, &env, KeyCode::Esc);
         assert_eq!(s.take_actions(), vec![TicketsAction::BackToChat]);
-        press(&mut s, &env, KeyCode::Char('b'));
+        key_with(&mut s, &env, KeyCode::Char('b'), KeyModifiers::CONTROL);
         assert_eq!(s.take_actions(), vec![TicketsAction::OpenBoard]);
         press(&mut s, &env, KeyCode::Char('?'));
         let text = render(&s, 100, 40, true).join("\n");

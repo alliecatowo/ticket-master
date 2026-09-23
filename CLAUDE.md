@@ -56,7 +56,8 @@ never drift between sessions:
   (`docs/decisions/D-019-claude-code-parity-shell.md` §2 and its "Implemented: tickets screen"):
   groups Needs input / Working / Ready for review / Queued / Completed, a dispatch input at the
   bottom (Enter creates and queues a ticket), Space peeks, Enter/→ attaches the chat, Ctrl+X twice
-  cancels, `a`/`r` accept/reject a submission, `b` the Kanban board, `?` shortcuts, Esc back. While
+  cancels, Space then `1`/`2` accept/reject a submission, Ctrl+B the Kanban board, `?` shortcuts,
+  Esc back (no plain letter is a shortcut: typing always goes to the dispatch input). While
   the TUI is open a scheduler runs in-process (`sched::spawn_background_runner`), so dispatched
   tickets get worked; the header says so if it could not start. `cargo run -p tm-tui --example
   chat_demo` plays a scripted turn (tool calls, Markdown) through the real chat screen, for

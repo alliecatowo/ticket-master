@@ -129,12 +129,12 @@ fn chat_to_tickets_to_board_to_detail_and_back_one_level_at_a_time() {
         "sessions are not listed on the tickets screen, got: {screen:?}"
     );
 
-    // 3. `b` opens the board.
-    pty.write(b"b").expect("press b");
+    // 3. Ctrl+B opens the board.
+    pty.write(b"\x02").expect("press ctrl+b");
     let screen = pty.wait_for(BOARD_MARK, Duration::from_secs(10));
     assert!(
         has(&screen, BOARD_MARK),
-        "`b` on tickets opens the board, got: {screen:?}"
+        "ctrl+b on tickets opens the board, got: {screen:?}"
     );
     assert!(
         has(&screen, "Draft"),

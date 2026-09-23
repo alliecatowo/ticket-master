@@ -164,9 +164,11 @@ the rows.
   - Enter or `→` attaches the chat to the ticket (`AgentSession::attach_ticket`) and posts a
     one-line `Recap of T-n: …`. Opening tickets from an attached chat selects that ticket.
   - Ctrl+X, then Ctrl+X again within 2 s, cancels the ticket. Esc disarms.
-  - `a` accepts and `r` rejects (`Store::accept`/`reject`). Reject asks for the reason in the
-    input and refuses an empty one.
-  - `b` opens the board and `?` shows shortcuts.
+  - A review ticket's peek leads with numbered choices, like a permission prompt: `1` accepts and
+    `2` rejects (`Store::accept`/`reject`). Reject asks for the reason in the input and refuses an
+    empty one.
+  - Ctrl+B opens the board and `?` shows shortcuts. As in Claude Code's agent view, no plain
+    letter is a shortcut, so typed text always reaches the dispatch input.
   - Esc closes the peek panel, then clears the input, then returns to the chat.
   - Ctrl+C clears the input first, then counts toward quitting.
   - Shift+Enter and Ctrl+J insert a newline.
@@ -210,10 +212,10 @@ the rows.
     updated `tui_navigation.rs` (double `←`, Ctrl+T, `/tickets`, board and detail, Esc chain).
 
 **Known gaps, stated plainly:**
-- **`b` collides with typing.** The dispatch input always has focus, so `b` on an empty input
-  opens the board. A task typed starting with "b" loses its first letter to the board. `a`/`r`
-  have the same collision, but only on a Ready-for-review row. The brief asked for bare-letter
-  keys, and Claude Code's agent view avoids them. If this bites, the fix is Ctrl-chords.
+- ~~**`b` collides with typing.**~~ Fixed the same day: the brief's bare-letter keys (`b` board,
+  `a`/`r` accept/reject) ate the first letter of a typed task. Claude Code's agent view has no
+  letter shortcuts, so neither does this: Ctrl+B for the board, and `1`/`2` in a review ticket's
+  peek.
 - **The peek panel has no reply input.** Claude Code's has one. Answering an escalation means
   attaching.
 - **No filters or pinning.** The `a:`/`s:` filters, Ctrl+S grouping by directory, Ctrl+T pin,
