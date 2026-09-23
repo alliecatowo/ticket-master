@@ -552,7 +552,7 @@ pub(crate) fn load_role_table(
                 tm_types::TmError::storage(format!("Failed to read harness.toml: {e}"))
             })?;
             tm_provider::RoleTable::parse(&harness_content)
-                .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))
+                .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e}")))
         }
         None => Ok(tm_provider::RoleTable::default_table()),
     }
@@ -1130,7 +1130,7 @@ pub fn harness_show(project: &Project, renderer: &Renderer) -> tm_types::Result<
         .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
 
     let config = tm_harness::HarnessConfig::parse(&harness_content)
-        .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?;
+        .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e}")))?;
 
     if renderer.is_json() {
         renderer.emit(&config, "")?;
@@ -1160,7 +1160,7 @@ pub fn harness_set(
         .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
 
     let mut config = tm_harness::HarnessConfig::parse(&harness_content)
-        .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?;
+        .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e}")))?;
 
     let value: toml::Value = toml::from_str(&args.value)
         .map_err(|e| tm_types::TmError::parse(format!("Invalid TOML value: {e}")))?;
@@ -1188,11 +1188,11 @@ pub fn harness_set(
         .map_err(|e| tm_types::TmError::parse(format!("Failed to serialize config: {e}")))?;
 
     config = tm_harness::HarnessConfig::parse(&new_config_str)
-        .map_err(|e| tm_types::TmError::parse(format!("Invalid updated config: {e:?}")))?;
+        .map_err(|e| tm_types::TmError::parse(format!("Invalid updated config: {e}")))?;
 
     config
         .validate()
-        .map_err(|e| tm_types::TmError::parse(format!("Validation failed: {e:?}")))?;
+        .map_err(|e| tm_types::TmError::parse(format!("Validation failed: {e}")))?;
 
     if renderer.is_json() {
         renderer.emit(
@@ -1287,7 +1287,7 @@ pub fn harness_promote(
     let harness_content = fs::read_to_string(&harness_path)
         .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
     let candidate = tm_harness::HarnessConfig::parse(&harness_content)
-        .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?;
+        .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e}")))?;
 
     // The current epoch this candidate is promoted from, reconstructed just well enough for
     // `EpochRegistry::promote` to compute `next_number`/apply the gate. `harness_epochs` has no
@@ -1297,7 +1297,7 @@ pub fn harness_promote(
     let current_epoch = match existing.last() {
         Some(row) => {
             let config = tm_harness::HarnessConfig::parse(&row.harness_config).map_err(|e| {
-                tm_types::TmError::parse(format!("Invalid persisted epoch {}: {e:?}", row.epoch))
+                tm_types::TmError::parse(format!("Invalid persisted epoch {}: {e}", row.epoch))
             })?;
             tm_harness::HarnessEpoch {
                 number: row.epoch,
@@ -1747,7 +1747,7 @@ pub fn mirror_link(
     for entry in &args.credentials {
         let Some((field, env_var)) = entry.split_once('=') else {
             return Err(tm_types::TmError::parse(format!(
-                "Invalid --credential {entry:?}: expected FIELD=ENV_VAR"
+                "Invalid --credential {entry}: expected FIELD=ENV_VAR"
             )));
         };
         credentials.insert(field.to_string(), env_var.to_string());
@@ -1825,7 +1825,7 @@ fn build_tracker(
                 Ok(TrackerBuildOutcome::Built(Box::new(tracker)))
             }
             _ => Ok(TrackerBuildOutcome::Skipped(format!(
-                "adapter {:?}: github requires credential fields token, owner, repo",
+                "adapter {}: github requires credential fields token, owner, repo",
                 adapter.name
             ))),
         },
@@ -1836,7 +1836,7 @@ fn build_tracker(
                 Ok(TrackerBuildOutcome::Built(Box::new(tracker)))
             }
             _ => Ok(TrackerBuildOutcome::Skipped(format!(
-                "adapter {:?}: gitlab requires credential fields token, project_id",
+                "adapter {}: gitlab requires credential fields token, project_id",
                 adapter.name
             ))),
         },
@@ -1853,7 +1853,7 @@ fn build_tracker(
                     Ok(TrackerBuildOutcome::Built(Box::new(tracker)))
                 }
                 _ => Ok(TrackerBuildOutcome::Skipped(format!(
-                    "adapter {:?}: jira requires credential fields email, api_token, project_key",
+                    "adapter {}: jira requires credential fields email, api_token, project_key",
                     adapter.name
                 ))),
             }
@@ -1869,7 +1869,7 @@ fn build_tracker(
                 Ok(TrackerBuildOutcome::Built(Box::new(tracker)))
             }
             _ => Ok(TrackerBuildOutcome::Skipped(format!(
-                "adapter {:?}: linear requires credential fields api_key, team_id",
+                "adapter {}: linear requires credential fields api_key, team_id",
                 adapter.name
             ))),
         },
@@ -2320,8 +2320,11 @@ pub fn events_verify(project: &Project, renderer: &Renderer) -> tm_types::Result
             "valid".to_string()
         } else {
             format!(
-                "invalid at seq {:?}: {}",
-                report.first_broken_seq,
+                "invalid at seq {}: {}",
+                report
+                    .first_broken_seq
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "unknown".to_string()),
                 report.detail.as_deref().unwrap_or("unknown")
             )
         };
@@ -2330,8 +2333,11 @@ pub fn events_verify(project: &Project, renderer: &Renderer) -> tm_types::Result
 
     if !report.is_valid() {
         return Err(tm_types::TmError::invariant(format!(
-            "Event chain is broken at seq {:?}",
-            report.first_broken_seq
+            "Event chain is broken at seq {}",
+            report
+                .first_broken_seq
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "unknown".to_string())
         )));
     }
 
