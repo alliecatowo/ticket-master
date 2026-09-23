@@ -269,7 +269,7 @@ impl IntoResponse for ServerError {
             ServerError::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 "unauthorized",
-                "unauthorized".to_string(),
+                "This request needs a valid access token.".to_string(),
             ),
             ServerError::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg),
             ServerError::ApprovalFailed(msg) => {
