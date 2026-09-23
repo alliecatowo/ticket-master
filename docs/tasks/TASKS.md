@@ -435,6 +435,78 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-e2e`
   evidence: The `nav-fresh` probe confirmed indexing picks up new files/edits and `nav-semantic` confirmed correct top-1 hits, and `prefetch` confirmed a `ContextPack`/`rent_report` abstraction exists internally — all verified by hand via CLI probes, none by an automated regression test.
 
+- [ ] **d20-decider-trait-and-mock** — Add DecisionProvider trait, DecideRequest/Response types, MockDecisionProvider, and Role::Decider
+  model: sonnet · severity: critical · builds Rust: yes · area: providers (D-020) · deps: none
+  files: `crates/tm-provider/src/decide.rs`, `crates/tm-provider/src/lib.rs`, `crates/tm-provider/src/mock.rs`, `crates/tm-types/src/role.rs`
+  change: Create `crates/tm-provider/src/decide.rs` with the `DecisionProvider` trait (id, limits, async decide) and `DecideRequest`/`DecideResponse`/`Question(Choice|Score|Noul)`/`DecideLimits` types per D-020 §Decision 1-2 (`docs/decisions/D-020-system-one-decision-providers.md`); add `MockDecisionProvider` (hash-keyed scripted responses, same pattern as `crates/tm-provider/src/mock.rs`'s `MockProvider` — no I/O ever) in the same file or a sibling `decide/mock.rs`; add `Role::Decider` to `crates/tm-types/src/role.rs`'s enum and its `pub const ALL: [Role; 12]` (becomes 13), updating every place that iterates `Role::ALL` and any hardcoded `12` in tests. This is a foundational task all other D-020 tasks below depend on.
+  acceptance: cargo builds; `Role::ALL.len() == 13` and includes Decider; MockDecisionProvider returns deterministic answers for the same DecideRequest across two calls and differs for a different request; no cargo test touches the network.
+  test: `mise run test:crate -- tm-provider`
+  evidence: `grep -rn 'DecisionProvider\|Role::Decider\|classify\.decided' crates --include='*.rs'` (worktrees excluded) → no output, exit 1: nothing exists yet. `crates/tm-types/src/role.rs:39` `pub const ALL: [Role; 12] = [...]` confirms the enum and cardinality to extend.
+
+- [ ] **d20-decider-http-systemone-client** — Add an HTTP DecisionProvider for the /v1/systemone wire contract (Jev gateway, TypeSafe direct, jevmlx local)
+  model: sonnet · severity: critical · builds Rust: yes · area: providers (D-020) · deps: d20-decider-trait-and-mock
+  files: `crates/tm-provider/src/providers/systemone.rs`, `crates/tm-provider/src/providers/mod.rs`, `crates/tm-provider/src/providers/registry.rs`
+  change: Add `providers/systemone.rs` implementing `DecisionProvider` (from `d20-decider-trait-and-mock`) with a reqwest-based client (same shape as `providers/openai.rs`) against a configurable `base_url` + `/v1/systemone`, POSTing `{model, state, questions}` and parsing `{answers, usage, provider_metadata}` per Vercel's documented TypeSafe-compatible API (https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe). Auth: `Authorization: Bearer <token>` where token comes from `AI_GATEWAY_API_KEY`, `TYPESAFE_API_KEY`, or a caller-supplied token (never hardcode a header name assumption beyond Bearer). Do NOT build an OpenAI-chat-shaped client or target `mlx_lm.server` — Jev/TypeSafe never speak chat-completions and Laya is not a generative LM. Register it in `providers/registry.rs` so a config can select it for `Role::Decider`.
+  acceptance: A unit test with an injected fake transport (trait-object or a local test double, not real network) proves the request body matches `{model,state,questions}` and a 200 JSON response parses into `DecideResponse` with per-option probabilities; an error body `{message,error_type}` maps to a typed `ProviderError`.
+  test: `mise run test:crate -- tm-provider`
+  evidence: WebFetch of https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe: base URL `https://ai-gateway.vercel.sh/typesafe`, POST `/typesafe/v1/systemone`, body `{"model":"typesafe-ai/jev","state":...,"questions":{...}}`, auth `Authorization: Bearer $AI_GATEWAY_API_KEY` or OIDC token.
+
+- [ ] **d20-decider-config-selection** — Add config to select the decider backend (mock/http) and its base URL/model per role_config's existing pattern
+  model: sonnet · severity: high · builds Rust: yes · area: providers (D-020) · deps: d20-decider-trait-and-mock
+  files: `crates/tm-provider/src/role_config.rs`
+  change: Extend `role_config.rs`'s TOML schema with a Decider role entry (candidates: mock, or systemone-http with base_url/model_id/env var name for the token) reusing the existing `RoleConfigError` variants (`UnknownRole`, `EmptyRole`, `ZeroConcurrency`) rather than inventing a parallel config path, so `tm doctor`/existing role-config validation covers it for free.
+  acceptance: A role_config.toml with a `[decider]` section (or equivalent) parses into a routable candidate list; an empty Decider role produces `RoleConfigError::EmptyRole` like any other role; existing role_config tests still pass.
+  test: `mise run test:crate -- tm-provider`
+  evidence: `crates/tm-provider/src/role_config.rs:90-110` shows the existing `RoleConfigError` enum (InvalidToml, UnknownRole, EmptyRole, ZeroConcurrency) this task reuses rather than duplicating.
+
+- [ ] **d20-classify-decided-event-kind** — Add EventKind::ClassifyDecided ("classify.decided") with the D-020 payload shape
+  model: sonnet · severity: high · builds Rust: yes · area: events (D-020) · deps: none
+  files: `crates/tm-events/src/kind.rs`
+  change: Add a `ClassifyDecided` variant to `EventKind` following the existing pattern at `kind.rs:79-80/430` (TicketCreated → "ticket.created") and `:225-226/476` (ApprovalRequested → "approval.requested"): `#[serde(rename = "classify.decided")]`, wire string "classify.decided", with fields `{site, backend, model, model_revision, input_hash, questions_hash, answers, calibrated_confidence, thresholds, disposition, latency_ms, cost_micros}` per D-020's cascade diagram (`docs/vision/system-one-decisions.md` §3). Use the `classify.*` namespace, not `decision.*` (already taken by the unrelated `DecisionId` ticket-decision domain in `crates/tm-core/src/decision.rs`).
+  acceptance: `EventKind::ClassifyDecided` round-trips through serde as "classify.decided"; the event log's existing kind-exhaustiveness test (if any) still compiles/passes with the new variant.
+  test: `mise run test:crate -- tm-events`
+  evidence: `crates/tm-events/src/kind.rs:79-80` `#[serde(rename = "ticket.created")]` and `:225-226` `#[serde(rename = "approval.requested")]` are the two existing precedents this task follows; grep confirmed no `classify.*` or decision-provider event kind exists yet.
+
+- [ ] **d20-shadow-triage-new-tickets** — Shadow-classify new tickets at creation: call the decider, record classify.decided(shadow), never act on it
+  model: sonnet · severity: high · builds Rust: yes · area: core (D-020) · deps: d20-decider-trait-and-mock, d20-decider-config-selection, d20-classify-decided-event-kind
+  files: `crates/tm-core/src/store.rs`
+  change: At the ticket-creation append site in tm-core (grep `'"ticket.created"'` in `crates/tm-core/src` for the exact function), after appending `ticket.created`, call the configured `Role::Decider` candidate (from `d20-decider-config-selection`) with a triage-shaped `DecideRequest` (kind/routing questions over the ticket objective), and append `classify.decided` with `disposition:"shadow"` via `d20-classify-decided-event-kind`'s new `EventKind`. On any decider error or missing candidate, log and continue — ticket creation must never fail or block on this.
+  acceptance: Creating a ticket with the `MockDecisionProvider` configured appends both `ticket.created` and a `classify.decided(shadow)` event in the same store transaction/sequence; with no decider configured, ticket creation behaves exactly as before (no new event, no error).
+  test: `mise run test:crate -- tm-core`
+  evidence: `grep -rln '"ticket.created"' crates --include='*.rs'` (worktrees excluded) → `crates/tm-cli/tests/tui_tickets.rs`, `crates/tm-cli/tests/ticket_fork.rs`, `crates/tm-events/src/kind.rs` — the real append site in tm-core's own src needs its own grep at implementation time since this search only turned up test/event-kind references.
+
+- [ ] **d20-redact-decide-request** — Add redact_decide_request through SessionRedactor before any remote DecisionProvider call
+  model: sonnet · severity: medium · builds Rust: yes · area: auth (D-020) · deps: d20-decider-trait-and-mock, d20-decider-http-systemone-client
+  files: `crates/tm-auth/src/redact.rs`
+  change: Per D-020 decision 7 ("Redaction before anything leaves the machine"), add a `redact_decide_request(&DecideRequest) -> DecideRequest` function alongside `SessionRedactor`'s existing redaction entry points in `crates/tm-auth/src/redact.rs`, applying the same secret-pattern scrubbing `SessionRedactor` already does to session/turn content, to the `DecideRequest`'s state and question text. Wire the HTTP decider provider (`d20-decider-http-systemone-client`) to call it before every outbound request; the mock/local backends don't need it (nothing leaves the machine).
+  acceptance: A `DecideRequest` whose state contains a fake API-key-shaped string is redacted identically to how `SessionRedactor` redacts the same string in a normal turn; the HTTP systemone provider's outbound body in a unit test never contains the raw secret.
+  test: `mise run test:crate -- tm-auth`
+  evidence: `grep -rln 'SessionRedactor' crates --include='*.rs'` (worktrees excluded) → `crates/tm-auth/src/lib.rs`, `crates/tm-auth/src/redact.rs`, `crates/tm-provider/src/fabric.rs`, `crates/tm-core/src/store.rs` — the redaction entry point this task extends.
+
+- [ ] **d20-bench-decision-eval** — Add a small offline decision-eval task to tm-harness's bench
+  model: sonnet · severity: medium · builds Rust: yes · area: bench (D-020) · deps: d20-decider-trait-and-mock
+  files: `crates/tm-harness/src/bench.rs`
+  change: Extend `crates/tm-harness/src/bench.rs` with a decision-eval task type that replays `classify.decided(shadow)` events against known outcomes (`Session.promote`, `StepRecord`, ticket end-states per D-020's "Why" section) and reports accuracy/ECE, using the `MockDecisionProvider` for a fully offline, hermetic fixture so the eval itself needs no network or real decider.
+  acceptance: `tm bench` (or the crate's existing bench entry point) runs the new decision-eval task against a fixture of recorded `classify.decided` + outcome pairs and reports an accuracy number, with zero network calls.
+  test: `mise run test:crate -- tm-harness`
+  evidence: `crates/tm-harness/src/bench.rs` exists (`find crates -iname '*bench*.rs'` outside worktrees/target → only this file) and is the natural extension point named in D-020 consequence "Plus a `tm bench` decision task scored against `Session.promote` and `StepRecord`."
+
+- [ ] **d20-flip-status-and-amend-spec** — Flip D-020 from proposed to accepted and amend SPEC.md §6.1 with the decider role, once the trait/mock lands
+  model: haiku · severity: low · builds Rust: no · area: docs (D-020) · deps: d20-decider-trait-and-mock, d20-shadow-triage-new-tickets
+  files: `docs/decisions/D-020-system-one-decision-providers.md`, `SPEC.md`
+  change: Once `d20-decider-trait-and-mock` (and ideally `d20-shadow-triage-new-tickets`) merge, change D-020's "Status: proposed" line to "Status: accepted", and add the decider role / DecisionProvider trait to SPEC.md §6.1 per D-020's own closing line ("If accepted, SPEC.md ... gains the decider role and the DecisionProvider trait"), per this repo's "keep documentation honest as you change things" rule.
+  acceptance: `docs/decisions/D-020-system-one-decision-providers.md`'s Status line reads accepted; SPEC.md §6.1 mentions Role::Decider/DecisionProvider; `mise run hygiene`'s D-NNN cross-reference check still passes.
+  test: `mise run hygiene`
+  evidence: `docs/decisions/D-020-system-one-decision-providers.md` header line: "**Status:** proposed · **Date:** 2026-09-23" and its closing paragraph naming exactly this SPEC §6.1 amendment as conditional on acceptance.
+
+- [ ] **d20-backlog-status-accepted** — Move D-020 out of docs/backlog.md's "Ask the owner later" and record it as owner-accepted
+  model: haiku · severity: low · builds Rust: no · area: docs (D-020) · deps: none
+  files: `docs/backlog.md`
+  change: The owner approved D-020 on 2026-09-23 (asked directly for Jev/Laya support). Remove the "D-020 (system-one decision providers, proposed): deferred by the owner on 2026-09-23 ('toss jev in backlog')..." entry from `docs/backlog.md`'s "## Ask the owner later" section and replace it with a short "## Accepted, 2026-09-23 (D-020 system-one decision providers)" entry noting the approval, pointing at `docs/tasks/TASKS.md`'s `d20-*` tasks for the shadow-mode slice, and folding in this session's Jev/Laya research findings (Laya is on Hugging Face as `convaiinnovations/laya*`, not Kaggle — Kaggle's role is the free fine-tune notebook; `laya-mlx` has no server mode; Jev's real contract is `POST https://ai-gateway.vercel.sh/typesafe/v1/systemone`, not OpenAI chat-completions, auth via `AI_GATEWAY_API_KEY` or Vercel OIDC, neither available in the research shell so no live call was made and no key was created).
+  acceptance: `docs/backlog.md` no longer lists D-020 under "Ask the owner later"; a new section records the acceptance and the Jev/Laya research summary; `mise run hygiene` still passes.
+  test: `mise run hygiene`
+  evidence: `docs/backlog.md`'s "## Ask the owner later" section currently contains the D-020 deferral entry dated 2026-09-23, now superseded by the owner's direct Jev/Laya request in this same session.
+
 ## Owner asks (2026-09-23)
 
 - Actual ticket flow works end to end: request → implementation → verification → finished, from the chat, the tickets screen, `tm serve` and `tm mcp`.
@@ -884,9 +956,14 @@ Gate: `mise run verify`
   acceptance: On a scratch Swift file, outline lists the function, def resolves it, and refs finds exactly the call site.
   test: `mise run test:crate -- tm-codeintel`
 
-## D-020 (deferred)
+## D-020 (accepted 2026-09-23)
 
-6 owner-gated batches exist in the audit plan (journal of `wf_87a85411-848`). Not scheduled until the owner brings D-020 back.
+The owner approved D-020 on 2026-09-23 (asked directly for Jev/Laya support), superseding the
+earlier "6 owner-gated batches, not scheduled until the owner brings D-020 back" note (journal of
+`wf_87a85411-848`). The shadow-mode slice is now scheduled as tasks `d20-decider-trait-and-mock`
+through `d20-flip-status-and-amend-spec` in section T above; see `docs/backlog.md`'s "Accepted,
+2026-09-23 (D-020 system-one decision providers)" entry for the Jev/Laya research this scheduling
+is based on.
 
 ## Dropped by the planner
 
