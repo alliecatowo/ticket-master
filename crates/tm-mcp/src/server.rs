@@ -1,7 +1,21 @@
-//! [`McpServer`]: exposes one already-identified Ticketmaster project as a real, read-only MCP
-//! server over stdio — `ticket.*` (from [`tm_core::Store::view`]), `search.*` and `symbol.*`
+//! [`McpServer`]: exposes one already-identified Ticketmaster project as a real MCP server over
+//! stdio — `ticket_list`/`ticket_show` (from [`tm_core::Store::view`]), `search_*` and `symbol_*`
 //! (from `tm_codeintel::CodeIntel`, the same facade `tm-cli`'s own `search`/`symbol` subcommands
-//! call — see `crates/tm-cli/src/search.rs`).
+//! call — see `crates/tm-cli/src/search.rs`), and one write: `ticket_dispatch`, which creates a
+//! work ticket with `tm ticket new`'s defaults and activates it, so an MCP host (Claude Code, via
+//! `tm mcp`) can hand work to tm's workers.
+//!
+//! # Tool names
+//!
+//! Underscored, not dotted: Claude Code (and the Anthropic and OpenAI APIs behind most MCP hosts)
+//! only accept tool names matching `^[a-zA-Z0-9_-]{1,64}$`, so `ticket.list` would be rejected by
+//! the host before a model ever saw it.
+//!
+//! # Deliberately absent: accept, reject, retry
+//!
+//! A submitted ticket's accept/reject and an escalated ticket's retry are human-only decisions
+//! (`tm ticket accept|reject|retry`, the tickets screen, `tm serve`'s transition route). An MCP
+//! host is an agent, so this server never offers them.
 //!
 //! # Opening a project: no second discovery mechanism
 //!
@@ -13,16 +27,16 @@
 //! `(root, state_dir)` pair (`docs/decisions/D-003-project-scope.md`); depending on `tm-cli`
 //! itself from here would pull in axum/crossterm/ratatui/tm-tui/tm-browser/tm-computer/tm-server
 //! transitively for a binary that needs none of them, so this crate does not do that.
-//! `src/bin/tm-mcp-server.rs` instead takes `--project-root`/`--state-dir` directly as flags —
-//! resolving *which* directory those are (bare `tm`'s scope logic) is left to whatever launches
-//! this binary (a future `tm mcp serve` verb in `tm-cli`, or a hand-written MCP host config)
-//! rather than reinvented here. No `.join(".tm")` appears anywhere in this crate as a result.
+//! `src/bin/tm-mcp-server.rs` instead takes `--project-root`/`--state-dir` directly as flags.
+//! `tm mcp` (in `tm-cli`) resolves the project itself and uses [`McpServer::with_store`] to share
+//! its already-open [`tm_core::Store`] with the in-process scheduler, so both mint ids from one
+//! counter. No `.join(".tm")` appears anywhere in this crate as a result.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Value};
-use tm_types::{MilestoneId, Result, TicketId, TmError};
+use tm_types::{Authority, Budget, MilestoneId, ParticipantId, Result, TicketId, TmError};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::protocol::{
@@ -36,12 +50,12 @@ use crate::transport::{FramedTransport, Transport};
 /// this crate's two halves happen to target the same spec revision today).
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-/// The six read-only tools this server exposes: `(name, description, input JSON Schema)`. A
+/// The tools this server exposes: `(name, description, input JSON Schema)`. A
 /// plain function rather than a `const` because `serde_json::json!` allocates.
 fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
-            "name": "ticket.list",
+            "name": "ticket_list",
             "description": "List tickets in the project, optionally filtered by state, milestone, or parent.",
             "inputSchema": {
                 "type": "object",
@@ -54,7 +68,7 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "ticket.show",
+            "name": "ticket_show",
             "description": "Show the full record for one ticket by id.",
             "inputSchema": {
                 "type": "object",
@@ -63,7 +77,7 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "search.exact",
+            "name": "search_exact",
             "description": "Literal substring search over the project's tracked files.",
             "inputSchema": {
                 "type": "object",
@@ -75,7 +89,7 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "search.hybrid",
+            "name": "search_hybrid",
             "description": "Fused semantic + lexical + symbol-graph search over the project's code index.",
             "inputSchema": {
                 "type": "object",
@@ -87,7 +101,7 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "symbol.def",
+            "name": "symbol_def",
             "description": "Resolve a symbol name to its definition site.",
             "inputSchema": {
                 "type": "object",
@@ -99,7 +113,7 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "symbol.outline",
+            "name": "symbol_outline",
             "description": "Rendered top-level symbol outline for one file.",
             "inputSchema": {
                 "type": "object",
@@ -107,17 +121,61 @@ fn tool_definitions() -> Vec<Value> {
                 "required": ["path"]
             }
         }),
+        json!({
+            "name": "ticket_dispatch",
+            "description": "Hand a task to tm's background workers: creates a work ticket for the objective (the same defaults as `tm ticket new`) and queues it. Returns the ticket id and state; follow it with ticket_show. A worker picks it up when a tm scheduler is running for this project (`tm mcp` runs one unless started with --no-workers). A finished ticket waits for a human to accept or reject it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string", "description": "What the worker should do, stated as a complete task."}
+                },
+                "required": ["objective"]
+            }
+        }),
     ]
 }
 
 const TOOL_NAMES: &[&str] = &[
-    "ticket.list",
-    "ticket.show",
-    "search.exact",
-    "search.hybrid",
-    "symbol.def",
-    "symbol.outline",
+    "ticket_list",
+    "ticket_show",
+    "search_exact",
+    "search_hybrid",
+    "symbol_def",
+    "symbol_outline",
+    "ticket_dispatch",
 ];
+
+/// The actor `ticket_dispatch` records when the host didn't say who it is in `initialize`.
+const DEFAULT_DISPATCH_ACTOR: &str = "agent:mcp/client";
+
+/// The actor for tickets dispatched by the MCP host that named itself `client_name` in
+/// `initialize`'s `clientInfo`: `agent:mcp/<name>`, with every character outside
+/// `[A-Za-z0-9._-]` replaced by `-`. A `ParticipantId` for an agent must be
+/// `agent:<provider>/<id>`, so a bare `agent:mcp` would not parse.
+fn dispatch_actor(client_name: Option<&str>) -> ParticipantId {
+    let cleaned: String = client_name
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(64)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches('-');
+    let default = || {
+        // `DEFAULT_DISPATCH_ACTOR` is a valid `agent:<provider>/<id>`; `system` is unreachable.
+        ParticipantId::new(DEFAULT_DISPATCH_ACTOR).unwrap_or_else(|_| ParticipantId::system())
+    };
+    if cleaned.is_empty() {
+        return default();
+    }
+    ParticipantId::new(format!("agent:mcp/{cleaned}")).unwrap_or_else(|_| default())
+}
 
 /// The default result cap for a search/list tool call that does not specify `limit`.
 const DEFAULT_LIMIT: usize = 20;
@@ -140,19 +198,54 @@ pub struct McpServer {
     store: Arc<tm_core::Store>,
     project_root: PathBuf,
     state_dir: PathBuf,
+    /// `clientInfo.name` from the host's `initialize`, for `ticket_dispatch`'s actor.
+    client_name: Mutex<Option<String>>,
 }
 
 impl McpServer {
     /// Open the project at `state_dir` (already resolved by the caller — see this module's doc
-    /// comment) and serve reads over it. `project_root` is the workspace `tm-codeintel` walks;
-    /// it may differ from `state_dir` (D-003: global-scope state lives outside the workspace).
+    /// comment) and serve it. `project_root` is the workspace `tm-codeintel` walks; it may differ
+    /// from `state_dir` (D-003: global-scope state lives outside the workspace).
+    ///
+    /// This opens a second [`tm_core::Store`] with its own id counters, restored from the
+    /// database at open. Like any two `tm` processes writing one project at once (`tm ticket
+    /// new` next to a running `tm serve`), a `ticket_dispatch` here can race another process for
+    /// the next ticket id. `tm mcp` avoids that by sharing its store through
+    /// [`McpServer::with_store`].
     pub fn new(project_root: PathBuf, state_dir: PathBuf) -> Result<Self> {
         let store = Arc::new(tm_core::Store::open_at(&state_dir)?);
-        Ok(McpServer {
+        Ok(Self::with_store(store, project_root, state_dir))
+    }
+
+    /// Serve a project whose [`tm_core::Store`] the caller already has open, so the server and
+    /// anything else in the process (an in-process scheduler) share one store and one id source.
+    pub fn with_store(
+        store: Arc<tm_core::Store>,
+        project_root: PathBuf,
+        state_dir: PathBuf,
+    ) -> Self {
+        McpServer {
             store,
             project_root,
             state_dir,
-        })
+            client_name: Mutex::new(None),
+        }
+    }
+
+    fn remember_client(&self, params: Option<&Value>) {
+        let name = params
+            .and_then(|p| p.get("clientInfo"))
+            .and_then(|c| c.get("name"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Ok(mut slot) = self.client_name.lock() {
+            *slot = name;
+        }
+    }
+
+    fn dispatch_actor(&self) -> ParticipantId {
+        let name = self.client_name.lock().ok().and_then(|slot| slot.clone());
+        dispatch_actor(name.as_deref())
     }
 
     fn code_intel(&self) -> Result<tm_codeintel::CodeIntel> {
@@ -207,6 +300,44 @@ impl McpServer {
             .get(&id)
             .ok_or_else(|| TmError::not_found("ticket", &id))?;
         serde_json::to_value(ticket).map_err(TmError::from)
+    }
+
+    /// Create a work ticket with `tm ticket new`'s defaults (`Authority::worker()`, an
+    /// unlimited budget, and `tm-core`'s default executor, retry and verification policies),
+    /// then activate it so a worker can take it.
+    fn ticket_dispatch(&self, args: &Value) -> Result<Value> {
+        let objective = get_str(args, "objective")?.trim();
+        if objective.is_empty() {
+            return Err(TmError::parse("`objective` must not be empty"));
+        }
+        let actor = self.dispatch_actor();
+        let events = self.store.create_ticket(
+            tm_core::TicketKind::Work,
+            objective.to_string(),
+            None,
+            None,
+            Authority::worker(),
+            Vec::new(),
+            tm_core::ExecutorRequirements::default(),
+            Vec::new(),
+            Vec::new(),
+            tm_core::VerificationPolicy::default(),
+            Budget::unlimited(),
+            tm_core::RetryPolicy::default(),
+            0,
+            actor.clone(),
+        )?;
+        let id = events
+            .iter()
+            .find_map(|e| e.payload.as_ticket_created().map(|p| p.ticket.clone()))
+            .ok_or_else(|| TmError::invariant("create_ticket did not emit ticket.created"))?;
+        self.store.activate(&id, actor)?;
+        let view = self.store.view()?;
+        let ticket = view
+            .tickets
+            .get(&id)
+            .ok_or_else(|| TmError::not_found("ticket", &id))?;
+        Ok(json!({ "id": id.to_string(), "state": ticket.state }))
     }
 
     fn search_exact(&self, args: &Value) -> Result<Value> {
@@ -293,12 +424,13 @@ impl McpServer {
 
     fn execute_tool(&self, name: &str, args: &Value) -> Result<Value> {
         match name {
-            "ticket.list" => self.ticket_list(args),
-            "ticket.show" => self.ticket_show(args),
-            "search.exact" => self.search_exact(args),
-            "search.hybrid" => self.search_hybrid(args),
-            "symbol.def" => self.symbol_def(args),
-            "symbol.outline" => self.symbol_outline(args),
+            "ticket_list" => self.ticket_list(args),
+            "ticket_show" => self.ticket_show(args),
+            "ticket_dispatch" => self.ticket_dispatch(args),
+            "search_exact" => self.search_exact(args),
+            "search_hybrid" => self.search_hybrid(args),
+            "symbol_def" => self.symbol_def(args),
+            "symbol_outline" => self.symbol_outline(args),
             other => Err(TmError::invariant(format!(
                 "execute_tool called with unvalidated tool name `{other}`"
             ))),
@@ -349,14 +481,17 @@ impl McpServer {
     /// Handle one JSON-RPC request, producing exactly the response to send back.
     pub fn handle_request(&self, req: JsonRpcRequest) -> JsonRpcResponse {
         match req.method.as_str() {
-            "initialize" => JsonRpcResponse::ok(
-                req.id,
-                json!({
-                    "protocolVersion": PROTOCOL_VERSION,
-                    "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "tm-mcp", "version": env!("CARGO_PKG_VERSION")},
-                }),
-            ),
+            "initialize" => {
+                self.remember_client(req.params.as_ref());
+                JsonRpcResponse::ok(
+                    req.id,
+                    json!({
+                        "protocolVersion": PROTOCOL_VERSION,
+                        "capabilities": {"tools": {}},
+                        "serverInfo": {"name": "tm-mcp", "version": env!("CARGO_PKG_VERSION")},
+                    }),
+                )
+            }
             "ping" => JsonRpcResponse::ok(req.id, json!({})),
             "tools/list" => JsonRpcResponse::ok(req.id, json!({ "tools": tool_definitions() })),
             "tools/call" => match self.dispatch_tool_call(req.params) {
@@ -407,15 +542,17 @@ impl McpServer {
     /// Serve over this process's real stdin/stdout, [`Framing::ContentLength`]-framed (the
     /// framing the task that produced this crate specified for MCP stdio — see
     /// `crate::protocol`'s module doc comment for why that diverges from the real-world MCP
-    /// stdio spec, and why [`Framing::LineDelimited`] exists on the client side for talking to
-    /// an actual external server).
+    /// stdio spec). `tm-mcp-server` keeps this default; `tm mcp` uses
+    /// [`McpServer::run_stdio_with`] and [`Framing::LineDelimited`], which is what Claude Code
+    /// and every other real MCP host speak.
     pub async fn run_stdio(&self) -> Result<()> {
-        self.serve(
-            tokio::io::stdin(),
-            tokio::io::stdout(),
-            Framing::ContentLength,
-        )
-        .await
+        self.run_stdio_with(Framing::ContentLength).await
+    }
+
+    /// Serve over this process's real stdin/stdout with `framing`, until stdin closes.
+    pub async fn run_stdio_with(&self, framing: Framing) -> Result<()> {
+        self.serve(tokio::io::stdin(), tokio::io::stdout(), framing)
+            .await
     }
 }
 
@@ -477,7 +614,7 @@ mod tests {
         let resp = server.handle_request(JsonRpcRequest::new(
             crate::protocol::RequestId::Number(1),
             "tools/call",
-            Some(json!({"name": "not.a.real.tool", "arguments": {}})),
+            Some(json!({"name": "not_a_real_tool", "arguments": {}})),
         ));
         let err = resp
             .error
@@ -491,7 +628,7 @@ mod tests {
         let resp = server.handle_request(JsonRpcRequest::new(
             crate::protocol::RequestId::Number(1),
             "tools/call",
-            Some(json!({"name": "ticket.show", "arguments": {"id": "T-999"}})),
+            Some(json!({"name": "ticket_show", "arguments": {"id": "T-999"}})),
         ));
         let result = resp
             .result
@@ -505,11 +642,107 @@ mod tests {
         let resp = server.handle_request(JsonRpcRequest::new(
             crate::protocol::RequestId::Number(1),
             "tools/call",
-            Some(json!({"name": "ticket.list", "arguments": {}})),
+            Some(json!({"name": "ticket_list", "arguments": {}})),
         ));
         let result = resp
             .result
             .expect("listing tickets on an empty project succeeds");
         assert_eq!(result["isError"], false);
+    }
+
+    fn call(server: &McpServer, name: &str, arguments: Value) -> Value {
+        let resp = server.handle_request(JsonRpcRequest::new(
+            crate::protocol::RequestId::Number(7),
+            "tools/call",
+            Some(json!({"name": name, "arguments": arguments})),
+        ));
+        resp.result.expect("a known tool answers with a result")
+    }
+
+    fn payload(result: &Value) -> Value {
+        let text = result["content"][0]["text"]
+            .as_str()
+            .expect("tool results carry one text block");
+        serde_json::from_str(text).expect("tool result text is JSON")
+    }
+
+    #[test]
+    fn every_tool_name_is_a_valid_host_tool_name() {
+        for name in TOOL_NAMES {
+            assert!(
+                !name.is_empty()
+                    && name.len() <= 64
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "{name} would be rejected by Claude Code / the Anthropic and OpenAI APIs"
+            );
+        }
+    }
+
+    #[test]
+    fn no_human_only_transition_is_offered() {
+        for name in TOOL_NAMES {
+            for human_only in ["accept", "reject", "retry"] {
+                assert!(!name.contains(human_only), "{name} is human-only");
+            }
+        }
+    }
+
+    #[test]
+    fn ticket_dispatch_creates_and_activates_a_worker_ticket() {
+        let (server, _dir) = open_test_server();
+        server.handle_request(JsonRpcRequest::new(
+            crate::protocol::RequestId::Number(1),
+            "initialize",
+            Some(json!({"clientInfo": {"name": "claude-code", "version": "2.0"}})),
+        ));
+        let result = call(
+            &server,
+            "ticket_dispatch",
+            json!({"objective": "Add a README"}),
+        );
+        assert_eq!(result["isError"], false, "{result}");
+        let out = payload(&result);
+        assert_eq!(out["state"], "ready");
+        let id = TicketId::new(out["id"].as_str().expect("id is a string")).expect("valid id");
+
+        let view = server.store.view().expect("view");
+        let ticket = view.tickets.get(&id).expect("the ticket exists");
+        assert_eq!(ticket.objective, "Add a README");
+        assert_eq!(ticket.kind, tm_core::TicketKind::Work);
+        assert_eq!(ticket.authority, Authority::worker());
+        assert_eq!(ticket.budget, Budget::unlimited());
+        assert_eq!(ticket.executor, tm_core::ExecutorRequirements::default());
+        assert_eq!(ticket.retry, tm_core::RetryPolicy::default());
+        assert_eq!(ticket.verification, tm_core::VerificationPolicy::default());
+        assert_eq!(ticket.state, tm_core::TicketState::Ready);
+    }
+
+    #[test]
+    fn ticket_dispatch_without_an_objective_is_a_tool_error() {
+        let (server, _dir) = open_test_server();
+        let result = call(&server, "ticket_dispatch", json!({"objective": "   "}));
+        assert_eq!(result["isError"], true);
+        let result = call(&server, "ticket_dispatch", json!({}));
+        assert_eq!(result["isError"], true);
+    }
+
+    #[test]
+    fn dispatch_actor_names_the_host_and_always_parses() {
+        assert_eq!(
+            dispatch_actor(Some("claude-code")).to_string(),
+            "agent:mcp/claude-code"
+        );
+        assert_eq!(
+            dispatch_actor(Some("My Host/1")).to_string(),
+            "agent:mcp/My-Host-1"
+        );
+        assert_eq!(dispatch_actor(None).to_string(), DEFAULT_DISPATCH_ACTOR);
+        assert_eq!(
+            dispatch_actor(Some(" /// ")).to_string(),
+            DEFAULT_DISPATCH_ACTOR
+        );
+        assert!(dispatch_actor(Some("x")).is_agent());
     }
 }

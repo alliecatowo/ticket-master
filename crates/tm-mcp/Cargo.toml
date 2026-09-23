@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Ticketmaster MCP adapter: a Model Context Protocol client (stdio + SSE, one CapabilityProvider per connected server) and a read-only MCP server exposing ticket.*/search.*/symbol.* over stdio (docs/audit-2026-09-18-fable.md B-12)."
+description = "Ticketmaster MCP adapter: a Model Context Protocol client (stdio + SSE, one CapabilityProvider per connected server) and an MCP server exposing ticket_*/search_*/symbol_* reads plus ticket_dispatch over stdio (tm mcp, tm-mcp-server) (docs/audit-2026-09-18-fable.md B-12)."
 
 [dependencies]
 tm-types = { workspace = true }

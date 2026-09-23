@@ -9,8 +9,10 @@
 //!   ([`capability::McpClientCapability`]) — so `tm_agent::tools::ToolRegistry` (or any future
 //!   caller) sees a remote server's tools exactly like it sees a built-in capability crate.
 //! - **Server** ([`server`]): exposes one already-opened Ticketmaster project as a real MCP
-//!   server over stdio, with read-only `ticket.*`/`search.*`/`symbol.*` tools backed by
-//!   [`tm_core::Store`] and `tm_codeintel::CodeIntel`.
+//!   server over stdio, with `ticket_list`/`ticket_show`/`search_*`/`symbol_*` reads backed by
+//!   [`tm_core::Store`] and `tm_codeintel::CodeIntel`, plus one write, `ticket_dispatch`, that
+//!   creates and queues a worker ticket. `tm mcp` (in `tm-cli`) serves it to Claude Code with
+//!   the scheduler running in-process.
 //!
 //! [`protocol`] is real JSON-RPC 2.0 (request/notification/response types, two wire framings —
 //! see that module's doc comment for why there are two, not one). [`transport`] is the thin
@@ -20,10 +22,10 @@
 //! # Scope
 //!
 //! Deliberately not attempted: MCP's resources/prompts/sampling primitives, tool-call streaming,
-//! JSON-RPC batching, or a `tm mcp serve`/`tm mcp connect` verb in `tm-cli` (this crate ships its
-//! own `[[bin]] tm-mcp-server` instead — see `src/bin/tm-mcp-server.rs` and `server`'s module doc
-//! for why depending on `tm-cli` itself was rejected). Read-only tools over stdio+SSE is the
-//! target this crate was scoped to.
+//! JSON-RPC batching, or a `tm mcp connect` verb. `tm mcp` lives in `tm-cli`, which depends on
+//! this crate, not the other way round; this crate's own `[[bin]] tm-mcp-server` is the
+//! standalone form (see `src/bin/tm-mcp-server.rs` and `server`'s module doc for why depending on
+//! `tm-cli` from here was rejected).
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

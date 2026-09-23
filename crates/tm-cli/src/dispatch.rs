@@ -119,6 +119,23 @@ impl HumanApprovalSink for StdinApprovalSink {
     }
 }
 
+/// The [`HumanApprovalSink`] for a process whose stdin and stdout are not a human's terminal:
+/// `tm mcp`, where both carry JSON-RPC. [`StdinApprovalSink`] would print its prompt into the
+/// protocol stream and then swallow the host's next request as the "answer". This one declines
+/// with an error instead (the trait's "no terminal attached" case), leaving the ticket for a
+/// human to pick up from `tm run`, `tm sched run` or the TUI.
+pub struct HeadlessApprovalSink;
+
+#[async_trait::async_trait]
+impl HumanApprovalSink for HeadlessApprovalSink {
+    async fn escalate(&self, task: &ExecutorTask) -> tm_types::Result<Option<HumanDecision>> {
+        Err(tm_types::TmError::Io(format!(
+            "{} needs a human, and this process has no terminal to ask on; run it with `tm run {}`",
+            task.ticket, task.ticket
+        )))
+    }
+}
+
 const ACP_TOML_FILENAME: &str = "acp.toml";
 
 /// The `[agent]` table `acp.toml` names: which external ACP-speaking agent to launch and which
@@ -230,6 +247,21 @@ pub fn build_dispatcher(
     exec_root: Option<&Path>,
     steps: Option<tokio::sync::mpsc::UnboundedSender<tm_agent::StepRecord>>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
+    let human = Arc::new(StdinApprovalSink {
+        store: project.store.clone(),
+    });
+    build_dispatcher_with_human(project, handle, exec_root, steps, human)
+}
+
+/// [`build_dispatcher`] with the [`HumanApprovalSink`] `human_required` tickets escalate through
+/// chosen by the caller: [`HeadlessApprovalSink`] where stdin/stdout aren't a human's terminal.
+pub fn build_dispatcher_with_human(
+    project: &Project,
+    handle: tokio::runtime::Handle,
+    exec_root: Option<&Path>,
+    steps: Option<tokio::sync::mpsc::UnboundedSender<tm_agent::StepRecord>>,
+    human_sink: Arc<dyn HumanApprovalSink>,
+) -> tm_types::Result<Arc<ExecutorDispatcher>> {
     let exec_root = exec_root.unwrap_or(project.root.as_path());
     let fabric = build_fabric(project.clock.clone())?;
     let ci = Arc::new(project.code_intel()?);
@@ -264,12 +296,7 @@ pub fn build_dispatcher(
     }
     let builtin = Arc::new(builtin_executor);
 
-    let human = Arc::new(HumanExecutor::new(
-        "human",
-        Arc::new(StdinApprovalSink {
-            store: project.store.clone(),
-        }),
-    ));
+    let human = Arc::new(HumanExecutor::new("human", human_sink));
 
     let mut registry = ExecutorRegistry::new(human);
     for role in Role::ALL {

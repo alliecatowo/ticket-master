@@ -4,7 +4,7 @@
 //! [`tm_mcp::client::McpClient`] handshake/dispatch bookkeeping in between) over an in-process
 //! pipe.
 //!
-//! What this proves: `initialize` -> `tools/list` -> `tools/call("ticket.list")` round-trips
+//! What this proves: `initialize` -> `tools/list` -> `tools/call("ticket_list")` round-trips
 //! real `Content-Length`-framed JSON-RPC 2.0 over a byte stream, and the returned ticket data is
 //! the actual row [`tm_core::Store::create_ticket`] wrote — not a mock, not a fixture baked into
 //! the server.
@@ -183,12 +183,12 @@ async fn tools_list_then_ticket_list_round_trips_a_real_ticket_over_the_wire() {
         .filter_map(|t| t.get("name").and_then(Value::as_str))
         .collect();
     for expected in [
-        "ticket.list",
-        "ticket.show",
-        "search.exact",
-        "search.hybrid",
-        "symbol.def",
-        "symbol.outline",
+        "ticket_list",
+        "ticket_show",
+        "search_exact",
+        "search_hybrid",
+        "symbol_def",
+        "symbol_outline",
     ] {
         assert!(
             tool_names.contains(&expected),
@@ -196,25 +196,25 @@ async fn tools_list_then_ticket_list_round_trips_a_real_ticket_over_the_wire() {
         );
     }
 
-    // 3. tools/call("ticket.list") — the real round trip this test exists to prove.
+    // 3. tools/call("ticket_list") — the real round trip this test exists to prove.
     let call = raw_request(
         &mut client,
         3,
         "tools/call",
-        Some(json!({"name": "ticket.list", "arguments": {}})),
+        Some(json!({"name": "ticket_list", "arguments": {}})),
     )
     .await;
-    let call_result = call.result.expect("tools/call(ticket.list) should succeed");
+    let call_result = call.result.expect("tools/call(ticket_list) should succeed");
     assert_eq!(call_result["isError"], false);
 
     let text = call_result["content"][0]["text"]
         .as_str()
         .expect("a successful tool call returns a text content block");
     let payload: Value =
-        serde_json::from_str(text).expect("ticket.list's text payload is itself JSON");
+        serde_json::from_str(text).expect("ticket_list's text payload is itself JSON");
     let tickets = payload["tickets"]
         .as_array()
-        .expect("ticket.list result carries a `tickets` array");
+        .expect("ticket_list result carries a `tickets` array");
     assert_eq!(
         tickets.len(),
         1,

@@ -2,17 +2,18 @@
 //!
 //! Takes an already-resolved project root and state directory directly as flags rather than
 //! rediscovering them (see `tm_mcp::server`'s module doc comment for why this crate does not
-//! depend on `tm-cli::project`'s scope-resolution logic). A future `tm mcp serve` verb in
-//! `tm-cli` would call `tm-cli::project::open_for_command` and pass its `Project::root`/
-//! `state_dir` straight through as these same two flags — that wiring is not part of this
-//! crate's scope (see `tm_mcp`'s crate-level doc comment).
+//! depend on `tm-cli::project`'s scope-resolution logic). Speaks `Content-Length` framing and
+//! runs no workers; `tm mcp` (in `tm-cli`) is the form for Claude Code and other real MCP hosts:
+//! it resolves the project itself, speaks newline-delimited JSON-RPC, and works dispatched
+//! tickets in-process.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
 
-/// Serve one Ticketmaster project as a read-only MCP server over stdio.
+/// Serve one Ticketmaster project as an MCP server over stdio (`Content-Length` framing): ticket,
+/// search and symbol reads, plus `ticket_dispatch`. Runs no workers; see `tm mcp` for that.
 #[derive(Parser, Debug)]
 #[command(name = "tm-mcp-server")]
 struct Args {

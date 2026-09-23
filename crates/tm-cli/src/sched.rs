@@ -211,7 +211,35 @@ pub fn spawn_background_runner(
 ) -> tm_types::Result<tokio::task::JoinHandle<()>> {
     let dispatcher =
         crate::dispatch::build_dispatcher(&project, tokio::runtime::Handle::current(), None, None)?;
-    Ok(tokio::spawn(async move {
+    Ok(spawn_runner_loop(project, interval, dispatcher))
+}
+
+/// [`spawn_background_runner`] for a process whose stdin/stdout aren't a human's terminal (`tm
+/// mcp`, where both carry JSON-RPC): a `human_required` ticket fails its attempt through
+/// [`crate::dispatch::HeadlessApprovalSink`] instead of prompting on stdout and reading stdin.
+///
+/// # Errors
+/// As [`spawn_background_runner`].
+pub fn spawn_headless_background_runner(
+    project: std::sync::Arc<Project>,
+    interval: Duration,
+) -> tm_types::Result<tokio::task::JoinHandle<()>> {
+    let dispatcher = crate::dispatch::build_dispatcher_with_human(
+        &project,
+        tokio::runtime::Handle::current(),
+        None,
+        None,
+        std::sync::Arc::new(crate::dispatch::HeadlessApprovalSink),
+    )?;
+    Ok(spawn_runner_loop(project, interval, dispatcher))
+}
+
+fn spawn_runner_loop(
+    project: std::sync::Arc<Project>,
+    interval: Duration,
+    dispatcher: std::sync::Arc<tm_scheduler::dispatch::ExecutorDispatcher>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
         let mut policy = tm_scheduler::SchedulingPolicy::conservative_default();
         policy.available_roles = tm_types::Role::ALL.iter().copied().collect();
         let loop_driver =
@@ -236,7 +264,7 @@ pub fn spawn_background_runner(
                 Err(e) => tracing::warn!(error = %e, "background runner tick failed"),
             }
         }
-    }))
+    })
 }
 
 /// `tm sched pause`: stop granting new leases; admitted work continues.

@@ -184,6 +184,10 @@ pub enum Command {
     /// Serve the project over HTTP/SSE, optionally serving the built web client.
     Serve(ServeArgs),
 
+    /// Serve the project to an MCP host over stdio (Claude Code: `claude mcp add --transport
+    /// stdio tm -- tm mcp`), and work the tickets it dispatches.
+    Mcp(McpArgs),
+
     /// The durable event log: tail, inspect, replay, and verify the hash chain.
     #[command(subcommand)]
     Events(EventsCommand),
@@ -982,6 +986,15 @@ pub struct ServeArgs {
     /// in the checkout `tm` was built from).
     #[arg(long, value_name = "DIR")]
     pub web_dir: Option<std::path::PathBuf>,
+}
+
+/// `tm mcp [--no-workers]`
+#[derive(Debug, Args)]
+pub struct McpArgs {
+    /// Don't work tickets in this process (by default `tm mcp` runs the scheduler, so tickets
+    /// the host dispatches get done).
+    #[arg(long)]
+    pub no_workers: bool,
 }
 
 /// `tm events ...`
