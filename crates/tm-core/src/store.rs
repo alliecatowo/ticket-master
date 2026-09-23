@@ -301,7 +301,7 @@ pub fn rejection_reason(ticket: &TicketId, reason: &str) -> tm_types::Result<Str
     let reason = reason.trim();
     if reason.is_empty() {
         return Err(TmError::InvalidTransition(format!(
-            "rejecting {ticket} needs a reason: say what was wrong, the next attempt reads it"
+            "Rejecting ticket {ticket} needs a reason: describe what was wrong so the next attempt knows what to fix"
         )));
     }
     Ok(reason.to_string())
@@ -646,7 +646,7 @@ impl Store {
                     .ok_or_else(|| TmError::not_found("ticket", parent_id))?;
                 if !parent_ticket.authority.contains(&authority) {
                     return Err(TmError::invariant(format!(
-                        "requested authority for a child of {parent_id} is not contained by the parent's authority"
+                        "This child ticket asks for more authority than its parent, ticket {parent_id}, has"
                     )));
                 }
             }
@@ -763,7 +763,7 @@ impl Store {
             let violations = graph.find_illegal_cycles(has_budget);
             if !violations.is_empty() {
                 return Err(TmError::invariant(format!(
-                    "adding {ticket} -> {depends_on} would create an illegal cycle"
+                    "Ticket {ticket} can't depend on {depends_on}: that would create a dependency cycle"
                 )));
             }
             Ok(vec![EventDraft::new(
@@ -850,7 +850,7 @@ impl Store {
     ) -> tm_types::Result<Vec<Event>> {
         if evidence.is_empty() {
             return Err(TmError::invariant(
-                "submission requires at least one evidence artifact",
+                "Submitting a ticket needs at least one piece of evidence",
             ));
         }
         let ticket = ticket.clone();
@@ -963,7 +963,7 @@ impl Store {
                 .map(|l| l.holder.clone());
             if executor.as_ref() == Some(&actor) {
                 return Err(TmError::invariant(
-                    "the auditor must differ from the executor that produced the submission",
+                    "The auditor must be someone other than the worker who submitted this ticket",
                 ));
             }
             let trigger = match outcome {
@@ -1656,7 +1656,7 @@ impl Store {
                 .ok_or_else(|| TmError::not_found("decision", &supersedes))?;
             if !old.is_active() {
                 return Err(TmError::conflict(format!(
-                    "decision {supersedes} is already superseded"
+                    "Decision {supersedes} has already been superseded"
                 )));
             }
             let new_id = DecisionId::new(self.ids.next(IdKind::Decision).as_str())?;
@@ -2663,7 +2663,7 @@ impl Store {
         let head = self.log.head()?;
         if seq == 0 || seq > head {
             return Err(TmError::invariant(format!(
-                "seq {seq} is out of range for a log whose current head is {head}"
+                "Can't fork at step {seq}: this ticket's history only has {head} steps so far"
             )));
         }
         let events = self.log.read_range(1, seq)?;
