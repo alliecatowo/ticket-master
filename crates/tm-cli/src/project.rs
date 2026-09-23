@@ -1029,16 +1029,80 @@ fn render_attach_report(report: &tm_genesis::attach::AttachReport) -> String {
     sections.join("\n\n")
 }
 
-/// Pure gating logic behind [`resolve_genesis_provider`]'s `ANTHROPIC_API_KEY` check, split out
-/// so the presence check is testable without reading or writing the real process environment.
-fn api_key_gate(key: Result<String, std::env::VarError>) -> tm_types::Result<()> {
-    if key.is_ok() {
-        Ok(())
+/// Whether the provider a Genesis [`tm_provider::RoleCandidate`] names can be used as-is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GenesisCandidateState {
+    /// The slug is not one [`tm_provider::Registry::known_providers`] lists at all — a
+    /// configuration error, never a reason to fall back to probing local backends.
+    Unknown,
+    /// A known provider whose required env vars are not all set; carries the missing names
+    /// (names only, never values).
+    NotConfigured { missing: Vec<&'static str> },
+    /// A known provider whose required env vars are all set.
+    Configured,
+}
+
+/// Pure gating logic behind [`resolve_genesis_provider`]: classify `candidate` against `known`,
+/// asking `is_set` whether each required env var is present. `is_set` is injected (production
+/// passes a real `std::env::var(..).is_ok()`, the same presence test
+/// [`tm_provider::ProviderInfo::is_configured`] uses) so every branch is testable without reading
+/// or writing the real process environment.
+fn genesis_candidate_state(
+    candidate: &tm_provider::RoleCandidate,
+    known: &[tm_provider::ProviderInfo],
+    is_set: impl Fn(&str) -> bool,
+) -> GenesisCandidateState {
+    let Some(info) = known.iter().find(|info| info.id == candidate.provider) else {
+        return GenesisCandidateState::Unknown;
+    };
+    let missing: Vec<&'static str> = info
+        .env_vars
+        .iter()
+        .filter(|v| v.required && !is_set(v.name))
+        .map(|v| v.name)
+        .collect();
+    if missing.is_empty() {
+        GenesisCandidateState::Configured
     } else {
-        Err(TmError::Provider(
-            "ANTHROPIC_API_KEY is not set; Genesis needs a real model provider".to_string(),
-        ))
+        GenesisCandidateState::NotConfigured { missing }
     }
+}
+
+/// The error for a Genesis role candidate whose provider slug this build does not recognize.
+fn unknown_genesis_provider_error(
+    candidate: &tm_provider::RoleCandidate,
+    known: &[tm_provider::ProviderInfo],
+) -> TmError {
+    let names = known.iter().map(|info| info.id).collect::<Vec<_>>();
+    TmError::Provider(format!(
+        "Genesis role candidate names unknown provider `{}` (model `{}`); known providers: {}",
+        candidate.provider,
+        candidate.model,
+        names.join(", ")
+    ))
+}
+
+/// Construct the [`tm_provider::Provider`] `candidate` actually names — `anthropic`, `devpass`,
+/// or any other slug [`tm_provider::Registry::build_provider`] dispatches — rather than assuming
+/// Anthropic. An unknown slug is a clear error naming it (checked against `known` first, so the
+/// message lists what *is* valid). Construction itself does no network I/O.
+///
+/// Note `devpass` reads its model from `DEVPASS_MODEL`, not `candidate.model` (see
+/// `Registry::build_provider`'s own comment on that arm).
+fn genesis_provider_for_candidate(
+    candidate: &tm_provider::RoleCandidate,
+    known: &[tm_provider::ProviderInfo],
+    clock: Arc<dyn Clock>,
+) -> tm_types::Result<Arc<dyn tm_provider::Provider>> {
+    if !known.iter().any(|info| info.id == candidate.provider) {
+        return Err(unknown_genesis_provider_error(candidate, known));
+    }
+    tm_provider::Registry::build_provider(candidate, clock).map_err(|e| {
+        TmError::Provider(format!(
+            "could not construct provider `{}` (model `{}`) for Genesis: {e}",
+            candidate.provider, candidate.model
+        ))
+    })
 }
 
 /// Resolve the Genesis seed prompt from `explicit` (the `--prompt` value), reading stdin when it
@@ -1085,12 +1149,16 @@ where
 
 /// Resolve the single [`tm_provider::Provider`] [`genesis`] should use for this run.
 ///
-/// Keeps the original behavior byte-for-byte when `ANTHROPIC_API_KEY` is set: build
-/// `AnthropicProvider` from `RoleTable::default_table`'s `VisionFrontier` candidate, same as
-/// before this function existed, and return `None` for the note (nothing changed, so genesis
-/// stays silent about a choice that didn't move).
+/// Takes `RoleTable::default_table`'s `VisionFrontier` candidate and, when that candidate's
+/// provider is configured (all its required env vars set — today the default table names
+/// `anthropic`, so that means `ANTHROPIC_API_KEY`), constructs the provider the candidate actually
+/// names via [`genesis_provider_for_candidate`] and returns `None` for the note (nothing changed,
+/// so genesis stays silent about a choice that didn't move). This used to build an
+/// `AnthropicProvider` unconditionally regardless of the candidate's slug, which would have
+/// silently misrouted a role pointed at e.g. `devpass`. A slug this build doesn't recognize is a
+/// hard error up front, never a reason to go probing local backends.
 ///
-/// Only when `ANTHROPIC_API_KEY` is *not* set does this probe for a fallback: the three
+/// Only when the candidate's provider is *not* configured does this probe for a fallback: the three
 /// zero-account local backends in [`tm_provider::LOCAL_PROVIDER_IDS`], in priority order, each a
 /// single short-timeout `GET /v1/models` (`tm_provider::providers::local::PROBE_TIMEOUT`,
 /// currently 750ms) — a brand-new user who has never heard of `ANTHROPIC_API_KEY` but happens to
@@ -1102,24 +1170,29 @@ where
 ///
 /// This gate (probe only when nothing else is configured) is deliberate: a slow-by-comparison
 /// network probe has no business running on every `tm genesis` invocation that already has a
-/// working `ANTHROPIC_API_KEY`.
+/// working credential for its configured provider.
 fn resolve_genesis_provider(
     clock: Arc<dyn Clock>,
 ) -> tm_types::Result<(Arc<dyn tm_provider::Provider>, Option<String>)> {
-    if api_key_gate(std::env::var("ANTHROPIC_API_KEY")).is_ok() {
-        let table = tm_provider::RoleTable::default_table();
-        let candidate = table
-            .candidates_for(tm_types::Role::VisionFrontier)
-            .first()
-            .cloned()
-            .ok_or_else(|| {
-                TmError::invariant("default role table has no VisionFrontier candidate")
-            })?;
-        let model = tm_provider::ModelId::new(candidate.provider.clone(), candidate.model.clone());
-        let provider = tm_provider::AnthropicProvider::from_env(model, clock)
-            .map_err(|e| TmError::Provider(e.to_string()))?;
-        return Ok((Arc::new(provider), None));
-    }
+    let known = tm_provider::Registry::known_providers();
+    let table = tm_provider::RoleTable::default_table();
+    let candidate = table
+        .candidates_for(tm_types::Role::VisionFrontier)
+        .first()
+        .cloned()
+        .ok_or_else(|| TmError::invariant("default role table has no VisionFrontier candidate"))?;
+    let missing =
+        match genesis_candidate_state(&candidate, &known, |name| std::env::var(name).is_ok()) {
+            GenesisCandidateState::Unknown => {
+                return Err(unknown_genesis_provider_error(&candidate, &known))
+            }
+            GenesisCandidateState::Configured => {
+                let provider = genesis_provider_for_candidate(&candidate, &known, clock)?;
+                return Ok((provider, None));
+            }
+            GenesisCandidateState::NotConfigured { missing } => missing.join("/"),
+        };
+    let slug = candidate.provider.clone();
 
     let probe_clock = clock.clone();
     let probes: Vec<(&'static str, tm_provider::LocalProbe)> = run_async(move || async move {
@@ -1146,8 +1219,9 @@ fn resolve_genesis_provider(
         let provider = tm_provider::Registry::build_provider(&candidate, clock)
             .map_err(|e| TmError::Provider(e.to_string()))?;
         let note = format!(
-            "ANTHROPIC_API_KEY is not set; using detected local provider `{id}` (model \
-             `{model}`) for Genesis instead. Set ANTHROPIC_API_KEY to use Anthropic instead."
+            "{missing} is not set (needed by `{slug}`, Genesis's configured provider); using \
+             detected local provider `{id}` (model `{model}`) for Genesis instead. Set {missing} \
+             to use `{slug}` instead."
         );
         return Ok((provider, Some(note)));
     }
@@ -1167,9 +1241,10 @@ fn resolve_genesis_provider(
         .join("; ");
 
     Err(TmError::Provider(format!(
-        "ANTHROPIC_API_KEY is not set and no local model provider is reachable ({detail}). \
-         Fastest zero-cost path: install Ollama (https://ollama.com) and run `ollama pull \
-         <model>`, then re-run `tm genesis`. Or set ANTHROPIC_API_KEY, or (if you have a GitHub \
+        "{missing} is not set (needed by `{slug}`, Genesis's configured provider) and no local \
+         model provider is reachable ({detail}). Fastest zero-cost path: install Ollama \
+         (https://ollama.com) and run `ollama pull <model>`, then re-run `tm genesis`. Or set \
+         {missing}, or (if you have a GitHub \
          account) run `gh auth login` and export GITHUB_TOKEN=$(gh auth token) to route through \
          GitHub Models instead."
     )))
@@ -1191,9 +1266,9 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
     // hand. A single candidate stands in for "the fabric": `GenesisDriver` takes one `Provider`
     // for its whole run (every stage, regardless of role), so there is no per-call routing
     // decision for a `Fabric` to make here. See `resolve_genesis_provider` for how that one
-    // provider gets picked — unchanged (Anthropic via `RoleTable::default_table`) when
-    // `ANTHROPIC_API_KEY` is set, falling back to a reachable zero-signup local provider when it
-    // is not.
+    // provider gets picked — whatever `RoleTable::default_table`'s `VisionFrontier` candidate
+    // names (Anthropic today) when that provider is configured, falling back to a reachable
+    // zero-signup local provider when it is not.
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let (provider, fallback_note) = resolve_genesis_provider(clock)?;
     if let Some(note) = &fallback_note {
@@ -2206,16 +2281,88 @@ mod tests {
         assert!(tmp.path().join(".tm").is_dir());
     }
 
-    #[test]
-    fn require_anthropic_api_key_errors_precisely_when_unset() {
-        let err = api_key_gate(Err(std::env::VarError::NotPresent)).unwrap_err();
-        assert!(matches!(err, TmError::Provider(_)));
+    fn genesis_candidate(provider: &str, model: &str) -> tm_provider::RoleCandidate {
+        tm_provider::RoleCandidate {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            max_concurrency: 1,
+            degraded_ok: false,
+            price: None,
+            limits: tm_provider::role_config::Limits::unlimited(),
+        }
     }
 
     #[test]
-    fn require_anthropic_api_key_passes_when_set() {
-        let result = api_key_gate(Ok("test-key".to_string()));
-        assert!(result.is_ok());
+    fn genesis_candidate_state_reports_missing_env_var_names_when_unset() {
+        let known = tm_provider::Registry::known_providers();
+        let state =
+            genesis_candidate_state(&genesis_candidate("anthropic", "m"), &known, |_| false);
+        assert_eq!(
+            state,
+            GenesisCandidateState::NotConfigured {
+                missing: vec!["ANTHROPIC_API_KEY"]
+            }
+        );
+        let state = genesis_candidate_state(&genesis_candidate("devpass", "m"), &known, |_| false);
+        assert_eq!(
+            state,
+            GenesisCandidateState::NotConfigured {
+                missing: vec!["DEVPASS_API_KEY", "DEVPASS_BASE_URL", "DEVPASS_MODEL"]
+            }
+        );
+    }
+
+    #[test]
+    fn genesis_candidate_state_is_configured_when_every_required_var_is_set() {
+        let known = tm_provider::Registry::known_providers();
+        let state = genesis_candidate_state(&genesis_candidate("devpass", "m"), &known, |_| true);
+        assert_eq!(state, GenesisCandidateState::Configured);
+    }
+
+    #[test]
+    fn genesis_candidate_state_flags_an_unknown_slug_before_any_env_check() {
+        let known = tm_provider::Registry::known_providers();
+        let state =
+            genesis_candidate_state(&genesis_candidate("not-a-provider", "m"), &known, |_| {
+                panic!("an unknown slug must not consult the environment")
+            });
+        assert_eq!(state, GenesisCandidateState::Unknown);
+    }
+
+    #[test]
+    fn genesis_provider_for_candidate_builds_the_provider_the_slug_names() {
+        // `ollama` needs no credential (its env vars are all optional), so constructing it here
+        // touches neither the network nor a real key — and proves the slug is honored rather
+        // than an `AnthropicProvider` being built regardless, which is what this used to do.
+        let known = tm_provider::Registry::known_providers();
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        let provider =
+            genesis_provider_for_candidate(&genesis_candidate("ollama", "llama3"), &known, clock)
+                .expect("ollama constructs without any env var");
+        assert_eq!(provider.id(), "ollama");
+    }
+
+    #[test]
+    fn genesis_provider_for_candidate_rejects_an_unknown_slug_by_name() {
+        let known = tm_provider::Registry::known_providers();
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        let err = genesis_provider_for_candidate(
+            &genesis_candidate("not-a-provider", "m"),
+            &known,
+            clock,
+        )
+        .err()
+        .expect("unknown slug must fail");
+        match err {
+            TmError::Provider(msg) => {
+                assert!(msg.contains("unknown provider `not-a-provider`"), "{msg}");
+                assert!(
+                    msg.contains("devpass"),
+                    "should list known providers: {msg}"
+                );
+            }
+            other => panic!("expected a Provider error, got {other:?}"),
+        }
     }
 
     #[test]

@@ -757,16 +757,18 @@ pub enum ProviderCommand {
     /// Inspect the environment and report which of this crate's known provider backends are
     /// actually configured right now, without printing any key material.
     Detect,
-    /// Show live provider/candidate health (breaker state, quota, price).
+    /// Show each provider's availability and whether tm's turn path uses it. No live breaker or
+    /// quota state is reported: that exists only inside a running process.
     Status,
-    /// Send a minimal live completion request to confirm a provider is reachable.
+    /// Send one tiny real (billed) completion through each provider tm's turn path uses, or just
+    /// the named one; exits non-zero if any fails.
     Test(ProviderTestArgs),
 }
 
 /// `tm provider test`
 #[derive(Debug, Args)]
 pub struct ProviderTestArgs {
-    /// The provider to test; defaults to every configured provider.
+    /// The provider to test; defaults to every provider tm's turn path registers.
     #[arg(value_name = "PROVIDER")]
     pub provider: Option<String>,
 }

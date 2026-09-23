@@ -904,14 +904,20 @@ pub fn build_wire_request(model: &str, req: &CompletionRequest) -> WireRequest {
 
 // ---- shaping: wire -> crate::types -------------------------------------------------------------
 
-/// Map an OpenAI-style `finish_reason` to [`StopReason`]. `"stop"` -> `EndTurn`, `"length"` ->
-/// `MaxTokens`, `"tool_calls"`/the legacy `"function_call"` -> `ToolUse`; anything else
-/// (including `"content_filter"`, which has no [`StopReason`] equivalent in this crate) is a
-/// [`ProviderError::MalformedResponse`], matching `crate::anthropic`'s strictness.
+/// Map an OpenAI-style `finish_reason` to [`StopReason`]. `"stop"` -> `EndTurn`, `"length"` and
+/// `"incomplete"` -> `MaxTokens`, `"tool_calls"`/the legacy `"function_call"` -> `ToolUse`;
+/// anything else (including `"content_filter"`, which has no [`StopReason`] equivalent in this
+/// crate) is a [`ProviderError::MalformedResponse`], matching `crate::anthropic`'s strictness.
+///
+/// `"incomplete"` is not part of OpenAI's own Chat Completions vocabulary, but the LLM Gateway
+/// behind DevPass returns it on a real, billed 200 OK when a reasoning model (seen live with
+/// `muse-spark-1.3-contributor`) spends its whole `max_tokens` budget before finishing — the
+/// same situation `"length"` describes. Treating it as malformed failed the entire request as a
+/// non-retryable error instead of surfacing a truncated reply the caller can act on.
 pub fn map_finish_reason(reason: &str) -> Result<StopReason, ProviderError> {
     match reason {
         "stop" => Ok(StopReason::EndTurn),
-        "length" => Ok(StopReason::MaxTokens),
+        "length" | "incomplete" => Ok(StopReason::MaxTokens),
         "tool_calls" | "function_call" => Ok(StopReason::ToolUse),
         other => Err(ProviderError::MalformedResponse(format!(
             "unknown finish_reason: {other}"
@@ -1554,6 +1560,56 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ProviderError::MalformedResponse(_)));
+    }
+
+    #[test]
+    fn map_finish_reason_treats_gateway_incomplete_like_length() {
+        assert_eq!(
+            map_finish_reason("incomplete").ok(),
+            Some(StopReason::MaxTokens)
+        );
+        assert_eq!(
+            map_finish_reason("length").ok(),
+            Some(StopReason::MaxTokens)
+        );
+    }
+
+    #[test]
+    fn parse_wire_response_accepts_gateway_incomplete_finish_reason() {
+        // The shape the LLM Gateway returns when a reasoning model exhausts `max_tokens` before
+        // producing visible output: a 200 OK with null content and `"incomplete"`.
+        let body = r#"{"model": "muse-spark-1.3-contributor", "choices": [{"message": {"role": "assistant", "content": null}, "finish_reason": "incomplete"}], "usage": {"prompt_tokens": 12, "completion_tokens": 32}}"#;
+        let completion = parse_wire_response(
+            body.as_bytes(),
+            "m",
+            "devpass",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+        )
+        .expect("incomplete is a truncated reply, not a malformed one");
+        assert_eq!(completion.candidates.len(), 1);
+        assert_eq!(completion.candidates[0].stop_reason, StopReason::MaxTokens);
+        assert!(completion.candidates[0].content.is_empty());
+        assert_eq!(completion.usage.output_tokens, 32);
+    }
+
+    #[test]
+    fn assemble_streamed_completion_accepts_gateway_incomplete_finish_reason() {
+        let body = concat!(
+            "data: {\"choices\": [{\"index\": 0, \"delta\": {\"content\": \"partial\"}}]}\n\n",
+            "data: {\"choices\": [{\"index\": 0, \"delta\": {}, \"finish_reason\": \"incomplete\"}]}\n\n",
+            "data: [DONE]\n\n",
+        );
+        let chunks = parse_sse_body(body.as_bytes()).expect("parses");
+        let completion = assemble_streamed_completion(
+            &chunks,
+            "m",
+            "devpass",
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+        )
+        .expect("incomplete is a truncated reply, not a malformed one");
+        assert_eq!(completion.candidates[0].stop_reason, StopReason::MaxTokens);
     }
 
     #[test]
