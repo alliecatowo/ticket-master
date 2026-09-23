@@ -1585,14 +1585,9 @@ pub struct DoctorCheck {
     /// Whether a failure here makes the project unhealthy. Optional capabilities (computer use,
     /// which needs OS permissions most people never grant) are reported, but a failure is a
     /// warning, not a doctor failure.
-    #[serde(default = "required_default")]
     pub required: bool,
     /// Human-readable detail, especially on failure.
     pub detail: String,
-}
-
-fn required_default() -> bool {
-    true
 }
 
 /// The full `tm doctor` report.
