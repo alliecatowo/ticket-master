@@ -2052,7 +2052,11 @@ mod tests {
     #[test]
     fn build_wire_request_sends_only_valid_tool_names_consistent_with_history() {
         let wire = build_wire_request("gpt-test", &dotted_tool_request(false));
-        let tool_names: Vec<&str> = wire.tools.iter().map(|t| t.function.name.as_str()).collect();
+        let tool_names: Vec<&str> = wire
+            .tools
+            .iter()
+            .map(|t| t.function.name.as_str())
+            .collect();
         assert_eq!(
             tool_names,
             vec!["fs_read_2", "ticket_create_child", "fs_read"]

@@ -34,6 +34,7 @@ use crate::types::{
     Candidate, Completion, CompletionRequest, ContentBlock, EmbedRequest, Embeddings, MessageRole,
     ModelId, ProviderError, StopReason, Usage,
 };
+use crate::wire_names::WireNames;
 
 /// Default Generative Language API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -422,7 +423,27 @@ fn wire_part_to_content_block(part: &WirePart) -> Option<ContentBlock> {
 /// `\n\n` if more than one, matching `crate::anthropic`'s handling); maps `User` -> `role: "user"`
 /// and `Assistant` -> `role: "model"`. Walks messages in order to build the `tool_use_id -> name`
 /// map a following `ToolResult` needs, since Gemini's `functionResponse` correlates by name only.
+///
+/// Tool names go on the wire through [`WireNames::for_request`], like every other real provider.
+/// Gemini itself would accept tm's dotted names (its rule allows `.` and `:`), but it also
+/// requires a leading letter or underscore and caps the length, and one mapping rule for every
+/// provider is simpler to reason about than a per-provider exception: already-valid names pass
+/// through unchanged, so the map only ever touches names some provider would reject. The name
+/// map is applied before the `tool_use_id -> name` walk below, so a `functionResponse` carries
+/// the same wire name as the `functionCall` it answers.
 pub fn build_wire_request(model: &ModelId, req: &CompletionRequest) -> WireRequest {
+    build_wire_request_with_names(model, req, &WireNames::for_request(req))
+}
+
+/// [`build_wire_request`] with an explicit name map, so [`GeminiProvider::complete`] can decode
+/// the response (streamed or not) with the same one.
+pub fn build_wire_request_with_names(
+    model: &ModelId,
+    req: &CompletionRequest,
+    names: &WireNames,
+) -> WireRequest {
+    let req = names.encode_request(req);
+    let req = req.as_ref();
     let mut system_parts: Vec<String> = Vec::new();
     if let Some(system) = &req.system {
         system_parts.push(system.clone());
@@ -719,6 +740,27 @@ pub fn assemble_streamed_completion(
     })
 }
 
+/// Parse a successful body (SSE chunks when `stream`, one JSON response otherwise) and map every
+/// tool call's wire name back through `names`, the map [`build_wire_request_with_names`] sent the
+/// request with. [`GeminiProvider::complete`]'s whole response path, kept pure so both branches
+/// are tested without a network.
+pub fn parse_completion_body(
+    body: &[u8],
+    stream: bool,
+    model: &ModelId,
+    latency: Duration,
+    received_at: tm_types::Timestamp,
+    names: &WireNames,
+) -> Result<Completion, ProviderError> {
+    let completion = if stream {
+        let chunks = parse_sse_body(body)?;
+        assemble_streamed_completion(&chunks, model, latency, received_at)
+    } else {
+        parse_wire_response(body, model, latency, received_at)
+    }?;
+    Ok(names.decode_completion(completion))
+}
+
 /// Parse a `Retry-After` header value as an integer number of seconds. An HTTP-date value (RFC
 /// 7231's alternate form) is not handled, matching `crate::anthropic::parse_retry_after`.
 fn parse_retry_after(value: &str) -> Option<Duration> {
@@ -795,7 +837,8 @@ impl Provider for GeminiProvider {
     async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
         let streaming = req.stream;
         let model = req.model_or(&self.model);
-        let wire_request = build_wire_request(&model, &req);
+        let names = WireNames::for_request(&req);
+        let wire_request = build_wire_request_with_names(&model, &req, &names);
         let url = if streaming {
             format!(
                 "{}/models/{}:streamGenerateContent?alt=sse",
@@ -849,12 +892,9 @@ impl Provider for GeminiProvider {
                     let finished = self.clock.now();
                     let latency =
                         Duration::from_secs(finished.seconds_since(started).max(0) as u64);
-                    return if streaming {
-                        let chunks = parse_sse_body(&body)?;
-                        assemble_streamed_completion(&chunks, &model, latency, finished)
-                    } else {
-                        parse_wire_response(&body, &model, latency, finished)
-                    };
+                    return parse_completion_body(
+                        &body, streaming, &model, latency, finished, &names,
+                    );
                 }
                 Err(err) => {
                     if err.is_retryable() && attempt < self.max_retries {
@@ -1401,5 +1441,96 @@ mod tests {
             .env_vars
             .iter()
             .any(|v| v.name == "GOOGLE_API_KEY" && !v.required));
+    }
+
+    // ---- tool names on the wire ----
+
+    fn dotted_tool_request(stream: bool) -> CompletionRequest {
+        let mut req = sample_request();
+        req.stream = stream;
+        req.tools[0].name = "fs.read".to_string();
+        req.messages.push(Message {
+            role: MessageRole::Assistant,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_fs_read".to_string(),
+                name: "fs.read".to_string(),
+                input: serde_json::json!({"path": "a"}),
+            }],
+        });
+        req.messages.push(Message {
+            role: MessageRole::User,
+            content: vec![ContentBlock::ToolResult {
+                tool_use_id: "call_fs_read".to_string(),
+                content: vec![ContentBlock::Text {
+                    text: "ok".to_string(),
+                }],
+                is_error: false,
+            }],
+        });
+        req
+    }
+
+    #[test]
+    fn build_wire_request_maps_declarations_calls_and_responses_to_one_wire_name() {
+        let model = ModelId::new("gemini", "gemini-2.5-pro");
+        let wire = build_wire_request(&model, &dotted_tool_request(false));
+        assert_eq!(wire.tools[0].function_declarations[0].name, "fs_read");
+        let call = wire.contents[1].parts[0]
+            .function_call
+            .as_ref()
+            .expect("has function call");
+        assert_eq!(call.name, "fs_read");
+        // The functionResponse name is resolved from the (already renamed) preceding call.
+        let response = wire.contents[2].parts[0]
+            .function_response
+            .as_ref()
+            .expect("has function response");
+        assert_eq!(response.name, "fs_read");
+    }
+
+    fn called_names(completion: &Completion) -> Vec<String> {
+        completion.candidates[0]
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn parse_completion_body_maps_calls_back_streamed_and_not() {
+        let model = ModelId::new("gemini", "gemini-2.5-pro");
+        let req = dotted_tool_request(false);
+        let names = WireNames::for_request(&req);
+        let whole = r#"{"candidates": [{"content": {"role": "model", "parts": [
+            {"functionCall": {"name": "fs_read", "args": {}}},
+            {"functionCall": {"name": "invented", "args": {}}}
+        ]}, "finishReason": "STOP"}]}"#;
+        let completion = parse_completion_body(
+            whole.as_bytes(),
+            false,
+            &model,
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+            &names,
+        )
+        .expect("parses");
+        assert_eq!(called_names(&completion), vec!["fs.read", "invented"]);
+
+        let streamed = concat!(
+            "data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"fs_read\", \"args\": {}}}]}, \"finishReason\": \"STOP\"}]}\n\n",
+        );
+        let completion = parse_completion_body(
+            streamed.as_bytes(),
+            true,
+            &model,
+            Duration::ZERO,
+            tm_types::Timestamp::EPOCH,
+            &names,
+        )
+        .expect("assembles");
+        assert_eq!(called_names(&completion), vec!["fs.read"]);
     }
 }

@@ -960,7 +960,10 @@ mod tests {
             .expect("history tool use");
         assert_eq!(history_name, "fs_read_2");
         let body = serde_json::to_string(&wire).expect("serializes");
-        assert!(!body.contains("fs.read") && !body.contains("shell.run"), "{body}");
+        assert!(
+            !body.contains("fs.read") && !body.contains("shell.run"),
+            "{body}"
+        );
     }
 
     #[test]

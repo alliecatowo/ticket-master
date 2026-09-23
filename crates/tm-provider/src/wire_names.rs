@@ -75,7 +75,9 @@ pub fn sanitize(name: &str) -> String {
 /// truncation cannot split a character.
 fn with_suffix(base: &str, n: usize) -> String {
     let suffix = format!("_{n}");
-    let keep = MAX_WIRE_NAME_LEN.saturating_sub(suffix.len()).min(base.len());
+    let keep = MAX_WIRE_NAME_LEN
+        .saturating_sub(suffix.len())
+        .min(base.len());
     format!("{}{suffix}", &base[..keep])
 }
 
@@ -347,7 +349,7 @@ mod tests {
     #[test]
     fn non_ascii_and_empty_names_sanitize_safely() {
         assert_eq!(sanitize(""), "_");
-        assert_eq!(sanitize("日本.語"), "_____");
+        assert_eq!(sanitize("日本.語"), "____");
         let long_multibyte = "é".repeat(100);
         assert_eq!(sanitize(&long_multibyte), "_".repeat(64));
     }
