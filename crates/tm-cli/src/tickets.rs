@@ -139,7 +139,9 @@ fn parse_ticket_kind(s: &str) -> tm_types::Result<TicketKind> {
         "investigation" => Ok(TicketKind::Investigation),
         "recovery" => Ok(TicketKind::Recovery),
         "harness" => Ok(TicketKind::Harness),
-        other => Err(TmError::parse(format!("unknown ticket kind: {other}"))),
+        other => Err(TmError::parse(format!(
+            "unknown ticket kind '{other}' (expected task, verification, audit, investigation, recovery, or harness)"
+        ))),
     }
 }
 
@@ -273,7 +275,7 @@ pub fn create_worker_ticket(project: &Project, objective: &str) -> tm_types::Res
     events
         .iter()
         .find_map(|e| e.payload.as_ticket_created().map(|p| p.ticket.clone()))
-        .ok_or_else(|| TmError::invariant("create_ticket did not emit ticket.created"))
+        .ok_or_else(|| TmError::invariant("Could not create the ticket."))
 }
 
 /// `tm ticket list`
@@ -476,7 +478,7 @@ pub fn ticket_edit(
 
     if args.objective.is_none() && args.priority.is_none() {
         return Err(TmError::parse(
-            "ticket edit requires at least --objective or --priority",
+            "Provide --objective or --priority to update the ticket.",
         ));
     }
 
@@ -755,8 +757,13 @@ pub fn ticket_submit(
     let mut evidence_ids = Vec::new();
 
     for path in &args.evidence {
-        let bytes = fs::read(path)
-            .map_err(|e| TmError::storage(format!("could not read {}: {}", path.display(), e)))?;
+        let bytes = fs::read(path).map_err(|e| {
+            TmError::storage(format!(
+                "could not read evidence file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
 
         let media_type = "application/octet-stream".to_string();
         let events = project.store.store_artifact(
@@ -805,7 +812,12 @@ pub fn dep_add(args: &DepEdgeArgs, project: &Project, renderer: &Renderer) -> tm
     let kind = match args.kind.as_str() {
         "blocks" => DependencyKind::Hard,
         "loop" => DependencyKind::Loop,
-        k => return Err(TmError::parse(format!("unknown dependency kind: {}", k))),
+        k => {
+            return Err(TmError::parse(format!(
+                "unknown dependency kind '{}' (expected blocks or loop)",
+                k
+            )))
+        }
     };
 
     project
