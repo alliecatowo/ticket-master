@@ -443,7 +443,7 @@ impl Transcript {
 
         let below = total.saturating_sub(top + height);
         if below > 0 {
-            let note = format!(" {below} more below {} PgDn ", glyphs.sep.trim());
+            let note = format!(" {below} more below {} PgDn to scroll ", glyphs.sep.trim());
             let width = display_width(&note) as u16;
             if width < area.width {
                 let y = area.y + area.height - 1;
