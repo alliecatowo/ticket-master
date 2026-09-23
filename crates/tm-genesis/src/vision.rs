@@ -145,12 +145,12 @@ Return ONLY the JSON object, with no markdown formatting or code fences.",
     let completion = provider
         .complete(req)
         .await
-        .map_err(|e| tm_types::TmError::Provider(format!("vision compilation failed: {}", e)))?;
+        .map_err(|e| tm_types::TmError::Provider(format!("Couldn't compile the vision: {}", e)))?;
 
     // Extract the text content from the first candidate.
     let response_text = if completion.candidates.is_empty() {
         return Err(tm_types::TmError::Parse(
-            "vision compilation returned no candidates".to_string(),
+            "The model didn't return a vision. Try again.".to_string(),
         ));
     } else {
         let mut text_parts = Vec::new();
@@ -164,7 +164,7 @@ Return ONLY the JSON object, with no markdown formatting or code fences.",
 
     // Parse the JSON response.
     let parsed: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
-        tm_types::TmError::Parse(format!("failed to parse vision response as JSON: {}", e))
+        tm_types::TmError::Parse(format!("The model's response wasn't valid: {}", e))
     })?;
 
     // Extract each required field, treating missing fields as errors.
@@ -172,7 +172,9 @@ Return ONLY the JSON object, with no markdown formatting or code fences.",
         .get("product_thesis")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            tm_types::TmError::Parse("missing required field: product_thesis".to_string())
+            tm_types::TmError::Parse(
+                "The model's response was missing the product thesis.".to_string(),
+            )
         })?
         .to_string();
 
@@ -180,14 +182,20 @@ Return ONLY the JSON object, with no markdown formatting or code fences.",
         .get("user_experience")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            tm_types::TmError::Parse("missing required field: user_experience".to_string())
+            tm_types::TmError::Parse(
+                "The model's response was missing the user experience description.".to_string(),
+            )
         })?
         .to_string();
 
     let taste = parsed
         .get("taste")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| tm_types::TmError::Parse("missing required field: taste".to_string()))?
+        .ok_or_else(|| {
+            tm_types::TmError::Parse(
+                "The model's response was missing its taste description.".to_string(),
+            )
+        })?
         .to_string();
 
     let governing_constraints = parsed
@@ -195,14 +203,14 @@ Return ONLY the JSON object, with no markdown formatting or code fences.",
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
             tm_types::TmError::Parse(
-                "missing or non-array field: governing_constraints".to_string(),
+                "The model's response was missing its list of governing constraints.".to_string(),
             )
         })?
         .iter()
         .map(|v| {
             v.as_str().map(|s| s.to_string()).ok_or_else(|| {
                 tm_types::TmError::Parse(
-                    "non-string value in governing_constraints array".to_string(),
+                    "The model's list of governing constraints had a non-text entry.".to_string(),
                 )
             })
         })
@@ -211,19 +219,27 @@ Return ONLY the JSON object, with no markdown formatting or code fences.",
     let identity = parsed
         .get("identity")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| tm_types::TmError::Parse("missing required field: identity".to_string()))?
+        .ok_or_else(|| {
+            tm_types::TmError::Parse(
+                "The model's response was missing the project's identity.".to_string(),
+            )
+        })?
         .to_string();
 
     let non_goals = parsed
         .get("non_goals")
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
-            tm_types::TmError::Parse("missing or non-array field: non_goals".to_string())
+            tm_types::TmError::Parse(
+                "The model's response was missing its list of non-goals.".to_string(),
+            )
         })?
         .iter()
         .map(|v| {
             v.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                tm_types::TmError::Parse("non-string value in non_goals array".to_string())
+                tm_types::TmError::Parse(
+                    "The model's list of non-goals had a non-text entry.".to_string(),
+                )
             })
         })
         .collect::<TmResult<Vec<String>>>()?;
@@ -232,7 +248,9 @@ Return ONLY the JSON object, with no markdown formatting or code fences.",
         .get("architectural_character")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
-            tm_types::TmError::Parse("missing required field: architectural_character".to_string())
+            tm_types::TmError::Parse(
+                "The model's response was missing its architectural character.".to_string(),
+            )
         })?
         .to_string();
 
@@ -240,12 +258,12 @@ Return ONLY the JSON object, with no markdown formatting or code fences.",
         .get("spiritually_wrong")
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
-            tm_types::TmError::Parse("missing or non-array field: spiritually_wrong".to_string())
+            tm_types::TmError::Parse("The model's response was missing its list of things that would be technically valid but spiritually wrong.".to_string())
         })?
         .iter()
         .map(|v| {
             v.as_str().map(|s| s.to_string()).ok_or_else(|| {
-                tm_types::TmError::Parse("non-string value in spiritually_wrong array".to_string())
+                tm_types::TmError::Parse("The model's spiritually-wrong list had a non-text entry.".to_string())
             })
         })
         .collect::<TmResult<Vec<String>>>()?;
@@ -435,7 +453,7 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(tm_types::TmError::Parse(msg)) => {
-                assert!(msg.contains("product_thesis"));
+                assert!(msg.contains("product thesis"));
             }
             _ => panic!("expected Parse error"),
         }
@@ -488,7 +506,7 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(tm_types::TmError::Parse(msg)) => {
-                assert!(msg.contains("non-string"));
+                assert!(msg.contains("non-text"));
             }
             _ => panic!("expected Parse error"),
         }
@@ -515,7 +533,7 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(tm_types::TmError::Parse(msg)) => {
-                assert!(msg.contains("governing_constraints"));
+                assert!(msg.contains("governing constraints"));
             }
             _ => panic!("expected Parse error"),
         }
@@ -591,7 +609,7 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(tm_types::TmError::Parse(msg)) => {
-                assert!(msg.contains("no candidates"));
+                assert!(msg.contains("didn't return a vision"));
             }
             _ => panic!("expected Parse error"),
         }
