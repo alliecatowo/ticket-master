@@ -22,7 +22,7 @@
 
 use rusqlite::{params, OptionalExtension};
 use tm_events::{Event, EventKind, Tx};
-use tm_types::{IdKind, TmError};
+use tm_types::{IdKind, Timestamp, TmError};
 
 use crate::goal::GoalStep;
 
@@ -172,6 +172,11 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
         EventKind::TicketUpdated => {
             if let Some(p) = event.payload.as_ticket_updated() {
                 apply_ticket_updated(tx, event, &p.ticket, &p.fields)?;
+                // A change to the ticket is a change: `updated` follows it, unless the event
+                // sets `updated` itself (`create_ticket`/`fork_ticket`'s initial field set).
+                if p.fields.get("updated").is_none() {
+                    touch_ticket(tx, &p.ticket, event.ts)?;
+                }
             }
         }
         EventKind::TicketStateChanged => {
@@ -183,6 +188,9 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
                         params![p.ticket.as_str(), state_json],
                     )
                     .map_err(storage_err)?;
+                // Every lifecycle step (close, cancel, lease, failure, ...) travels as a state
+                // change, so this is what keeps `updated` honest across all of them.
+                touch_ticket(tx, &p.ticket, event.ts)?;
             }
         }
         EventKind::TicketDependencyAdded => {
@@ -895,6 +903,23 @@ fn write_goal_steps(
              VALUES (?1, '', ?2, 0, 0, ?3, ?3)
              ON CONFLICT(ticket) DO UPDATE SET steps = excluded.steps, updated_at = excluded.updated_at",
             params![ticket.as_str(), steps_json, now],
+        )
+        .map_err(storage_err)?;
+    Ok(())
+}
+
+/// Set `ticket`'s `updated` column to `at`, the timestamp of the event that changed it, in the
+/// same serialized form `Store::create_ticket` writes (a JSON-serialized `Timestamp`).
+fn touch_ticket(tx: &Tx<'_>, ticket: &tm_types::TicketId, at: Timestamp) -> tm_types::Result<()> {
+    let at = serde_json::to_value(at)
+        .map_err(TmError::from)?
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| TmError::invariant("a Timestamp serializes as a JSON string"))?;
+    tx.raw()
+        .execute(
+            "UPDATE tickets SET updated = ?2 WHERE id = ?1",
+            params![ticket.as_str(), at],
         )
         .map_err(storage_err)?;
     Ok(())

@@ -69,7 +69,9 @@ never drift between sessions:
   chat_demo` plays a scripted turn (every tool shape, an inline diff, long and failing commands,
   a permission prompt) through the real chat screen, for looking at rendering without a model.
   If your shell inherited `CARGO_TARGET_DIR` from a parent session, prefix builds with
-  `env -u CARGO_TARGET_DIR` so a worktree builds into its own `target/`.
+  `env -u CARGO_TARGET_DIR` so a worktree builds into its own `target/` (a worktree-isolated
+  subagent's command guard refuses `env -u …`; use `unset CARGO_TARGET_DIR && mise run …` there,
+  in the same command, since shell state doesn't carry between calls).
 - `tm tickets` opens the TUI straight onto the tickets screen (Esc goes to a fresh chat);
   `tm tickets --json` prints open tickets as a JSON array and exits (`--all` adds closed and
   cancelled), like `claude agents --json`, and never creates a project just to print `[]`.
@@ -79,8 +81,19 @@ never drift between sessions:
 - `tm serve [--open] [--no-workers] [--web-dir DIR]` — the HTTP API plus the web client at
   `/app/` (build it first: `pnpm -C clients/web install && pnpm -C clients/web build`). It also
   works ready tickets in-process, like the TUI does, so a ticket created and activated from the web
-  client actually runs; `--no-workers` turns that off. A `POST /tickets` with only `kind`,
-  `objective` and `actor` gets the same worker defaults as `tm ticket new`.
+  client actually runs; `--no-workers` turns that off, and `GET /health`/`GET /state` report
+  `workers: true/false` (false also when the runner couldn't start). A `POST /tickets` with only
+  `kind`, `objective` and `actor` gets the same worker defaults as `tm ticket new`. `GET
+  /tickets/{id}/events?after=<seq>&limit=<n>` pages one ticket's history (`next` is the cursor,
+  `null` at the end); `GET /events` resumes from `Last-Event-ID` when a reconnect sends it and
+  sends keep-alive comments while idle; a `reject` with a blank reason is a 400 (and refused by
+  `Store::reject` for the CLI too).
+- The scheduler acts as `system`, not as you: leases, attempt starts, retries and escalations from
+  `tm sched run`/`tm sched tick`/`tm serve`/the TUI's in-process runner are recorded under
+  `ParticipantId::system()` (`sched::scheduler_actor`). `tm run <T>` stays yours, since you asked
+  for that run. A provider at capacity (`RouteDecision::Wait`) makes the agent loop wait, up to
+  5 minutes, instead of failing the attempt
+  (`docs/decisions/D-021-capacity-wait-is-not-a-failed-attempt.md`).
 - `mise run docs:wiki` — regenerate `docs/wiki/` (`tm wiki generate`); pass `-- --dry-run` to
   preview without writing (see "Navigation" below).
 

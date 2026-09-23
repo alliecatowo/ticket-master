@@ -290,6 +290,23 @@ fn state_str(state: TicketState) -> String {
     }
 }
 
+/// The reason a [`Store::reject`] of `ticket` records: `reason` trimmed, refused when nothing is
+/// left. The next attempt reads it as what was wrong, so a rejection without one would send the
+/// worker back blind. Every surface (CLI, TUI, `tm serve`) goes through `Store::reject`, so this
+/// is the one rule; `tm serve` also calls it up front to answer 400 instead of 409.
+///
+/// # Errors
+/// [`TmError::InvalidTransition`] when `reason` is empty or only whitespace.
+pub fn rejection_reason(ticket: &TicketId, reason: &str) -> tm_types::Result<String> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(TmError::InvalidTransition(format!(
+            "rejecting {ticket} needs a reason: say what was wrong, the next attempt reads it"
+        )));
+    }
+    Ok(reason.to_string())
+}
+
 fn state_changed_draft(
     ticket: &TicketId,
     from: TicketState,
@@ -1086,7 +1103,8 @@ impl Store {
     /// verification carrying `reason`, then the ticket's retry policy decides between another
     /// attempt (`-> Ready`) and escalation, exactly as for any other failure
     /// ([`Store::record_failure`]). The next attempt's context includes `reason` among the
-    /// ticket's prior failures, so the worker sees what was wrong.
+    /// ticket's prior failures, so the worker sees what was wrong. The reason is required: an
+    /// empty or whitespace-only one is refused ([`rejection_reason`]), and it is stored trimmed.
     pub fn reject(
         &self,
         ticket: &TicketId,
@@ -1098,6 +1116,7 @@ impl Store {
                 "{actor} cannot reject a submission directly: only a human can"
             )));
         }
+        let reason = rejection_reason(ticket, &reason)?;
         let id = ticket.clone();
         let failure_reason = reason.clone();
         let mut events = self.run_command(move |view| {
@@ -4634,6 +4653,63 @@ mod tests {
             .expect("the rejection is a recorded failure");
         assert_eq!(last.class, FailureClass::VerificationFailed);
         assert_eq!(last.detail, "subtract is missing a test");
+    }
+
+    #[test]
+    fn a_rejection_needs_a_reason_and_stores_it_trimmed() {
+        let (_dir, store) = open_store();
+        let ticket_id = submitted_ticket(&store);
+        let human: ParticipantId = "human:owner".parse().unwrap();
+        for blank in ["", "   ", "\n\t "] {
+            assert!(matches!(
+                store
+                    .reject(&ticket_id, blank.into(), human.clone())
+                    .unwrap_err(),
+                TmError::InvalidTransition(_)
+            ));
+        }
+        assert_eq!(
+            store.view().unwrap().tickets[&ticket_id].state,
+            TicketState::Submitted,
+            "a refused rejection changes nothing"
+        );
+        store
+            .reject(&ticket_id, "  wrong file \n".into(), human)
+            .expect("reject");
+        let view = store.view().unwrap();
+        let last = view.tickets[&ticket_id].failures.last().cloned().unwrap();
+        assert_eq!(last.detail, "wrong file");
+    }
+
+    /// `updated` moves with every change to a ticket, including the terminal ones.
+    #[test]
+    fn closing_or_cancelling_a_ticket_bumps_its_updated_time() {
+        let dir = TempDir::new().unwrap();
+        let clock = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store = Store::open_with(dir.path(), clock.clone(), ids).unwrap();
+        let human: ParticipantId = "human:owner".parse().unwrap();
+        let ticket = |id: &TicketId| store.view().unwrap().tickets[id].clone();
+
+        let cancelled = create_root_ticket(&store);
+        let created = ticket(&cancelled).updated;
+        assert_eq!(created, ticket(&cancelled).created);
+        clock.advance_seconds(60);
+        store.cancel(&cancelled, None, human.clone()).unwrap();
+        assert_eq!(ticket(&cancelled).updated, created.plus_seconds(60));
+
+        let closed = submitted_ticket(&store);
+        clock.advance_seconds(60);
+        let before = ticket(&closed).updated;
+        store.accept(&closed, None, human.clone()).unwrap();
+        assert_eq!(ticket(&closed).state, TicketState::Closed);
+        assert_eq!(ticket(&closed).updated, before.plus_seconds(60));
+
+        clock.advance_seconds(60);
+        store
+            .update_ticket(&closed, serde_json::json!({"priority": 3}), human)
+            .unwrap();
+        assert_eq!(ticket(&closed).updated, before.plus_seconds(120));
     }
 
     #[test]

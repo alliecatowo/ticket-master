@@ -1,4 +1,5 @@
-//! `GET /events?from=<seq>`: the resumable, gap-free, dupe-free event stream (`SPEC.md` §14).
+//! `GET /events?from=<seq>` (or `Last-Event-ID: <seq>`): the resumable, gap-free, dupe-free event
+//! stream (`SPEC.md` §14).
 //!
 //! The hard part, called out explicitly in the spec, is the handover between "replay from the
 //! log" and "live broadcast": a client resuming from `from=N` must see every event with
@@ -19,7 +20,8 @@ use std::convert::Infallible;
 use std::pin::Pin;
 
 use axum::extract::{Query, State};
-use axum::response::sse::{Event as SseEvent, Sse};
+use axum::http::HeaderMap;
+use axum::response::sse::{Event as SseEvent, KeepAlive, KeepAliveStream, Sse};
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use tm_events::Event;
@@ -114,17 +116,32 @@ pub fn to_sse_event(event: &Event) -> tm_types::Result<SseEvent> {
 
 type BoxEventStream = Pin<Box<dyn Stream<Item = Result<SseEvent, Infallible>> + Send>>;
 
-/// `GET /events?from=<seq>` handler: replay the backlog from `from` (or the beginning) up to the
+/// Where a `GET /events` stream resumes: the `Last-Event-ID` header when it carries a `seq`, else
+/// `?from=`, else the beginning. The header wins because a browser's `EventSource` sends it on
+/// every automatic reconnect while still requesting the original URL, whose `from` is stale by
+/// then. A header that isn't a number is ignored rather than refused.
+pub fn resume_point(headers: &HeaderMap, params: EventStreamParams) -> u64 {
+    headers
+        .get("last-event-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .or(params.from)
+        .unwrap_or(0)
+}
+
+/// `GET /events?from=<seq>` handler: replay the backlog from the [`resume_point`] up to the
 /// log's head at subscribe time, then continue with live events, admitting each through a single
-/// [`ResumableStream`] so the handover neither drops nor duplicates.
+/// [`ResumableStream`] so the handover neither drops nor duplicates. An idle stream sends a
+/// keep-alive comment every [`crate::state::ServerConfig::sse_keep_alive`].
 ///
 /// # Errors
 /// [`ServerError::Domain`] if the initial backlog read fails (e.g. storage I/O error).
 pub async fn sse_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(params): Query<EventStreamParams>,
-) -> Result<Sse<BoxEventStream>, ServerError> {
-    let from = params.from.unwrap_or(0);
+) -> Result<Sse<KeepAliveStream<BoxEventStream>>, ServerError> {
+    let from = resume_point(&headers, params);
     let mut resumer = ResumableStream::new(from);
 
     // Subscribe before reading the backlog: whatever lands between "subscribe" and "read
@@ -185,7 +202,7 @@ pub async fn sse_handler(
     });
 
     let combined: BoxEventStream = Box::pin(backlog_stream.chain(live_stream));
-    Ok(Sse::new(combined))
+    Ok(Sse::new(combined).keep_alive(KeepAlive::new().interval(state.config.sse_keep_alive)))
 }
 
 #[cfg(test)]
@@ -251,6 +268,8 @@ mod tests {
                 presence_ttl_seconds: 60,
                 broadcast_poll_interval: Duration::from_millis(20),
                 sse_replay_page_size: page_size,
+                sse_keep_alive: Duration::from_secs(15),
+                workers: false,
             },
             clock,
             ids,
@@ -428,6 +447,67 @@ mod tests {
 
         let (ids, _raw) = handle.await.unwrap();
         assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn last_event_id_wins_over_from_and_a_garbled_one_is_ignored() {
+        use super::{resume_point, EventStreamParams};
+        use axum::http::{HeaderMap, HeaderValue};
+        let from = |n| EventStreamParams { from: Some(n) };
+        let with = |v: &'static str| {
+            let mut h = HeaderMap::new();
+            h.insert("last-event-id", HeaderValue::from_static(v));
+            h
+        };
+        assert_eq!(
+            resume_point(&HeaderMap::new(), EventStreamParams::default()),
+            0
+        );
+        assert_eq!(resume_point(&HeaderMap::new(), from(3)), 3);
+        assert_eq!(resume_point(&with("7"), from(3)), 7);
+        assert_eq!(resume_point(&with(" 7 "), EventStreamParams::default()), 7);
+        assert_eq!(resume_point(&with("not-a-seq"), from(3)), 3);
+    }
+
+    /// An `EventSource` reconnect: the URL still says `from=0`, the header says where it was.
+    #[tokio::test]
+    async fn a_reconnect_resumes_after_its_last_event_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = build_state(dir.path(), 2);
+        for _ in 0..5 {
+            state.events.append(make_draft()).unwrap();
+        }
+        let addr = spawn_server(state).await;
+
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/events?from=0"))
+            .header("Last-Event-ID", "3")
+            .send()
+            .await
+            .unwrap();
+        let (ids, _raw) = collect_ids(resp, 2, Duration::from_secs(5)).await;
+        assert_eq!(ids, vec![4, 5]);
+    }
+
+    #[tokio::test]
+    async fn an_idle_stream_sends_keep_alive_comments() {
+        use futures::StreamExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = build_state(dir.path(), 10);
+        state.config.sse_keep_alive = Duration::from_millis(50);
+        let addr = spawn_server(state).await;
+
+        let mut stream = get_events(addr, 0).await.bytes_stream();
+        let mut raw = String::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while !raw.lines().any(|l| l.starts_with(':')) {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, stream.next()).await {
+                Ok(Some(Ok(chunk))) => raw.push_str(&String::from_utf8_lossy(&chunk)),
+                other => panic!("no keep-alive comment before the stream ended: {other:?} {raw:?}"),
+            }
+        }
     }
 
     #[tokio::test]

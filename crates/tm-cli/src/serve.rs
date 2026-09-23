@@ -28,6 +28,22 @@ pub async fn serve(
 ) -> tm_types::Result<()> {
     let bind_addr = parse_bind_addr(args.addr.as_deref())?;
 
+    // Started before the config is built so `/health` and `/state` report whether workers are
+    // actually running, not just whether `--no-workers` was left off.
+    let workers = if args.no_workers {
+        None
+    } else {
+        match crate::sched::spawn_background_runner(Arc::clone(&project), WORKER_INTERVAL) {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                renderer.note(&format!(
+                    "Not working tickets: {e}. Tickets can still be created and reviewed."
+                ));
+                None
+            }
+        }
+    };
+
     let config = tm_server::state::ServerConfig {
         project_root: project.root.clone(),
         state_dir: project.state_dir.clone(),
@@ -36,6 +52,8 @@ pub async fn serve(
         presence_ttl_seconds: 3600,
         broadcast_poll_interval: std::time::Duration::from_millis(100),
         sse_replay_page_size: 100,
+        sse_keep_alive: std::time::Duration::from_secs(15),
+        workers: workers.is_some(),
     };
 
     let state = Arc::new(tm_server::state::AppState::open(
@@ -58,20 +76,6 @@ pub async fn serve(
             axum::routing::get(|| async { axum::response::Redirect::temporary("/app/") }),
         );
     }
-
-    let workers = if args.no_workers {
-        None
-    } else {
-        match crate::sched::spawn_background_runner(Arc::clone(&project), WORKER_INTERVAL) {
-            Ok(handle) => Some(handle),
-            Err(e) => {
-                renderer.note(&format!(
-                    "Not working tickets: {e}. Tickets can still be created and reviewed."
-                ));
-                None
-            }
-        }
-    };
 
     let listener = TcpListener::bind(bind_addr).await?;
     let resolved_addr = listener.local_addr()?;
