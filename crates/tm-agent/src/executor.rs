@@ -338,6 +338,17 @@ impl BuiltinExecutor {
         if let Some(root) = self.root_override.clone() {
             agent_loop = agent_loop.with_root(root);
         }
+        let date = self.clock.now().to_rfc3339();
+        let root = agent_loop.root().display().to_string();
+        agent_loop = agent_loop.with_prompt_fragments(crate::prompt::worker_fragments(
+            &crate::prompt::PromptEnvironment {
+                root,
+                platform: std::env::consts::OS.to_string(),
+                date: date.get(..10).unwrap_or(&date).to_string(),
+                scope: String::new(),
+                attached_ticket: Some(task.ticket.to_string()),
+            },
+        ));
 
         let agent_task = AgentTask {
             ticket: Some(task.ticket.clone()),

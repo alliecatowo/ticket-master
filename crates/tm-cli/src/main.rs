@@ -166,7 +166,14 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
             }
         }
         Some(Command::Ticket(cmd)) => {
-            let opened = project::open_for_command(cli.global.project.as_deref())?;
+            // Creating a ticket is an explicit request to have a project, so it starts one the
+            // way bare `tm` does (global scope, nothing written into the workspace; D-003).
+            // Every other ticket verb needs an existing project with tickets in it.
+            let opened = if matches!(cmd, tm_cli::args::TicketCommand::New(_)) {
+                project::open_bare(cli.global.project.as_deref(), renderer)?
+            } else {
+                project::open_for_command(cli.global.project.as_deref())?
+            };
             tickets::dispatch_ticket(&cmd, &opened, renderer)
         }
         Some(Command::Dep(cmd)) => {

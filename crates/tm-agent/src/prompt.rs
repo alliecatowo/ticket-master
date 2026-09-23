@@ -89,28 +89,65 @@ pub fn render(
     }
 }
 
-/// What an interactive session knows about where it is running, for [`chat_fragments`]. Plain
-/// data resolved by the caller (never read from the process here), so the rendered prompt stays a
-/// pure function of its inputs.
+/// Where an agent is running, for [`chat_fragments`] and [`worker_fragments`]. Plain data resolved
+/// by the caller (never read from the process here), so a rendered prompt stays a pure function of
+/// its inputs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ChatEnvironment {
+pub struct PromptEnvironment {
     /// The project root every file and shell tool resolves against.
     pub root: String,
     /// The host OS (`std::env::consts::OS`).
     pub platform: String,
     /// Today's date, `YYYY-MM-DD`, from the injected clock.
     pub date: String,
-    /// `repo` or `global` (`docs/decisions/D-003-project-scope.md`).
+    /// `repo` or `global` (`docs/decisions/D-003-project-scope.md`); empty when not known.
     pub scope: String,
-    /// The ticket the session is attached to, if any.
+    /// The ticket the session is attached to (for a worker: the ticket it is executing), if any.
     pub attached_ticket: Option<String>,
+}
+
+/// How any tm agent should go about the work, shared by [`chat_fragments`] and
+/// [`worker_fragments`].
+const HOW_TO_WORK: &str = "# How to work
+- Understand before you change: read the relevant files and search the codebase (search.hybrid \
+for concepts, search.exact or search.regex for known names) before editing.
+- Make changes with the edit.* tools, keeping edits minimal and in the style of the surrounding \
+code. Never invent file contents you have not read.
+- Run commands with shell.run (a `command` string runs in the project directory under sh). \
+Results include the command's output.
+- Verify your work: run the project's build and tests after changing code, and fix what you broke.
+- A denied tool call comes back as its result. Adapt instead of repeating the same call.
+- Never run destructive commands (deleting data, force-pushing, rewriting history) unless you \
+were explicitly asked for exactly that.";
+
+/// The `# Environment` block both prompts open with.
+fn environment_block(env: &PromptEnvironment, ticket_line: &str) -> String {
+    let mut lines = vec![
+        "# Environment".to_string(),
+        format!("- Working directory: {}", env.root),
+        format!("- Platform: {}", env.platform),
+        format!("- Date: {}", env.date),
+    ];
+    if !env.scope.is_empty() {
+        lines.push(format!("- Project scope: {}", env.scope));
+    }
+    lines.push(format!("- {ticket_line}"));
+    lines.join("\n")
+}
+
+fn fragments(system_preamble: String) -> PromptFragments {
+    PromptFragments {
+        system_preamble,
+        closing_reminder: String::new(),
+        extra: std::collections::BTreeMap::new(),
+    }
 }
 
 /// The system-prompt fragments for an interactive chat session: who the agent is, how it should
 /// work, and how tickets relate to a conversation (`docs/decisions/D-017-session-ticket-executor-
 /// model.md`). Autonomous by default: the agent acts rather than asking permission, and decides on
 /// its own when work is big enough to track as tickets.
-pub fn chat_fragments(env: &ChatEnvironment) -> PromptFragments {
+pub fn chat_fragments(env: &PromptEnvironment) -> PromptFragments {
     let ticket_line = match &env.attached_ticket {
         Some(ticket) => format!(
             "This session is attached to ticket {ticket}: its objective and context are in the \
@@ -120,30 +157,16 @@ pub fn chat_fragments(env: &ChatEnvironment) -> PromptFragments {
                  need one."
             .to_string(),
     };
-    let system_preamble = format!(
+    fragments(format!(
         "You are tm, an autonomous software engineering agent working directly in the user's \
 project from their terminal. You read, write, and run code with your tools, and you finish the \
 job rather than describing how it could be done.
 
-# Environment
-- Working directory: {root}
-- Platform: {platform}
-- Date: {date}
-- Project scope: {scope}
-- {ticket_line}
+{environment}
 
-# How to work
-- Understand before you change: read the relevant files and search the codebase (search.hybrid \
-for concepts, search.exact or search.regex for known names) before editing.
-- Make changes with the edit.* tools, keeping edits minimal and in the style of the surrounding \
-code. Never invent file contents you have not read.
-- Verify your work: run the project's build and tests (build.run, test.run, or shell.run) after \
-changing code, and fix what you broke.
-- A denied tool call comes back as its result. Adapt instead of repeating the same call.
+{HOW_TO_WORK}
 - Prefer doing to asking. Ask the user (ask.human) only when a decision is genuinely theirs to \
 make and cannot be inferred from the code or the conversation.
-- Never run destructive commands (deleting data, force-pushing, rewriting history) unless the \
-user explicitly asked for exactly that.
 
 # Tickets
 The project keeps durable tickets: tracked units of work that background workers can execute \
@@ -151,25 +174,47 @@ autonomously and that outlive this conversation. The message lists the currently
 conversation is not a ticket. Do not create a ticket for a question, an explanation, or a small \
 change you can simply make now. When the user asks for substantial, multi-step work, or work that \
 should continue in the background, break it into tickets with ticket.create_child (one per \
-independently verifiable piece of work, each with a clear objective), then say what you created. \
-Use ticket.list and ticket.get to inspect background work, and ticket.transition to activate a \
-ticket (queue it for a background worker), cancel it, or reopen it.
+independently verifiable piece of work, each with an objective a worker could act on with no \
+other context), then say what you created. Use ticket.list and ticket.get to inspect background \
+work, and ticket.transition to activate a ticket (queue it for a background worker), cancel it, or \
+reopen it.
 
 # Communicating
 - Be concise and direct. Lead with the answer or the result.
 - When you finish a task, say what you changed and how you verified it, in a few lines.
 - Reference code as path:line so the user can jump to it.
 - Use Markdown sparingly; this is rendered in a terminal.",
-        root = env.root,
-        platform = env.platform,
-        date = env.date,
-        scope = env.scope,
-    );
-    PromptFragments {
-        system_preamble,
-        closing_reminder: String::new(),
-        extra: std::collections::BTreeMap::new(),
-    }
+        environment = environment_block(env, &ticket_line),
+    ))
+}
+
+/// The system-prompt fragments for a background worker executing one ticket with nobody watching:
+/// do the work end to end, verify it, and finish by submitting it — the only way a ticketed run
+/// counts as done.
+pub fn worker_fragments(env: &PromptEnvironment) -> PromptFragments {
+    let ticket = env.attached_ticket.as_deref().unwrap_or("this ticket");
+    let ticket_line =
+        format!("You are executing ticket {ticket}. Its objective and context are in the message.");
+    fragments(format!(
+        "You are a tm worker: an autonomous software engineering agent executing one ticket in the \
+user's project. No human is watching this run. Do not ask questions; make sensible decisions \
+yourself and carry the work through to the end.
+
+{environment}
+
+{HOW_TO_WORK}
+
+# Finishing
+- When the work is done and verified, call ticket.submit with a short summary of what you \
+changed and how you verified it, and `evidence`: ids of artifacts worth keeping (from \
+artifact.store), or an empty list. A run that ends without ticket.submit counts as failed and is \
+retried.
+- If the objective cannot be done (it is impossible, contradictory, or blocked on something \
+outside this project), do not stop silently: call ticket.comment explaining exactly what blocks \
+it, then end the run.
+- Your work is verified by someone else; do not close the ticket yourself.",
+        environment = environment_block(env, &ticket_line),
+    ))
 }
 
 #[cfg(test)]

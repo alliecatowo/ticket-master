@@ -137,6 +137,13 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   feature and the env var are required. As of D-010, this exports nothing yet in practice: the
   OTel layer is span-shaped and this workspace has zero `#[instrument]`/`*_span!` call sites, only
   bare `tracing::info!`/`debug!` events — adding real instrumentation is a separate follow-up.
+- `tm -p "<prompt>"` is the scriptable one-shot chat turn: exit 0 on a reply, 2 when the agent
+  failed the task (`TmError::TurnFailed`), 4 when it ran out of budget; `--json -p` prints one
+  result object (outcome, text, model, tokens, steps). Chatting never creates a ticket (D-017).
+- Ticket lifecycle from the CLI: `tm ticket new "<objective>"` (starts a global-scope project if
+  none exists; new tickets get `Authority::worker()`), `tm ticket activate <T>` (draft -> ready),
+  then `tm run <T>` (activates a draft itself) or `tm sched run`. `tm run` reports a failed attempt
+  as an error (exit 2), not as "finished".
 - `tm run <ticket> --worktree` isolates one delegated run in a real `git worktree` (a fresh branch
   off `HEAD`, under `<state_dir>/worktrees/<ticket>-<suffix>/`) instead of the main checkout —
   requires a repo-scoped project backed by a real, non-bare git repository with at least one

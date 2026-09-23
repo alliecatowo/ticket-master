@@ -562,7 +562,10 @@ fn reference_json(r: &Reference) -> Value {
 struct CreateChildInput {
     kind: TicketKind,
     objective: String,
-    authority: Authority,
+    /// Omitted (the usual case): the worker default, narrowed to what the caller itself holds,
+    /// since a ticket can never grant more than its creator has.
+    #[serde(default)]
+    authority: Option<Authority>,
     #[serde(default)]
     budget: Budget,
     #[serde(default)]
@@ -1253,12 +1256,15 @@ impl BuiltinCapability {
             }
             ToolName::TicketCreateChild => {
                 let parsed: CreateChildInput = serde_json::from_value(input.clone())?;
+                let authority = parsed
+                    .authority
+                    .unwrap_or_else(|| Authority::worker().intersect(ctx.authority));
                 let events = self.store.create_ticket(
                     parsed.kind,
                     parsed.objective,
                     ctx.ticket.cloned(),
                     None,
-                    parsed.authority,
+                    authority,
                     Vec::new(),
                     default_executor_requirements(),
                     parsed.context_refs,
@@ -1332,7 +1338,7 @@ impl BuiltinCapability {
                     .filter(|t| {
                         state
                             .as_ref()
-                            .is_none_or(|s| format!("{:?}", t.state).to_ascii_lowercase() == *s)
+                            .is_none_or(|s| state_name(t.state).eq_ignore_ascii_case(s))
                     })
                     .collect();
                 tickets.sort_by(|a, b| b.priority.cmp(&a.priority).then_with(|| a.id.cmp(&b.id)));
@@ -1343,7 +1349,7 @@ impl BuiltinCapability {
                     .map(|t| {
                         json!({
                             "id": t.id.as_str(),
-                            "state": format!("{:?}", t.state),
+                            "state": state_name(t.state),
                             "objective": t.objective,
                             "priority": t.priority,
                             "parent": t.parent.as_ref().map(|p| p.as_str()),
@@ -1380,7 +1386,7 @@ impl BuiltinCapability {
                     .view()?
                     .tickets
                     .get(&id)
-                    .map(|t| format!("{:?}", t.state));
+                    .map(|t| state_name(t.state));
                 Ok(json!({"ticket": id.as_str(), "state": state, "events": events.len()}))
             }
             ToolName::DecisionRecord => {
@@ -1896,19 +1902,29 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::TicketCreateChild.as_str(),
-                description: "Create a child of the current ticket.",
+                description: "Create a ticket: a tracked unit of work a background worker can \
+                              pick up. It becomes a child of the attached ticket, or a top-level \
+                              ticket when none is attached. It starts as a draft; ticket.transition \
+                              `activate` queues it. Leave authority out to give its worker the \
+                              standard coding permissions.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "kind": {"type": "string"},
-                        "objective": {"type": "string"},
+                        "kind": {
+                            "type": "string",
+                            "enum": ["work", "investigation", "verification", "audit", "recovery"]
+                        },
+                        "objective": {
+                            "type": "string",
+                            "description": "What done looks like, specific enough for a worker with no other context."
+                        },
                         "authority": {"type": "object"},
                         "budget": {"type": "object"},
                         "success": {"type": "array"},
                         "context_refs": {"type": "array"},
                         "priority": {"type": "integer"}
                     },
-                    "required": ["kind", "objective", "authority"]
+                    "required": ["kind", "objective"]
                 }),
                 cost: CostClass::Mutating,
                 requires: requirement_for(ToolName::TicketCreateChild),
@@ -1959,7 +1975,7 @@ impl CapabilityProvider for BuiltinCapability {
                 name: ToolName::TicketList.as_str(),
                 description: "List the project's tickets: the durable work items background \
                               workers execute. Open tickets only unless include_closed is true; \
-                              optionally filtered to one state (e.g. \"Ready\", \"Running\").",
+                              optionally filtered to one state (e.g. \"ready\", \"running\").",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -2143,6 +2159,15 @@ impl CapabilityProvider for BuiltinCapability {
 /// transcript-size budget this bounds is a property of the dispatch loop, not of any one
 /// capability, so [`ToolRegistry`] — not [`BuiltinCapability`] — owns the `Store` handle this
 /// needs.
+/// A ticket state's canonical wire name (`"draft"`, `"ready"`, ...): the same spelling every
+/// other JSON surface (`tm ticket list --json`, `tm serve`) uses.
+fn state_name(state: tm_core::TicketState) -> String {
+    serde_json::to_value(state)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{state:?}").to_ascii_lowercase())
+}
+
 /// The ticket a ticket-scoped tool acts on, or a clear refusal when the calling session has none
 /// attached (`docs/decisions/D-017-session-ticket-executor-model.md`).
 fn require_ticket<'a>(ctx: &CallContext<'a>, tool: &str) -> Result<&'a TicketId> {
@@ -3570,7 +3595,7 @@ mod tests {
                 )
                 .await,
         );
-        assert_eq!(activated["state"], "Ready");
+        assert_eq!(activated["state"], "ready");
 
         let cancelled = completed(
             h.registry
@@ -3583,7 +3608,7 @@ mod tests {
                 )
                 .await,
         );
-        assert_eq!(cancelled["state"], "Cancelled");
+        assert_eq!(cancelled["state"], "cancelled");
 
         let open = completed(
             h.registry

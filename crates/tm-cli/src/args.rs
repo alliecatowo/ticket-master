@@ -276,6 +276,8 @@ pub enum TicketCommand {
     New(TicketNewArgs),
     /// Edit mutable fields of an existing ticket.
     Edit(TicketEditArgs),
+    /// Make a draft ticket ready for a worker to pick up (`tm run` or `tm sched run`).
+    Activate(TicketRefArgs),
     /// Close a ticket (requires it to be verified, unless its kind permits an unverified
     /// close).
     Close(TicketRefArgs),

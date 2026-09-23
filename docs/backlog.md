@@ -105,12 +105,14 @@ endpoint/key/model. Along the way, four real, pre-existing gaps surfaced, all st
    reason falls through to `Err(ProviderError::MalformedResponse)`, failing the whole request —
    not retried (`MalformedResponse` isn't retryable). Fix: map `"incomplete"` to
    `StopReason::MaxTokens` alongside `"length"` at line 914.
-3. **The actually-served model/provider (`StepRecord.served_by`) is computed but never surfaced
-   anywhere.** `crates/tm-agent/src/agent_loop.rs:759` computes it from the real wire response,
+3. **Fixed (2026-09-22) for `--json -p`**, which reports `model` per turn and per step. The TUI
+   status bar redesign surfaces it interactively. **The actually-served model/provider
+   (`StepRecord.served_by`) is computed but never surfaced anywhere.** `crates/tm-agent/src/agent_loop.rs:759` computes it from the real wire response,
    but `crates/tm-cli/src/agent.rs`'s `format_step` drops it when rendering, and `StepRecord` is
    never persisted to an event/`project.db` either. There is currently no `tm` surface, live or
    historical, that lets an operator confirm which provider/model actually served a turn.
-4. **`tm --json -p <prompt>` does not emit JSON**, contradicting `args.rs`'s own module doc
+4. **Fixed (2026-09-22):** `tm --json -p` now emits one structured result object.
+   **`tm --json -p <prompt>` does not emit JSON**, contradicting `args.rs`'s own module doc
    ("every subcommand's JSON schema is stable and snapshot-tested"). `agent.rs`'s `run_turn`
    `on_event` closure always calls `renderer.note()` with preformatted plain text, never checking
    `renderer.is_json()`. Fixing this would also let bug 3's `served_by` ride along for free.
@@ -532,7 +534,15 @@ D-005 (see that decision doc). Fix: route through the same provider-registry loo
 `crates/tm-provider/src/fabric.rs::Fabric::execute` already uses for every other role, rather than
 hardcoding a single provider type at the genesis call site.
 
-## Open decision: should `-p` exit non-zero on an in-band agent failure?
+## Resolved (2026-09-22): should `-p` exit non-zero on an in-band agent failure?
+
+Yes. `tm -p` exits 0 when the turn replied or submitted, 2 (`TmError::TurnFailed`) when the agent
+didn't accomplish the task, and 4 when it ran out of budget. `tm run <ticket>` follows the same
+rule for a failed attempt, instead of printing "finished". `--json -p` prints one result object
+(outcome, text, model, tokens, steps) on stdout either way. See `AgentSession::run_prompt` and
+`sched::run_outcome`. The original question follows.
+
+### Original question
 
 `crates/tm-cli/src/agent.rs::run_turn_streaming` deliberately returns `Err` only for an
 infrastructure failure (network, storage) and `Ok(AgentOutcome::Failed {..})` for the agent's own

@@ -88,8 +88,21 @@ fn run_with_worktree_creates_a_real_worktree_and_keeps_it_when_the_run_does_not_
     let ticket_id: String = serde_json::from_slice(&created.stdout).expect("ticket id json");
     activate_ticket(root, &ticket_id);
 
-    let output = run_tm_ok(root, &["run", &ticket_id, "--worktree"]);
+    // The mock provider only ever replies in text, so the attempt never submits: `tm run` reports
+    // that as the failure it is (exit 2), and the worktree is kept for inspection.
+    let output = run_tm(root, &["run", &ticket_id, "--worktree"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a run that doesn't submit exits 2\nstdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("did not finish"),
+        "the failure says what happened, got stderr {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let worktrees_dir = root.join(".tm").join("worktrees");
     let entries: Vec<_> = std::fs::read_dir(&worktrees_dir)

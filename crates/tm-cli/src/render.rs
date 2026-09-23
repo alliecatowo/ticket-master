@@ -95,6 +95,7 @@ impl Renderer {
                 TmError::Io(_) => "Io",
                 TmError::Parse(_) => "Parse",
                 TmError::Invariant(_) => "Invariant",
+                TmError::TurnFailed(_) => "TurnFailed",
             };
             let json = serde_json::json!({
                 "error": {

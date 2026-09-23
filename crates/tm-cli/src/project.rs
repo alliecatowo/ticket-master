@@ -347,7 +347,11 @@ pub fn open_for_command(explicit: Option<&Path>) -> tm_types::Result<Project> {
     if !resolved.exists {
         return Err(TmError::not_found(
             "project",
-            resolved.root.display().to_string(),
+            format!(
+                "for {} yet (run `tm` to start one, kept outside this directory, or `tm init` to \
+                 keep it in this repo)",
+                resolved.root.display()
+            ),
         ));
     }
     open_at(&resolved.root, &resolved.state_dir, resolved.scope)

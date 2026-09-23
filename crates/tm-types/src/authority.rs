@@ -328,6 +328,54 @@ impl Authority {
         }
     }
 
+    /// What a ticket worker gets by default: enough to carry a piece of coding work end to end
+    /// on its own (read and write the repository, run commands and interactive programs, commit
+    /// on a branch, look up docs, create child tickets and submit its work), and nothing
+    /// irreversible or out of its lane (no push, force-push or merge, no closing, cancelling or
+    /// reopening tickets, since a worker never verifies its own work; no project-level edits, no
+    /// arbitrary network, no desktop control).
+    pub fn worker() -> Self {
+        Authority {
+            repository: RepoAuthority {
+                read: PatternSet::all(),
+                write: PatternSet::all(),
+            },
+            git: GitAuthority {
+                commit: true,
+                branch: true,
+                merge: false,
+                push: false,
+                force: false,
+            },
+            tickets: TicketAuthority {
+                create_children: true,
+                delegate_children: true,
+                modify_siblings: true,
+                close: false,
+                cancel: false,
+                reopen: false,
+            },
+            project: ProjectAuthority::default(),
+            network: NetworkAuthority {
+                docs: true,
+                arbitrary: false,
+                allowlist: BTreeSet::new(),
+            },
+            shell: ShellAuthority {
+                enabled: true,
+                allow: PatternSet::all(),
+                deny: PatternSet::empty(),
+                pty: true,
+            },
+            computer: ComputerAuthority::default(),
+            resources: ResourceAuthority {
+                max_workers: 4,
+                max_concurrent_commands: 4,
+            },
+            budget: Budget::unlimited(),
+        }
+    }
+
     /// No authority at all. This is also [`Authority::default`].
     pub fn none() -> Self {
         Authority::default()
@@ -738,6 +786,45 @@ impl Authority {
 mod tests {
     use super::*;
     use crate::budget::Spend;
+
+    #[test]
+    fn worker_authority_can_do_coding_work_but_nothing_irreversible() {
+        let worker = Authority::worker();
+        assert!(
+            Authority::root().contains(&worker),
+            "a worker is always within root"
+        );
+        let allowed = [
+            Action::ReadPath {
+                path: "src/lib.rs".into(),
+            },
+            Action::WritePath {
+                path: "src/lib.rs".into(),
+            },
+            Action::RunCommand {
+                command: vec!["cargo".into(), "test".into()],
+            },
+            Action::Git { op: GitOp::Commit },
+            Action::Ticket {
+                op: TicketOp::CreateChild,
+            },
+        ];
+        for action in allowed {
+            assert_eq!(worker.permits(&action), Decision::Allow, "{action:?}");
+        }
+        for action in [
+            Action::Git { op: GitOp::Push },
+            Action::Git { op: GitOp::Merge },
+            Action::Ticket {
+                op: TicketOp::Close,
+            },
+        ] {
+            assert!(
+                matches!(worker.permits(&action), Decision::Deny(_)),
+                "{action:?}"
+            );
+        }
+    }
 
     fn scoped() -> Authority {
         Authority {

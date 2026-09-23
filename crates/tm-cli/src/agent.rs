@@ -228,7 +228,7 @@ impl AgentSession {
                     ));
                 }
                 Command::Turn(prompt) => {
-                    if let Err(e) = self.run_turn(&prompt).await {
+                    if let Err(e) = self.run_turn(&prompt, true).await {
                         self.renderer.error(&e);
                     }
                 }
@@ -239,11 +239,29 @@ impl AgentSession {
     }
 
     /// Run one prompt to completion non-interactively: the `tm -p <prompt>` form.
+    ///
+    /// Scripting contract: exits 0 when the turn replied or submitted its ticket's work, and
+    /// otherwise returns the error the process exits with — [`TmError::TurnFailed`] (exit 2) when
+    /// the agent didn't accomplish the task, [`TmError::BudgetExhausted`] (exit 4) when it ran out
+    /// of budget. With `--json`, stdout gets one result object ([`turn_result_json`]) either way.
     pub async fn run_prompt(&mut self, prompt: &str) -> tm_types::Result<()> {
         // `SessionStart`: this entry point's session is exactly this one prompt, so it fires
         // here rather than in `run_interactive`'s loop (which this call never reaches).
         self.fire_session_start().await;
-        self.run_turn(prompt).await
+        let outcome = if self.renderer.is_json() {
+            // No human at the keyboard to approve anything: suspensions are denied.
+            let outcome = self
+                .run_turn_streaming(prompt, |_| {}, |_| Ok(false))
+                .await?;
+            self.renderer.emit(
+                &turn_result_json(&outcome, &self.session, self.attached_ticket.as_ref()),
+                "",
+            )?;
+            outcome
+        } else {
+            self.run_turn(prompt, false).await?
+        };
+        outcome_result(&outcome)
     }
 
     /// Load `hooks.toml` (if present) and run its `session_start` entries, logging a load
@@ -284,9 +302,9 @@ impl AgentSession {
     }
 
     /// Where this session is running, for the chat system prompt.
-    fn chat_environment(&self, ticket: Option<&Ticket>) -> tm_agent::ChatEnvironment {
+    fn chat_environment(&self, ticket: Option<&Ticket>) -> tm_agent::PromptEnvironment {
         let date = self.project.clock.now().to_rfc3339();
-        tm_agent::ChatEnvironment {
+        tm_agent::PromptEnvironment {
             root: self.project.root.display().to_string(),
             platform: std::env::consts::OS.to_string(),
             date: date.get(..10).unwrap_or(&date).to_string(),
@@ -325,8 +343,14 @@ impl AgentSession {
     /// (`tm-cli`'s `tui.rs`) also calls, so the two front ends can never drift apart on how a
     /// turn is actually executed. Every `self.renderer.note`/`error` call below reproduces this
     /// method's pre-refactor output byte for byte: `--plain`/piped-stdin behavior is unchanged.
-    #[allow(dead_code)]
-    async fn run_turn(&mut self, prompt: &str) -> tm_types::Result<()> {
+    ///
+    /// `report_failures` prints a failed or budget-exhausted turn's summary line; the `-p` path
+    /// turns those into the process's error (and exit code) instead, so it passes `false`.
+    async fn run_turn(
+        &mut self,
+        prompt: &str,
+        report_failures: bool,
+    ) -> tm_types::Result<AgentOutcome> {
         let renderer = self.renderer;
         let mut printed = 0usize;
         let outcome = self
@@ -350,11 +374,15 @@ impl AgentSession {
                 |_pending| prompt_approval_decision(),
             )
             .await?;
+        let is_failure = matches!(
+            outcome,
+            AgentOutcome::Failed { .. } | AgentOutcome::BudgetExhausted { .. }
+        );
         let summary = format_outcome_summary(&outcome);
-        if !summary.is_empty() {
+        if !summary.is_empty() && (report_failures || !is_failure) {
             self.renderer.note(&summary);
         }
-        Ok(())
+        Ok(outcome)
     }
 
     /// The shared turn-running logic [`AgentSession::run_turn`] (the plain/`-p` loop) and the
@@ -803,6 +831,78 @@ fn build_mock_fabric(clock: Arc<dyn Clock>) -> Fabric {
     });
     fabric.register_provider(Arc::new(provider));
     fabric
+}
+
+/// A finished turn as the process's result: `Ok` when it replied or submitted, otherwise the error
+/// `tm -p` exits with (see [`AgentSession::run_prompt`]).
+fn outcome_result(outcome: &AgentOutcome) -> tm_types::Result<()> {
+    match outcome {
+        AgentOutcome::Failed { class, detail, .. } => {
+            Err(TmError::TurnFailed(format!("{class:?}: {detail}")))
+        }
+        AgentOutcome::BudgetExhausted { exhausted, .. } => Err(TmError::BudgetExhausted(
+            format_budget_dimension(*exhausted).to_string(),
+        )),
+        AgentOutcome::Replied { .. }
+        | AgentOutcome::Submitted { .. }
+        | AgentOutcome::AwaitingApproval { .. } => Ok(()),
+    }
+}
+
+/// The `tm --json -p` result object: how the turn ended, the reply, which model actually served
+/// it, token spend, and every step's text and tool calls.
+pub(crate) fn turn_result_json(
+    outcome: &AgentOutcome,
+    session: &SessionId,
+    ticket: Option<&TicketId>,
+) -> serde_json::Value {
+    let steps = outcome.steps();
+    let (status, text, detail) = match outcome {
+        AgentOutcome::Replied { text, .. } => ("replied", Some(text.clone()), None),
+        AgentOutcome::Submitted { evidence, .. } => {
+            ("submitted", Some(evidence.summary.clone()), None)
+        }
+        AgentOutcome::BudgetExhausted { exhausted, .. } => (
+            "budget_exhausted",
+            None,
+            Some(format_budget_dimension(*exhausted).to_string()),
+        ),
+        AgentOutcome::AwaitingApproval { pending_call, .. } => (
+            "awaiting_approval",
+            None,
+            Some(format_pending_approval(pending_call)),
+        ),
+        AgentOutcome::Failed { class, detail, .. } => {
+            ("failed", None, Some(format!("{class:?}: {detail}")))
+        }
+    };
+    let tool_status = |r: &ToolCallResolution| match r {
+        ToolCallResolution::Completed { .. } => ("ok", None),
+        ToolCallResolution::Denied { reason } => ("denied", Some(reason.clone())),
+        ToolCallResolution::Errored { detail } => ("error", Some(detail.clone())),
+    };
+    serde_json::json!({
+        "outcome": status,
+        "text": text,
+        "detail": detail,
+        "session": session.as_str(),
+        "ticket": ticket.map(TicketId::as_str),
+        "model": steps.last().map(|s| s.served_by.as_str()),
+        "tokens": steps.iter().map(|s| s.spend.tokens).sum::<u64>(),
+        "steps": steps.iter().map(|step| serde_json::json!({
+            "text": step.assistant_text,
+            "model": step.served_by,
+            "tool_calls": step.tool_calls.iter().map(|call| {
+                let (status, detail) = tool_status(&call.resolution);
+                serde_json::json!({
+                    "tool": call.tool_name,
+                    "input": call.input,
+                    "status": status,
+                    "detail": detail,
+                })
+            }).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// Render one step: the model's text (if any) plus one line per tool call.
@@ -1351,6 +1451,49 @@ mod tests {
 
         assert_eq!(reported.len(), outcome.steps().len(), "one report per step");
         assert_eq!(reported.last().map(Vec::as_slice), Some(outcome.steps()));
+    }
+
+    #[tokio::test]
+    async fn the_json_result_reports_the_reply_model_and_tokens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = Arc::new(open_test_project(dir.path()));
+        let (fabric, _provider) = scripted_fabric(project.clock.clone(), "done: 4");
+        let mut session =
+            AgentSession::new(project, Renderer::from_flags(true, true, true)).with_fabric(fabric);
+        let outcome = session
+            .run_turn_streaming("2+2?", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+
+        let json = turn_result_json(&outcome, session.session_id(), None);
+        assert_eq!(json["outcome"], "replied");
+        assert_eq!(json["text"], "done: 4");
+        assert_eq!(json["model"], "mock/m1");
+        assert_eq!(json["tokens"], 20);
+        assert_eq!(json["ticket"], serde_json::Value::Null);
+        assert_eq!(json["steps"].as_array().map(Vec::len), Some(1));
+        assert!(outcome_result(&outcome).is_ok());
+    }
+
+    #[test]
+    fn a_failed_turn_is_an_exit_code_2_error_for_scripts() {
+        let failed = AgentOutcome::Failed {
+            steps: Vec::new(),
+            class: tm_core::FailureClass::Other,
+            detail: "step limit (64) reached".to_string(),
+        };
+        let err = outcome_result(&failed).expect_err("a failed turn is an error");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("step limit"), "{err}");
+
+        let exhausted = AgentOutcome::BudgetExhausted {
+            steps: Vec::new(),
+            exhausted: BudgetDimension::Tokens,
+        };
+        assert_eq!(
+            outcome_result(&exhausted).expect_err("budget").exit_code(),
+            4
+        );
     }
 
     #[tokio::test]

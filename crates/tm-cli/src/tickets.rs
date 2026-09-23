@@ -188,6 +188,7 @@ pub fn dispatch_ticket(
         TicketCommand::Close(args) => ticket_close(args, project, renderer),
         TicketCommand::Cancel(args) => ticket_cancel(args, project, renderer),
         TicketCommand::Reopen(args) => ticket_reopen(args, project, renderer),
+        TicketCommand::Activate(args) => ticket_activate(args, project, renderer),
         TicketCommand::Tree(args) => ticket_tree(args, project, renderer),
         TicketCommand::Delegate(args) => ticket_delegate(args, project, renderer),
         TicketCommand::Submit(args) => ticket_submit(args, project, renderer),
@@ -337,7 +338,9 @@ pub fn ticket_new(
             .ok_or_else(|| TmError::not_found("ticket", parent_id))?;
         parent_ticket.authority.clone()
     } else {
-        Authority::default()
+        // A root ticket is meant to be worked on: give its worker enough authority to do the
+        // job (`Authority::worker`), not none at all.
+        Authority::worker()
     };
 
     let events = project.store.create_ticket(
@@ -437,6 +440,21 @@ pub fn ticket_reopen(
         .store
         .reopen(&ticket_id, None, project.actor.clone())?;
     renderer.emit(&ticket_id, &format!("Reopened ticket {}", ticket_id))?;
+    Ok(())
+}
+
+/// `tm ticket activate`: `Draft -> Ready`, so the scheduler (or `tm run`) can pick it up.
+pub fn ticket_activate(
+    args: &TicketRefArgs,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let ticket_id = TicketId::new(&args.ticket)?;
+    project.store.activate(&ticket_id, project.actor.clone())?;
+    renderer.emit(
+        &ticket_id,
+        &format!("Activated ticket {ticket_id}: ready for a worker (tm run {ticket_id})"),
+    )?;
     Ok(())
 }
 

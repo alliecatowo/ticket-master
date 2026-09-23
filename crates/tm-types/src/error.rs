@@ -49,6 +49,12 @@ pub enum TmError {
     #[error("io: {0}")]
     Io(String),
 
+    /// An agent turn ran but did not accomplish its task (it hit its step limit, the provider
+    /// failed mid-turn, or it stopped without finishing ticket work). Distinct from an
+    /// infrastructure error so a script driving `tm -p` can tell the two apart.
+    #[error("agent turn failed: {0}")]
+    TurnFailed(String),
+
     /// Malformed input that could not be parsed.
     #[error("parse: {0}")]
     Parse(String),
@@ -93,6 +99,7 @@ impl TmError {
             TmError::AuthorityDenied(_) => 3,
             TmError::BudgetExhausted(_) => 4,
             TmError::Invariant(_) => 5,
+            TmError::TurnFailed(_) => 2,
             _ => 1,
         }
     }
@@ -119,6 +126,7 @@ mod tests {
         assert_eq!(TmError::AuthorityDenied("x".into()).exit_code(), 3);
         assert_eq!(TmError::BudgetExhausted("x".into()).exit_code(), 4);
         assert_eq!(TmError::invariant("x").exit_code(), 5);
+        assert_eq!(TmError::TurnFailed("x".into()).exit_code(), 2);
         assert_eq!(TmError::conflict("x").exit_code(), 1);
     }
 

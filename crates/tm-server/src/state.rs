@@ -229,6 +229,7 @@ pub fn status_for(err: &TmError) -> StatusCode {
         TmError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         TmError::Parse(_) => StatusCode::INTERNAL_SERVER_ERROR,
         TmError::Invariant(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        TmError::TurnFailed(_) => StatusCode::UNPROCESSABLE_ENTITY,
     }
 }
 
@@ -246,6 +247,7 @@ pub fn error_code(err: &TmError) -> &'static str {
         TmError::Provider(_) => "storage_error",
         TmError::Parse(_) => "storage_error",
         TmError::Invariant(_) => "invariant_violation",
+        TmError::TurnFailed(_) => "turn_failed",
     }
 }
 

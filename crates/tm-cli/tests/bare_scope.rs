@@ -238,6 +238,10 @@ fn status_in_a_fresh_directory_with_no_project_anywhere_errors_not_found() {
         stderr.to_lowercase().contains("not found"),
         "expected a NotFound-shaped error, got stderr {stderr:?}"
     );
+    assert!(
+        stderr.contains("tm init"),
+        "the error must say how to get a project, got stderr {stderr:?}"
+    );
     let projects_dir = tm_home.path().join("projects");
     assert!(
         !projects_dir.exists() || std::fs::read_dir(&projects_dir).unwrap().next().is_none(),
@@ -383,4 +387,51 @@ fn project_show_with_explicit_project_flag_reports_repo_scope() {
         serde_json::from_slice(&output.stdout).expect("project show --json must be JSON");
     assert_eq!(report.get("kind").and_then(|v| v.as_str()), Some("repo"));
     assert_eq!(report.get("exists").and_then(|v| v.as_bool()), Some(true));
+}
+
+/// `tm ticket new` in a fresh directory is an explicit request to have a project: it starts one in
+/// global scope the way bare `tm` does, writing nothing into the workspace (D-003), and the ticket
+/// is then listable.
+#[test]
+fn ticket_new_in_a_fresh_directory_starts_a_global_project() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tm_home = tempfile::tempdir().expect("tempdir");
+
+    let created = run_tm_in(
+        tmp.path(),
+        tm_home.path(),
+        &["ticket", "new", "write the docs"],
+    );
+    assert!(
+        created.status.success(),
+        "tm ticket new must succeed in a fresh directory, got stderr {:?}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    assert!(
+        !tmp.path().join(".tm").exists(),
+        "nothing is written into the workspace"
+    );
+
+    let listed = run_tm_in(tmp.path(), tm_home.path(), &["ticket", "list", "--json"]);
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("json");
+    assert_eq!(
+        listed.as_array().map(Vec::len),
+        Some(1),
+        "the new ticket is listed: {listed:?}"
+    );
+    let id = listed[0]["id"].as_str().expect("ticket id").to_string();
+    assert_eq!(listed[0]["state"], "draft");
+
+    let activated = run_tm_in(tmp.path(), tm_home.path(), &["ticket", "activate", &id]);
+    assert!(
+        activated.status.success(),
+        "tm ticket activate must succeed, got stderr {:?}",
+        String::from_utf8_lossy(&activated.stderr)
+    );
+    let listed = run_tm_in(tmp.path(), tm_home.path(), &["ticket", "list", "--json"]);
+    let listed: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("json");
+    assert_eq!(
+        listed[0]["state"], "ready",
+        "activate makes it runnable: {listed:?}"
+    );
 }

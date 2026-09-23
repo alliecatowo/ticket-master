@@ -371,11 +371,24 @@ pub async fn run_ticket(
     start_notification_watcher(project);
 
     let ticket = TicketId::new(&args.ticket)?;
-    let view = project.store.view()?;
+    let mut view = project.store.view()?;
+    let is_draft = view
+        .tickets
+        .get(&ticket)
+        .ok_or_else(|| tm_types::TmError::not_found("ticket", &ticket))?
+        .state
+        == tm_core::TicketState::Draft;
+    // Asking to run a draft is asking for it to be ready: activate it rather than refusing.
+    if is_draft {
+        project.store.activate(&ticket, project.actor.clone())?;
+        renderer.note(&format!("Activated {ticket} (was a draft)."));
+        view = project.store.view()?;
+    }
     let ticket_state = view
         .tickets
         .get(&ticket)
         .ok_or_else(|| tm_types::TmError::not_found("ticket", &ticket))?;
+    let failures_before = ticket_state.failures.len();
 
     let worktree = if args.worktree {
         Some(crate::worktree::create(project, &ticket)?)
@@ -421,6 +434,7 @@ pub async fn run_ticket(
         .plus_seconds(RUN_TICKET_MAX_WAIT.as_secs() as i64);
     let mut detached = false;
     let mut final_state = None;
+    let mut outcome = None;
     loop {
         if project.clock.now() >= deadline {
             renderer.note(&format!(
@@ -439,8 +453,8 @@ pub async fn run_ticket(
             t.state,
             tm_core::ticket::TicketState::Leased | tm_core::ticket::TicketState::Running
         ) {
-            renderer.note(&format!("Ticket {ticket} finished: {:?}", t.state));
             final_state = Some(t.state);
+            outcome = Some(run_outcome(t, failures_before));
             break;
         }
     }
@@ -457,7 +471,51 @@ pub async fn run_ticket(
         .await;
     }
 
-    Ok(())
+    match outcome {
+        Some(Ok(message)) => {
+            renderer.note(&message);
+            Ok(())
+        }
+        Some(Err(err)) => Err(err),
+        None => Ok(()),
+    }
+}
+
+/// How one `tm run` attempt ended, read from the ticket once it left `Leased`/`Running`: a
+/// forward-progress state is success; anything else is reported as the failure it recorded (with
+/// what happens next), as the error `tm run` exits with — never as a quiet "finished".
+fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Result<String> {
+    let state = state_label(ticket.state);
+    if worktree_run_reached_success(ticket.state) {
+        return Ok(format!(
+            "Ticket {} submitted its work ({state}).",
+            ticket.id
+        ));
+    }
+    let reason = ticket
+        .failures
+        .get(failures_before..)
+        .and_then(<[_]>::last)
+        .map(|f| format!("{:?}: {}", f.class, f.detail))
+        .unwrap_or_else(|| "no failure was recorded".to_string());
+    let next = match ticket.state {
+        tm_core::TicketState::Ready | tm_core::TicketState::Blocked => {
+            format!("it is {state} again and will be retried")
+        }
+        _ => format!("it is now {state}"),
+    };
+    Err(tm_types::TmError::TurnFailed(format!(
+        "ticket {} attempt {} did not finish: {reason}; {next}",
+        ticket.id, ticket.attempts
+    )))
+}
+
+/// A ticket state's canonical lowercase name (`"ready"`, `"submitted"`, ...).
+fn state_label(state: tm_core::TicketState) -> String {
+    serde_json::to_value(state)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{state:?}").to_ascii_lowercase())
 }
 
 /// The success set [`finish_worktree_run`] treats as "confirmed forward progress" — a submitted

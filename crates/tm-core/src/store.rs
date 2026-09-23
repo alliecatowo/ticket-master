@@ -986,7 +986,9 @@ impl Store {
     /// tickets whose `VerificationPolicy::None` needs no audit path).
     ///
     /// Authority is resolved from the ticket's own `authority` field (there is not yet a
-    /// separate per-participant authority store); this is a documented simplification.
+    /// separate per-participant authority store), which answers "may this ticket's worker do
+    /// this". A human participant is the project's owner, not the ticket's worker, and is not
+    /// bound by it; an agent always is.
     pub fn close(
         &self,
         ticket: &TicketId,
@@ -999,7 +1001,7 @@ impl Store {
                 .tickets
                 .get(&ticket)
                 .ok_or_else(|| TmError::not_found("ticket", &ticket))?;
-            if !t.authority.tickets.close {
+            if !actor.is_human() && !t.authority.tickets.close {
                 return Err(TmError::AuthorityDenied(format!(
                     "{ticket} lacks tickets.close authority"
                 )));
@@ -1034,7 +1036,7 @@ impl Store {
                 .tickets
                 .get(&ticket)
                 .ok_or_else(|| TmError::not_found("ticket", &ticket))?;
-            if !t.authority.tickets.cancel {
+            if !actor.is_human() && !t.authority.tickets.cancel {
                 return Err(TmError::AuthorityDenied(format!(
                     "{ticket} lacks tickets.cancel authority"
                 )));
@@ -4340,6 +4342,43 @@ mod tests {
         let ticket_id = TicketId::new(events[0].subject.as_str()).unwrap();
         let err = store.cancel(&ticket_id, None, actor()).unwrap_err();
         assert!(matches!(err, TmError::AuthorityDenied(_)));
+    }
+
+    #[test]
+    fn a_human_can_cancel_a_ticket_whose_worker_could_not() {
+        let (_dir, store) = open_store();
+        let events = store
+            .create_ticket(
+                TicketKind::Work,
+                "worker authority only".into(),
+                None,
+                None,
+                Authority::worker(),
+                vec![],
+                executor(),
+                vec![],
+                vec![],
+                VerificationPolicy::None,
+                Budget::unlimited(),
+                retry(),
+                0,
+                actor(),
+            )
+            .unwrap();
+        let ticket_id = TicketId::new(events[0].subject.as_str()).unwrap();
+        let agent: ParticipantId = "agent:builtin/worker".parse().unwrap();
+        assert!(matches!(
+            store.cancel(&ticket_id, None, agent).unwrap_err(),
+            TmError::AuthorityDenied(_)
+        ));
+        let human: ParticipantId = "human:owner".parse().unwrap();
+        store
+            .cancel(&ticket_id, Some("not needed".into()), human)
+            .expect("the project owner can cancel any ticket");
+        assert_eq!(
+            store.view().unwrap().tickets[&ticket_id].state,
+            TicketState::Cancelled
+        );
     }
 
     #[test]
