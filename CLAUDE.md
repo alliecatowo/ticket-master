@@ -10,6 +10,10 @@ never drift between sessions:
 - `mise run build` — build just the `tm` binary (fast default).
 - `mise run build:all` — build the whole workspace.
 - `mise run build:release` — optimized release build of just the `tm` binary (what the release pipeline ships).
+- Provider/auth/config overhaul: `workflows/provider-overhaul.workflow.js` is a bounded
+  Open Dynamic Workflow run using isolated worktrees and `openai/gpt-6-luna`; follow
+  `workflows/README.md` before launching it. Only the integration worker builds,
+  and its final commit is reviewed and verified in the primary checkout before a release.
 - Releases: `.github/workflows/release.yml` runs on `v*` tags and attaches `tm-<target>.tar.gz` per OS to the GitHub Release (`git tag vX.Y.Z && git push origin vX.Y.Z`). The root README's install section names those assets — keep the two in sync.
 - `mise run test` — `cargo test --workspace`.
 - `mise run test:crate -- <crate>` — one crate's tests.

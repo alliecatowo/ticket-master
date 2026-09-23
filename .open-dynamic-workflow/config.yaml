@@ -1,0 +1,21 @@
+# Code-writing workers are restricted to pre-created isolated git worktrees by the
+# workflow's per-call cwd. --auto avoids hanging on prompts in a headless runner.
+# Never run this workflow with cwd pointed at the primary checkout for an edit call.
+defaultProvider: opencode
+outDir: "/var/folders/zp/63k3q7t13rb7bx4l8wnxshgh0000gn/T/opencode/odw-runs"
+concurrency: 2
+timeoutMs: 7200000
+maxAgentCalls: 8
+failFast: true
+providers:
+  opencode:
+    command: node
+    # ODW 0.6.1 cannot extract assistant text from OpenCode's JSONL part.text;
+    # this adapter emits only the final answer and retains a real exit code.
+    args: ["scripts/odw-opencode-jsonl.mjs", "--auto"]
+    modelArg: { flag: "--model" }
+    promptMode: arg
+    permissionPolicy: passthrough
+security:
+  passEnv: []
+  redactEnv: ["*_KEY", "*_TOKEN", "*_SECRET", "PASSWORD"]
