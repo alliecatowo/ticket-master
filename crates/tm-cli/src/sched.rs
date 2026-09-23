@@ -274,7 +274,7 @@ pub fn sched_pause(project: &Project, renderer: &Renderer) -> tm_types::Result<(
         tm_types::TmError::InvalidTransition("Cannot determine parent directory".to_string())
     })?)?;
     std::fs::write(&paused_path, b"paused")?;
-    renderer.note("Scheduler paused.");
+    renderer.status("Scheduler paused.");
     Ok(())
 }
 
@@ -284,7 +284,7 @@ pub fn sched_resume(project: &Project, renderer: &Renderer) -> tm_types::Result<
     if paused_path.exists() {
         std::fs::remove_file(&paused_path)?;
     }
-    renderer.note("Scheduler resumed.");
+    renderer.status("Scheduler resumed.");
     Ok(())
 }
 
@@ -370,7 +370,7 @@ pub fn lease_acquire(
         project.actor.clone(),
     )?;
 
-    renderer.note(&format!("Lease acquired for {}", ticket));
+    renderer.status(&format!("Lease acquired for {}", ticket));
     Ok(())
 }
 
@@ -384,7 +384,7 @@ pub fn lease_release(
 
     let _events = project.store.release(&lease_id, project.actor.clone())?;
 
-    renderer.note(&format!("Lease {} released.", lease_id));
+    renderer.status(&format!("Lease {} released.", lease_id));
     Ok(())
 }
 
@@ -392,7 +392,7 @@ pub fn lease_release(
 pub fn lease_expire(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let _events = project.store.expire_leases()?;
 
-    renderer.note("Expired leases swept.");
+    renderer.status("Expired leases swept.");
     Ok(())
 }
 

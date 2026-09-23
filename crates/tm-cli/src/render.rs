@@ -80,6 +80,13 @@ impl Renderer {
         }
     }
 
+    /// Print a successful human-readable status, highlighted when color is enabled.
+    pub fn status(&self, text: &str) {
+        if !self.quiet {
+            println!("{}", self.apply_color(Color::Green, text));
+        }
+    }
+
     /// Print an error to stderr, human-formatted or as a JSON error object depending on `--json`.
     pub fn error(&self, err: &TmError) {
         if self.json {
