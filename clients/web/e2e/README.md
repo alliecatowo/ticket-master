@@ -6,7 +6,8 @@ Playwright worker gets its own scratch project and server, so spec files run in 
 ```
 pnpm -C clients/web e2e                  # pnpm build, then playwright test
 pnpm -C clients/web e2e:nobuild          # reuse the dist/ you already built
-pnpm -C clients/web e2e -- smoke         # one file (args go to playwright test)
+pnpm -C clients/web e2e smoke            # one file (args go to playwright test; no `--`,
+                                         # which pnpm would pass through literally)
 pnpm -C clients/web e2e --repeat-each=3  # shake out flakes
 ```
 
