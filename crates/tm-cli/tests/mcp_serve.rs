@@ -37,7 +37,8 @@ impl McpChild {
             .arg("--project")
             .arg(project)
             .arg("mcp")
-            .current_dir(project)
+            // Started somewhere other than the project, as a host with `--project` would.
+            .current_dir(tm_home)
             .env("TM_HOME", tm_home)
             .env("TM_NOTIFY", "0")
             .env("TM_TEST_MOCK_PROVIDER", "1")

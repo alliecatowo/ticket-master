@@ -88,7 +88,8 @@ never drift between sessions:
   actor `agent:mcp/<clientInfo.name>`), `search_exact`, `search_hybrid`, `symbol_def`,
   `symbol_outline`. No accept/reject/retry: those stay human-only. It resolves the project from
   Claude Code's working directory like any subcommand, so one must already exist there (`tm
-  init`), or pin one with `-- tm --project DIR mcp`; it runs the scheduler in-process like `tm serve`, and
+  init`), or pin one with `-- tm --project DIR mcp`; workers run at the project root either way;
+  it runs the scheduler in-process like `tm serve`, and
   a `human_required` ticket fails its attempt rather than prompting (stdin/stdout are the
   protocol). Stdout carries JSON-RPC only; log to stderr. `tm-mcp-server` (crate `tm-mcp`) is
   the older standalone form: explicit `--project-root`/`--state-dir`, `Content-Length` framing,

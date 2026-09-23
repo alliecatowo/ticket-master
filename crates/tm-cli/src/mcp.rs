@@ -36,6 +36,12 @@ const WORKER_INTERVAL: Duration = Duration::from_secs(2);
 
 /// Run `tm mcp` until the host closes stdin.
 pub async fn mcp(args: &McpArgs, project: Arc<Project>) -> tm_types::Result<()> {
+    // The in-process workers resolve their file and shell tool calls against the process's
+    // working directory, and their workspace snapshots against `project.root`. The host starts
+    // `tm mcp` wherever it happens to be (a subdirectory of the repo, or anywhere at all with
+    // `--project`), so pin the two together at the project root before any worker starts.
+    std::env::set_current_dir(&project.root)?;
+
     let server = McpServer::with_store(
         Arc::clone(&project.store),
         project.root.clone(),
