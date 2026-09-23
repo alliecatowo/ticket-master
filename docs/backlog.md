@@ -584,6 +584,23 @@ simply no longer the wiki's source for this page family, leaving open whether th
 genuine separate use. Full reasoning, the rejected alternative, and what this trade costs:
 `docs/decisions/D-015-decision-docs-are-the-wiki-source.md`.
 
+## Found live, 2026-09-23 (D-019 shell)
+
+- **`/model` lists routing candidates, not models.** With only DevPass configured the picker shows
+  one entry. Claude Code's `/model` lists what you can switch to; OpenAI-compatible gateways
+  (DevPass included) expose `GET /models`, and Anthropic has `GET /v1/models`. The picker should
+  offer those, plus free-typed `provider/model` (which `AgentSession::set_model` already accepts).
+- **Ctrl+Z then `fg` exits the TUI** with "cursor position could not be read": on resume,
+  `Terminal::clear` queries the cursor while crossterm's event-stream thread holds the reader
+  (`crates/tm-tui` runtime; reported by the chat-parity agent, not yet fixed).
+- **Esc on a running `!` command** stops waiting for it but doesn't kill the process.
+- **Token use per turn is high.** A small bug-fix turn reached ~175k tokens, mostly from the model
+  flailing on the edit-hash contract (being fixed) but also from the ~18KB tool-schema block on
+  every step. Worth measuring again once edits work: trimming the chat tool set, or prompt caching
+  on Anthropic, are the levers.
+- **Not built yet from D-019 §1:** mid-prompt `/` completion, prompt stash, image paste, vim mode,
+  rewind (Esc Esc on an empty prompt in Claude Code).
+
 ## Stretch
 
 - iOS simulator executor (SPEC §23).
