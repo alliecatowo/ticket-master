@@ -6,8 +6,8 @@ use crate::args::{
     DecisionCommand, DecisionNewArgs, DecisionRefArgs, DecisionSupersedeArgs, DepCommand,
     DepEdgeArgs, DepGraphArgs, MilestoneCommand, MilestoneRefArgs, TicketAcceptArgs,
     TicketCancelArgs, TicketCommand, TicketDelegateArgs, TicketEditArgs, TicketForkArgs,
-    TicketListArgs, TicketNewArgs, TicketRefArgs, TicketRejectArgs, TicketStateArg,
-    TicketSubmitArgs, TicketsArgs,
+    TicketListArgs, TicketNewArgs, TicketRefArgs, TicketRejectArgs, TicketRetryArgs,
+    TicketStateArg, TicketSubmitArgs, TicketsArgs,
 };
 use crate::project::Project;
 
@@ -241,6 +241,7 @@ pub fn dispatch_ticket(
         TicketCommand::Activate(args) => ticket_activate(args, project, renderer),
         TicketCommand::Accept(args) => ticket_accept(args, project, renderer),
         TicketCommand::Reject(args) => ticket_reject(args, project, renderer),
+        TicketCommand::Retry(args) => ticket_retry(args, project, renderer),
         TicketCommand::Tree(args) => ticket_tree(args, project, renderer),
         TicketCommand::Delegate(args) => ticket_delegate(args, project, renderer),
         TicketCommand::Submit(args) => ticket_submit(args, project, renderer),
@@ -589,6 +590,28 @@ pub fn ticket_reject(
     renderer.emit(
         &ticket_id,
         &format!("Rejected {ticket_id}: it is {state}, and the next attempt will see your reason."),
+    )?;
+    Ok(())
+}
+
+/// `tm ticket retry`
+pub fn ticket_retry(
+    args: &TicketRetryArgs,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let ticket_id = TicketId::new(&args.ticket)?;
+    project
+        .store
+        .retry(&ticket_id, args.guidance.clone(), project.actor.clone())?;
+    let told = if args.guidance.is_some() {
+        ", and the next attempt will see your guidance"
+    } else {
+        ""
+    };
+    renderer.emit(
+        &ticket_id,
+        &format!("Retrying {ticket_id}: it is queued for a worker again{told}."),
     )?;
     Ok(())
 }

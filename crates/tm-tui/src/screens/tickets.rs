@@ -5,8 +5,9 @@
 //! grouped by state (**Needs input**, **Working**, **Ready for review**, **Queued**,
 //! **Completed**), one row per ticket (a status glyph, id and short title, a one-line summary, and
 //! an age aligned right), a dispatch input between two rules at the bottom, and a footer of key
-//! hints. Space opens a peek panel; Enter or `→` attaches; Ctrl+X cancels (twice); in a review ticket's
-//! peek, `1`/`2` accept or reject its submission; Ctrl+B opens the board; `?` lists every
+//! hints. Space opens a peek panel; Enter or `→` attaches; Ctrl+X cancels (twice); an open peek lists the
+//! ticket's options numbered (accept or reject a submission, retry an escalation, queue a draft)
+//! and `1`, `2`, ... pick one; Ctrl+B opens the board; `?` lists every
 //! shortcut. Like Claude Code's agent view, no plain letter is a shortcut: typed text always goes
 //! to the dispatch input.
 //!
@@ -175,6 +176,53 @@ pub struct TicketRow {
     pub order: i64,
     /// What the peek panel shows, top to bottom.
     pub peek: Vec<PeekItem>,
+    /// What the human can do about it from the peek, numbered `1`, `2`, ... in this order.
+    pub choices: Vec<Choice>,
+}
+
+/// Something the human can do about a ticket from its peek panel, numbered like a Claude Code
+/// permission prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    /// Accept a submission.
+    Accept,
+    /// Reject a submission, with a reason.
+    Reject,
+    /// Send an escalated ticket back to work.
+    Retry,
+    /// The same, with guidance for the next attempt.
+    RetryWithGuidance,
+    /// Queue a draft for a background worker.
+    Queue,
+}
+
+impl Choice {
+    /// How the peek lists it.
+    fn label(self) -> &'static str {
+        match self {
+            Choice::Accept => "Accept",
+            Choice::Reject => "Reject, with a reason the next attempt sees",
+            Choice::Retry => "Retry",
+            Choice::RetryWithGuidance => "Retry, with guidance for the next attempt",
+            Choice::Queue => "Queue it for a background worker",
+        }
+    }
+
+    /// How the footer names it (`1 to accept`).
+    fn verb(self) -> &'static str {
+        match self {
+            Choice::Accept => "accept",
+            Choice::Reject => "reject",
+            Choice::Retry => "retry",
+            Choice::RetryWithGuidance => "retry with guidance",
+            Choice::Queue => "queue it",
+        }
+    }
+
+    /// Whether it needs words from the human first (typed into the input).
+    fn asks(self) -> bool {
+        matches!(self, Choice::Reject | Choice::RetryWithGuidance)
+    }
 }
 
 /// Everything the tickets screen shows.
@@ -213,6 +261,15 @@ pub enum TicketsAction {
         /// Why; the next attempt's worker sees it.
         reason: String,
     },
+    /// Send this escalated ticket back to work.
+    Retry {
+        /// The ticket.
+        id: String,
+        /// What the next attempt should do differently, if the human said.
+        guidance: Option<String>,
+    },
+    /// Queue this draft for a background worker.
+    Queue(String),
     /// Open the Kanban board.
     OpenBoard,
 }
@@ -382,8 +439,8 @@ pub struct TicketsScreen {
     peek_open: bool,
     help_open: bool,
     input: InputBox,
-    /// The ticket a reject reason is being typed for.
-    reject_for: Option<String>,
+    /// The ticket and choice whose words (a reject reason, retry guidance) are being typed.
+    asking: Option<(String, Choice)>,
     cancel_armed: Option<(String, Timestamp)>,
     flash: Option<Flash>,
     actions: VecDeque<TicketsAction>,
@@ -406,7 +463,7 @@ impl TicketsScreen {
             peek_open: false,
             help_open: false,
             input: InputBox::new(),
-            reject_for: None,
+            asking: None,
             cancel_armed: None,
             flash: None,
             actions: VecDeque::new(),
@@ -467,9 +524,9 @@ impl TicketsScreen {
     /// Clear the dispatch input (Ctrl+C's first press). Returns whether there was anything to
     /// clear, so a second press on an empty input can mean "exit" instead.
     pub fn clear_input(&mut self) -> bool {
-        let had = !self.input.is_empty() || self.reject_for.is_some();
+        let had = !self.input.is_empty() || self.asking.is_some();
         self.input.clear();
-        self.reject_for = None;
+        self.asking = None;
         had
     }
 
@@ -667,7 +724,7 @@ impl TicketsScreen {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        let empty = self.input.is_empty() && self.reject_for.is_none();
+        let empty = self.input.is_empty() && self.asking.is_none();
 
         if ctrl {
             match key.code {
@@ -713,14 +770,13 @@ impl TicketsScreen {
             // Space on a heading does nothing rather than start a task with a blank.
             KeyCode::Char(' ') if empty => {}
             KeyCode::Char('?') if empty => self.help_open = true,
-            // A review ticket's peek offers its choices numbered, like a permission prompt.
-            KeyCode::Char('1') if empty && self.reviewing() => {
-                if let Some(id) = self.selected_ticket().map(str::to_string) {
-                    self.actions.push_back(TicketsAction::Accept(id));
+            // An open peek offers the ticket's choices numbered, like a permission prompt.
+            KeyCode::Char(c @ '1'..='9') if empty && self.choice(c).is_some() => {
+                if let (Some(choice), Some(id)) =
+                    (self.choice(c), self.selected_ticket().map(str::to_string))
+                {
+                    self.choose(id, choice);
                 }
-            }
-            KeyCode::Char('2') if empty && self.reviewing() => {
-                self.reject_for = self.selected_ticket().map(str::to_string);
             }
             KeyCode::Char(_) if alt => {}
             KeyCode::Char(c) => {
@@ -733,30 +789,52 @@ impl TicketsScreen {
         Propagation::Consumed
     }
 
-    fn selected_is_review(&self) -> bool {
-        self.selected_row()
-            .is_some_and(|r| r.group == Group::Review)
+    /// The choice digit `c` picks in the open peek, if any.
+    fn choice(&self, c: char) -> Option<Choice> {
+        if !self.peek_open {
+            return None;
+        }
+        let n = c.to_digit(10)? as usize;
+        self.selected_row()?.choices.get(n.checked_sub(1)?).copied()
     }
 
-    /// The peek is open on a ticket that's ready for review, so `1`/`2` answer it.
-    fn reviewing(&self) -> bool {
-        self.peek_open && self.selected_is_review()
+    fn choose(&mut self, id: String, choice: Choice) {
+        if choice.asks() {
+            self.asking = Some((id, choice));
+            return;
+        }
+        self.actions.push_back(match choice {
+            Choice::Accept => TicketsAction::Accept(id),
+            Choice::Retry => TicketsAction::Retry { id, guidance: None },
+            Choice::Queue => TicketsAction::Queue(id),
+            Choice::Reject | Choice::RetryWithGuidance => return,
+        });
     }
 
     fn enter(&mut self, now: Timestamp) {
-        if let Some(id) = self.reject_for.clone() {
-            let reason = self.input.text().trim().to_string();
-            if reason.is_empty() {
+        if let Some((id, choice)) = self.asking.clone() {
+            let words = self.input.text().trim().to_string();
+            if words.is_empty() {
+                let ask = match choice {
+                    Choice::Reject => format!("Type why you are rejecting {id}"),
+                    _ => format!("Type what {id}'s next attempt should do differently"),
+                };
                 self.flash(
-                    format!("Type why you are rejecting {id}; the next attempt sees it."),
+                    format!("{ask}; the next attempt sees it."),
                     FlashTone::Error,
                     now.plus_millis(3_000),
                 );
                 return;
             }
             self.input.clear();
-            self.reject_for = None;
-            self.actions.push_back(TicketsAction::Reject { id, reason });
+            self.asking = None;
+            self.actions.push_back(match choice {
+                Choice::Reject => TicketsAction::Reject { id, reason: words },
+                _ => TicketsAction::Retry {
+                    id,
+                    guidance: Some(words),
+                },
+            });
             return;
         }
         if !self.input.is_empty() {
@@ -794,7 +872,7 @@ impl TicketsScreen {
         if self.cancel_armed.take().is_some() {
             return;
         }
-        if self.reject_for.take().is_some() {
+        if self.asking.take().is_some() {
             self.input.clear();
             return;
         }
@@ -1151,16 +1229,19 @@ impl TicketsScreen {
         let text_w = width.saturating_sub(label_w + 2).max(8);
         let muted = Style::default().fg(theme.muted);
         let mut lines = Vec::new();
-        if row.group == Group::Review {
-            // First, so a long peek never scrolls the choices out of view.
-            lines.push(Line::from_spans(vec![
-                Span::new("1. Accept", Style::default().fg(theme.success)),
-                Span::new("   ", muted),
-                Span::new(
-                    "2. Reject, with a reason the next attempt sees",
-                    Style::default(),
-                ),
-            ]));
+        // First, so a long peek never scrolls the choices out of view.
+        for (i, choice) in row.choices.iter().enumerate() {
+            let style = if i == 0 {
+                Style::default().fg(theme.success)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from_spans(vec![Span::new(
+                format!("{}. {}", i + 1, choice.label()),
+                style,
+            )]));
+        }
+        if !row.choices.is_empty() {
             lines.push(Line::from_spans(vec![Span::new(String::new(), muted)]));
         }
         for item in &row.peek {
@@ -1256,8 +1337,9 @@ impl TicketsScreen {
                 "cancel the ticket (press again within 2s to confirm)",
             ),
             (
-                "space, then 1 / 2",
-                "accept or reject a ticket that is ready for review",
+                "space, then 1 2 3",
+                "a ticket's options: accept or reject a submission, retry an escalated ticket, \
+                 queue a draft",
             ),
             ("ctrl+b", "open the Kanban board"),
             ("enter on a heading", "collapse or expand the group"),
@@ -1347,14 +1429,28 @@ impl TicketsScreen {
                 )];
             }
         }
-        let hints: Vec<&str> = if let Some(id) = &self.reject_for {
+        let hints: Vec<&str> = if let Some((id, choice)) = &self.asking {
+            let what = match choice {
+                Choice::Reject => format!("enter to reject {id} with this reason"),
+                _ => format!("enter to retry {id} with this guidance"),
+            };
             return vec![Span::new(
-                format!(
-                    "enter to reject {id} with this reason{}esc to keep it",
-                    glyphs.sep
-                ),
+                format!("{what}{}esc to keep it as it is", glyphs.sep),
                 Style::default().fg(theme.warning),
             )];
+        } else if let Some(row) = self
+            .selected_row()
+            .filter(|r| self.peek_open && self.input.is_empty() && !r.choices.is_empty())
+        {
+            let mut hints: Vec<String> = row
+                .choices
+                .iter()
+                .enumerate()
+                .map(|(i, c)| format!("{} to {}", i + 1, c.verb()))
+                .collect();
+            hints.push("enter to open".into());
+            hints.push("space to close".into());
+            return vec![Span::new(hints.join(glyphs.sep), muted)];
         } else if !self.input.is_empty() {
             vec![
                 "enter to dispatch",
@@ -1363,12 +1459,6 @@ impl TicketsScreen {
             ]
         } else {
             match (&self.selected, self.selected_row()) {
-                (_, Some(row)) if row.group == Group::Review && self.peek_open => vec![
-                    "1 to accept",
-                    "2 to reject",
-                    "enter to open",
-                    "space to close",
-                ],
                 (_, Some(row)) if row.group == Group::Review => vec![
                     "space to review",
                     "enter to open",
@@ -1379,6 +1469,12 @@ impl TicketsScreen {
                     "enter to open",
                     "space to close",
                     "↑↓ to peek at others",
+                    "? for shortcuts",
+                ],
+                (_, Some(row)) if !row.choices.is_empty() => vec![
+                    "enter to open",
+                    "space for options",
+                    "ctrl+x to cancel",
                     "? for shortcuts",
                 ],
                 (_, Some(_)) => vec![
@@ -1424,7 +1520,7 @@ impl TicketsScreen {
 
     fn render_input(&self, area: Rect, buf: &mut Buffer, theme: &Theme, glyphs: &Glyphs) {
         let marks = Marks::for_glyphs(glyphs);
-        let rejecting = self.reject_for.is_some();
+        let rejecting = self.asking.is_some();
         let marker_style = Style::default()
             .fg(if rejecting {
                 theme.warning
@@ -1444,8 +1540,11 @@ impl TicketsScreen {
             return;
         }
         if self.input.is_empty() {
-            let placeholder = match &self.reject_for {
-                Some(id) => format!("Why reject {id}? The next attempt sees your reason"),
+            let placeholder = match &self.asking {
+                Some((id, Choice::Reject)) => {
+                    format!("Why reject {id}? The next attempt sees your reason")
+                }
+                Some((id, _)) => format!("What should {id}'s next attempt do differently?"),
                 None if glyphs.unicode => PLACEHOLDER.to_string(),
                 None => PLACEHOLDER.to_string(),
             };
@@ -1669,6 +1768,11 @@ mod tests {
                 PeekItem::new("objective", format!("the whole objective of {id}")),
                 PeekItem::new("state", "running"),
             ],
+            choices: match group {
+                Group::Review => vec![Choice::Accept, Choice::Reject],
+                Group::NeedsInput => vec![Choice::Retry, Choice::RetryWithGuidance],
+                _ => Vec::new(),
+            },
         }
     }
 
@@ -1781,7 +1885,7 @@ mod tests {
         assert!(text.contains("mock/m1 · ~/proj (main)"));
         assert!(text.contains(PLACEHOLDER));
         // The needs-input row is first, so it is selected and its hints show.
-        assert!(text.contains("enter to open · space to peek · ctrl+x to cancel"));
+        assert!(text.contains("enter to open · space for options · ctrl+x to cancel"));
     }
 
     #[test]
@@ -1942,6 +2046,43 @@ mod tests {
                 reason: "tests do not cover the bug".into()
             }]
         );
+    }
+
+    #[test]
+    fn an_escalated_tickets_peek_retries_with_or_without_guidance() {
+        let env = Env::new(true);
+        let mut s = screen();
+        assert!(s.select_ticket("T-4"));
+        press(&mut s, &env, KeyCode::Char(' '));
+        let text = render(&s, 100, 40, true).join("\n");
+        assert!(text.contains("1. Retry"), "{text}");
+        assert!(text.contains("1 to retry"), "{text}");
+        press(&mut s, &env, KeyCode::Char('1'));
+        assert_eq!(
+            s.take_actions(),
+            vec![TicketsAction::Retry {
+                id: "T-4".into(),
+                guidance: None
+            }]
+        );
+        press(&mut s, &env, KeyCode::Char('2'));
+        let text = render(&s, 100, 40, true).join("\n");
+        assert!(
+            text.contains("What should T-4's next attempt do differently?"),
+            "{text}"
+        );
+        type_text(&mut s, &env, "use the fixture in tests/data");
+        press(&mut s, &env, KeyCode::Enter);
+        assert_eq!(
+            s.take_actions(),
+            vec![TicketsAction::Retry {
+                id: "T-4".into(),
+                guidance: Some("use the fixture in tests/data".into())
+            }]
+        );
+        // There is no third option, so `3` is just text.
+        press(&mut s, &env, KeyCode::Char('3'));
+        assert_eq!(s.input_text(), "3");
     }
 
     #[test]

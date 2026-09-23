@@ -56,7 +56,8 @@ never drift between sessions:
   (`docs/decisions/D-019-claude-code-parity-shell.md` §2 and its "Implemented: tickets screen"):
   groups Needs input / Working / Ready for review / Queued / Completed, a dispatch input at the
   bottom (Enter creates and queues a ticket), Space peeks, Enter/→ attaches the chat, Ctrl+X twice
-  cancels, Space then `1`/`2` accept/reject a submission, Ctrl+B the Kanban board, `?` shortcuts,
+  cancels, Space opens a peek whose numbered options `1`/`2` accept/reject a submission, retry an
+  escalated ticket (with or without guidance), or queue a draft, Ctrl+B the Kanban board, `?` shortcuts,
   Esc back (no plain letter is a shortcut: typing always goes to the dispatch input). While
   the TUI is open a scheduler runs in-process (`sched::spawn_background_runner`), so dispatched
   tickets get worked; the header says so if it could not start. `cargo run -p tm-tui --example
@@ -167,8 +168,12 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   result object (outcome, text, model, tokens, steps). Chatting never creates a ticket (D-017).
 - Ticket lifecycle from the CLI: `tm ticket new "<objective>"` (starts a global-scope project if
   none exists; new tickets get `Authority::worker()`), `tm ticket activate <T>` (draft -> ready),
-  then `tm run <T>` (activates a draft itself) or `tm sched run`. `tm run` reports a failed attempt
-  as an error (exit 2), not as "finished".
+  then `tm run <T>` (activates a draft itself, and prints each step live) or `tm sched run`. `tm
+  run` reports a failed attempt as an error (exit 2), not as "finished". A submitted ticket waits
+  for `tm ticket accept <T>` or `tm ticket reject <T> --reason "..."`; an escalated one (out of
+  attempts) for `tm ticket retry <T> [--guidance "..."]`, which gives it a fresh round of attempts
+  and appends the guidance to its objective. All three are human-only, and the tickets screen and
+  `tm serve`'s `/tickets/{id}/transition` offer the same three.
 - `tm run <ticket> --worktree` isolates one delegated run in a real `git worktree` (a fresh branch
   off `HEAD`, under `<state_dir>/worktrees/<ticket>-<suffix>/`) instead of the main checkout —
   requires a repo-scoped project backed by a real, non-bare git repository with at least one

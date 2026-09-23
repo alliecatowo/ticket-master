@@ -790,6 +790,25 @@ impl App {
                         .accept(t, None, self.project.actor.clone())
                         .map(|_| format!("Accepted {t}: closed (tm ticket reopen {t} undoes it)."))
                 }),
+                TicketsAction::Retry { id, guidance } => with_ticket(&id, |t| {
+                    let said = guidance.is_some();
+                    self.project
+                        .store
+                        .retry(t, guidance.clone(), self.project.actor.clone())
+                        .map(|_| {
+                            if said {
+                                format!("Retrying {t}; the next attempt sees your guidance.")
+                            } else {
+                                format!("Retrying {t}.")
+                            }
+                        })
+                }),
+                TicketsAction::Queue(id) => with_ticket(&id, |t| {
+                    self.project
+                        .store
+                        .activate(t, self.project.actor.clone())
+                        .map(|_| format!("Queued {t} for a background worker."))
+                }),
                 TicketsAction::Reject { id, reason } => with_ticket(&id, |t| {
                     self.project
                         .store

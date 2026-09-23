@@ -396,6 +396,12 @@ enum TransitionRequest {
         reason: String,
         actor: ParticipantId,
     },
+    /// A human sends an escalated ticket back to work (`tm ticket retry`).
+    Retry {
+        #[serde(default)]
+        guidance: Option<String>,
+        actor: ParticipantId,
+    },
     Fail {
         class: FailureClass,
         detail: String,
@@ -691,6 +697,7 @@ async fn transition_ticket(
         TransitionRequest::Reopen { reason, actor } => state.store.reopen(&id, reason, actor)?,
         TransitionRequest::Accept { note, actor } => state.store.accept(&id, note, actor)?,
         TransitionRequest::Reject { reason, actor } => state.store.reject(&id, reason, actor)?,
+        TransitionRequest::Retry { guidance, actor } => state.store.retry(&id, guidance, actor)?,
         TransitionRequest::Fail {
             class,
             detail,
@@ -1332,12 +1339,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accept_and_reject_are_transitions_only_a_human_can_make() {
+    async fn accept_reject_and_retry_are_transitions_only_a_human_can_make() {
         let (_dir, state) = test_state();
         let id = make_ready_ticket(&state).await;
         for body in [
             json!({"accept": {"actor": "system"}}),
             json!({"reject": {"reason": "no tests", "actor": "system"}}),
+            json!({"retry": {"guidance": "try again", "actor": "system"}}),
         ] {
             let request: TransitionRequest = serde_json::from_value(body).expect("wire shape");
             let err = transition_ticket(State(state.clone()), Path(id.clone()), Json(request))

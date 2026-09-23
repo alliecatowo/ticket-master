@@ -300,6 +300,9 @@ pub enum TicketCommand {
     Accept(TicketAcceptArgs),
     /// Reject a submitted ticket's work, sending it back for another attempt with your reason.
     Reject(TicketRejectArgs),
+    /// Send an escalated ticket back to work, optionally telling the next attempt what to do
+    /// differently.
+    Retry(TicketRetryArgs),
     /// Close a ticket (requires it to be verified, unless its kind permits an unverified
     /// close).
     Close(TicketRefArgs),
@@ -426,6 +429,17 @@ pub struct TicketRejectArgs {
     /// What is wrong or missing; the next attempt's worker sees this.
     #[arg(long)]
     pub reason: String,
+}
+
+/// `tm ticket retry`
+#[derive(Debug, Args)]
+pub struct TicketRetryArgs {
+    /// The escalated ticket to retry.
+    #[arg(value_name = "TICKET")]
+    pub ticket: String,
+    /// What the next attempt should do differently; it's added to the ticket's objective.
+    #[arg(long)]
+    pub guidance: Option<String>,
 }
 
 /// `tm ticket cancel`

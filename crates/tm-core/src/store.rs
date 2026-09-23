@@ -1134,6 +1134,79 @@ impl Store {
         Ok(events)
     }
 
+    /// A human sends an escalated ticket back to work (`Escalated -> Blocked`, then `-> Ready`
+    /// when its dependencies allow, as [`Store::activate`] does), with a fresh round of the
+    /// attempts its retry policy allows. `guidance`, when given, is appended to the objective,
+    /// the brief every attempt reads, so the next worker gets what the human said. Human-only,
+    /// like [`Store::accept`]: escalation exists to reach a person.
+    pub fn retry(
+        &self,
+        ticket: &TicketId,
+        guidance: Option<String>,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        if !actor.is_human() {
+            return Err(TmError::AuthorityDenied(format!(
+                "{actor} cannot retry an escalated ticket: escalation waits for a human"
+            )));
+        }
+        let ticket = ticket.clone();
+        self.run_command(move |view| {
+            let t = view
+                .tickets
+                .get(&ticket)
+                .ok_or_else(|| TmError::not_found("ticket", &ticket))?;
+            if t.state != TicketState::Escalated {
+                let state = format!("{:?}", t.state).to_ascii_lowercase();
+                let instead = match t.state {
+                    TicketState::Draft => " (activating it queues a draft)",
+                    TicketState::Submitted => " (accept or reject a submission)",
+                    _ => "",
+                };
+                return Err(TmError::InvalidTransition(format!(
+                    "{ticket} is {state}; only an escalated ticket can be retried{instead}"
+                )));
+            }
+            let blocked = machine::transition(t.state, Trigger::EscalationResolved)
+                .map_err(|e| TmError::InvalidTransition(e.to_string()))?;
+            let retry = RetryPolicy {
+                max_attempts: t.attempts + t.retry.max_attempts.max(1),
+                ..t.retry
+            };
+            let mut fields = serde_json::json!({ "retry": retry });
+            if let Some(guidance) = guidance.as_deref().map(str::trim).filter(|g| !g.is_empty()) {
+                fields["objective"] = serde_json::json!(format!(
+                    "{}\n\nFrom the user, after attempt {}: {guidance}",
+                    t.objective, t.attempts
+                ));
+            }
+            let mut drafts = vec![
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(ticket.clone()),
+                    Payload::from(TicketUpdatedPayload {
+                        ticket: ticket.clone(),
+                        fields,
+                    }),
+                ),
+                state_changed_draft(&ticket, t.state, blocked, actor.clone()),
+            ];
+            let closed: std::collections::BTreeSet<TicketId> = view
+                .tickets
+                .values()
+                .filter(|t| t.state == TicketState::Closed)
+                .map(|t| t.id.clone())
+                .collect();
+            if view.graph.dependencies_satisfied(&ticket, &closed) {
+                let ready = machine::transition(blocked, Trigger::DependenciesSatisfied).expect(
+                    "Blocked always accepts DependenciesSatisfied per the fixed transition table",
+                );
+                drafts.push(state_changed_draft(&ticket, blocked, ready, actor));
+            }
+            Ok(drafts)
+        })
+    }
+
     /// Cancel `ticket` from any non-terminal state, gated on `authority.tickets.cancel`
     /// (`SPEC.md` §4.3 rule 12).
     pub fn cancel(
@@ -4561,6 +4634,76 @@ mod tests {
             .expect("the rejection is a recorded failure");
         assert_eq!(last.class, FailureClass::VerificationFailed);
         assert_eq!(last.detail, "subtract is missing a test");
+    }
+
+    #[test]
+    fn a_human_retries_an_escalated_ticket_with_guidance_and_fresh_attempts() {
+        let (_dir, store) = open_store();
+        let ticket_id = submitted_ticket(&store);
+        let human: ParticipantId = "human:owner".parse().unwrap();
+        store
+            .reject(&ticket_id, "wrong file".into(), human.clone())
+            .expect("reject");
+        // A second attempt that runs out of budget, which is never retried: it escalates.
+        let worker: ParticipantId = "agent:builtin/worker".parse().unwrap();
+        store
+            .acquire_lease(
+                &ticket_id,
+                worker.clone(),
+                Authority::none(),
+                vec![],
+                60,
+                actor(),
+            )
+            .expect("lease");
+        store
+            .transition(&ticket_id, Trigger::WorkStarted, worker)
+            .expect("work started");
+        store
+            .record_failure(
+                &ticket_id,
+                FailureClass::BudgetExhausted,
+                "ran dry".into(),
+                ParticipantId::system(),
+            )
+            .expect("failure recorded");
+        let before = store.view().unwrap().tickets[&ticket_id].clone();
+        assert_eq!(before.state, TicketState::Escalated);
+
+        let agent: ParticipantId = "agent:builtin/other".parse().unwrap();
+        assert!(matches!(
+            store.retry(&ticket_id, None, agent).unwrap_err(),
+            TmError::AuthorityDenied(_)
+        ));
+        store
+            .retry(
+                &ticket_id,
+                Some("edit src/lib.rs, not main.rs".into()),
+                human.clone(),
+            )
+            .expect("retry");
+        let after = store.view().unwrap().tickets[&ticket_id].clone();
+        assert_eq!(after.state, TicketState::Ready);
+        assert!(
+            after
+                .objective
+                .ends_with("From the user, after attempt 2: edit src/lib.rs, not main.rs"),
+            "{}",
+            after.objective
+        );
+        assert!(after.objective.starts_with(&before.objective));
+        assert_eq!(
+            after.retry.max_attempts,
+            before.attempts + before.retry.max_attempts
+        );
+        assert!(crate::invariants::check_invariants(&store.view().unwrap()).is_empty());
+        assert!(
+            matches!(
+                store.retry(&ticket_id, None, human).unwrap_err(),
+                TmError::InvalidTransition(_)
+            ),
+            "only an escalated ticket can be retried"
+        );
     }
 
     #[test]

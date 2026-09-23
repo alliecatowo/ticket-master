@@ -399,7 +399,7 @@ pub fn summary_for(ticket: &Ticket, ctx: SummaryContext<'_>) -> (String, Summary
                 .collect();
             format!("blocked on {}", deps.join(", "))
         }),
-        S::Draft => normal("draft, not queued yet (tm ticket activate)".to_string()),
+        S::Draft => normal("draft, not queued yet".to_string()),
         S::Closed => (
             act.submission
                 .as_deref()

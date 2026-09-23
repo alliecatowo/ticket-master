@@ -3,7 +3,7 @@
 //! the screen and the JSON cannot disagree about a ticket.
 
 use tm_tui::screens::tickets::{
-    compact_age, Group, PeekItem, TicketRow, TicketsData, Tint, Worker,
+    compact_age, Choice, Group, PeekItem, TicketRow, TicketsData, Tint, Worker,
 };
 use tm_types::Timestamp;
 
@@ -73,6 +73,17 @@ fn row(o: &TicketOverview, now: Timestamp) -> TicketRow {
         age: compact_age(o.age_millis),
         order,
         peek: peek(o, now),
+        choices: choices(o),
+    }
+}
+
+/// What the peek offers for `o`, numbered in this order.
+fn choices(o: &TicketOverview) -> Vec<Choice> {
+    match o.state.as_str() {
+        "submitted" => vec![Choice::Accept, Choice::Reject],
+        "escalated" => vec![Choice::Retry, Choice::RetryWithGuidance],
+        "draft" => vec![Choice::Queue],
+        _ => Vec::new(),
     }
 }
 

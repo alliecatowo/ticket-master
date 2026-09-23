@@ -164,9 +164,13 @@ the rows.
   - Enter or `→` attaches the chat to the ticket (`AgentSession::attach_ticket`) and posts a
     one-line `Recap of T-n: …`. Opening tickets from an attached chat selects that ticket.
   - Ctrl+X, then Ctrl+X again within 2 s, cancels the ticket. Esc disarms.
-  - A review ticket's peek leads with numbered choices, like a permission prompt: `1` accepts and
-    `2` rejects (`Store::accept`/`reject`). Reject asks for the reason in the input and refuses an
-    empty one.
+  - A peek leads with the ticket's options, numbered like a permission prompt (`Choice`, filled
+    per state by `tui/tickets_view.rs`): a submission offers 1 accept / 2 reject
+    (`Store::accept`/`reject`); an escalated ticket offers 1 retry / 2 retry with guidance
+    (`Store::retry`, new: before it, nothing ever fired `EscalationResolved`, so "Needs input" was
+    a dead end short of cancelling); a draft offers 1 queue it (`Store::activate`; the model's own
+    `ticket.create_child` makes drafts, and they could only be queued from the CLI). Options that
+    need words (reject, guidance) ask in the input and refuse an empty answer.
   - Ctrl+B opens the board and `?` shows shortcuts. As in Claude Code's agent view, no plain
     letter is a shortcut, so typed text always reaches the dispatch input.
   - Esc closes the peek panel, then clears the input, then returns to the chat.
