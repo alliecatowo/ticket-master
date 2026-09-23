@@ -23,6 +23,7 @@ pub mod role_config;
 pub mod route;
 pub mod state;
 pub mod types;
+pub mod wire_names;
 
 pub use anthropic::AnthropicProvider;
 pub use fabric::{Fabric, Provider, ProviderRecord};
@@ -41,3 +42,4 @@ pub use types::{
     Candidate, Completion, CompletionRequest, ContentBlock, EmbedRequest, Embeddings, Message,
     MessageRole, ModelId, ProviderError, StopReason, ToolDef, Usage,
 };
+pub use wire_names::WireNames;
