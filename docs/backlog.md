@@ -584,6 +584,16 @@ simply no longer the wiki's source for this page family, leaving open whether th
 genuine separate use. Full reasoning, the rejected alternative, and what this trade costs:
 `docs/decisions/D-015-decision-docs-are-the-wiki-source.md`.
 
+## Ask the owner later
+
+- **D-020 (system-one decision providers, proposed):** approve building the first slice (shadow
+  mode: jev/Laya predictions recorded as events and scored by `tm bench`, nothing acts on them)?
+  Owner's notes so far (2026-09-23): Python can come from `mise use uv` rather than a manual
+  install, so that item drops off the owner checklist; freeing RAM on this machine (e.g. stopping
+  Docker) is fine to do ourselves; and Vercel's AI Gateway reportedly serves Jev. The owner has the
+  Vercel CLI authenticated here (and a Vercel MCP connector), so that may be the fastest path to the
+  hosted model without the TypeSafe waitlist. Verify it before relying on it.
+
 ## Found live, 2026-09-23 (D-019 shell)
 
 - **`/model` lists routing candidates, not models.** With only DevPass configured the picker shows
