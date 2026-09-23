@@ -915,7 +915,9 @@ fn touch_ticket(tx: &Tx<'_>, ticket: &tm_types::TicketId, at: Timestamp) -> tm_t
         .map_err(TmError::from)?
         .as_str()
         .map(str::to_string)
-        .ok_or_else(|| TmError::invariant("a Timestamp serializes as a JSON string"))?;
+        .ok_or_else(|| {
+            TmError::invariant("internal error: a timestamp did not serialize as expected")
+        })?;
     tx.raw()
         .execute(
             "UPDATE tickets SET updated = ?2 WHERE id = ?1",
