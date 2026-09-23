@@ -91,3 +91,25 @@ few large ones.
 
 TASKS.md and the `integrate` branch are the resume state. After a usage-limit halt, relaunch
 fresh with a new `args.stamp` and `args.skipDiscovery: true`.
+
+# `complete.workflow.js`: drive tm to completion (Claude Code Workflow)
+
+This is the convergence loop that runs after `tasks-all`. Each round goes through these steps:
+
+1. **Prep.** Build `tm` from `integrate`, discard any half-done batch a halted run left behind,
+   and load every open or retryable task from TASKS.md.
+2. **Land.** Work the tasks that are already known through the batch loop: no-build editors, then
+   one integrator.
+3. **Probe and sweep.** Run 17 single-purpose flow probes, four of them on the real provider.
+   On round 1 and every even round, also run read-only sweeps of every crate and client for
+   stubs, unwired features, duplicate concepts, machine-speak and false docs. On round 1, also
+   exercise each CLI group.
+4. **Record and land.** Dedupe the findings into TASKS.md and land them.
+5. **Judge.** One judge decides whether tm is tasteful, coherent and drivable end to end, and
+   its gaps become tasks.
+
+The loop stops when every probe passes, nothing critical or high was found, the judge says done
+and nothing is left open, or when it reaches `args.maxRounds` (default 8). A deferred task gets
+one retry in a later run; after that it's marked "gave up after a retry". The state lives in
+TASKS.md and on the `integrate` branch, so after a usage-limit halt a fresh relaunch continues
+where the last run stopped. The orchestrating session relaunches it on a cron.
