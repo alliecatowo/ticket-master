@@ -187,7 +187,13 @@ impl GithubModelsProvider {
     /// `GITHUB_TOKEN` for something else (e.g. an unrelated `gh` CLI login) doesn't collide.
     pub fn from_env(model: ModelId, clock: Arc<dyn Clock>) -> Result<Self, ProviderError> {
         let token = std::env::var("GITHUB_TOKEN")
-            .or_else(|_| std::env::var("GITHUB_MODELS_TOKEN"))
+            .ok()
+            .filter(|token| !token.trim().is_empty())
+            .or_else(|| {
+                std::env::var("GITHUB_MODELS_TOKEN")
+                    .ok()
+                    .filter(|token| !token.trim().is_empty())
+            })
             .map_err(|_| missing_env_var("GITHUB_TOKEN"))?;
         let base_url = std::env::var("GITHUB_MODELS_BASE_URL").ok();
 
