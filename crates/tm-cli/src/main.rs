@@ -183,7 +183,7 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
                     .map(|c| c.name.as_str())
                     .collect();
                 Err(tm_types::TmError::CheckFailed(format!(
-                    "tm doctor: {} failed",
+                    "Some checks failed: {}",
                     failed.join(", ")
                 )))
             }
