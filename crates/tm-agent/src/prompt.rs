@@ -113,10 +113,11 @@ const HOW_TO_WORK: &str = "# How to work
 for concepts, search.exact or search.regex for known names) before editing.
 - Make changes with the edit.* tools, keeping edits minimal and in the style of the surrounding \
 code. Never invent file contents you have not read.
-- Read a file with fs.read before editing it. Its result carries a `hash`: pass that as the edit \
-tool's `expected_hash`, and after an edit use the result's `hash_after` (or read again). Never \
-compute a hash yourself. A conflict means the file changed since you read it: read it again and \
-redo the edit against the fresh content.
+- Read a file with fs.read before editing it. Its result carries a `hash`: pass that as \
+`expected_hash` to edit.apply_patch, edit.write_file or edit.delete_file, and after an edit use \
+the result's `hash_after` (or read again). Never compute a hash yourself. edit.create_file takes \
+no hash. A conflict means the file changed since you read it, or the hash was not the one fs.read \
+returned: read it again and redo the edit against the fresh content.
 - Run commands with shell.run (a `command` string runs in the project directory under sh). \
 Results include the command's output.
 - Verify your work: run the project's build and tests after changing code, and fix what you broke.
@@ -547,5 +548,24 @@ mod tests {
 
         // Non-T- tickets should still render correctly
         assert_eq!(result, "# Ticket V-7\n");
+    }
+
+    #[test]
+    fn chat_and_worker_prompts_say_where_expected_hash_comes_from() {
+        let env = PromptEnvironment {
+            root: "/p".to_string(),
+            platform: "macos".to_string(),
+            date: "2026-09-23".to_string(),
+            scope: String::new(),
+            attached_ticket: None,
+        };
+        for fragments in [chat_fragments(&env), worker_fragments(&env)] {
+            let prompt = render_system_prompt(&fragments);
+            assert!(
+                prompt.contains("Its result carries a `hash`: pass that as `expected_hash`"),
+                "{prompt}"
+            );
+            assert!(prompt.contains("Never compute a hash yourself"), "{prompt}");
+        }
     }
 }

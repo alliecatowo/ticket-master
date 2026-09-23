@@ -677,7 +677,12 @@ result (not an exception) so it can adapt, and is recorded as an event. Approval
 actions suspend the loop, emit `approval.requested`, and resume on `approval.decided`.
 
 Edits are applied through a patch engine with conflict detection (`similar`), never blind
-overwrites; every edit produces a `Patch` artifact. The loop enforces the budget before each
+overwrites; every edit produces a `Patch` artifact. The conflict token is the file's blake3
+content hash: `fs.read`, `fs.read_range` and `fs.stat` return it as `hash` (always over the whole
+file), `edit.apply_patch`/`edit.write_file`/`edit.delete_file` take it back as `expected_hash`,
+and a successful edit returns the new one as `hash_after`. The model copies it and never computes
+it; a mismatch is refused with directions to re-read rather than with the file's current hash, so
+a retry has to go back through `fs.read` (or `fs.stat`) first. The loop enforces the budget before each
 provider call and stops cleanly with `AgentOutcome::BudgetExhausted` rather than mid-edit.
 
 **Verification separation** (non-negotiable): the agent that produced a change may not run its

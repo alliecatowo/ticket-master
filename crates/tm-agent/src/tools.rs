@@ -1173,10 +1173,12 @@ impl BuiltinCapability {
                     Err(e) => Err(TmError::from(e)),
                 }
             }
-            // `expected_hash` stays mandatory here even though the patch engine could splice
-            // without it: these edits are bare byte offsets with no surrounding context, so a
+            // `expected_hash` stays mandatory here (the schema requires it, and the patch engine
+            // refuses an existing file edited without one). Unlike a unified-diff hunk, these
+            // edits carry no context lines to re-anchor against: they are bare byte offsets, so a
             // file that changed since the read would take the splice at the wrong bytes, silently.
-            // The hash is the only drift detection this tool has.
+            // The hash is the only drift detection this tool has, and fs.read now hands it over,
+            // so requiring it costs the model nothing.
             ToolName::EditApplyPatch => {
                 let path = get_string(input, "path")?;
                 let mut expected_hash = get_opt_string(input, "expected_hash");
@@ -3191,6 +3193,223 @@ mod tests {
         match outcome {
             ToolOutcome::Completed { result, .. } => assert_eq!(result["applied"], false),
             other => panic!("expected Completed(applied=false), got {other:?}"),
+        }
+    }
+
+    /// Dispatch one call that must complete, returning its result.
+    async fn dispatch_completed(h: &Harness, name: &str, input: Value) -> Value {
+        match h.registry.dispatch(&call(name, input), &h.ctx()).await {
+            ToolOutcome::Completed { result, .. } => result,
+            other => panic!("{name}: expected Completed, got {other:?}"),
+        }
+    }
+
+    /// The `hash` field of an `fs.read` of `path`.
+    async fn read_hash(h: &Harness, path: &str) -> String {
+        let read = dispatch_completed(h, "fs.read", json!({"path": path})).await;
+        read["hash"]
+            .as_str()
+            .unwrap_or_else(|| panic!("fs.read returns a hash: {read}"))
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn fs_read_fs_read_range_and_fs_stat_all_return_the_whole_file_hash() {
+        let h = Harness::new();
+        std::fs::write(
+            h.root().join("calc.py"),
+            "def sub(a, b):\n    return a - b\n",
+        )
+        .unwrap();
+        let from_read = read_hash(&h, "calc.py").await;
+        let stat = dispatch_completed(&h, "fs.stat", json!({"path": "calc.py"})).await;
+        let range = dispatch_completed(
+            &h,
+            "fs.read_range",
+            json!({"path": "calc.py", "byte_start": 0, "byte_end": 3}),
+        )
+        .await;
+        assert_eq!(range["content"], "def");
+        assert_eq!(stat["hash"], from_read.as_str(), "{stat}");
+        assert_eq!(
+            range["hash"],
+            from_read.as_str(),
+            "a ranged read still hashes the whole file: {range}"
+        );
+        let dir = dispatch_completed(&h, "fs.stat", json!({"path": "."})).await;
+        assert!(dir.get("hash").is_none(), "a directory has no hash: {dir}");
+    }
+
+    #[tokio::test]
+    async fn the_hash_fs_read_returns_is_what_every_edit_tool_accepts() {
+        let h = Harness::new();
+        let file = h.root().join("calc.py");
+        let original = "def sub(a, b):\n    return a - b\n";
+        std::fs::write(&file, original).unwrap();
+
+        let hash = read_hash(&h, "calc.py").await;
+        let start = original.find("a - b").unwrap();
+        let patched = dispatch_completed(
+            &h,
+            "edit.apply_patch",
+            json!({
+                "path": "calc.py",
+                "edits": [{"byte_start": start, "byte_end": start + 5, "replacement": "b - a"}],
+                "expected_hash": hash,
+            }),
+        )
+        .await;
+        assert_eq!(patched["edits"][0]["applied"], true, "{patched}");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "def sub(a, b):\n    return b - a\n"
+        );
+        let after_patch = read_hash(&h, "calc.py").await;
+        assert_eq!(
+            patched["edits"][0]["patch"]["hash_after"],
+            after_patch.as_str(),
+            "hash_after is the same value the next fs.read returns"
+        );
+
+        let written = dispatch_completed(
+            &h,
+            "edit.write_file",
+            json!({"path": "calc.py", "content": "x = 1\n", "expected_hash": after_patch}),
+        )
+        .await;
+        assert_eq!(written["applied"], true, "{written}");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "x = 1\n");
+
+        let before_delete = read_hash(&h, "calc.py").await;
+        let deleted = dispatch_completed(
+            &h,
+            "edit.delete_file",
+            json!({"path": "calc.py", "expected_hash": before_delete}),
+        )
+        .await;
+        assert_eq!(deleted["applied"], true, "{deleted}");
+        assert!(!file.exists());
+    }
+
+    #[tokio::test]
+    async fn a_stale_or_self_computed_hash_conflicts_and_says_to_re_read() {
+        let h = Harness::new();
+        let file = h.root().join("calc.py");
+        std::fs::write(&file, "one\n").unwrap();
+        let stale = read_hash(&h, "calc.py").await;
+        std::fs::write(&file, "two\n").unwrap();
+        let current = read_hash(&h, "calc.py").await;
+
+        let attempts = [
+            (
+                "edit.apply_patch",
+                json!({"path": "calc.py", "expected_hash": stale,
+                       "edits": [{"byte_start": 0, "byte_end": 3, "replacement": "six"}]}),
+            ),
+            (
+                "edit.write_file",
+                json!({"path": "calc.py", "content": "six\n", "expected_hash": stale}),
+            ),
+            (
+                "edit.delete_file",
+                json!({"path": "calc.py", "expected_hash": stale}),
+            ),
+            // What the live model did: hashed the file itself with sha256.
+            (
+                "edit.write_file",
+                json!({"path": "calc.py", "content": "six\n", "expected_hash":
+                       "e1a894e0bd5a36f3c5c2e7a2d26e0d6f1d4e7c1b9f3b2a1c0d9e8f7a6b5c4d3e"}),
+            ),
+        ];
+        for (name, input) in attempts {
+            let result = dispatch_completed(&h, name, input).await;
+            let outcome = if name == "edit.apply_patch" {
+                result["edits"][0].clone()
+            } else {
+                result
+            };
+            assert_eq!(outcome["applied"], false, "{name}: {outcome}");
+            let error = outcome["error"].as_str().unwrap_or_default();
+            assert!(error.starts_with("conflict at calc.py"), "{name}: {error}");
+            assert!(error.contains("fs.read"), "{name}: {error}");
+            assert!(
+                !error.contains(&current),
+                "{name}: the current hash is withheld so a retry must re-read: {error}"
+            );
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "two\n");
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_patch_without_a_hash_is_refused_with_directions() {
+        let h = Harness::new();
+        std::fs::write(h.root().join("calc.py"), "one\n").unwrap();
+        let result = dispatch_completed(
+            &h,
+            "edit.apply_patch",
+            json!({"path": "calc.py",
+                   "edits": [{"byte_start": 0, "byte_end": 3, "replacement": "six"}]}),
+        )
+        .await;
+        let edit = &result["edits"][0];
+        assert_eq!(edit["applied"], false, "{result}");
+        assert!(
+            edit["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("fs.read"),
+            "{result}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(h.root().join("calc.py")).unwrap(),
+            "one\n"
+        );
+    }
+
+    #[test]
+    fn every_edit_tool_says_where_expected_hash_comes_from() {
+        let h = Harness::new();
+        let defs = h.registry.tool_defs();
+        for (name, required) in [
+            ("edit.apply_patch", true),
+            ("edit.write_file", false),
+            ("edit.delete_file", true),
+        ] {
+            let def = defs
+                .iter()
+                .find(|d| d.name == name)
+                .unwrap_or_else(|| panic!("{name} is offered"));
+            let description = def.input_schema["properties"]["expected_hash"]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}: expected_hash has a description"));
+            assert!(
+                description.contains(
+                    "The `hash` fs.read or fs.stat returned for this file; it guards against \
+                     editing a file that changed since you read it."
+                ),
+                "{name}: {description}"
+            );
+            let required_fields = def.input_schema["required"].as_array().unwrap();
+            assert_eq!(
+                required_fields.contains(&json!("expected_hash")),
+                required,
+                "{name}: {}",
+                def.input_schema
+            );
+            if !required {
+                assert!(
+                    description.contains("omit it only"),
+                    "{name}: {description}"
+                );
+            }
+        }
+        for name in ["fs.read", "fs.stat"] {
+            let def = defs.iter().find(|d| d.name == name).unwrap();
+            assert!(
+                def.description.contains("`hash`"),
+                "{name}: {}",
+                def.description
+            );
         }
     }
 

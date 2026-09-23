@@ -37,7 +37,7 @@ pub enum Edit {
         /// New full file content.
         content: String,
         /// Hash of the content last observed at this path; `None` only for a file the caller
-        /// has never read (fresh-write intent, still checked against "must already exist").
+        /// has never read (fresh-write intent, still checked against "must not already exist").
         expected_hash: Option<String>,
     },
     /// Delete a file.
@@ -114,8 +114,8 @@ pub enum PatchError {
     Conflict {
         /// The path in conflict.
         path: String,
-        /// Human-readable detail (e.g. "expected hash abc123, found def456", or "file no
-        /// longer exists").
+        /// Human-readable detail that also says how to recover (e.g. "expected_hash abc123 does
+        /// not match the file's current content. ... Re-read the file with fs.read ...").
         detail: String,
     },
     /// The edit's path falls outside the engine's authority write scope.
@@ -408,18 +408,20 @@ fn check_expectation(
                 .to_string(),
         }),
         (Some(expected), Some(content)) => {
-            let actual = hash_bytes(content.as_bytes());
-            if &actual == expected {
+            if &hash_bytes(content.as_bytes()) == expected {
                 Ok(())
             } else {
+                // The current hash is deliberately left out: handed it, a model can retry with
+                // it without re-reading, and its stale byte offsets would then land on whatever
+                // the file holds now. Re-reading is the only way to get it.
                 Err(PatchError::Conflict {
                     path: path.to_string(),
                     detail: format!(
-                        "expected hash {expected}, found {actual}. The file changed since it was \
-                         read, or the hash did not come from fs.read/fs.stat (it is tm's own \
-                         content hash; never compute it yourself). Re-read the file with fs.read \
-                         and retry with the `hash` it returns, working out any byte offsets \
-                         against the fresh content"
+                        "expected_hash {expected} does not match the file's current content. The \
+                         file changed since it was read, or the hash did not come from \
+                         fs.read/fs.stat (it is tm's own content hash; never compute it \
+                         yourself). Re-read the file with fs.read and retry with the `hash` it \
+                         returns, working out any byte offsets against the fresh content"
                     ),
                 })
             }

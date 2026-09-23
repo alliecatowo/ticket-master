@@ -2306,6 +2306,9 @@ mod tests {
     enum Scripted {
         Text(&'static str),
         Tool(&'static str, serde_json::Value),
+        /// A tool call whose input is built from the tool results the model has seen so far (every
+        /// tool-result text in the request, joined), the way a model copies a value it was handed.
+        ToolFrom(&'static str, fn(&str) -> serde_json::Value),
         Hang,
     }
 
@@ -2328,13 +2331,18 @@ mod tests {
             req: tm_provider::CompletionRequest,
         ) -> Result<tm_provider::Completion, tm_provider::ProviderError> {
             let served_by = req.model_or(&ModelId::new("mock", "m1"));
+            let seen = tool_results(&req);
             self.log.lock().unwrap().push(req);
-            let next = self.script.lock().unwrap().pop_front();
+            let next = match self.script.lock().unwrap().pop_front() {
+                Some(Scripted::ToolFrom(name, build)) => Some(Scripted::Tool(name, build(&seen))),
+                other => other,
+            };
             let (content, stop_reason) = match next {
                 Some(Scripted::Hang) => {
                     tokio::time::sleep(std::time::Duration::from_secs(600)).await;
                     unreachable!("a hanging call is always interrupted first")
                 }
+                Some(Scripted::ToolFrom(..)) => unreachable!("resolved to a Tool above"),
                 Some(Scripted::Tool(name, input)) => {
                     let n = self.log.lock().unwrap().len();
                     (
@@ -2443,6 +2451,63 @@ mod tests {
         let session =
             AgentSession::new(project, Renderer::from_flags(false, true, true)).with_fabric(fabric);
         (session, provider)
+    }
+
+    /// The last `"hash"` value in `seen` (tool-result text), as a model would copy it.
+    fn last_hash(seen: &str) -> String {
+        let at = seen
+            .rfind("\"hash\"")
+            .expect("a tool result carried a hash");
+        seen[at + "\"hash\"".len()..]
+            .chars()
+            .skip_while(|c| !c.is_ascii_hexdigit())
+            .take_while(char::is_ascii_hexdigit)
+            .collect()
+    }
+
+    /// The live bug: fixing `return a - b`, a real model had no hash to pass `edit.apply_patch`,
+    /// computed a sha256 itself, and burned ~175k tokens on conflicts. Now fs.read hands over the
+    /// exact value, and a model that copies it gets its edit applied on the first try.
+    #[tokio::test]
+    async fn a_model_that_copies_fs_reads_hash_into_apply_patch_edits_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        let original = "def sub(a, b):\n    return a + b\n";
+        std::fs::write(dir.path().join("src/calc.py"), original).expect("write");
+        let (mut session, provider) = session_with(
+            dir.path(),
+            vec![
+                Scripted::Tool("fs.read", serde_json::json!({"path": "src/calc.py"})),
+                Scripted::ToolFrom("edit.apply_patch", |seen| {
+                    let start = "def sub(a, b):\n    return a ".len();
+                    serde_json::json!({
+                        "path": "src/calc.py",
+                        "edits": [{"byte_start": start, "byte_end": start + 1, "replacement": "-"}],
+                        "expected_hash": last_hash(seen),
+                    })
+                }),
+                Scripted::Text("fixed"),
+            ],
+        );
+        let outcome = session
+            .run_turn_streaming("fix sub", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+
+        assert!(
+            matches!(outcome, AgentOutcome::Replied { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("src/calc.py")).expect("read"),
+            "def sub(a, b):\n    return a - b\n"
+        );
+        let log = provider.log.lock().unwrap();
+        let patch_result = tool_results(&log[2]);
+        assert!(
+            patch_result.contains("\"applied\":true") && !patch_result.contains("conflict"),
+            "{patch_result}"
+        );
     }
 
     #[tokio::test]
