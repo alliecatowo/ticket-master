@@ -9,6 +9,7 @@ use ratatui_core::style::{Modifier, Style};
 
 use crate::chat::glyphs::Glyphs;
 use crate::chat::lines::{clear, draw_box, draw_spans, truncate_spans, Span};
+use crate::chat::sanitize::sanitize;
 use crate::text::display_width;
 use crate::theme::Theme;
 
@@ -92,7 +93,7 @@ impl Picker {
                         if r.turns == 1 { "" } else { "s" }
                     ),
                     id: r.id,
-                    label: r.first_message,
+                    label: sanitize(&r.first_message).replace('\n', " "),
                 })
                 .collect(),
             filter: String::new(),
@@ -118,7 +119,7 @@ impl Picker {
                         String::new()
                     },
                     id: m.clone(),
-                    label: m,
+                    label: sanitize(&m).replace('\n', " "),
                 })
                 .collect(),
             filter: String::new(),

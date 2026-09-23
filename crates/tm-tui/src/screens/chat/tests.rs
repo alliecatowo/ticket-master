@@ -1000,3 +1000,83 @@ fn a_forced_repaint_draws_one_blank_frame_then_the_real_one() {
     assert!(buf[(0, 0)].modifier.contains(Modifier::HIDDEN));
     assert!(!screen_text(&render(&chat, &env, 40, 10)).trim().is_empty());
 }
+
+#[test]
+fn a_permission_prompt_closes_the_viewer_so_esc_cannot_answer_it_unseen() {
+    let env = Env::new();
+    let mut chat = screen();
+    type_text(&mut chat, &env, "go");
+    press(&mut chat, &env, key(KeyCode::Enter));
+    chat.take_actions();
+    press(&mut chat, &env, ctrl('o'));
+    assert!(chat.is_viewer_open());
+    update(
+        &mut chat,
+        &env,
+        TurnUpdate::AwaitingApproval(ApprovalRequest {
+            tool: "shell.run".into(),
+            target: "rm -rf build\n\x1b[2J".into(),
+            reason: "ask mode".into(),
+        }),
+    );
+    assert!(!chat.is_viewer_open());
+    let text = screen_text(&render(&chat, &env, 80, 24));
+    assert!(text.contains("Do you want to proceed?"), "{text}");
+    assert!(text.contains("rm -rf build"), "{text}");
+}
+
+#[test]
+fn a_recalled_bang_command_in_shell_mode_runs_once_not_as_bang_bang() {
+    let env = Env::new();
+    let mut chat = screen();
+    chat.load_history(vec!["!ls -la".to_string()]);
+    type_text(&mut chat, &env, "!");
+    press(&mut chat, &env, key(KeyCode::Up));
+    assert_eq!(chat.input_text(), "!ls -la");
+    press(&mut chat, &env, key(KeyCode::Enter));
+    assert_eq!(
+        chat.take_actions(),
+        vec![ChatAction::Shell("ls -la".into())]
+    );
+}
+
+#[test]
+fn every_overlay_survives_tiny_terminals() {
+    use crate::chat::tasks::{TaskItem, TaskState};
+    let env = Env::new();
+    let sizes = [(20u16, 6u16), (10, 3), (4, 1), (80, 24)];
+    let mut chat = screen();
+    type_text(&mut chat, &env, "go");
+    press(&mut chat, &env, key(KeyCode::Enter));
+    update(
+        &mut chat,
+        &env,
+        TurnUpdate::AwaitingApproval(ApprovalRequest {
+            tool: "edit.write_file".into(),
+            target: "src/main.rs".into(),
+            reason: "ask mode".into(),
+        }),
+    );
+    for (w, h) in sizes {
+        assert_eq!(render(&chat, &env, w, h).len(), h as usize);
+    }
+    let mut chat = screen();
+    chat.show_tasks(vec![TaskItem {
+        state: TaskState::Pending,
+        text: "T-1 x".into(),
+    }]);
+    chat.open_resume_picker(vec![ConversationRow {
+        id: "S-2".into(),
+        first_message: "中文".repeat(40),
+        age: "1m ago".into(),
+        turns: 2,
+    }]);
+    for (w, h) in sizes {
+        assert_eq!(render(&chat, &env, w, h).len(), h as usize);
+    }
+    press(&mut chat, &env, key(KeyCode::Esc));
+    press(&mut chat, &env, ctrl('o'));
+    for (w, h) in sizes {
+        assert_eq!(render(&chat, &env, w, h).len(), h as usize);
+    }
+}

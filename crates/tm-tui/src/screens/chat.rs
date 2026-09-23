@@ -353,7 +353,15 @@ impl ChatScreen {
 
     /// Show (or refresh) the Ctrl+T task checklist.
     pub fn show_tasks(&mut self, items: Vec<TaskItem>) {
-        self.tasks = Some(items);
+        self.tasks = Some(
+            items
+                .into_iter()
+                .map(|item| TaskItem {
+                    text: one_line(&item.text),
+                    ..item
+                })
+                .collect(),
+        );
     }
 
     /// Whether the task checklist is open.
@@ -567,8 +575,14 @@ impl ChatScreen {
                 }
             }
             TurnUpdate::AwaitingApproval(request) => {
+                // The question takes over: nothing may hide it, or catch the key meant for it
+                // (Esc closing the viewer would otherwise answer "No" unseen).
                 self.shortcuts_open = false;
-                self.search = None;
+                self.viewer = None;
+                self.picker = None;
+                if let Some(search) = self.search.take() {
+                    self.input.set_text(search.original);
+                }
                 self.approval = Some(ApprovalPrompt::new(request));
                 if let Some(turn) = &mut self.turn {
                     turn.activity = "Waiting for your approval".to_string();
@@ -782,11 +796,8 @@ impl ChatScreen {
             return;
         }
         if self.in_shell() {
-            let command = if self.shell_mode {
-                raw.trim().to_string()
-            } else {
-                raw.trim_start_matches('!').trim().to_string()
-            };
+            // A recalled `!cmd` in shell mode must not run as `!!cmd`.
+            let command = raw.trim().trim_start_matches('!').trim().to_string();
             if command.is_empty() {
                 return;
             }
@@ -1432,11 +1443,11 @@ impl ChatScreen {
                     Queued::Prompt { shown, .. } => (glyphs.prompt, shown.as_str()),
                     Queued::Shell(command) => ("!", command.as_str()),
                 };
-                let first = text.lines().next().unwrap_or_default();
+                let first = one_line(text.lines().next().unwrap_or_default());
                 rows.push(Line::from_spans(truncate_spans(
                     &[
                         Span::new(format!(" {mark} "), muted),
-                        Span::new(first.to_string(), muted),
+                        Span::new(first, muted),
                         Span::new("  (queued)", muted.add_modifier(Modifier::ITALIC)),
                     ],
                     width,
@@ -1741,6 +1752,12 @@ impl ChatScreen {
             }
         }
     }
+}
+
+/// `text` made safe for one row: escapes and controls stripped ([`sanitize`]), newlines as
+/// spaces.
+pub(crate) fn one_line(text: &str) -> String {
+    crate::chat::sanitize::sanitize(text).replace('\n', " ")
 }
 
 /// `text` cut from the left to `width` columns, marked with `ellipsis`.

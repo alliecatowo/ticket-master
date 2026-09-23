@@ -27,6 +27,7 @@ use crate::chat::glyphs::Glyphs;
 use crate::chat::lines::{
     clear, draw_box, draw_spans, truncate_spans, wrap_with_prefix, Line, Span,
 };
+use crate::chat::sanitize::sanitize;
 use crate::chat::transcript::tool_label;
 use crate::theme::Theme;
 
@@ -66,10 +67,16 @@ const CHOICES: [ApprovalChoice; 3] = [
 ];
 
 impl ApprovalPrompt {
-    /// A prompt for `request`, "Yes" highlighted.
+    /// A prompt for `request`, "Yes" highlighted. Everything shown is sanitized first: the target
+    /// and reason come from the model.
     pub fn new(request: ApprovalRequest) -> Self {
+        let clean = |s: &str| sanitize(s).replace('\n', " ");
         ApprovalPrompt {
-            request,
+            request: ApprovalRequest {
+                tool: clean(&request.tool),
+                target: clean(&request.target),
+                reason: clean(&request.reason),
+            },
             selected: 0,
         }
     }
@@ -273,6 +280,17 @@ mod tests {
         ] {
             assert!(text.contains(needle), "{needle:?} missing from\n{text}");
         }
+    }
+
+    #[test]
+    fn model_text_is_sanitized_to_one_row() {
+        let p = ApprovalPrompt::new(ApprovalRequest {
+            tool: "shell.run".into(),
+            target: "cat <<EOF\n\x1b[2Jboom\nEOF".into(),
+            reason: "\x1b]0;title\x07why".into(),
+        });
+        assert_eq!(p.request().target, "cat <<EOF boom EOF");
+        assert_eq!(p.request().reason, "why");
     }
 
     #[test]

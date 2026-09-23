@@ -813,6 +813,10 @@ impl Component for App {
                 let propagation = self.chat.handle_event(event, ctx);
                 // Finishing may have started what was queued behind the turn.
                 self.handle_chat_actions(now);
+                // A turn waiting for permission must be seen, whichever screen is showing.
+                if self.chat.is_awaiting_approval() && self.current != ScreenId::Chat {
+                    self.back_to_chat();
+                }
                 if finished {
                     self.refresh(now);
                 }
