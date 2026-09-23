@@ -1,5 +1,6 @@
 /// <reference types="vitest/config" />
 import { defineConfig } from "vite";
+import { configDefaults } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 // Vite + React config for the Ticketmaster project canvas.
@@ -46,5 +47,7 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./src/setupTests.ts"],
+    // e2e/ is Playwright's (pnpm e2e), run against a real tm serve, not vitest's jsdom.
+    exclude: [...configDefaults.exclude, "e2e/**"],
   },
 });

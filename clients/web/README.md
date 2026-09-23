@@ -127,7 +127,12 @@ collide with the API endpoints of the same names.
 
 ```
 pnpm test && pnpm typecheck && pnpm build
+pnpm e2e                       # Playwright against a real tm serve; see e2e/README.md
 ```
+
+`pnpm e2e` builds `dist/`, then runs `e2e/` in headless Chromium. Each worker gets its own scratch
+project and `tm serve` (mock model). `e2e/README.md` documents the fixtures and the seeding
+helpers (`seedSubmitted`, `seedEscalated`, `waitForState`, …). `pnpm typecheck` covers `e2e/` too.
 
 - `pnpm test` (`vitest run`): 85 tests in 9 files.
   - `src/views/ticketsModel.test.ts`: the group for all 14 states, approval overrides, the
