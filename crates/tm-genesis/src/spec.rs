@@ -211,11 +211,11 @@ pub async fn compile_spec(
     let completion = provider
         .complete(req)
         .await
-        .map_err(|e| TmError::Provider(format!("architect.frontier completion failed: {e}")))?;
+        .map_err(|e| TmError::Provider(format!("Couldn't reach the model to draft a spec: {e}")))?;
 
     if completion.candidates.is_empty() {
         return Err(TmError::Parse(
-            "architect.frontier completion produced no candidates".to_string(),
+            "The model didn't return a specification. Try again.".to_string(),
         ));
     }
 
@@ -224,7 +224,7 @@ pub async fn compile_spec(
         Some(ContentBlock::Text { text }) => text,
         _ => {
             return Err(TmError::Parse(
-                "architect.frontier response was not text".to_string(),
+                "The model's response wasn't readable text. Try again.".to_string(),
             ))
         }
     };
@@ -248,19 +248,19 @@ pub async fn compile_spec(
     let spec_response: SpecResponse =
         serde_json::from_str::<SpecResponse>(response_text).map_err(|e| {
             TmError::Parse(format!(
-                "failed to parse architect.frontier JSON response: {e}"
+                "Couldn't make sense of the model's specification: {e}"
             ))
         })?;
 
     // Validate that v0 and v1 are non-empty
     if spec_response.v0.exit_criteria.is_empty() {
         return Err(TmError::Parse(
-            "v0 exit_criteria must be non-empty".to_string(),
+            "The v0 release needs at least one exit criterion.".to_string(),
         ));
     }
     if spec_response.v1.exit_criteria.is_empty() {
         return Err(TmError::Parse(
-            "v1 exit_criteria must be non-empty".to_string(),
+            "The v1 release needs at least one exit criterion.".to_string(),
         ));
     }
 
@@ -270,7 +270,9 @@ pub async fn compile_spec(
     // A more sophisticated check would parse the claim/judgment text to find requirement IDs,
     // but for now we just ensure both sides are non-empty.
     if spec_response.requirements.is_empty() {
-        return Err(TmError::Parse("requirements must be non-empty".to_string()));
+        return Err(TmError::Parse(
+            "The specification needs at least one requirement.".to_string(),
+        ));
     }
 
     Ok(Specification {
@@ -467,7 +469,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("v0 exit_criteria must be non-empty"));
+            .contains("The v0 release needs at least one exit criterion."));
     }
 
     #[tokio::test]
@@ -517,7 +519,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("v1 exit_criteria must be non-empty"));
+            .contains("The v1 release needs at least one exit criterion."));
     }
 
     #[tokio::test]
@@ -567,7 +569,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("requirements must be non-empty"));
+            .contains("The specification needs at least one requirement."));
     }
 
     #[tokio::test]
@@ -603,7 +605,7 @@ mod tests {
         assert!(result
             .unwrap_err()
             .to_string()
-            .contains("failed to parse architect.frontier JSON response"));
+            .contains("Couldn't make sense of the model's specification"));
     }
 
     #[test]
