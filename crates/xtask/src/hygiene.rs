@@ -396,6 +396,11 @@ pub fn check_crate_descriptions(root: &Path) -> Vec<String> {
 ///   follows).
 const DOT_TM_LITERAL_ALLOWLIST: &[&str] = &[
     "crates/tm-cli/src/project.rs",
+    // `index_root_and_state_dir` mirrors `Project::code_intel`'s own `.tm` resolution for a `tm
+    // run --worktree` checkout's exec root, which is deliberately never itself doctored/
+    // initialized as a `Project` (so it has no `Project::state_dir` to take): see that
+    // function's own doc comment in dispatch.rs (`critic-worktree-exec-root-indexing`).
+    "crates/tm-cli/src/dispatch.rs",
     "crates/tm-core/src/store.rs",
     "crates/tm-codeintel/src/api.rs",
     "crates/tm-codeintel/src/store.rs",

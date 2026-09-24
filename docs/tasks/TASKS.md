@@ -131,7 +131,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
   evidence: `ls crates/tm-tui/src/screens` -> no milestone screen exists yet.
 
-- [ ] **s1-tui-timeline-view** — Timeline tab: ticket bars from the event log, today line, due markers, month grid
+- [x] **s1-tui-timeline-view** (landed 08efa61) — Timeline tab: ticket bars from the event log, today line, due markers, month grid
   model: sonnet · severity: medium · builds Rust: yes · area: tui · deps: s1-tui-hub-tabs, s1-ticket-due-date
   files: `crates/tm-tui/src/screens/timeline.rs`, `crates/tm-tui/src/screens/mod.rs`, `crates/tm-cli/src/tickets/overview.rs`, `crates/tm-cli/src/tui.rs`
   change: Ticket has no created/closed timestamps, so extend the existing event fold in tickets/overview.rs (`apply(kind, subject, ts, payload)`, line 220) to record first-seen and closed-at per ticket. Render one bar per ticket from created to closed (or now), grouped by milestone, with a today line and a due-date mark. `+`/`-` zoom between day/week/month; month zoom is the calendar grid (due tickets listed per day). Timeline has no text input so plain keys are safe. Use a fixed clock for unit tests.
@@ -303,7 +303,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `tm attach .` -> "indexed 1 files, 1 chunks, 1 commits ingested (symbol graph built: true)"; doc table shows both "README.md  Readme" and "readme.md  Readme" for the same file.
 
-- [ ] **s1-io-error-wrapping-and-empty-objective** — Wrap low-level IO/git errors for users; reject empty ticket objectives
+- [x] **s1-io-error-wrapping-and-empty-objective** (landed 42c6968) — Wrap low-level IO/git errors for users; reject empty ticket objectives
   model: sonnet · severity: medium · builds Rust: yes · area: cli/copy · deps: none
   files: `crates/tm-cli/src/main.rs`, `crates/tm-core/src/history.rs`, `crates/tm-cli/src/tickets.rs`
   change: Wrap the bare IO error path in main.rs so e.g. `tm attach /nonexistent/path` says "The path /nonexistent/path does not exist. Check the path and try again." instead of "error: io: No such file or directory (os error 2)". Wrap git2 NotFound errors at the `tm history why <path>` call site as "File does not exist in repository history."; other git2 errors become "Unable to read file history — repository may be corrupted." (log the raw error via tracing for debugging). Separately, in `ticket_new` (tickets.rs ~392), reject an empty or whitespace-only `--objective`/positional objective with "Objective cannot be empty — describe what the ticket should accomplish." instead of silently creating a blank-objective ticket.
@@ -535,7 +535,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-provider`
   evidence: workflow wf_87a85411-848's critic result, "missing" item 4: `rg 'price:\s*Some'` finds only the role_config.rs:685 test fixture; role_config.rs:48 documents price as integer micros/token.
 
-- [ ] **critic-worktree-exec-root-indexing** — `tm run --worktree` indexes the main checkout, not the worktree it's actually running in
+- [x] **critic-worktree-exec-root-indexing** (landed 5906619) — `tm run --worktree` indexes the main checkout, not the worktree it's actually running in
   model: sonnet · severity: high · builds Rust: yes · area: code-navigation · deps: nav-fix-project-codeintel-freshness, nav-agent-tool-index-refresh
   files: `crates/tm-cli/src/dispatch.rs`
   change: `build_dispatcher_with_fabric` builds the CodeIntel `ci` from `project.code_intel()` (dispatch.rs:281), and `ProjectContextPackSource` opens `root: project.root` (dispatch.rs:322-326), while tools actually run at `exec_root` via `with_root` (dispatch.rs:305-307). Under `tm run --worktree` (D-012), search/symbol/prefetch results therefore show the main checkout's index instead of the worktree's own tree, and a per-worktree cache would be wrong to share. Index `exec_root` instead of `project.root` whenever they differ, with a per-worktree index db path (e.g. under the worktree's own state dir) so worktree runs don't fight the main checkout's index for writes.
@@ -651,7 +651,7 @@ Gate: `mise run verify && pnpm -C clients/ts build && pnpm -C clients/vscode run
   acceptance: New tools.rs test in a git tempdir with one commit: a write tool creates new.rs containing `fn fresh_fn`, then a symbol-definition tool call finds fresh_fn (this fails today). Two consecutive search calls with no write between them trigger no refresh, asserted through a counter or a no-op delta.
   test: `mise run test:crate -- tm-agent`
 
-- [ ] **replay-fix-events-replay-stub** — Make `tm events replay` actually replay through materialize::replay
+- [x] **replay-fix-events-replay-stub** (landed 663b2b7) — Make `tm events replay` actually replay through materialize::replay
   model: sonnet · size: S · builds Rust: yes · area: replay · deps: none
   files: `crates/tm-core/src/store.rs`, `crates/tm-cli/src/ops.rs`
   change: Add a public `Store::view_as_of(&self, seq: u64) -> tm_types::Result<ProjectView>`. It generalizes the private ticket_and_goal_as_of scratch-replay pattern (store.rs:2639): tempfile EventLog, create_views, materialize::replay, read_view. Rewrite events_replay (ops.rs:2260-2289), whose doc comment currently misdescribes it, to call view_as_of(to) and render ticket counts and states in human mode, or the full view in --json. The live store is never mutated.
@@ -702,7 +702,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **genesis-provider-mock-ordered-sequence** — Add a FIFO ordered-response mode to MockProvider
+- [x] **genesis-provider-mock-ordered-sequence** (landed 78e516e) — Add a FIFO ordered-response mode to MockProvider
   model: haiku · size: S · builds Rust: yes · area: provider (serves genesis and replay) · deps: none
   files: `crates/tm-provider/src/mock.rs`
   change: Add script_sequence(Vec<Completion>). It answers successive complete() calls in order regardless of request content; once exhausted, it falls through to the existing hash-match, then default, then Unscripted behavior. Follow the existing Mutex<Script> pattern. Also expose sequence_remaining(), and keep recording each served request in the call log so a replay caller can compare request hashes. The later replay-cassette-types task relies on this.
@@ -720,7 +720,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **genesis-shared-offline-fixtures** — Extract reusable, schema-valid canned JSON for each Genesis provider stage
+- [x] **genesis-shared-offline-fixtures** (landed 8594469) — Extract reusable, schema-valid canned JSON for each Genesis provider stage
   model: haiku · size: S · builds Rust: yes · area: genesis · deps: none
   files: `crates/tm-genesis/src/fixtures.rs`, `crates/tm-genesis/src/lib.rs`
   change: Add an always-compiled (not cfg(test)) module in tm-genesis exposing the minimal canned JSON that each provider-calling stage needs (seed, vision, spec, graph compilation, maturity), taken from what crates/tm-e2e/tests/genesis_e2e.rs writes by hand (from line 82 on). Also add `fn offline_sequence() -> Vec<String>` in stage call order, so a CLI mock can feed MockProvider::script_sequence. Leave genesis_e2e.rs as it is.
@@ -781,7 +781,7 @@ Gate: `mise run verify`
   acceptance: Extend genesis_offline.rs: run genesis until it stops, then run it again with --resume. Exactly one GraphCompilation artifact exists afterward (no duplicate graph), and the run continues from the persisted stage.
   test: `mise run test:crate -- tm-cli`
 
-- [ ] **nav-expand-mcp-navigation-toolset** — Expose the remaining tm-codeintel read tools over tm-mcp, with a fresh index
+- [x] **nav-expand-mcp-navigation-toolset** (landed 6fc9c37) — Expose the remaining tm-codeintel read tools over tm-mcp, with a fresh index
   model: sonnet · size: M · builds Rust: yes · area: code-navigation / MCP · deps: nav-fix-project-codeintel-freshness, nav-fix-codeintel-self-reference
   files: `crates/tm-mcp/src/server.rs`
   change: tm mcp and the underscore tool-name scheme have already landed (the tools are ticket_list, search_exact, symbol_def and so on). Add definitions and handlers for search_regex, search_semantic, symbol_references, symbol_callers, symbol_callees, history_why, history_search and history_deleted, following the existing tool_definitions() and execute_tool (server.rs:425-433) pattern. Leave out rename_preview, since it is write-shaped. McpServer::code_intel() (server.rs:251) also never refreshes: call update_incremental with warn-and-continue, the same policy as nav-fix-project-codeintel-freshness.
@@ -792,7 +792,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify && pnpm -C clients/ts run gen && git diff --exit-code clients/ts/src/generated.ts clients/ts/schema/snapshot.json && pnpm -C clients/ts test && pnpm -C clients/ts build`
 
-- [ ] **ts-sdk-schema-snapshot-drift-note** — Document accept/reject/retry in GET /schema and regenerate the TS snapshot
+- [x] **ts-sdk-schema-snapshot-drift-note** (landed 0660084) — Document accept/reject/retry in GET /schema and regenerate the TS snapshot
   model: haiku · size: XS · builds Rust: yes · area: tm-server / clients/ts · deps: ts-sdk-add-accept-reject-retry
   files: `crates/tm-server/src/routes.rs`, `clients/ts/schema/snapshot.json`, `clients/ts/src/generated.ts`
   change: get_schema's TransitionRequest description (routes.rs:595) still reads 'activate|trigger|submit|verify|audit|close|cancel|reopen|fail'; add accept, reject and retry. First check whether the server-fixes track has already landed this, and if so skip the routes.rs edit. Update schema/snapshot.json to match, then run `pnpm -C clients/ts run gen`, which falls back to the snapshot when no server is running, to regenerate src/generated.ts.

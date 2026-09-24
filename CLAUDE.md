@@ -147,8 +147,11 @@ never drift between sessions:
   so a Claude Code session can delegate to tm workers: `claude mcp add --transport stdio tm -- tm
   mcp` (add `--scope project` to share it via `.mcp.json`). Tools: `ticket_list`, `ticket_show`,
   `ticket_dispatch` (objective in; creates a ticket with `tm ticket new`'s defaults, activates it,
-  actor `agent:mcp/<clientInfo.name>`), `search_exact`, `search_hybrid`, `symbol_def`,
-  `symbol_outline`. No accept/reject/retry: those stay human-only. It resolves the project from
+  actor `agent:mcp/<clientInfo.name>`), `search_exact`, `search_hybrid`, `search_regex`,
+  `search_semantic`, `symbol_def` (now returns an `id` that round-trips into `symbol_references`/
+  `symbol_callers`/`symbol_callees`), `symbol_outline`, `symbol_references`, `symbol_callers`,
+  `symbol_callees`, `history_why`, `history_search`, `history_deleted`. No accept/reject/retry:
+  those stay human-only. It resolves the project from
   Claude Code's working directory like any subcommand, so one must already exist there (`tm
   init`), or pin one with `-- tm --project DIR mcp`; workers run at the project root either way;
   it runs the scheduler in-process like `tm serve`, and
