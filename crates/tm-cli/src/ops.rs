@@ -1824,13 +1824,27 @@ pub async fn dispatch_mirror(
     }
 }
 
+/// Turn `(field, env_var)` pairs an unset environment variable was found for into the
+/// non-fatal warning lines `mirror link` prints — so a credential misconfiguration surfaces at
+/// link time rather than first at push/pull time.
+fn format_unset_credential_warnings(unset: &[(String, String)]) -> Vec<String> {
+    unset
+        .iter()
+        .map(|(field, env_var)| {
+            format!("credential field \"{field}\" references env var {env_var} which is not set")
+        })
+        .collect()
+}
+
 /// `tm mirror link`
 ///
 /// # IMPL
-/// Parse `args.adapter` into `tm_mirror::config::AdapterKind`, resolve its credentials via
-/// `CredentialEnv::resolve` (named environment variables only, never stored in `mirror.toml`
-/// itself), persist the resulting `AdapterConfig` into the project's `mirror.toml`. Errors when
-/// a required credential environment variable is unset.
+/// Parse `args.adapter` into `tm_mirror::config::AdapterKind`, persist the resulting
+/// `AdapterConfig` into the project's `mirror.toml`. Credentials are never resolved here (that's
+/// `CredentialEnv::resolve`, first called at push/pull time) — only the env var *names* an
+/// explicitly given `--credential field=ENV_VAR` references are checked for existence, and only
+/// as a non-fatal warning: an unset one still lets the link succeed, so the misconfiguration
+/// surfaces here rather than first at push/pull time.
 pub fn mirror_link(
     args: &MirrorLinkArgs,
     project: &Project,
@@ -1861,12 +1875,18 @@ pub fn mirror_link(
 
     let mut credentials = std::collections::BTreeMap::new();
     credentials.insert("token".to_string(), credential_var.to_string());
+    // Fields the caller explicitly named with `--credential field=ENV_VAR`, checked below for an
+    // unset env var so the misconfiguration surfaces here rather than first at push/pull time.
+    let mut unset_credential_vars: Vec<(String, String)> = Vec::new();
     for entry in &args.credentials {
         let Some((field, env_var)) = entry.split_once('=') else {
             return Err(tm_types::TmError::parse(format!(
                 "Invalid --credential {entry}: expected FIELD=ENV_VAR"
             )));
         };
+        if std::env::var(env_var).is_err() {
+            unset_credential_vars.push((field.to_string(), env_var.to_string()));
+        }
         credentials.insert(field.to_string(), env_var.to_string());
     }
     config.adapters.insert(
@@ -1888,13 +1908,18 @@ pub fn mirror_link(
     }
     fs::write(&mirror_path, serialized)?;
 
+    let warnings = format_unset_credential_warnings(&unset_credential_vars);
+
     if renderer.is_json() {
         renderer.emit(
-            &serde_json::json!({"adapter": args.adapter, "linked": true}),
+            &serde_json::json!({"adapter": args.adapter, "linked": true, "warnings": warnings}),
             "",
         )?;
     } else {
         renderer.note(&format!("Linked {} mirror", args.adapter));
+        for warning in &warnings {
+            renderer.note(&format!("warning: {warning}"));
+        }
     }
     Ok(())
 }
@@ -1993,6 +2018,31 @@ fn build_tracker(
     }
 }
 
+/// Explain a bare "0 pushed"/"0 pulled" `mirror push`/`mirror pull` result: why there was nothing
+/// to do, rather than a bare count with no reason attached.
+///
+/// `eligible_count` (tickets, for push; linked tickets with something to pull, for pull) is
+/// computed independently of whether any adapter's tracker actually built, so "no tickets
+/// eligible" is reserved for the case where there is genuinely nothing that qualifies, regardless
+/// of adapter health. `any_tracker_built` is checked next, ahead of "all already synced": a run
+/// where every configured adapter failed to build (e.g. a missing credential env var) must not be
+/// misreported as "already synced" — nothing was actually attempted.
+fn mirror_zero_result_reason(
+    enabled_adapter_count: usize,
+    eligible_count: u64,
+    any_tracker_built: bool,
+) -> &'static str {
+    if enabled_adapter_count == 0 {
+        "no mirrors configured"
+    } else if eligible_count == 0 {
+        "no tickets eligible"
+    } else if !any_tracker_built {
+        "no adapter could authenticate, see the skipped adapters below"
+    } else {
+        "all already synced"
+    }
+}
+
 /// `tm mirror push`
 ///
 /// # IMPL
@@ -2022,7 +2072,7 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
     if !mirror_path.is_file() {
         if renderer.is_json() {
             renderer.emit(
-                &serde_json::json!({"pushed": 0, "degraded": 0, "skipped_adapters": []}),
+                &serde_json::json!({"pushed": 0, "already_synced": 0, "degraded": 0, "skipped_adapters": [], "reason": "no mirrors configured"}),
                 "",
             )?;
         } else {
@@ -2039,9 +2089,21 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
         project.actor.clone(),
     );
 
+    let enabled_adapter_count = config.enabled_adapters().len();
+    // Tickets that qualify to be mirrored at all, independent of whether any adapter's tracker
+    // actually built — so "no tickets eligible" stays reserved for the case where nothing
+    // qualifies, not the unrelated case where a credential is missing (see
+    // `mirror_zero_result_reason`).
+    let eligible_tickets = view
+        .tickets
+        .values()
+        .filter(|t| policy.should_mirror(t, None))
+        .count() as u64;
     let mut pushed = 0u64;
+    let mut already_synced = 0u64;
     let mut degraded = 0u64;
     let mut skipped_adapters = Vec::new();
+    let mut any_tracker_built = false;
 
     for adapter in config.enabled_adapters() {
         let tracker = match build_tracker(adapter, project.clock.clone())? {
@@ -2052,6 +2114,7 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
                 continue;
             }
         };
+        any_tracker_built = true;
         let caps = tracker.capabilities();
         for ticket in view.tickets.values() {
             if !policy.should_mirror(ticket, None) {
@@ -2086,8 +2149,10 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
             if guard.already_completed() {
                 // The exact same projection was already pushed to this adapter under this
                 // ticket attempt — the idempotency guarantee this mechanism exists for. No
-                // network call, no re-linking; `pushed` still counts it as delivered.
-                pushed += 1;
+                // network call, no re-linking; counted separately from `pushed` so a run that
+                // did nothing but confirm existing pushes is reported as "all already synced"
+                // rather than as a fresh push.
+                already_synced += 1;
                 continue;
             }
 
@@ -2124,15 +2189,30 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
         }
     }
 
+    let reason = if pushed == 0 && degraded == 0 {
+        Some(mirror_zero_result_reason(
+            enabled_adapter_count,
+            eligible_tickets,
+            any_tracker_built,
+        ))
+    } else {
+        None
+    };
+
     if renderer.is_json() {
         renderer.emit(
-            &serde_json::json!({"pushed": pushed, "degraded": degraded, "skipped_adapters": skipped_adapters}),
+            &serde_json::json!({"pushed": pushed, "already_synced": already_synced, "degraded": degraded, "skipped_adapters": skipped_adapters, "reason": reason}),
             "",
         )?;
     } else {
-        renderer.note(&format!(
-            "Mirror push completed: {pushed} pushed, {degraded} degraded"
-        ));
+        match reason {
+            Some(reason) => renderer.note(&format!(
+                "Mirror push completed: {pushed} pushed, {degraded} degraded ({reason})"
+            )),
+            None => renderer.note(&format!(
+                "Mirror push completed: {pushed} pushed, {degraded} degraded"
+            )),
+        }
         for s in &skipped_adapters {
             renderer.note(&format!(
                 "Skipped adapter {}: {}",
@@ -2159,7 +2239,7 @@ pub async fn mirror_pull(project: &Project, renderer: &Renderer) -> tm_types::Re
     if !mirror_path.is_file() {
         if renderer.is_json() {
             renderer.emit(
-                &serde_json::json!({"pulled": 0, "applied": 0, "skipped_adapters": []}),
+                &serde_json::json!({"pulled": 0, "applied": 0, "skipped_adapters": [], "reason": "no mirrors configured"}),
                 "",
             )?;
         } else {
@@ -2180,9 +2260,15 @@ pub async fn mirror_pull(project: &Project, renderer: &Renderer) -> tm_types::Re
         .map(|a| (a.name.as_str(), a))
         .collect();
 
+    let enabled_adapter_count = adapters_by_name.len();
     let mut pulled = 0u64;
     let mut applied = 0u64;
     let mut skipped_adapters = Vec::new();
+    // Links that actually have something to pull from (a non-empty `remote_id` and a still
+    // configured/enabled adapter), independent of whether that adapter's tracker actually built
+    // — see `mirror_zero_result_reason`'s doc comment.
+    let mut eligible_links = 0u64;
+    let mut any_tracker_built = false;
 
     for link in &links {
         // A link with no `remote_id` was `mirror.linked` but never actually pushed or pulled
@@ -2193,6 +2279,7 @@ pub async fn mirror_pull(project: &Project, renderer: &Renderer) -> tm_types::Re
         let Some(adapter) = adapters_by_name.get(link.remote_system.as_str()) else {
             continue; // linked to an adapter no longer configured/enabled
         };
+        eligible_links += 1;
         let tracker = match build_tracker(adapter, project.clock.clone())? {
             TrackerBuildOutcome::Built(t) => t,
             TrackerBuildOutcome::Skipped(reason) => {
@@ -2201,6 +2288,7 @@ pub async fn mirror_pull(project: &Project, renderer: &Renderer) -> tm_types::Re
                 continue;
             }
         };
+        any_tracker_built = true;
         let stub_link = tm_mirror::MirrorLink {
             ticket: link.ticket.clone(),
             adapter: link.remote_system.clone(),
@@ -2230,15 +2318,30 @@ pub async fn mirror_pull(project: &Project, renderer: &Renderer) -> tm_types::Re
         )?;
     }
 
+    let reason = if pulled == 0 && applied == 0 {
+        Some(mirror_zero_result_reason(
+            enabled_adapter_count,
+            eligible_links,
+            any_tracker_built,
+        ))
+    } else {
+        None
+    };
+
     if renderer.is_json() {
         renderer.emit(
-            &serde_json::json!({"pulled": pulled, "applied": applied, "skipped_adapters": skipped_adapters}),
+            &serde_json::json!({"pulled": pulled, "applied": applied, "skipped_adapters": skipped_adapters, "reason": reason}),
             "",
         )?;
     } else {
-        renderer.note(&format!(
-            "Mirror pull completed: {pulled} pulled, {applied} applied"
-        ));
+        match reason {
+            Some(reason) => renderer.note(&format!(
+                "Mirror pull completed: {pulled} pulled, {applied} applied ({reason})"
+            )),
+            None => renderer.note(&format!(
+                "Mirror pull completed: {pulled} pulled, {applied} applied"
+            )),
+        }
         for s in &skipped_adapters {
             renderer.note(&format!(
                 "Skipped adapter {}: {}",
@@ -2249,18 +2352,65 @@ pub async fn mirror_pull(project: &Project, renderer: &Renderer) -> tm_types::Re
     Ok(())
 }
 
+/// One configured adapter as a `--json` entry, distinct from ticket-level mirror-link status.
+fn mirror_status_adapter_json(adapter: &tm_mirror::AdapterConfig) -> serde_json::Value {
+    serde_json::json!({
+        "name": adapter.name,
+        "kind": adapter.kind,
+        "enabled": adapter.enabled,
+    })
+}
+
+/// The product's own name for an adapter kind, for human-readable output — never the internal
+/// enum variant spelling (`{:?}` debug output is against this codebase's voice rules).
+fn adapter_kind_label(kind: tm_mirror::AdapterKind) -> &'static str {
+    match kind {
+        tm_mirror::AdapterKind::GitHub => "GitHub",
+        tm_mirror::AdapterKind::GitLab => "GitLab",
+        tm_mirror::AdapterKind::Jira => "Jira",
+        tm_mirror::AdapterKind::Linear => "Linear",
+        tm_mirror::AdapterKind::Null => "none",
+    }
+}
+
+/// One configured adapter as a human-readable table row.
+fn mirror_status_adapter_row(adapter: &tm_mirror::AdapterConfig) -> Vec<String> {
+    vec![
+        adapter.name.clone(),
+        adapter_kind_label(adapter.kind).to_string(),
+        if adapter.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+        .to_string(),
+    ]
+}
+
 /// `tm mirror status`
 ///
 /// # IMPL
-/// Render each `MirrorLink`'s last sync time and any recorded `Degradation`s.
+/// Render each configured adapter (from `mirror.toml`, distinct from ticket sync status —
+/// linking an adapter is enough to show up here, whether or not any ticket has been pushed or
+/// pulled yet) alongside each `MirrorLink`'s last sync time and any recorded `Degradation`s.
 ///
 /// `tm_core::MirrorLinkRow` carries no `Degradation`s (the thin persisted table has no column
-/// for them — see its doc comment), so this reports what's actually durable: ticket, remote
-/// system, remote id, and last-synced time.
+/// for them — see its doc comment), so the tickets section reports what's actually durable:
+/// ticket, remote system, remote id, and last-synced time.
 pub fn mirror_status(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let links = project.store.mirror_links()?;
+    let mirror_path = project.state_dir.join("mirror.toml");
+    let adapters: Vec<tm_mirror::AdapterConfig> = if mirror_path.is_file() {
+        tm_mirror::MirrorConfig::parse(&fs::read_to_string(&mirror_path)?)?
+            .adapters
+            .into_values()
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     if renderer.is_json() {
+        let adapters_out: Vec<_> = adapters.iter().map(mirror_status_adapter_json).collect();
         let out: Vec<_> = links
             .iter()
             .map(|l| {
@@ -2272,31 +2422,50 @@ pub fn mirror_status(project: &Project, renderer: &Renderer) -> tm_types::Result
                 })
             })
             .collect();
-        renderer.emit(&serde_json::json!({"mirrors": out}), "")?;
-    } else if links.is_empty() {
-        renderer.note("No active mirror links");
+        renderer.emit(
+            &serde_json::json!({"adapters": adapters_out, "mirrors": out}),
+            "",
+        )?;
     } else {
-        let rows = links
-            .iter()
-            .map(|l| {
+        if adapters.is_empty() {
+            renderer.note("No mirror adapters configured");
+        } else {
+            let rows = adapters.iter().map(mirror_status_adapter_row).collect();
+            let table = Table::new(
                 vec![
-                    l.ticket.to_string(),
-                    l.remote_system.clone(),
-                    l.remote_id.clone(),
-                    l.last_synced.to_rfc3339(),
-                ]
-            })
-            .collect();
-        let table = Table::new(
-            vec![
-                "Ticket".to_string(),
-                "Remote".to_string(),
-                "Remote id".to_string(),
-                "Last synced".to_string(),
-            ],
-            rows,
-        );
-        renderer.emit(&(), &table.render())?;
+                    "Adapter".to_string(),
+                    "Kind".to_string(),
+                    "State".to_string(),
+                ],
+                rows,
+            );
+            renderer.emit(&(), &table.render())?;
+        }
+        if links.is_empty() {
+            renderer.note("No active mirror links");
+        } else {
+            let rows = links
+                .iter()
+                .map(|l| {
+                    vec![
+                        l.ticket.to_string(),
+                        l.remote_system.clone(),
+                        l.remote_id.clone(),
+                        l.last_synced.to_rfc3339(),
+                    ]
+                })
+                .collect();
+            let table = Table::new(
+                vec![
+                    "Ticket".to_string(),
+                    "Remote".to_string(),
+                    "Remote id".to_string(),
+                    "Last synced".to_string(),
+                ],
+                rows,
+            );
+            renderer.emit(&(), &table.render())?;
+        }
     }
     Ok(())
 }
@@ -2845,12 +3014,225 @@ mod tests {
 
     #[test]
     fn mirror_link_parses_adapter() {
-        // Mirror link should parse adapter kind
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+
+        mirror_link(
+            &MirrorLinkArgs {
+                adapter: "github".to_string(),
+                credentials: vec![],
+            },
+            &project,
+            &renderer,
+        )
+        .expect("link github");
+
+        let mirror_path = project.state_dir.join("mirror.toml");
+        let config =
+            tm_mirror::MirrorConfig::parse(&fs::read_to_string(&mirror_path).unwrap()).unwrap();
+        let adapter = config
+            .adapters
+            .get("github")
+            .expect("github adapter persisted");
+        assert_eq!(adapter.kind, tm_mirror::AdapterKind::GitHub);
+        assert!(adapter.enabled);
     }
 
     #[test]
     fn mirror_status_no_active_mirrors() {
-        // Without active mirrors, status should report empty
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+
+        // A fresh project has no mirror.toml at all; status must still succeed, not error on
+        // the missing file, and report nothing configured or synced.
+        mirror_status(&project, &renderer).expect("status on a fresh project");
+        assert!(project.store.mirror_links().unwrap().is_empty());
+        assert!(!project.state_dir.join("mirror.toml").is_file());
+    }
+
+    #[test]
+    fn mirror_status_shows_configured_adapter_before_any_ticket_synced() {
+        // s1-mirror-status-and-push-clarity: `tm mirror status` must show a configured adapter
+        // (from `mirror.toml`) even when no ticket has ever been pushed/pulled through it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+
+        mirror_link(
+            &MirrorLinkArgs {
+                adapter: "github".to_string(),
+                credentials: vec![],
+            },
+            &project,
+            &renderer,
+        )
+        .expect("link github");
+
+        // No ticket-level sync has happened yet — the old "No active mirror links" report alone
+        // would hide the adapter that was just configured.
+        assert!(project.store.mirror_links().unwrap().is_empty());
+
+        let mirror_path = project.state_dir.join("mirror.toml");
+        let config =
+            tm_mirror::MirrorConfig::parse(&fs::read_to_string(&mirror_path).unwrap()).unwrap();
+        let adapters: Vec<_> = config.adapters.into_values().collect();
+        assert_eq!(adapters.len(), 1);
+
+        let json = mirror_status_adapter_json(&adapters[0]);
+        assert_eq!(json["name"], "github");
+        assert_eq!(json["enabled"], true);
+
+        let row = mirror_status_adapter_row(&adapters[0]);
+        assert_eq!(row[0], "github");
+        assert_eq!(row[2], "enabled");
+    }
+
+    #[test]
+    fn mirror_zero_result_reason_names_no_mirrors_configured() {
+        assert_eq!(
+            mirror_zero_result_reason(0, 0, false),
+            "no mirrors configured"
+        );
+    }
+
+    #[test]
+    fn mirror_zero_result_reason_names_no_tickets_eligible() {
+        assert_eq!(mirror_zero_result_reason(1, 0, true), "no tickets eligible");
+    }
+
+    #[test]
+    fn mirror_zero_result_reason_names_no_adapter_could_authenticate() {
+        // s1-mirror-status-and-push-clarity's own evidence scenario: an adapter is configured and
+        // there are tickets that would qualify, but every adapter's tracker failed to build (e.g.
+        // a missing credential env var) — this must not be misreported as "all already synced".
+        assert_eq!(
+            mirror_zero_result_reason(1, 3, false),
+            "no adapter could authenticate, see the skipped adapters below"
+        );
+    }
+
+    #[test]
+    fn mirror_zero_result_reason_names_all_already_synced() {
+        assert_eq!(mirror_zero_result_reason(1, 3, true), "all already synced");
+    }
+
+    #[tokio::test]
+    async fn mirror_push_with_no_eligible_tickets_does_not_push_anything() {
+        // No ticket in the project qualifies under the default `ProjectionPolicy` (no milestone
+        // assigned), so a real `tm mirror push` against a configured adapter must still succeed
+        // with nothing pushed, rather than erroring or silently pushing something ineligible.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        std::fs::write(
+            root.join(".tm").join("mirror.toml"),
+            "[adapters.testnull]\nkind = \"null\"\nenabled = true\n",
+        )
+        .unwrap();
+
+        let renderer = test_renderer();
+        mirror_push(&project, &renderer)
+            .await
+            .expect("push with nothing eligible still succeeds");
+
+        let conn =
+            tm_events::schema::open_read_connection(&root.join(".tm").join("project.db")).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM effects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "nothing eligible must journal no push effect");
+    }
+
+    #[tokio::test]
+    async fn mirror_push_with_an_eligible_ticket_but_no_adapter_could_build_pushes_nothing() {
+        // s1-mirror-status-and-push-clarity's own evidence scenario: `tm mirror link github`
+        // succeeds but leaves `owner`/`repo` unresolved (no env var set for them), so
+        // `build_tracker` skips the adapter for every ticket. An eligible ticket does exist here
+        // (unlike the sibling test above) — this must still succeed with nothing pushed, and the
+        // journal must stay empty, since no adapter ever got the chance to push anything.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        mirrorable_ticket(&project);
+        std::fs::write(
+            root.join(".tm").join("mirror.toml"),
+            "[adapters.github]\nkind = \"github\"\nenabled = true\n[adapters.github.credentials]\ntoken = \"TM_TEST_MIRROR_PUSH_UNSET_TOKEN\"\n",
+        )
+        .unwrap();
+        assert!(
+            std::env::var("TM_TEST_MIRROR_PUSH_UNSET_TOKEN").is_err(),
+            "test var must not already be set"
+        );
+
+        let renderer = test_renderer();
+        mirror_push(&project, &renderer)
+            .await
+            .expect("push must still succeed when every adapter is skipped");
+
+        let conn =
+            tm_events::schema::open_read_connection(&root.join(".tm").join("project.db")).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM effects", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "an all-skipped adapter run must journal no push effect"
+        );
+    }
+
+    #[test]
+    fn mirror_link_still_succeeds_with_an_unset_credential_env_var() {
+        // s1-mirror-status-and-push-clarity acceptance: `--credential owner=TM_GITHUB_OWNER`
+        // with `TM_GITHUB_OWNER` unset must still link (non-fatal), warning at link time rather
+        // than first surfacing the misconfiguration later at push.
+        let unset_var = "TM_TEST_MIRROR_LINK_UNSET_XYZ";
+        assert!(
+            std::env::var(unset_var).is_err(),
+            "test var must not already be set"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+
+        mirror_link(
+            &MirrorLinkArgs {
+                adapter: "github".to_string(),
+                credentials: vec![format!("owner={unset_var}")],
+            },
+            &project,
+            &renderer,
+        )
+        .expect("link must still succeed despite the unset credential env var");
+
+        let mirror_path = project.state_dir.join("mirror.toml");
+        assert!(mirror_path.is_file(), "mirror.toml must still be written");
+    }
+
+    #[test]
+    fn format_unset_credential_warnings_names_field_and_env_var() {
+        let warnings = format_unset_credential_warnings(&[(
+            "owner".to_string(),
+            "TM_GITHUB_OWNER".to_string(),
+        )]);
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].contains("\"owner\"") && warnings[0].contains("TM_GITHUB_OWNER"),
+            "{}",
+            warnings[0]
+        );
+        assert!(warnings[0].contains("not set"), "{}", warnings[0]);
+    }
+
+    #[test]
+    fn format_unset_credential_warnings_empty_when_nothing_unset() {
+        assert!(format_unset_credential_warnings(&[]).is_empty());
     }
 
     #[test]
