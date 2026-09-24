@@ -31,3 +31,66 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
       - run: cargo run -p xtask -- hygiene
+
+  ts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: |
+            clients/ts/pnpm-lock.yaml
+            clients/vscode/pnpm-lock.yaml
+            clients/web/pnpm-lock.yaml
+      - run: pnpm -C clients/ts install
+      - run: pnpm -C clients/ts test
+      - run: pnpm -C clients/ts build
+
+  vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: |
+            clients/ts/pnpm-lock.yaml
+            clients/vscode/pnpm-lock.yaml
+            clients/web/pnpm-lock.yaml
+      - run: pnpm -C clients/vscode install
+      - run: pnpm -C clients/vscode test
+      - run: pnpm -C clients/vscode build
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 8
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: |
+            clients/ts/pnpm-lock.yaml
+            clients/vscode/pnpm-lock.yaml
+            clients/web/pnpm-lock.yaml
+      - run: pnpm -C clients/web install
+      - run: pnpm -C clients/web test
+      - run: pnpm -C clients/web build
+
+  swift:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: swift test --package-path clients/macos
