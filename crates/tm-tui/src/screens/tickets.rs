@@ -11,6 +11,11 @@
 //! shortcut. Like Claude Code's agent view, no plain letter is a shortcut: typed text always goes
 //! to the dispatch input.
 //!
+//! The header also carries the hub's tab strip (Tickets, Board, Milestones, Timeline, Graph):
+//! Tab/Shift+Tab cycle [`TicketsAction::NextTab`]/[`TicketsAction::PrevTab`], which `tm-cli`
+//! executes by moving its own `ScreenId`. This screen only ever draws itself while that
+//! `ScreenId` is `Tickets`, so its own strip always shows "Tickets" as the active tab.
+//!
 //! Like every screen here it is plain data in: `tm-cli` builds [`TicketsData`] from the project's
 //! real state and executes the [`TicketsAction`]s this screen records. This module decides only
 //! how it looks and which keys do what.
@@ -272,6 +277,11 @@ pub enum TicketsAction {
     Queue(String),
     /// Open the Kanban board.
     OpenBoard,
+    /// Tab: move to the next tab in the hub's strip (Tickets, Board, Milestones, Timeline,
+    /// Graph, wrapping).
+    NextTab,
+    /// Shift+Tab: move to the previous tab.
+    PrevTab,
 }
 
 /// How a transient footer message reads.
@@ -783,7 +793,8 @@ impl TicketsScreen {
                 self.cancel_armed = None;
                 self.input.insert_char(c);
             }
-            KeyCode::Tab | KeyCode::BackTab => {}
+            KeyCode::Tab => self.actions.push_back(TicketsAction::NextTab),
+            KeyCode::BackTab => self.actions.push_back(TicketsAction::PrevTab),
             _ => {}
         }
         Propagation::Consumed
@@ -959,6 +970,31 @@ impl TicketsScreen {
         }
     }
 
+    /// The hub's tab strip (Tickets, Board, Milestones, Timeline, Graph). This screen only ever
+    /// renders while it is itself the active tab, so "Tickets" is always the highlighted one.
+    const TABS: [&'static str; 5] = ["Tickets", "Board", "Milestones", "Timeline", "Graph"];
+
+    fn tab_strip_spans(theme: &Theme, sep: &str) -> Vec<Span> {
+        let mut spans = Vec::new();
+        for (i, tab) in Self::TABS.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::new(
+                    format!(" {sep} "),
+                    Style::default().fg(theme.muted),
+                ));
+            }
+            let style = if i == 0 {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.muted)
+            };
+            spans.push(Span::new(*tab, style));
+        }
+        spans
+    }
+
     /// The header: a ticket-stub mark beside three lines (name and version; model and place;
     /// counts), or one compact line on a short or narrow terminal. Returns the rows it used.
     fn render_header(
@@ -1000,7 +1036,15 @@ impl TicketsScreen {
                 width,
                 &truncate_spans(&spans, width as usize, glyphs.ellipsis),
             );
-            return 1;
+            let tabs = Self::tab_strip_spans(theme, sep);
+            draw_spans(
+                buf,
+                area.x,
+                area.y + 1,
+                width,
+                &truncate_spans(&tabs, width as usize, glyphs.ellipsis),
+            );
+            return 2;
         }
         let has_colour = theme.accent != Color::Reset;
         let logo = glyphs.unicode && has_colour && width >= 40;
@@ -1049,7 +1093,15 @@ impl TicketsScreen {
                 &truncate_spans(spans, text_w as usize, glyphs.ellipsis),
             );
         }
-        3
+        let tabs = Self::tab_strip_spans(theme, sep);
+        draw_spans(
+            buf,
+            text_x,
+            area.y + 3,
+            text_w,
+            &truncate_spans(&tabs, text_w as usize, glyphs.ellipsis),
+        );
+        4
     }
 
     fn row_line(
@@ -1638,7 +1690,7 @@ impl Component for TicketsScreen {
         // Header.
         let compact = area.height < 18 || width < 40;
         let header_h = self.render_header(
-            Rect::new(x, area.y + u16::from(!compact), width, 3),
+            Rect::new(x, area.y + u16::from(!compact), width, 4),
             buf,
             theme,
             &glyphs,
@@ -1738,6 +1790,8 @@ impl Component for TicketsScreen {
                 },
                 "cancel (press twice)",
             ),
+            KeyBinding::new(KeyChord::plain(KeyCode::Tab), "next tab"),
+            KeyBinding::new(KeyChord::plain(KeyCode::BackTab), "previous tab"),
             KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back to chat"),
         ]
     }
@@ -2100,6 +2154,30 @@ mod tests {
         press(&mut s, &env, KeyCode::Char('?'));
         let text = render(&s, 100, 40, true).join("\n");
         assert!(text.contains("Shortcuts"), "{text}");
+    }
+
+    #[test]
+    fn tab_and_shift_tab_ask_for_the_next_and_previous_tab() {
+        let env = Env::new(true);
+        let mut s = screen();
+        press(&mut s, &env, KeyCode::Tab);
+        assert_eq!(s.take_actions(), vec![TicketsAction::NextTab]);
+        press(&mut s, &env, KeyCode::BackTab);
+        assert_eq!(s.take_actions(), vec![TicketsAction::PrevTab]);
+    }
+
+    #[test]
+    fn header_shows_the_tab_strip_with_tickets_highlighted() {
+        let s = screen();
+        let text = render(&s, 100, 40, true).join("\n");
+        for tab in TicketsScreen::TABS {
+            assert!(text.contains(tab), "{tab} missing from header:\n{text}");
+        }
+        let pos = |needle: &str| text.find(needle).unwrap();
+        assert!(pos("Tickets") < pos("Board"));
+        assert!(pos("Board") < pos("Milestones"));
+        assert!(pos("Milestones") < pos("Timeline"));
+        assert!(pos("Timeline") < pos("Graph"));
     }
 
     #[test]

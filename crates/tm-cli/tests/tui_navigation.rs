@@ -77,6 +77,12 @@ const TICKETS_MARK: &str = "Describe a task for a background worker";
 const CHAT_MARK: &str = "Ask tm anything";
 /// Text only the Kanban board shows.
 const BOARD_MARK: &str = "Left/Right: columns";
+/// Text only the Milestones placeholder tab shows.
+const MILESTONES_MARK: &str = "Milestones: coming next";
+/// The Tab key's escape sequence (plain, no CSI: crossterm reports Tab as `\t`).
+const TAB: &[u8] = b"\t";
+/// Shift+Tab's escape sequence (CSI Z).
+const SHIFT_TAB: &[u8] = b"\x1b[Z";
 
 fn has(screen: &[String], needle: &str) -> bool {
     screen.iter().any(|line| line.contains(needle))
@@ -265,6 +271,55 @@ fn slash_tickets_opens_tickets_without_spawning_a_turn() {
     assert!(
         !has(&screen, "/tickets") && !has(&screen, "could not run"),
         "the command neither stays in the prompt nor runs a turn, got: {screen:?}"
+    );
+
+    quit(&mut pty);
+}
+
+#[test]
+fn tab_cycles_the_hub_and_esc_returns_straight_to_chat() {
+    let (project, _ticket_id) = init_project_with_one_ticket();
+    let tm_home = tempfile::tempdir().expect("tempdir");
+    let mut pty = spawn(project.path(), tm_home.path(), true);
+    let _ = pty.wait_for(CHAT_MARK, Duration::from_secs(10));
+
+    pty.write(b"/tickets\r").expect("type /tickets");
+    let screen = pty.wait_for(TICKETS_MARK, Duration::from_secs(10));
+    assert!(
+        has(&screen, "Tickets") && has(&screen, "Board") && has(&screen, "Milestones"),
+        "the tickets screen shows the hub's tab strip, got: {screen:?}"
+    );
+
+    // Tab: Tickets -> Board.
+    pty.write(TAB).expect("Tab");
+    let screen = pty.wait_for(BOARD_MARK, Duration::from_secs(10));
+    assert!(
+        has(&screen, BOARD_MARK),
+        "Tab from tickets must open the board, got: {screen:?}"
+    );
+
+    // Tab again: Board -> Milestones (a placeholder until its own task lands).
+    pty.write(TAB).expect("Tab");
+    let screen = pty.wait_for(MILESTONES_MARK, Duration::from_secs(10));
+    assert!(
+        has(&screen, MILESTONES_MARK),
+        "a second Tab must reach the Milestones placeholder, got: {screen:?}"
+    );
+
+    // Shift+Tab: back to Board.
+    pty.write(SHIFT_TAB).expect("Shift+Tab");
+    let screen = pty.wait_for(BOARD_MARK, Duration::from_secs(10));
+    assert!(
+        has(&screen, BOARD_MARK),
+        "Shift+Tab must move to the previous tab, got: {screen:?}"
+    );
+
+    // Esc from a tab reached by Tab-cycling goes straight back to chat, not one tab at a time.
+    pty.write(&[ESC]).expect("Esc");
+    let screen = pty.wait_for(CHAT_MARK, Duration::from_secs(10));
+    assert!(
+        has(&screen, CHAT_MARK),
+        "Esc from a cycled tab must return straight to chat, got: {screen:?}"
     );
 
     quit(&mut pty);

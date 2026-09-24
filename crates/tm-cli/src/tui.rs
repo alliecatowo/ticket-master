@@ -15,9 +15,12 @@
 //! (`/home`, `/agents`) opens the tickets screen ([`ScreenId::Tickets`],
 //! `tm_tui::screens::tickets::TicketsScreen`, Claude Code's agent view with tickets as rows;
 //! `docs/decisions/D-019-claude-code-parity-shell.md` §2); `tm tickets` opens straight onto it.
-//! From there Enter attaches the chat to a ticket, and `b` opens the Kanban board. Esc walks back
-//! one level at a time (`App::back_stack`); Ctrl+T from anywhere else returns straight to the
-//! chat.
+//! From there Enter attaches the chat to a ticket, and Ctrl+B opens the Kanban board. Tab/
+//! Shift+Tab cycle the hub's tab strip (Tickets, Board, Milestones, Timeline, Graph — the last
+//! three are placeholders until their own screens land); tab-cycling moves `App::current`
+//! directly rather than growing `App::back_stack`, so Esc from a tab reached only by Tab/
+//! Shift+Tab goes straight back to Chat. Esc walks back one level at a time (`App::back_stack`)
+//! everywhere else; Ctrl+T from anywhere else returns straight to the chat.
 //!
 //! While the TUI is open, a scheduler runs inside this process
 //! ([`crate::sched::spawn_background_runner`]), so tickets dispatched from the tickets screen are
@@ -409,9 +412,26 @@ enum ScreenId {
     Tickets,
     /// The Kanban board, opened from `Tickets`.
     Kanban,
+    /// Progress per milestone (`s1-tui-milestones-view`). A placeholder until that screen lands.
+    Milestones,
+    /// Ticket bars against the event log (`s1-tui-timeline-view`). A placeholder until that
+    /// screen lands.
+    Timeline,
+    /// The dependency graph (`s1-tui-graph-tab-prune-dead-screens`). A placeholder until that
+    /// screen lands.
+    Graph,
     /// One ticket's detail, opened from a Kanban card.
     Detail,
 }
+
+/// The hub's tab strip, in tab order — the `ScreenId`s Tab/Shift+Tab cycle among.
+const TAB_ORDER: [ScreenId; 5] = [
+    ScreenId::Tickets,
+    ScreenId::Kanban,
+    ScreenId::Milestones,
+    ScreenId::Timeline,
+    ScreenId::Graph,
+];
 
 /// Run a store command against ticket `id`, as a message for the tickets screen's footer.
 fn with_ticket(
@@ -424,6 +444,31 @@ fn with_ticket(
 
 fn is_ctrl(key: &crossterm::event::KeyEvent, c: char) -> bool {
     key.code == KeyCode::Char(c) && key.modifiers.contains(KeyModifiers::CONTROL)
+}
+
+/// `Some(true)` for Tab (next), `Some(false)` for Shift+Tab (previous), `None` otherwise — the
+/// hub's tab-strip chord, honored on any of `TAB_ORDER`'s screens (`App::cycle_tab`).
+fn tab_cycle_key(key: &crossterm::event::KeyEvent) -> Option<bool> {
+    match key.code {
+        KeyCode::Tab => Some(true),
+        KeyCode::BackTab => Some(false),
+        _ => None,
+    }
+}
+
+/// `current`'s neighbor in `TAB_ORDER`, wrapping; `current` itself if it is not a tab (never
+/// happens in practice — `App::cycle_tab` only calls this from a `TAB_ORDER` member).
+fn next_tab(current: ScreenId, forward: bool) -> ScreenId {
+    let len = TAB_ORDER.len();
+    let Some(idx) = TAB_ORDER.iter().position(|s| *s == current) else {
+        return current;
+    };
+    let next = if forward {
+        (idx + 1) % len
+    } else {
+        (idx + len - 1) % len
+    };
+    TAB_ORDER[next]
 }
 
 /// True when `key` walks back one level on `current`. Esc always does; `Left` does on the detail
@@ -506,6 +551,14 @@ impl App {
 
     fn pop_screen(&mut self) {
         self.current = self.back_stack.pop().unwrap_or(ScreenId::Chat);
+    }
+
+    /// Tab/Shift+Tab: move `current` to the next (or previous) tab in `TAB_ORDER`, wrapping.
+    /// Deliberately does not touch `back_stack` — Esc from a tab reached this way goes straight
+    /// back to wherever `back_stack` already pointed (Chat, from the tickets screen's own
+    /// `open_tickets`), not one Tab-press at a time.
+    fn cycle_tab(&mut self, forward: bool) {
+        self.current = next_tab(self.current, forward);
     }
 
     fn back_to_chat(&mut self) {
@@ -619,6 +672,16 @@ impl App {
                 TicketsAction::OpenBoard => {
                     self.refresh(now);
                     self.push_screen(ScreenId::Kanban);
+                    continue;
+                }
+                TicketsAction::NextTab => {
+                    self.refresh(now);
+                    self.cycle_tab(true);
+                    continue;
+                }
+                TicketsAction::PrevTab => {
+                    self.refresh(now);
+                    self.cycle_tab(false);
                     continue;
                 }
                 TicketsAction::Attach(id) => {
@@ -738,6 +801,36 @@ impl App {
                 .bg(ctx.theme.warning),
         );
     }
+
+    /// The Milestones/Timeline/Graph tabs, until their own screens land (`s1-tui-milestones-
+    /// view`, `s1-tui-timeline-view`, `s1-tui-graph-tab-prune-dead-screens`).
+    fn render_tab_placeholder(
+        &self,
+        area: ratatui_core::layout::Rect,
+        buf: &mut ratatui_core::buffer::Buffer,
+        ctx: &FrameContext<'_>,
+        name: &str,
+    ) {
+        if area.width < 4 || area.height < 2 {
+            return;
+        }
+        buf.set_stringn(
+            area.x + 1,
+            area.y + 1,
+            format!("{name}: coming next"),
+            (area.width - 2) as usize,
+            Style::default().fg(ctx.theme.muted),
+        );
+        if area.height > 2 {
+            buf.set_stringn(
+                area.x + 1,
+                area.y + area.height - 1,
+                "tab next   shift+tab previous   esc back   ctrl+t chat   ctrl+c twice quit",
+                (area.width - 2) as usize,
+                Style::default().fg(ctx.theme.muted),
+            );
+        }
+    }
 }
 
 impl Component for App {
@@ -755,6 +848,9 @@ impl Component for App {
             ScreenId::Chat => self.chat.render(area, buf, ctx),
             ScreenId::Tickets => self.tickets.render(area, buf, ctx),
             ScreenId::Kanban => self.kanban.render(area, buf, ctx),
+            ScreenId::Milestones => self.render_tab_placeholder(area, buf, ctx, "Milestones"),
+            ScreenId::Timeline => self.render_tab_placeholder(area, buf, ctx, "Timeline"),
+            ScreenId::Graph => self.render_tab_placeholder(area, buf, ctx, "Graph"),
             ScreenId::Detail => {
                 if let Some(detail) = &self.detail {
                     detail.render(area, buf, ctx);
@@ -879,12 +975,29 @@ impl Component for App {
                         self.pop_screen();
                         return Propagation::Consumed;
                     }
+                    if let Some(forward) = tab_cycle_key(key) {
+                        self.cycle_tab(forward);
+                        return Propagation::Consumed;
+                    }
                 }
                 let propagation = self.kanban.handle_event(event, ctx);
                 if let Some(ticket_id) = self.kanban.take_activation() {
                     self.open_detail(&ticket_id);
                 }
                 propagation
+            }
+            ScreenId::Milestones | ScreenId::Timeline | ScreenId::Graph => {
+                if let Event::Input(InputEvent::Key(key)) = event {
+                    if is_back_chord(key, self.current) {
+                        self.pop_screen();
+                        return Propagation::Consumed;
+                    }
+                    if let Some(forward) = tab_cycle_key(key) {
+                        self.cycle_tab(forward);
+                        return Propagation::Consumed;
+                    }
+                }
+                Propagation::Consumed
             }
             ScreenId::Detail => {
                 if let Event::Input(InputEvent::Key(key)) = event {
@@ -923,7 +1036,20 @@ impl Component for App {
             ScreenId::Tickets => bindings.extend(self.tickets.keybindings(ctx)),
             ScreenId::Kanban => {
                 bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back"));
+                bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Tab), "next tab"));
+                bindings.push(KeyBinding::new(
+                    KeyChord::plain(KeyCode::BackTab),
+                    "previous tab",
+                ));
                 bindings.extend(self.kanban.keybindings(ctx));
+            }
+            ScreenId::Milestones | ScreenId::Timeline | ScreenId::Graph => {
+                bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back"));
+                bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Tab), "next tab"));
+                bindings.push(KeyBinding::new(
+                    KeyChord::plain(KeyCode::BackTab),
+                    "previous tab",
+                ));
             }
             ScreenId::Detail => {
                 bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back"));
@@ -940,7 +1066,11 @@ impl Component for App {
         // The chat and tickets screens take input straight from `App::handle_event`, not through
         // the focus tree; the board and detail screens still use it.
         match self.current {
-            ScreenId::Chat | ScreenId::Tickets => Vec::new(),
+            ScreenId::Chat
+            | ScreenId::Tickets
+            | ScreenId::Milestones
+            | ScreenId::Timeline
+            | ScreenId::Graph => Vec::new(),
             ScreenId::Kanban => vec![self.kanban.id()],
             ScreenId::Detail => match &self.detail {
                 Some(detail) => {
@@ -965,6 +1095,7 @@ impl ComponentParent for App {
                 (id == self.tickets.id()).then_some(&self.tickets as &dyn Component)
             }
             ScreenId::Kanban => (id == self.kanban.id()).then_some(&self.kanban as &dyn Component),
+            ScreenId::Milestones | ScreenId::Timeline | ScreenId::Graph => None,
             ScreenId::Detail => self.detail.as_ref().and_then(|detail| detail.resolve(id)),
         }
     }
@@ -1076,6 +1207,30 @@ mod tests {
                 "a bare {c:?} must never be a global chord"
             );
         }
+    }
+
+    #[test]
+    fn tab_cycles_forward_through_every_hub_screen_and_wraps() {
+        assert_eq!(next_tab(ScreenId::Tickets, true), ScreenId::Kanban);
+        assert_eq!(next_tab(ScreenId::Kanban, true), ScreenId::Milestones);
+        assert_eq!(next_tab(ScreenId::Milestones, true), ScreenId::Timeline);
+        assert_eq!(next_tab(ScreenId::Timeline, true), ScreenId::Graph);
+        assert_eq!(next_tab(ScreenId::Graph, true), ScreenId::Tickets);
+    }
+
+    #[test]
+    fn shift_tab_cycles_backward_and_wraps() {
+        assert_eq!(next_tab(ScreenId::Tickets, false), ScreenId::Graph);
+        assert_eq!(next_tab(ScreenId::Graph, false), ScreenId::Timeline);
+        assert_eq!(next_tab(ScreenId::Kanban, false), ScreenId::Tickets);
+    }
+
+    #[test]
+    fn tab_and_shift_tab_are_the_only_tab_cycle_keys() {
+        assert_eq!(tab_cycle_key(&plain_key(KeyCode::Tab)), Some(true));
+        assert_eq!(tab_cycle_key(&plain_key(KeyCode::BackTab)), Some(false));
+        assert_eq!(tab_cycle_key(&plain_key(KeyCode::Char('t'))), None);
+        assert_eq!(tab_cycle_key(&plain_key(KeyCode::Esc)), None);
     }
 
     #[test]
