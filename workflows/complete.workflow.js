@@ -39,7 +39,7 @@ async function call(prompt, opts) {
     nullStreak++
     if (nullStreak >= 3 && !halted) {
       halted = true
-      log('HALTED: three agents in a row returned nothing (usage limit). The auto-resume cron relaunches this workflow fresh once usage is back; TASKS.md and the integrate branch carry the state.')
+      log('HALTED: three agents in a row returned nothing (usage limit). Relaunch this workflow fresh once usage is back; TASKS.md and the integrate branch carry the state.')
     }
   } else nullStreak = 0
   return r
