@@ -594,7 +594,6 @@ pub async fn run_ticket(
 /// forward-progress state is success; anything else is reported as the failure it recorded (with
 /// what happens next), as the error `tm run` exits with — never as a quiet "finished".
 fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Result<String> {
-    let state = state_label(ticket.state);
     if worktree_run_reached_success(ticket.state) {
         return Ok(if ticket.state == tm_core::TicketState::Submitted {
             format!(
@@ -603,25 +602,47 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
                 id = ticket.id
             )
         } else {
+            let state = state_label(ticket.state);
             format!("Ticket {} submitted its work ({state}).", ticket.id)
         });
     }
-    let reason = ticket
-        .failures
-        .get(failures_before..)
-        .and_then(<[_]>::last)
-        .map(|f| format!("{:?}: {}", f.class, f.detail))
-        .unwrap_or_else(|| "no failure was recorded".to_string());
+    let failure = ticket.failures.get(failures_before..).and_then(<[_]>::last);
+    let reason = failure
+        .map(|f| {
+            let class_desc = failure_class_description(f.class);
+            format!("{class_desc}: {}", f.detail)
+        })
+        .unwrap_or_else(|| "unknown failure".to_string());
     let next = match ticket.state {
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked => {
-            format!("it is {state} again and will be retried")
+            format!("Run `tm run {}` again to retry.", ticket.id)
         }
-        _ => format!("it is now {state}"),
+        tm_core::TicketState::Escalated => {
+            format!("Run `tm ticket retry {}` to try again.", ticket.id)
+        }
+        _ => "".to_string(),
     };
-    Err(tm_types::TmError::TurnFailed(format!(
-        "ticket {} attempt {} did not finish: {reason}; {next}",
-        ticket.id, ticket.attempts
-    )))
+    let message = if next.is_empty() {
+        format!("Ticket {}: {}.", ticket.id, reason)
+    } else {
+        format!("Ticket {}: {}. {}", ticket.id, reason, next)
+    };
+    Err(tm_types::TmError::TurnFailed(message))
+}
+
+/// Plain-English description of a failure class for user-facing messages.
+fn failure_class_description(class: tm_core::FailureClass) -> &'static str {
+    use tm_core::FailureClass;
+    match class {
+        FailureClass::ExecutorCrash => "executor crashed",
+        FailureClass::VerificationFailed => "verification failed",
+        FailureClass::AuditRejected => "audit rejected the result",
+        FailureClass::ProviderUnavailable => "provider was unavailable",
+        FailureClass::BudgetExhausted => "budget exhausted",
+        FailureClass::AuthorityDenied => "authority denied",
+        FailureClass::ResourceConflict => "resource conflict",
+        FailureClass::Other => "something went wrong",
+    }
 }
 
 /// A ticket state's canonical lowercase name (`"ready"`, `"submitted"`, ...).
@@ -1128,6 +1149,241 @@ mod tests {
         let json = serde_json::to_string(&lease).expect("should serialize");
         assert!(json.contains("L-1"));
         assert!(json.contains("T-1"));
+    }
+
+    /// p1-sched-run-failure-message-copy: run_outcome should produce plain-English failure
+    /// messages with no debug-printed enum variants, no false "will be retried" claims, and the
+    /// exact next command to run.
+    #[test]
+    fn run_outcome_ready_state_plain_message() {
+        use tm_core::{
+            ExecutorRequirements, FailureClass, FailureRecord, RetryPolicy, Ticket, TicketKind,
+            TicketState, VerificationPolicy,
+        };
+        use tm_types::{Authority, Budget, Timestamp, Tolerance};
+
+        let now = Timestamp::EPOCH;
+        let ticket = Ticket {
+            id: TicketId::new("T-1").unwrap(),
+            kind: TicketKind::Work,
+            objective: "test objective".to_string(),
+            state: TicketState::Ready,
+            parent: None,
+            children: vec![],
+            dependencies: vec![],
+            milestone: None,
+            authority: Authority::none(),
+            resources: vec![],
+            executor: ExecutorRequirements {
+                role: tm_types::Role::CoderDeep,
+                human_required: false,
+                min_capability: Tolerance::Strict,
+            },
+            context_refs: vec![],
+            success: vec![],
+            verification: VerificationPolicy::Single,
+            budget: Budget::unlimited(),
+            retry: RetryPolicy {
+                max_attempts: 3,
+                base_delay_seconds: 10,
+                backoff_multiplier: 2.0,
+                max_delay_seconds: 300,
+            },
+            cycle: None,
+            attempts: 1,
+            failures: vec![FailureRecord {
+                class: FailureClass::Other,
+                detail: "model ended turn without submitting".to_string(),
+                at: now,
+                attempt: 1,
+            }],
+            priority: 0,
+            created: now,
+            updated: now,
+        };
+
+        let result = run_outcome(&ticket, 0);
+        assert!(result.is_err());
+        if let Err(tm_types::TmError::TurnFailed(msg)) = result {
+            // Should not contain debug-printed enum variant
+            assert!(!msg.contains("Other:"));
+            assert!(!msg.contains("{:?}"));
+            // Should not contain false auto-retry claim
+            assert!(!msg.contains("will be retried"));
+            // Should not have stacked error prefix
+            assert!(!msg.contains("did not finish:"));
+            // Should contain the correct next step for Ready state
+            assert!(msg.contains("Run `tm run T-1` again to retry."));
+            // Should have plain-English failure reason
+            assert!(msg.contains("something went wrong"));
+            // Should contain the ticket ID
+            assert!(msg.contains("T-1"));
+        } else {
+            panic!("Expected TurnFailed error");
+        }
+    }
+
+    #[test]
+    fn run_outcome_escalated_state_plain_message() {
+        use tm_core::{
+            ExecutorRequirements, FailureClass, FailureRecord, RetryPolicy, Ticket, TicketKind,
+            TicketState, VerificationPolicy,
+        };
+        use tm_types::{Authority, Budget, Timestamp, Tolerance};
+
+        let now = Timestamp::EPOCH;
+        let ticket = Ticket {
+            id: TicketId::new("T-2").unwrap(),
+            kind: TicketKind::Work,
+            objective: "test objective".to_string(),
+            state: TicketState::Escalated,
+            parent: None,
+            children: vec![],
+            dependencies: vec![],
+            milestone: None,
+            authority: Authority::none(),
+            resources: vec![],
+            executor: ExecutorRequirements {
+                role: tm_types::Role::CoderDeep,
+                human_required: false,
+                min_capability: Tolerance::Strict,
+            },
+            context_refs: vec![],
+            success: vec![],
+            verification: VerificationPolicy::Single,
+            budget: Budget::unlimited(),
+            retry: RetryPolicy {
+                max_attempts: 3,
+                base_delay_seconds: 10,
+                backoff_multiplier: 2.0,
+                max_delay_seconds: 300,
+            },
+            cycle: None,
+            attempts: 3,
+            failures: vec![FailureRecord {
+                class: FailureClass::BudgetExhausted,
+                detail: "token budget exceeded".to_string(),
+                at: now,
+                attempt: 3,
+            }],
+            priority: 0,
+            created: now,
+            updated: now,
+        };
+
+        let result = run_outcome(&ticket, 0);
+        assert!(result.is_err());
+        if let Err(tm_types::TmError::TurnFailed(msg)) = result {
+            // Should contain the correct next step for Escalated state
+            assert!(msg.contains("Run `tm ticket retry T-2`"));
+            // Should have plain-English failure reason
+            assert!(msg.contains("budget exhausted"));
+            // Should not contain false auto-retry claim
+            assert!(!msg.contains("will be retried"));
+            // Should not have debug-printed enum variant
+            assert!(!msg.contains("BudgetExhausted"));
+        } else {
+            panic!("Expected TurnFailed error");
+        }
+    }
+
+    #[test]
+    fn run_outcome_blocked_state_plain_message() {
+        use tm_core::{
+            ExecutorRequirements, FailureClass, FailureRecord, RetryPolicy, Ticket, TicketKind,
+            TicketState, VerificationPolicy,
+        };
+        use tm_types::{Authority, Budget, Timestamp, Tolerance};
+
+        let now = Timestamp::EPOCH;
+        let ticket = Ticket {
+            id: TicketId::new("T-3").unwrap(),
+            kind: TicketKind::Work,
+            objective: "test objective".to_string(),
+            state: TicketState::Blocked,
+            parent: None,
+            children: vec![],
+            dependencies: vec![],
+            milestone: None,
+            authority: Authority::none(),
+            resources: vec![],
+            executor: ExecutorRequirements {
+                role: tm_types::Role::CoderDeep,
+                human_required: false,
+                min_capability: Tolerance::Strict,
+            },
+            context_refs: vec![],
+            success: vec![],
+            verification: VerificationPolicy::Single,
+            budget: Budget::unlimited(),
+            retry: RetryPolicy {
+                max_attempts: 3,
+                base_delay_seconds: 10,
+                backoff_multiplier: 2.0,
+                max_delay_seconds: 300,
+            },
+            cycle: None,
+            attempts: 1,
+            failures: vec![FailureRecord {
+                class: FailureClass::ProviderUnavailable,
+                detail: "provider at capacity".to_string(),
+                at: now,
+                attempt: 1,
+            }],
+            priority: 0,
+            created: now,
+            updated: now,
+        };
+
+        let result = run_outcome(&ticket, 0);
+        assert!(result.is_err());
+        if let Err(tm_types::TmError::TurnFailed(msg)) = result {
+            // Should contain the correct next step for Blocked state (same as Ready)
+            assert!(msg.contains("Run `tm run T-3` again to retry."));
+            // Should have plain-English failure reason
+            assert!(msg.contains("provider was unavailable"));
+        } else {
+            panic!("Expected TurnFailed error");
+        }
+    }
+
+    #[test]
+    fn failure_class_description_all_variants() {
+        use tm_core::FailureClass;
+
+        // Ensure all variants are covered with plain English descriptions
+        assert_eq!(
+            failure_class_description(FailureClass::ExecutorCrash),
+            "executor crashed"
+        );
+        assert_eq!(
+            failure_class_description(FailureClass::VerificationFailed),
+            "verification failed"
+        );
+        assert_eq!(
+            failure_class_description(FailureClass::AuditRejected),
+            "audit rejected the result"
+        );
+        assert_eq!(
+            failure_class_description(FailureClass::ProviderUnavailable),
+            "provider was unavailable"
+        );
+        assert_eq!(
+            failure_class_description(FailureClass::BudgetExhausted),
+            "budget exhausted"
+        );
+        assert_eq!(
+            failure_class_description(FailureClass::AuthorityDenied),
+            "authority denied"
+        );
+        assert_eq!(
+            failure_class_description(FailureClass::ResourceConflict),
+            "resource conflict"
+        );
+        assert_eq!(
+            failure_class_description(FailureClass::Other),
+            "something went wrong"
+        );
     }
 
     // s1-events-sched-copy-and-quiet: `sched_plan`/`sched_tick` must not emit under `--quiet`,
