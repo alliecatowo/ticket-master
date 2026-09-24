@@ -99,14 +99,18 @@
     }
   },
   "scripts": {
-    "compile": "tsc -p ./",
+    "compile": "tsc --noEmit -p ./ && node esbuild.mjs",
     "watch": "tsc -w -p ./",
     "test": "vitest run",
     "test:watch": "vitest"
   },
+  "dependencies": {
+    "@ticketmaster/client": "link:../ts"
+  },
   "devDependencies": {
     "@types/node": "^20.14.0",
     "@types/vscode": "^1.85.0",
+    "esbuild": "^0.24.0",
     "typescript": "^5.5.4",
     "vitest": "^2.1.9"
   }
