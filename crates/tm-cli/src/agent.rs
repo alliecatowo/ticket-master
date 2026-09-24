@@ -533,6 +533,7 @@ impl AgentSession {
         let session = SessionId::new(session_id.as_str())
             .unwrap_or_else(|_| SessionId::new("S-0").expect("S-0 is a valid SessionId"));
         let started = project.clock.now();
+        let model = load_default_model(&project);
         AgentSession {
             started,
             project,
@@ -544,7 +545,7 @@ impl AgentSession {
             mode: PermissionMode::default(),
             approved_for_session: std::collections::BTreeSet::new(),
             interrupter: TurnInterrupter::default(),
-            model: None,
+            model,
             last_context: None,
         }
     }
@@ -594,9 +595,11 @@ impl AgentSession {
     fn fabric(&self) -> tm_types::Result<Arc<Fabric>> {
         let fabric = match &self.fabric_override {
             Some(fabric) => Arc::clone(fabric),
-            None => build_fabric(self.project.clock.clone())?,
+            None => build_fabric_for_project(&self.project, self.project.clock.clone())?,
         };
-        fabric.prefer(AGENT_ROLE, self.model.as_ref());
+        if self.model.is_some() {
+            fabric.prefer(AGENT_ROLE, self.model.as_ref());
+        }
         Ok(fabric)
     }
 
@@ -629,7 +632,7 @@ impl AgentSession {
     pub fn set_model(&mut self, spec: &str) -> tm_types::Result<Option<ModelId>> {
         let spec = spec.trim();
         if spec.is_empty() || spec.eq_ignore_ascii_case("default") {
-            self.model = None;
+            self.model = load_default_model(&self.project);
             self.save_best_effort();
             return self.model();
         }
@@ -640,10 +643,14 @@ impl AgentSession {
                 ModelId::new(provider, model)
             }
             Some((provider, _)) => {
-                return Err(TmError::Provider(format!(
-                    "no provider `{provider}` is configured (configured: {})",
-                    configured.join(", ")
-                )))
+                let known = tm_provider::Registry::known_providers()
+                    .iter()
+                    .any(|p| p.id == provider);
+                return Err(TmError::Provider(if known {
+                    format!("Provider `{provider}` is not configured; connect it with `/connect {provider}`.")
+                } else {
+                    format!("Unknown or unroutable provider `{provider}`. Use `/model` to list routable models or `/connect` to configure a provider.")
+                }));
             }
             None => {
                 let choices = self.model_choices()?;
@@ -659,6 +666,7 @@ impl AgentSession {
             }
         };
         self.model = Some(chosen.clone());
+        save_default_model(&self.project, Some(&chosen));
         self.save_best_effort();
         Ok(Some(chosen))
     }
@@ -829,9 +837,6 @@ impl AgentSession {
     }
 
     fn save(&self) -> tm_types::Result<()> {
-        if self.conversation.is_empty() {
-            return Ok(());
-        }
         let dir = sessions_dir(&self.project);
         std::fs::create_dir_all(&dir)?;
         let saved = SavedSession {
@@ -1629,10 +1634,25 @@ const TEST_MOCK_PROVIDER_ENV: &str = "TM_TEST_MOCK_PROVIDER";
 ///   the default turn points at the first registered candidate when the table primary has
 ///   no credentials. A missing key for one provider never fails construction for the rest.
 pub(crate) fn build_fabric(clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric>> {
+    build_fabric_with_table(RoleTable::default_table(), clock)
+}
+
+/// Build the shared provider fabric from the project's role configuration.
+pub(crate) fn build_fabric_for_project(
+    project: &Project,
+    clock: Arc<dyn Clock>,
+) -> tm_types::Result<Arc<Fabric>> {
+    let table = crate::ops::load_role_table(Some(project))?;
+    build_fabric_with_table(table, clock)
+}
+
+fn build_fabric_with_table(
+    mut table: RoleTable,
+    clock: Arc<dyn Clock>,
+) -> tm_types::Result<Arc<Fabric>> {
     if std::env::var_os(TEST_MOCK_PROVIDER_ENV).is_some() {
         return Ok(Arc::new(build_mock_fabric(clock)));
     }
-    let mut table = RoleTable::default_table();
     // Expose every configured, tool-capable backend the static table never mentions as an
     // AGENT_ROLE fallback, so `/model` lists it and turns can route to it. Only appends:
     // the table's own primaries stay first, so the default route never changes.
@@ -1728,6 +1748,44 @@ pub(crate) fn build_fabric(clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric
     Ok(Arc::new(fabric))
 }
 
+/// Load a project-scoped chat model default, when one has been saved.
+pub(crate) fn load_default_model(project: &Project) -> Option<ModelId> {
+    #[derive(serde::Deserialize)]
+    struct Saved {
+        model: String,
+    }
+    std::fs::read(project.state_dir.join("default-model.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Saved>(&bytes).ok())
+        .and_then(|saved| {
+            let (provider, model) = saved.model.split_once('/')?;
+            Some(ModelId::new(provider, model))
+        })
+}
+
+/// Persist the project default model in the format shared with `tm provider default`.
+pub(crate) fn save_default_model(project: &Project, model: Option<&ModelId>) {
+    let path = project.state_dir.join("default-model.json");
+    let result = (|| -> tm_types::Result<()> {
+        std::fs::create_dir_all(&project.state_dir)?;
+        match model {
+            Some(model) => std::fs::write(
+                path,
+                serde_json::to_vec(&serde_json::json!({"model": model.to_string()}))?,
+            )?,
+            None => match std::fs::remove_file(path) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
+            },
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        tracing::warn!(error = %error, "could not persist project model default");
+    }
+}
+
 /// The first model in `candidates` whose provider is registered, if any — the default turn's
 /// fallback when the table primary has no credentials (D-022). Pure, so the routing rule is
 /// unit-testable without touching the environment.
@@ -1738,10 +1796,18 @@ fn first_registered_candidate(candidates: &[ModelId], registered: &[String]) -> 
         .cloned()
 }
 
-/// The model `table` already routes to `slug` under any role, if it names the slug at all.
+/// The model `table` already routes to `slug` under any *chat-routable* role, if it names the
+/// slug at all. Deliberately excludes [`tm_types::Role::Embedder`]: `default_table`'s embedder
+/// candidate names a provider (`openai`, since Anthropic has no embedding endpoint) purely for
+/// embedding calls, never for a chat turn, so a backend appearing only there must still be
+/// offered as an [`AGENT_ROLE`] fallback by this function's one caller — otherwise a project
+/// whose only configured backend is that embedder's provider (e.g. `OPENAI_API_KEY` alone) would
+/// never get it appended as a chat candidate at all, reproducing exactly the "primary has no
+/// credentials and nothing else is offered" failure D-022 exists to fix.
 fn table_model_for(table: &RoleTable, slug: &str) -> Option<String> {
     tm_types::Role::ALL
         .iter()
+        .filter(|role| **role != tm_types::Role::Embedder)
         .flat_map(|role| table.candidates_for(*role))
         .find(|c| c.provider == slug)
         .map(|c| c.model.clone())
@@ -2098,6 +2164,21 @@ mod tests {
             first_registered_candidate(&candidates, &[]),
             None,
             "nothing registered means no fallback"
+        );
+    }
+
+    /// `default_table`'s sole [`tm_types::Role::Embedder`] candidate names `openai` (Anthropic
+    /// has no embedding endpoint). Regression guard: `table_model_for` must not treat that as
+    /// "the table already routes chat traffic to openai", or `build_fabric_with_table`'s
+    /// auto-append loop would skip appending openai as an [`AGENT_ROLE`] fallback for a project
+    /// whose only configured backend is OpenAI — reproducing the "primary has no credentials and
+    /// nothing else is offered" failure D-022 exists to fix, just for a different provider.
+    #[test]
+    fn table_model_for_ignores_the_embedder_only_candidate() {
+        assert!(
+            table_model_for(&tm_provider::RoleTable::default_table(), "openai").is_none(),
+            "openai only appears as the embedder's candidate in the default table; it must not \
+             be reported as already routed for chat roles like AGENT_ROLE"
         );
     }
 
@@ -3249,7 +3330,7 @@ mod tests {
 
         assert_eq!(
             session.set_model("default").unwrap(),
-            Some(ModelId::new("mock", "m1"))
+            Some(ModelId::new("mock", "m2"))
         );
     }
 

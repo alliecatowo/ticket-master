@@ -73,7 +73,9 @@ pub fn route(
 
     if need.tolerance != Tolerance::Strict {
         for (candidate, admission) in candidates.iter().zip(admissions.iter()).skip(1) {
-            if matches!(admission, Admission::Admit) {
+            // Tolerance permits degradation in principle; the table must independently opt this
+            // particular fallback in. Otherwise configuration's degraded_ok flag is misleading.
+            if candidate.degraded_ok && matches!(admission, Admission::Admit) {
                 let reason = match &admissions[0] {
                     Admission::Blocked(_, reason) => (*reason).to_string(),
                     Admission::PermanentlyBlocked(reason) => (*reason).to_string(),
@@ -288,6 +290,51 @@ mod tests {
             now,
         );
         assert_eq!(decision, RouteDecision::Wait(now.plus_seconds(60)));
+    }
+
+    #[test]
+    fn fallback_requires_degraded_ok_even_when_need_allows_degradation() {
+        let table = RoleTable::parse(
+            r#"
+            [coder_fast]
+            candidates = [
+              { provider = "a", model = "primary", max_concurrency = 1 },
+              { provider = "a", model = "fallback", max_concurrency = 1, degraded_ok = false },
+            ]
+            "#,
+        )
+        .expect("valid table");
+        let now = Timestamp::from_unix_seconds(1_000);
+        let mut state = FabricState::new();
+        for model in ["primary", "fallback"] {
+            state.register(
+                ModelId::new("a", model),
+                now,
+                3,
+                StdDuration::from_secs(60),
+                StdDuration::from_secs(30),
+                0.5,
+            );
+        }
+        state.apply(
+            FabricEvent::RequestStarted {
+                candidate: ModelId::new("a", "primary"),
+            },
+            now,
+        );
+        // The unapproved fallback must not be silently used (that would be `Degrade`), but the
+        // primary is only *temporarily* over its concurrency limit, not permanently blocked — so
+        // the honest outcome is `Wait` for the primary to free up, not `Exhausted`. Per
+        // `docs/decisions/D-023-capacity-wait-is-not-a-failed-attempt.md`, a capacity wait is not
+        // a failure, so this must not be conflated with "no candidate can serve this role at
+        // all". Deriving the expected instant from `CONCURRENCY_RETRY_HINT` (rather than
+        // hardcoding the resulting timestamp) keeps this assertion tied to that constant.
+        assert_eq!(
+            route(&table, &state, Role::CoderFast, &need(Tolerance::Any), now),
+            RouteDecision::Wait(now.plus_seconds(CONCURRENCY_RETRY_HINT.as_secs() as i64)),
+            "an unapproved fallback must not be silently used as a Degrade, but a merely-busy \
+             primary must still produce Wait, not Exhausted"
+        );
     }
 
     #[test]

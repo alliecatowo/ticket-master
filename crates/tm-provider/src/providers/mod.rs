@@ -109,14 +109,29 @@ impl ProviderInfo {
     /// shaping or retry logic).
     ///
     /// This is env-var presence only, never a network reachability check — see [`Availability`]
-    /// for the three-state answer that also accounts for reachability where it matters (the
+    /// for the four-state answer that also accounts for reachability where it matters (the
     /// three [`local`] backends, whose env vars are all optional so this method alone is
-    /// vacuously `true` for them regardless of whether a server is actually listening).
+    /// vacuously `true` for them regardless of whether a server is actually listening) and for
+    /// backends that are configured but not yet constructible at all.
     pub fn is_configured(&self) -> bool {
+        // GitHub Models supports a namespaced alias so an unrelated GitHub CLI token does not
+        // shadow it. Keep discovery/status consistent with the provider constructor.
+        if self.id == "github-models" {
+            let primary = std::env::var("GITHUB_TOKEN").ok();
+            let alias = std::env::var("GITHUB_MODELS_TOKEN").ok();
+            return openrouter::github_models_token(primary.as_deref(), alias.as_deref()).is_some();
+        }
+        // Gemini's constructor deliberately accepts a common alternate credential name too. Keep
+        // detection in sync so a valid alias is not reported as missing configuration.
+        if self.id == "gemini"
+            && std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty())
+        {
+            return true;
+        }
         self.env_vars
             .iter()
             .filter(|v| v.required)
-            .all(|v| std::env::var(v.name).is_ok())
+            .all(|v| std::env::var(v.name).is_ok_and(|value| !value.trim().is_empty()))
     }
 }
 
@@ -146,6 +161,9 @@ pub enum Availability {
     /// listening. Only reachable for the three [`LOCAL_PROVIDER_IDS`] backends today — every
     /// other backend has no probe, so it can never land here.
     ConfiguredButUnreachable,
+    /// Configuration exists, but this backend cannot currently construct a usable provider.
+    /// Used by integrations for explicitly stubbed backends such as Bedrock before SigV4 exists.
+    Unusable,
     /// Configured, and reachable when a probe applies.
     Ready,
 }

@@ -327,6 +327,8 @@ pub enum TicketCommand {
     Show(TicketRefArgs),
     /// Create a new ticket.
     New(TicketNewArgs),
+    /// Create and queue a work ticket for a background worker.
+    Dispatch(TicketDispatchArgs),
     /// Edit mutable fields of an existing ticket.
     Edit(TicketEditArgs),
     /// Make a draft ticket ready for a worker to pick up (`tm run` or `tm sched run`).
@@ -421,6 +423,14 @@ pub struct TicketNewArgs {
     /// Path patterns this ticket's lease may write to (repeatable).
     #[arg(long = "resource", value_name = "GLOB")]
     pub resources: Vec<String>,
+}
+
+/// `tm ticket dispatch`
+#[derive(Debug, Args)]
+pub struct TicketDispatchArgs {
+    /// The work objective, in natural language.
+    #[arg(value_name = "OBJECTIVE")]
+    pub objective: String,
 }
 
 /// `tm tickets`
@@ -864,9 +874,19 @@ pub enum ProviderCommand {
     /// Show each provider's availability and whether tm's turn path uses it. No live breaker or
     /// quota state is reported: that exists only inside a running process.
     Status,
+    /// Show or set the project-scoped default chat model; use `clear` to remove it.
+    Default(ProviderDefaultArgs),
     /// Send one tiny real (billed) completion through each provider tm's turn path uses, or just
     /// the named one; exits non-zero if any fails.
     Test(ProviderTestArgs),
+}
+
+/// Arguments for `tm provider default`.
+#[derive(Debug, Args)]
+pub struct ProviderDefaultArgs {
+    /// `provider/model`, or `clear`; omit to show the saved default.
+    #[arg(value_name = "SPEC")]
+    pub spec: Option<String>,
 }
 
 /// `tm provider test`
@@ -1248,6 +1268,17 @@ mod tests {
         match cli.command {
             Some(Command::Ticket(TicketCommand::List(args))) => {
                 assert!(matches!(args.state, Some(TicketStateArg::Ready)));
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ticket_dispatch_parses_an_objective() {
+        let cli = Cli::parse_from(["tm", "ticket", "dispatch", "fix the build"]);
+        match cli.command {
+            Some(Command::Ticket(TicketCommand::Dispatch(args))) => {
+                assert_eq!(args.objective, "fix the build");
             }
             other => panic!("unexpected parse: {other:?}"),
         }

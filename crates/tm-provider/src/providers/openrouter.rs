@@ -103,6 +103,15 @@ fn github_models_config(model: &str, token: String, base_url: Option<String>) ->
     .without_embeddings()
 }
 
+pub(super) fn github_models_token<'a>(
+    primary: Option<&'a str>,
+    alias: Option<&'a str>,
+) -> Option<&'a str> {
+    primary
+        .filter(|token| !token.trim().is_empty())
+        .or_else(|| alias.filter(|token| !token.trim().is_empty()))
+}
+
 /// OpenRouter — a single API in front of dozens of upstream model vendors.
 pub struct OpenRouterProvider {
     compat: CompatProvider,
@@ -186,9 +195,11 @@ impl GithubModelsProvider {
     /// `GITHUB_TOKEN` first, falling back to `GITHUB_MODELS_TOKEN` so a deployment already using
     /// `GITHUB_TOKEN` for something else (e.g. an unrelated `gh` CLI login) doesn't collide.
     pub fn from_env(model: ModelId, clock: Arc<dyn Clock>) -> Result<Self, ProviderError> {
-        let token = std::env::var("GITHUB_TOKEN")
-            .or_else(|_| std::env::var("GITHUB_MODELS_TOKEN"))
-            .map_err(|_| missing_env_var("GITHUB_TOKEN"))?;
+        let primary = std::env::var("GITHUB_TOKEN").ok();
+        let alias = std::env::var("GITHUB_MODELS_TOKEN").ok();
+        let token = github_models_token(primary.as_deref(), alias.as_deref())
+            .map(str::to_owned)
+            .ok_or_else(|| missing_env_var("GITHUB_TOKEN"))?;
         let base_url = std::env::var("GITHUB_MODELS_BASE_URL").ok();
 
         let config = github_models_config(&model.model, token, base_url);
@@ -207,6 +218,11 @@ impl GithubModelsProvider {
                     required: true,
                     description:
                         "GitHub PAT or Actions token scoped for GitHub Models (or GITHUB_MODELS_TOKEN)",
+                },
+                EnvVarRequirement {
+                    name: "GITHUB_MODELS_TOKEN",
+                    required: false,
+                    description: "Alternative token name when GITHUB_TOKEN is unset",
                 },
                 EnvVarRequirement {
                     name: "GITHUB_MODELS_BASE_URL",
@@ -325,6 +341,27 @@ mod tests {
             Err(other) => panic!("expected AuthFailed, got {other:?}"),
             Ok(_) => panic!("expected missing token to fail"),
         }
+    }
+
+    #[test]
+    fn github_models_token_falls_back_from_empty_primary_and_ignores_blank_values() {
+        assert_eq!(
+            github_models_token(Some("  "), Some("ghp-alias")),
+            Some("ghp-alias")
+        );
+        assert_eq!(
+            github_models_token(Some("ghp-primary"), Some("ghp-alias")),
+            Some("ghp-primary")
+        );
+        assert_eq!(github_models_token(None, Some(" \t")), None);
+    }
+
+    #[test]
+    fn github_models_info_accepts_the_alias_credential() {
+        // The pure selection helper is the same gate used by ProviderInfo::is_configured and
+        // from_env, so discovery must not disagree with construction for the alias.
+        assert!(github_models_token(None, Some("ghp-alias")).is_some());
+        assert!(github_models_token(None, None).is_none());
     }
 
     #[test]

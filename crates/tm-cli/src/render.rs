@@ -30,19 +30,21 @@ impl Renderer {
     /// Build a renderer from the parsed global flags and stdout's terminal status.
     ///
     /// # IMPL
-    /// `color` is `!no_color && stdout_is_terminal`; `stdout_is_terminal` should be
-    /// `std::io::stdout().is_terminal()` in `main`, threaded through explicitly so this
-    /// constructor stays pure and testable without swapping global stdout.
+    /// `color` is `!no_color && stdout_is_terminal`; environment policy is resolved by
+    /// [`Renderer::from_flags`], keeping this constructor pure and testable.
     pub fn new(json: bool, quiet: bool, no_color: bool, stdout_is_terminal: bool) -> Self {
         Renderer {
             json,
             quiet,
-            color: !no_color && stdout_is_terminal,
+            color: !json && !no_color && stdout_is_terminal,
         }
     }
 
     /// Convenience constructor that reads stdout's terminal status itself.
     pub fn from_flags(json: bool, quiet: bool, no_color: bool) -> Self {
+        let no_color = no_color
+            || std::env::var_os("NO_COLOR").is_some()
+            || std::env::var("CLICOLOR").is_ok_and(|value| value == "0");
         Renderer::new(json, quiet, no_color, std::io::stdout().is_terminal())
     }
 
@@ -77,6 +79,13 @@ impl Renderer {
     pub fn note(&self, text: &str) {
         if !self.quiet {
             println!("{text}");
+        }
+    }
+
+    /// Print a successful human-readable status, highlighted when color is enabled.
+    pub fn status(&self, text: &str) {
+        if !self.quiet {
+            println!("{}", self.apply_color(Color::Green, text));
         }
     }
 
@@ -169,6 +178,15 @@ impl Table {
     /// Render as a column-aligned string, one row per line, columns padded to the widest cell
     /// (header included) plus a two-space gutter.
     pub fn render(&self) -> String {
+        self.render_with_header_color(false)
+    }
+
+    /// Render with a blue header when color is enabled by the caller.
+    pub fn render_colored(&self, color: bool) -> String {
+        self.render_with_header_color(color)
+    }
+
+    fn render_with_header_color(&self, color: bool) -> String {
         if self.headers.is_empty() {
             return String::new();
         }
@@ -201,11 +219,17 @@ impl Table {
             if i > 0 {
                 output.push_str("  ");
             }
-            if i == last {
-                output.push_str(header);
+            let padded = if i == last {
+                header.clone()
             } else {
-                output.push_str(&format!("{:<width$}", header, width = col_widths[i]));
-            }
+                format!("{header:<width$}", width = col_widths[i])
+            };
+            let rendered = if color {
+                format!("\x1b[34m{padded}\x1b[0m")
+            } else {
+                padded
+            };
+            output.push_str(&rendered);
         }
         output.push('\n');
 

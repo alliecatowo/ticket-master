@@ -476,6 +476,46 @@ mod tests {
         assert!(matches!(err, ProviderError::MalformedResponse(_)));
     }
 
+    #[tokio::test]
+    async fn list_v1_models_distinguishes_live_empty_server_from_populated_server() {
+        async fn serve_once(body: &'static str) -> String {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind loopback mock server");
+            let address = listener.local_addr().expect("mock address");
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept probe");
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            });
+            format!("http://{address}/v1")
+        }
+
+        let empty = serve_once(r#"{"data":[]}"#).await;
+        assert!(list_v1_models(&empty, None)
+            .await
+            .expect("empty list")
+            .is_empty());
+
+        let populated = serve_once(r#"{"data":[{"id":"actual-pulled-model"}]}"#).await;
+        assert_eq!(
+            list_v1_models(&populated, None)
+                .await
+                .expect("populated list"),
+            ["actual-pulled-model"]
+        );
+    }
+
     // ---- shared error mapping + streaming reassembly, against this fleet's recorded shapes
     // (all plain OpenAI Chat Completions dialect, so these exercise compat.rs's shared functions
     // with fixtures shaped like what these three local backends actually send) ----

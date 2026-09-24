@@ -276,9 +276,17 @@ impl Registry {
         if !is_configured {
             return Availability::NotConfigured;
         }
+        // The constructor and both Provider methods deliberately fail until SigV4 signing and
+        // model-family request shaping exist. Credentials alone cannot make this backend ready.
+        if info.id == "bedrock" {
+            return Availability::Unusable;
+        }
         if LOCAL_PROVIDER_IDS.contains(&info.id) {
-            let reachable = Self::probe_local(info.id, clock).await.reachable();
-            Availability::derive(is_configured, Some(reachable))
+            match Self::probe_local(info.id, clock).await {
+                LocalProbe::Unreachable => Availability::ConfiguredButUnreachable,
+                LocalProbe::ReachableNoModels => Availability::Unusable,
+                LocalProbe::Ready { .. } => Availability::Ready,
+            }
         } else {
             Availability::derive(is_configured, None)
         }
@@ -377,7 +385,7 @@ impl Registry {
                 other => {
                     return Err(ProviderError::InvalidRequest(format!(
                         "unknown provider: {other}"
-                    )))
+                    )));
                 }
             };
         Ok(provider)
@@ -402,6 +410,16 @@ impl Registry {
 
         let configured = Self::autodetect();
         for (slug, candidate) in &distinct {
+            if !Self::known_providers().iter().any(|info| info.id == slug) {
+                return Err(ProviderError::InvalidRequest(format!(
+                    "unknown provider slug `{slug}` in role table"
+                )));
+            }
+            // A configured Bedrock credential set is not sufficient: from_env always rejects
+            // it because the transport is not implemented, so don't make the whole fabric fail.
+            if slug == "bedrock" {
+                continue;
+            }
             if !configured.iter().any(|info| info.id == slug) {
                 continue;
             }

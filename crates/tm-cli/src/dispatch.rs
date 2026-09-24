@@ -16,7 +16,7 @@ use tm_core::ArtifactKind;
 use tm_scheduler::dispatch::{ContextPackSource, ExecutorDispatcher, ExecutorRegistry};
 use tm_types::{Oversight, Role, TicketId};
 
-use crate::agent::{build_fabric, MemoryCommandCache, ProcessCommandExecutor};
+use crate::agent::{build_fabric_for_project, MemoryCommandCache, ProcessCommandExecutor};
 use crate::project::Project;
 
 /// Compiles a ticket's context pack against the live project state and renders it to text via
@@ -46,7 +46,7 @@ impl ContextPackSource for ProjectContextPackSource {
             tm_context::tokens::TokenBudget::even(10_000),
             tm_codeintel::SignalWeights::default(),
             &[],
-            &tm_provider::RoleTable::default_table(),
+            &crate::ops::load_role_table_for_state_dir(&self.state_dir)?,
         )?;
         Ok(tm_agent::render_task_prompt(ticket, &pack))
     }
@@ -232,12 +232,10 @@ pub(crate) fn load_oversight(project: &Project) -> tm_types::Result<Oversight> {
 /// `exec_root`, when `Some`, overrides where the dispatched run's own file/git tool calls
 /// resolve against — `tm run <ticket> --worktree`'s isolated checkout
 /// (`docs/decisions/D-012-run-worktree-isolation.md`) instead of the main working tree. `None`
-/// (what `sched::sched_run`'s `tm sched run` always passes; `sched::run_ticket`'s `tm run`
-/// passes it only without `--worktree`) is byte-identical to this function's behavior before
-/// `--worktree` existed: [`BuiltinExecutor`] keeps resolving tool calls against the process's own
-/// current directory, [`AcpExecutor`]'s `cwd` and the dispatcher's snapshot `repo_root` both stay
-/// `project.root`. Retrieval (`ProjectContextPackSource`'s `CodeIntel`) is deliberately *not*
-/// affected either way — see that struct's construction below.
+/// (what `tm sched run` and a normal `tm run` pass) resolves tool calls against `project.root`;
+/// `--worktree` passes that isolated root instead. The launcher process's current directory is
+/// never an execution-root fallback. Retrieval (`ProjectContextPackSource`'s `CodeIntel`) is
+/// deliberately *not* affected either way — see that struct's construction below.
 ///
 /// `steps`, when `Some`, receives every step of every builtin-executed run as it happens (`tm
 /// run`'s live progress).
@@ -262,13 +260,13 @@ pub fn build_dispatcher_with_human(
     steps: Option<tokio::sync::mpsc::UnboundedSender<tm_agent::StepRecord>>,
     human_sink: Arc<dyn HumanApprovalSink>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
-    let fabric = build_fabric(project.clock.clone())?;
+    let fabric = build_fabric_for_project(project, project.clock.clone())?;
     build_dispatcher_with_fabric(project, handle, exec_root, steps, fabric, human_sink)
 }
 
 /// [`build_dispatcher`] over an already-built `fabric` instead of the one
-/// [`crate::agent::build_fabric`] would pick from the environment — the seam an in-process test
-/// uses to run the real dispatcher against a provider it controls.
+/// [`crate::agent::build_fabric_for_project`] would pick from the project's own configuration —
+/// the seam an in-process test uses to run the real dispatcher against a provider it controls.
 pub(crate) fn build_dispatcher_with_fabric(
     project: &Project,
     handle: tokio::runtime::Handle,
@@ -277,7 +275,7 @@ pub(crate) fn build_dispatcher_with_fabric(
     fabric: Arc<tm_provider::Fabric>,
     human_sink: Arc<dyn HumanApprovalSink>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
-    let exec_root = exec_root.unwrap_or(project.root.as_path());
+    let exec_root = execution_root(&project.root, exec_root);
     let ci = Arc::new(project.code_intel()?);
     let command_cache: Arc<dyn tm_context::CommandCache + Send + Sync> =
         Arc::new(MemoryCommandCache::new(project.ids.clone()));
@@ -299,12 +297,9 @@ pub(crate) fn build_dispatcher_with_fabric(
         tm_agent::ComputerWiring::default(),
         oversight,
     );
-    // Only override when a caller actually asked for one (`exec_root` argument `Some`), not
-    // unconditionally to `project.root` — see this function's own doc comment on why "no
-    // override requested" and "override to project.root" must stay distinguishable.
-    if exec_root != project.root.as_path() {
-        builtin_executor = builtin_executor.with_root(exec_root.to_path_buf());
-    }
+    // Explicitly root all worker tools. `BuiltinExecutor`'s default is process cwd, which can be
+    // unrelated when `--project` targets another directory.
+    builtin_executor = builtin_executor.with_root(exec_root.to_path_buf());
     if let Some(steps) = steps {
         builtin_executor = builtin_executor.with_step_sender(steps);
     }
@@ -335,6 +330,10 @@ pub(crate) fn build_dispatcher_with_fabric(
     )))
 }
 
+fn execution_root<'a>(project_root: &'a Path, override_root: Option<&'a Path>) -> &'a Path {
+    override_root.unwrap_or(project_root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +346,24 @@ mod tests {
         let store =
             Arc::new(Store::open_with(root, clock.clone(), ids.clone()).expect("open store"));
         Project::for_test(root, store, clock, ids)
+    }
+
+    #[test]
+    fn worker_root_defaults_to_external_project_not_launcher_cwd() {
+        let launcher_cwd = std::env::current_dir().expect("launcher cwd");
+        let external_project = tempfile::tempdir().expect("external project");
+        assert_ne!(launcher_cwd, external_project.path());
+
+        assert_eq!(
+            execution_root(external_project.path(), None),
+            external_project.path(),
+            "worker tools must use --project's root even when launched elsewhere"
+        );
+        let selected_worktree = external_project.path().join("worktree");
+        assert_eq!(
+            execution_root(external_project.path(), Some(&selected_worktree)),
+            selected_worktree
+        );
     }
 
     #[test]
