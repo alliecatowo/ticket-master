@@ -72,11 +72,71 @@ pub struct RoleCandidate {
     pub limits: Limits,
 }
 
+/// The on-the-wire shape of one candidate row in `providers.toml`: everything
+/// [`RoleCandidate`] has, plus two fields that only mean anything on the `decider` role
+/// (D-020) — `base_url`/`token_env`, for selecting and pointing a
+/// [`crate::decide::DecisionProvider`] backend (`"mock"` or `"systemone"`/`"systemone-http"`) per
+/// [`crate::providers::registry::Registry::build_decider`]'s `(slug, model, token, base_url)`
+/// shape. Kept as a superset of `RoleCandidate` (not a `#[serde(flatten)]` wrapper around it,
+/// which cannot combine with `#[serde(deny_unknown_fields)]`) so a typo in either a decider or a
+/// non-decider candidate still surfaces as [`RoleConfigError::InvalidToml`] instead of silently
+/// taking a default. [`RoleTable::parse`] rejects `base_url`/`token_env` set on any role other
+/// than `decider`, and splits a valid decider row's two fields off into [`RoleTable`]'s
+/// `decider_meta` side table rather than carrying them on [`RoleCandidate`] itself —
+/// `RoleCandidate` is constructed by struct literal in several other crates, and adding fields to
+/// it would be a breaking change to all of them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CandidateToml {
+    /// The provider slug (`RoleCandidate::provider`), or for `decider` a
+    /// [`crate::providers::registry::Registry::build_decider`] slug (`"mock"`,
+    /// `"systemone"`/`"systemone-http"`).
+    provider: String,
+    /// The model id (`RoleCandidate::model`).
+    model: String,
+    /// `RoleCandidate::max_concurrency`.
+    max_concurrency: u32,
+    /// `RoleCandidate::degraded_ok`.
+    #[serde(default)]
+    degraded_ok: bool,
+    /// `RoleCandidate::price`.
+    #[serde(default)]
+    price: Option<Price>,
+    /// `RoleCandidate::limits`.
+    #[serde(default = "Limits::unlimited")]
+    limits: Limits,
+    /// `decider`-only: overrides the [`crate::providers::systemone::SystemOneProvider`]'s
+    /// default endpoint (e.g. a local jevmlx endpoint) instead of `SYSTEMONE_BASE_URL`/its
+    /// built-in default. Rejected on any other role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    base_url: Option<String>,
+    /// `decider`-only: the *name* of an environment variable to read the bearer token from at
+    /// dispatch time — never the token itself. `providers.toml` is project state, versioned
+    /// alongside the repo, not secret (see the module doc); a real credential never belongs in
+    /// it. Rejected on any other role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token_env: Option<String>,
+}
+
 /// Intermediate TOML structure for deserialization: `{ role: { candidates: [...] } }`.
 #[derive(Deserialize, Serialize)]
 struct IntermediateRole {
     /// The ordered list of candidates for this role.
-    candidates: Vec<RoleCandidate>,
+    candidates: Vec<CandidateToml>,
+}
+
+/// Endpoint override for one `Role::Decider` `(provider, model)` candidate, carried in
+/// [`RoleTable`]'s `decider_meta` side table rather than on [`RoleCandidate`] (see
+/// [`CandidateToml`]'s doc comment for why). `None` in either field means
+/// [`crate::providers::registry::Registry::build_decider`]'s own default applies (the
+/// `systemone` provider's `SYSTEMONE_BASE_URL`/`AI_GATEWAY_API_KEY`/`TYPESAFE_API_KEY` env
+/// vars) — this type carries no default resolution logic itself, only what the config said.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeciderEndpoint {
+    /// A config-supplied base URL override, if any.
+    pub base_url: Option<String>,
+    /// The name of the environment variable holding the bearer token, if any.
+    pub token_env: Option<String>,
 }
 
 /// The full role -> ordered-candidates mapping, validated on construction.
@@ -84,6 +144,14 @@ struct IntermediateRole {
 #[serde(transparent)]
 pub struct RoleTable {
     roles: BTreeMap<String, Vec<RoleCandidate>>,
+    /// `decider`-only endpoint overrides, keyed by `(provider, model)`. Never touched by
+    /// anything but the `decider` role — see [`CandidateToml`]'s doc comment. `#[serde(skip)]`
+    /// keeps [`RoleTable`]'s derived `Serialize`/`Deserialize` `#[serde(transparent)]` (both are
+    /// dead code paths in practice — [`RoleTable::parse`]/[`RoleTable::to_toml_string`] do the
+    /// real (de)serialization by hand — but transparent still requires every non-primary field to
+    /// be skipped and `Default`, which `BTreeMap` is).
+    #[serde(skip)]
+    decider_meta: BTreeMap<(String, String), DeciderEndpoint>,
 }
 
 /// A `providers.toml` document failed to parse or validate.
@@ -135,16 +203,52 @@ impl RoleTable {
 
         // Process and validate each role
         let mut roles = BTreeMap::new();
+        let mut decider_meta = BTreeMap::new();
         for (role_key, candidates) in flat {
             // Parse and validate role name
             let role = Role::from_str(&role_key)
                 .map_err(|_| RoleConfigError::UnknownRole(role_key.clone()))?;
 
+            // Split each wire candidate into a plain `RoleCandidate` (so `EmptyRole`/
+            // `ZeroConcurrency` cover every role, `decider` included, for free) plus, for
+            // `decider` only, a `decider_meta` entry for any `base_url`/`token_env` override.
+            // Both fields are rejected outright on any other role — they'd otherwise be silently
+            // ignored, which is exactly what `#[serde(deny_unknown_fields)]` elsewhere in this
+            // file exists to prevent.
+            let mut role_candidates = Vec::with_capacity(candidates.len());
+            for c in candidates {
+                if role != Role::Decider && (c.base_url.is_some() || c.token_env.is_some()) {
+                    return Err(RoleConfigError::InvalidToml(format!(
+                        "`base_url`/`token_env` are only valid on the decider role (found on `{role_key}`)"
+                    )));
+                }
+                if c.base_url.is_some() || c.token_env.is_some() {
+                    decider_meta.insert(
+                        (c.provider.clone(), c.model.clone()),
+                        DeciderEndpoint {
+                            base_url: c.base_url.clone(),
+                            token_env: c.token_env.clone(),
+                        },
+                    );
+                }
+                role_candidates.push(RoleCandidate {
+                    provider: c.provider,
+                    model: c.model,
+                    max_concurrency: c.max_concurrency,
+                    degraded_ok: c.degraded_ok,
+                    price: c.price,
+                    limits: c.limits,
+                });
+            }
+
             // Store under canonical role key for stable lookups
-            roles.insert(role.as_str().to_string(), candidates);
+            roles.insert(role.as_str().to_string(), role_candidates);
         }
 
-        let table = RoleTable { roles };
+        let table = RoleTable {
+            roles,
+            decider_meta,
+        };
         table.validate()?;
         Ok(table)
     }
@@ -154,7 +258,7 @@ impl RoleTable {
     fn collect_roles(
         table: &toml::value::Table,
         prefix: &str,
-        out: &mut BTreeMap<String, Vec<RoleCandidate>>,
+        out: &mut BTreeMap<String, Vec<CandidateToml>>,
     ) -> Result<(), RoleConfigError> {
         for (key, val) in table {
             let full_key = if prefix.is_empty() {
@@ -183,15 +287,45 @@ impl RoleTable {
     ///
     /// Produces a pretty-printed TOML representation with error handling for serialization failures.
     pub fn to_toml_string(&self) -> Result<String, RoleConfigError> {
-        // Convert to intermediate structure for serialization
+        // Convert to intermediate structure for serialization, re-attaching each decider
+        // candidate's `base_url`/`token_env` from `decider_meta` (every other role's candidates
+        // get `None`/`None`, which `#[serde(skip_serializing_if)]` on `CandidateToml` omits from
+        // the output entirely, so a table with no decider overrides round-trips byte-identical
+        // to before this field existed).
         let intermediate: BTreeMap<String, IntermediateRole> = self
             .roles
             .iter()
             .map(|(key, candidates)| {
+                // Only the `decider` role ever has `decider_meta` entries, but `(provider,
+                // model)` is not unique *across* roles — e.g. a `mock`/`m1` candidate on
+                // `coder_fast` in a test fixture must never pick up a same-named `decider`
+                // candidate's endpoint override, or this round-trips into an `InvalidToml`
+                // rejection on reparse (`base_url`/`token_env` only valid on `decider`).
+                let is_decider = key == Role::Decider.as_str();
+                let wire_candidates = candidates
+                    .iter()
+                    .map(|c| {
+                        let endpoint = if is_decider {
+                            self.decider_endpoint(&c.provider, &c.model)
+                        } else {
+                            DeciderEndpoint::default()
+                        };
+                        CandidateToml {
+                            provider: c.provider.clone(),
+                            model: c.model.clone(),
+                            max_concurrency: c.max_concurrency,
+                            degraded_ok: c.degraded_ok,
+                            price: c.price,
+                            limits: c.limits,
+                            base_url: endpoint.base_url,
+                            token_env: endpoint.token_env,
+                        }
+                    })
+                    .collect();
                 (
                     key.clone(),
                     IntermediateRole {
-                        candidates: candidates.clone(),
+                        candidates: wire_candidates,
                     },
                 )
             })
@@ -236,6 +370,20 @@ impl RoleTable {
             .get(role.as_str())
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    /// The config-supplied endpoint override for a `(provider, model)` decider candidate, if
+    /// `providers.toml` set `base_url`/`token_env` for it — `Default::default()` (both `None`)
+    /// for any candidate the config didn't set either field on, decider or not. This is the
+    /// `(token, base_url)` half of [`crate::providers::registry::Registry::build_decider`]'s
+    /// `(slug, model, token, base_url)` call shape; the caller still resolves `token_env` to an
+    /// actual token by reading the named environment variable — this module does no I/O (see the
+    /// module doc).
+    pub fn decider_endpoint(&self, provider: &str, model: &str) -> DeciderEndpoint {
+        self.decider_meta
+            .get(&(provider.to_string(), model.to_string()))
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Append `candidate` to the back of `role`'s list, unless the role already names the
@@ -319,6 +467,27 @@ impl RoleTable {
             let tolerance = role.default_tolerance();
 
             let candidates = match role {
+                Role::Decider => {
+                    // Default to the network-free mock decider, not an Anthropic completion
+                    // model: `Role::Decider` candidates dispatch through
+                    // `crate::providers::registry::Registry::build_decider` to a
+                    // `crate::decide::DecisionProvider` (`"mock"`/`"systemone"`/
+                    // `"systemone-http"`), a different trait from every other role's `Provider`,
+                    // so an `anthropic`/`claude-*` row here would be inert at best (silently
+                    // skipped by `Registry::build_fabric`) and misleading at worst (`tm doctor`
+                    // would print a model this role never actually calls). `MockDecisionProvider`
+                    // needs no credentials, so a fresh project's default table stays fully
+                    // functional (shadow-classifying nothing, per D-020, until a real backend is
+                    // configured) with zero setup.
+                    vec![RoleCandidate {
+                        provider: "mock".to_string(),
+                        model: "mock-decider".to_string(),
+                        max_concurrency: 1,
+                        degraded_ok: false,
+                        price: None,
+                        limits: Limits::unlimited(),
+                    }]
+                }
                 Role::Embedder => {
                     // Anthropic has no embedding endpoint. Use a provider whose declared
                     // capabilities match this role instead of advertising a fictitious model.
@@ -467,7 +636,10 @@ impl RoleTable {
             roles.insert(role.as_str().to_string(), candidates);
         }
 
-        RoleTable { roles }
+        RoleTable {
+            roles,
+            decider_meta: BTreeMap::new(),
+        }
     }
 }
 
@@ -791,10 +963,11 @@ candidates = [
         assert_eq!(coder_fast[1].model, "claude-haiku-4-5");
         assert!(coder_fast[1].degraded_ok);
 
-        // All non-embedding roles retain their Anthropic defaults; embeddings use OpenAI because
-        // Anthropic does not expose the embedding capability.
+        // All other roles retain their Anthropic defaults; embeddings use OpenAI because
+        // Anthropic does not expose the embedding capability, and the decider defaults to the
+        // network-free mock backend (see `default_table_with`'s `Role::Decider` arm).
         for role in Role::ALL {
-            if role == Role::Embedder {
+            if matches!(role, Role::Embedder | Role::Decider) {
                 continue;
             }
             for candidate in table.candidates_for(role) {
@@ -825,7 +998,7 @@ candidates = [
 
         // Every other role is completely unaffected: still all-Anthropic.
         for role in Role::ALL {
-            if matches!(role, Role::CoderFast | Role::Embedder) {
+            if matches!(role, Role::CoderFast | Role::Embedder | Role::Decider) {
                 continue;
             }
             for candidate in table.candidates_for(role) {
@@ -846,5 +1019,136 @@ candidates = [
         table
             .validate()
             .expect("devpass-preferred default table is still structurally valid");
+    }
+
+    #[test]
+    fn default_decider_is_the_mock_backend() {
+        let table = RoleTable::default_table_with(None);
+        let candidates = table.candidates_for(Role::Decider);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].provider, "mock");
+        assert!(!candidates[0].degraded_ok);
+        // No config-supplied endpoint override for the built-in default.
+        let endpoint = table.decider_endpoint(&candidates[0].provider, &candidates[0].model);
+        assert_eq!(endpoint, DeciderEndpoint::default());
+    }
+
+    #[test]
+    fn decider_role_parses_a_mock_and_a_systemone_http_candidate_with_endpoint_overrides() {
+        let toml = r#"
+[decider]
+candidates = [
+  { provider = "mock", model = "mock-decider", max_concurrency = 1 },
+  { provider = "systemone-http", model = "typesafe-ai/jev", max_concurrency = 2, base_url = "https://jevmlx.local", token_env = "JEV_TOKEN" }
+]
+"#;
+        let table = RoleTable::parse(toml).expect("a decider role with endpoint overrides parses");
+        let candidates = table.candidates_for(Role::Decider);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].provider, "mock");
+        assert_eq!(candidates[1].provider, "systemone-http");
+        assert_eq!(candidates[1].model, "typesafe-ai/jev");
+
+        // The mock candidate got no endpoint override.
+        assert_eq!(
+            table.decider_endpoint("mock", "mock-decider"),
+            DeciderEndpoint::default()
+        );
+        // The systemone-http candidate's override round-trips through the side table.
+        let endpoint = table.decider_endpoint("systemone-http", "typesafe-ai/jev");
+        assert_eq!(endpoint.base_url.as_deref(), Some("https://jevmlx.local"));
+        assert_eq!(endpoint.token_env.as_deref(), Some("JEV_TOKEN"));
+    }
+
+    #[test]
+    fn empty_decider_role_is_rejected_like_any_other_empty_role() {
+        let toml = "[decider]\ncandidates = []\n";
+        let err = RoleTable::parse(toml).unwrap_err();
+        assert!(matches!(err, RoleConfigError::EmptyRole(role) if role == "decider"));
+    }
+
+    #[test]
+    fn base_url_on_a_non_decider_role_is_rejected() {
+        let toml = r#"
+[coder.fast]
+candidates = [
+  { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 10, base_url = "https://example.invalid" }
+]
+"#;
+        let err = RoleTable::parse(toml).unwrap_err();
+        assert!(matches!(err, RoleConfigError::InvalidToml(_)));
+    }
+
+    #[test]
+    fn token_env_on_a_non_decider_role_is_rejected() {
+        let toml = r#"
+[coder.fast]
+candidates = [
+  { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 10, token_env = "SOME_TOKEN" }
+]
+"#;
+        let err = RoleTable::parse(toml).unwrap_err();
+        assert!(matches!(err, RoleConfigError::InvalidToml(_)));
+    }
+
+    #[test]
+    fn typoed_decider_endpoint_key_is_rejected_instead_of_ignored() {
+        let toml = r#"
+[decider]
+candidates = [
+  { provider = "systemone-http", model = "typesafe-ai/jev", max_concurrency = 1, base_urll = "https://jevmlx.local" }
+]
+"#;
+        let err = RoleTable::parse(toml).expect_err("unknown candidate keys must not be ignored");
+        assert!(matches!(err, RoleConfigError::InvalidToml(_)));
+    }
+
+    #[test]
+    fn decider_endpoint_overrides_round_trip_through_toml() {
+        let toml = r#"
+[decider]
+candidates = [
+  { provider = "systemone-http", model = "typesafe-ai/jev", max_concurrency = 1, base_url = "https://jevmlx.local", token_env = "JEV_TOKEN" }
+]
+"#;
+        let table = RoleTable::parse(toml).expect("valid decider TOML parses");
+        let serialized = table.to_toml_string().expect("serializes");
+        let reparsed = RoleTable::parse(&serialized).expect("reparses");
+        assert_eq!(table, reparsed);
+        let endpoint = reparsed.decider_endpoint("systemone-http", "typesafe-ai/jev");
+        assert_eq!(endpoint.base_url.as_deref(), Some("https://jevmlx.local"));
+        assert_eq!(endpoint.token_env.as_deref(), Some("JEV_TOKEN"));
+    }
+
+    #[test]
+    fn decider_endpoint_override_does_not_leak_onto_a_same_named_candidate_on_another_role() {
+        // Regression: `(provider, model)` is not unique across roles. A `mock`/`shared-name`
+        // decider candidate with an endpoint override must not make `to_toml_string` write
+        // `base_url`/`token_env` onto an unrelated `coder_fast` candidate that happens to share
+        // the same provider/model strings — that would fail to reparse (those fields are
+        // rejected on any role but `decider`).
+        let toml = r#"
+[decider]
+candidates = [
+  { provider = "mock", model = "shared-name", max_concurrency = 1, base_url = "https://jevmlx.local", token_env = "JEV_TOKEN" }
+]
+
+[coder.fast]
+candidates = [
+  { provider = "mock", model = "shared-name", max_concurrency = 10 }
+]
+"#;
+        let table = RoleTable::parse(toml).expect("valid TOML with a cross-role name collision");
+        let serialized = table.to_toml_string().expect("serializes");
+        let reparsed = RoleTable::parse(&serialized)
+            .expect("reparses without the endpoint override leaking onto coder_fast");
+        assert_eq!(table, reparsed);
+        assert_eq!(
+            reparsed.decider_endpoint("mock", "shared-name"),
+            DeciderEndpoint {
+                base_url: Some("https://jevmlx.local".to_string()),
+                token_env: Some("JEV_TOKEN".to_string()),
+            }
+        );
     }
 }
