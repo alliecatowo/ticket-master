@@ -12,7 +12,10 @@ use crate::args::{
 use crate::project::Project;
 
 pub mod overview;
-use crate::render::{kind_label, milestone_state_label, state_label, Renderer, Table, Tree};
+use crate::render::{
+    authority_label, budget_label, kind_label, milestone_state_label, state_label, Renderer, Table,
+    Tree,
+};
 use std::collections::BTreeMap;
 use std::fs;
 use tm_core::ticket::{
@@ -348,8 +351,8 @@ pub fn ticket_list(
         let rows: Vec<Vec<String>> = tickets
             .iter()
             .map(|t| {
-                let objective = if t.objective.len() > 50 {
-                    format!("{}...", &t.objective[..47])
+                let objective = if t.objective.chars().count() > 50 {
+                    format!("{}...", t.objective.chars().take(47).collect::<String>())
                 } else {
                     t.objective.clone()
                 };
@@ -369,6 +372,125 @@ pub fn ticket_list(
     Ok(())
 }
 
+/// A one-line human summary of a [`VerificationPolicy`], `None` when it's the default
+/// ([`VerificationPolicy::Single`]) so `ticket show` can omit the line entirely.
+fn verification_summary(policy: &VerificationPolicy) -> Option<String> {
+    match policy {
+        VerificationPolicy::Single => None,
+        VerificationPolicy::None => Some("not required".to_string()),
+        VerificationPolicy::EveryPredicate => {
+            Some("every success predicate is checked independently".to_string())
+        }
+        VerificationPolicy::Audited => {
+            Some("must pass, and the pass is itself audited".to_string())
+        }
+    }
+}
+
+/// A one-line human summary of a [`RetryPolicy`], `None` when it's the default so `ticket show`
+/// can omit the line entirely.
+fn retry_summary(retry: &RetryPolicy) -> Option<String> {
+    if *retry == RetryPolicy::default() {
+        return None;
+    }
+    Some(format!("up to {} attempts", retry.max_attempts))
+}
+
+/// A one-line human summary of a ticket's [`ResourceClaim`]s, `None` when there are none.
+fn resources_summary(resources: &[ResourceClaim]) -> Option<String> {
+    if resources.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = resources
+        .iter()
+        .map(|r| {
+            let mode = match r.mode {
+                ResourceMode::Exclusive => "exclusive",
+                ResourceMode::Shared => "shared",
+            };
+            let paths: Vec<&str> = r.paths.patterns().iter().map(|p| p.as_str()).collect();
+            format!("{} on {}", mode, paths.join(", "))
+        })
+        .collect();
+    Some(parts.join("; "))
+}
+
+/// A one-line human summary of a ticket's [`ExecutorRequirements`], `None` when it's the default.
+fn executor_summary(executor: &ExecutorRequirements) -> Option<String> {
+    if *executor == ExecutorRequirements::default() {
+        return None;
+    }
+    let mut parts = vec![executor.role.to_string()];
+    if executor.human_required {
+        parts.push("human required".to_string());
+    }
+    Some(parts.join(", "))
+}
+
+/// The plain-text body of `tm ticket show`: a person-readable summary, not a struct dump. Pulled
+/// out of [`ticket_show`] so it can be unit-tested against a constructed [`tm_core::ticket::Ticket`]
+/// without a real [`Project`]/[`tm_core::Store`].
+fn format_ticket_text(ticket: &tm_core::ticket::Ticket) -> String {
+    let mut text = format!("ID:           {}\n", ticket.id);
+    text.push_str(&format!("State:        {}\n", state_label(ticket.state)));
+    text.push_str(&format!("Kind:         {}\n", kind_label(ticket.kind)));
+    text.push_str(&format!("Priority:     {}\n", ticket.priority));
+    text.push_str(&format!("Objective:    {}\n", ticket.objective));
+    if let Some(parent) = &ticket.parent {
+        text.push_str(&format!("Parent:       {}\n", parent));
+    }
+    text.push_str(&format!(
+        "Milestone:    {}\n",
+        ticket
+            .milestone
+            .as_ref()
+            .map(|m| m.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
+    let depends_on = if ticket.dependencies.is_empty() {
+        "none".to_string()
+    } else {
+        ticket
+            .dependencies
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    text.push_str(&format!("Depends on:   {depends_on}\n"));
+    let children = if ticket.children.is_empty() {
+        "none".to_string()
+    } else {
+        ticket
+            .children
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    text.push_str(&format!("Children:     {children}\n"));
+    text.push_str(&format!("Budget:       {}\n", budget_label(&ticket.budget)));
+    text.push_str(&format!(
+        "Authority:    {}\n",
+        authority_label(&ticket.authority)
+    ));
+    if let Some(resources) = resources_summary(&ticket.resources) {
+        text.push_str(&format!("Resources:    {resources}\n"));
+    }
+    if let Some(executor) = executor_summary(&ticket.executor) {
+        text.push_str(&format!("Executor:     {executor}\n"));
+    }
+    if let Some(verification) = verification_summary(&ticket.verification) {
+        text.push_str(&format!("Verification: {verification}\n"));
+    }
+    if let Some(retry) = retry_summary(&ticket.retry) {
+        text.push_str(&format!("Retries:      {retry}\n"));
+    }
+    text.push_str(&format!("Created:      {}\n", ticket.created));
+    text.push_str(&format!("Updated:      {}\n", ticket.updated));
+    text
+}
+
 /// `tm ticket show`
 pub fn ticket_show(
     args: &TicketRefArgs,
@@ -386,27 +508,7 @@ pub fn ticket_show(
     if renderer.is_json() {
         renderer.emit(ticket, "")?;
     } else {
-        let mut text = format!("ID:           {}\n", ticket.id);
-        text.push_str(&format!("State:        {:?}\n", ticket.state));
-        text.push_str(&format!("Kind:         {:?}\n", ticket.kind));
-        text.push_str(&format!("Priority:     {}\n", ticket.priority));
-        text.push_str(&format!("Objective:    {}\n", ticket.objective));
-        if let Some(parent) = &ticket.parent {
-            text.push_str(&format!("Parent:       {}\n", parent));
-        }
-        if let Some(milestone) = &ticket.milestone {
-            text.push_str(&format!("Milestone:    {}\n", milestone));
-        }
-        text.push_str(&format!("Authority:    {:?}\n", ticket.authority));
-        text.push_str(&format!("Resources:    {:?}\n", ticket.resources));
-        text.push_str(&format!("Executor:     {:?}\n", ticket.executor));
-        text.push_str(&format!("Verification: {:?}\n", ticket.verification));
-        text.push_str(&format!("Budget:       {:?}\n", ticket.budget));
-        text.push_str(&format!("Retry Policy: {:?}\n", ticket.retry));
-        text.push_str(&format!("Children:     {:?}\n", ticket.children));
-        text.push_str(&format!("Created:      {}\n", ticket.created));
-        text.push_str(&format!("Updated:      {}\n", ticket.updated));
-        renderer.emit(ticket, &text)?;
+        renderer.emit(ticket, &format_ticket_text(ticket))?;
     }
 
     Ok(())
@@ -1424,6 +1526,64 @@ mod tests {
             });
             assert_eq!(state_from_arg(parsed), *state);
         }
+    }
+
+    fn sample_ticket(id: &str, objective: &str) -> tm_core::ticket::Ticket {
+        tm_core::ticket::Ticket {
+            id: TicketId::new(id).unwrap(),
+            objective: objective.to_string(),
+            kind: TicketKind::Work,
+            parent: None,
+            children: vec![],
+            dependencies: vec![],
+            milestone: None,
+            state: TicketState::Draft,
+            priority: 0,
+            authority: Authority::default(),
+            resources: vec![],
+            executor: default_executor_requirements(),
+            context_refs: vec![],
+            success: vec![],
+            verification: VerificationPolicy::Single,
+            budget: Budget::unlimited(),
+            retry: default_retry_policy(),
+            attempts: 0,
+            failures: vec![],
+            created: tm_types::Timestamp::parse_rfc3339("2024-01-01T00:00:00Z").unwrap(),
+            updated: tm_types::Timestamp::parse_rfc3339("2024-01-01T00:00:00Z").unwrap(),
+            cycle: None,
+        }
+    }
+
+    #[test]
+    fn format_ticket_text_has_no_debug_struct_syntax() {
+        let ticket = sample_ticket("T-1", "fix the thing");
+        let text = format_ticket_text(&ticket);
+        assert!(!text.contains('{'), "text contained a struct brace: {text}");
+        assert!(!text.contains("Some("), "text contained Some(...): {text}");
+        assert!(
+            !text.contains("18446744073709551615"),
+            "text contained raw u64::MAX: {text}"
+        );
+        assert!(text.contains("Budget:       unlimited"));
+        assert!(text.contains("State:        draft"));
+        assert!(text.contains("Depends on:   none"));
+        assert!(text.contains("Children:     none"));
+    }
+
+    #[test]
+    fn multi_byte_objective_truncation_does_not_panic() {
+        // ticket_list truncates a long objective with `.chars().take(47)` rather than a raw
+        // byte-slice `&s[..47]`, which would panic here since `😀` is a 4-byte UTF-8 scalar that
+        // byte offset 47 lands in the middle of.
+        let objective: String = "😀".repeat(60);
+        let truncated = if objective.chars().count() > 50 {
+            format!("{}...", objective.chars().take(47).collect::<String>())
+        } else {
+            objective.clone()
+        };
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated.chars().count(), 47 + 3);
     }
 
     fn test_project(root: &std::path::Path) -> Project {
