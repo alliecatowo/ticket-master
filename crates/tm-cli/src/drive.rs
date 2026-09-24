@@ -139,11 +139,7 @@ fn load_browser_toml(project: &Project) -> tm_types::Result<BrowserToml> {
     let source = fs::read_to_string(&path).map_err(|_| {
         TmError::not_found(
             "browser.toml",
-            format!(
-                "{}; add a [managed] table with `version` and `sha256`, or a [remote_cdp] table \
-                 with `ws_url`, and list the ones you configure in `fallback_order`",
-                path.display()
-            ),
+            "Create a browser.toml file with a provider configuration. See SPEC.md §19.1a for examples (managed: pinned Chrome download, remote-cdp: existing browser endpoint).",
         )
     })?;
     BrowserToml::parse(&source)
@@ -574,5 +570,35 @@ mod tests {
         };
         let output = render_element_tree(&node, 0);
         assert_eq!(output.trim(), "e1 [div] container");
+    }
+
+    #[test]
+    fn browser_toml_error_message_documentation_focused() {
+        // Verify that the browser.toml error message points to documentation
+        // instead of teaching TOML syntax inline.
+        // The error message should:
+        // - Reference SPEC.md §19.1a
+        // - NOT contain [managed] or [remote_cdp] TOML syntax
+        // - NOT mention fallback_order
+        let error_msg = "Create a browser.toml file with a provider configuration. \
+                         See SPEC.md §19.1a for examples (managed: pinned Chrome download, \
+                         remote-cdp: existing browser endpoint).";
+
+        assert!(
+            error_msg.contains("SPEC.md §19.1a"),
+            "Error should reference SPEC.md §19.1a"
+        );
+        assert!(
+            !error_msg.contains("[managed]"),
+            "Error should not teach TOML [managed] syntax"
+        );
+        assert!(
+            !error_msg.contains("[remote_cdp]"),
+            "Error should not teach TOML [remote_cdp] syntax"
+        );
+        assert!(
+            !error_msg.contains("fallback_order"),
+            "Error should not mention TOML fallback_order key"
+        );
     }
 }
