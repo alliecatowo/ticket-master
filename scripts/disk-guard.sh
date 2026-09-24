@@ -39,6 +39,7 @@ AGGRESSIVE=0
 
 for arg in "$@"; do
     case "$arg" in
+        "") ;; # an empty positional arg (e.g. a shell's unquoted-empty-default passthrough) is a no-op, not an error
         --dry-run) DRY_RUN=1 ;;
         --verbose) VERBOSE=1 ;;
         --aggressive) AGGRESSIVE=1 ;;
@@ -60,6 +61,12 @@ done
 REPO_ROOT="/Users/allie/Develop/ticket-master"
 
 WORKTREES_DIR="$REPO_ROOT/.claude/worktrees"
+
+# Never follow a symlink out of these two roots: resolve them once with `cd -P` up front so every
+# later comparison (safe_rm's target/worktree shape checks, is_under) is against the real,
+# symlink-free path rather than whatever REPO_ROOT/WORKTREES_DIR happen to say literally.
+REPO_ROOT_RESOLVED="$(cd -P "$REPO_ROOT" 2>/dev/null && pwd -P)" || REPO_ROOT_RESOLVED="$REPO_ROOT"
+WORKTREES_DIR_RESOLVED="$(cd -P "$WORKTREES_DIR" 2>/dev/null && pwd -P)" || WORKTREES_DIR_RESOLVED="$WORKTREES_DIR"
 LOG_DIR="$HOME/Library/Logs"
 LOG_FILE="$LOG_DIR/tm-disk-guard.log"
 
@@ -80,7 +87,11 @@ RM="/bin/rm"
 # finishes. A file survives across subshells.
 SUMMARY_FILE="$("/usr/bin/mktemp" -t "disk-guard-summary")" || SUMMARY_FILE="/tmp/tm-disk-guard-summary.$$"
 : >"$SUMMARY_FILE"
-trap 'rm -f "$SUMMARY_FILE"' EXIT INT TERM
+# EXIT alone does cleanup-only (a normal `exit 0` already reaches it); INT/TERM (e.g. launchd's
+# `bootout` sending SIGTERM) additionally force a real exit, so a caught signal can't leave the
+# script resuming mid-deletion after its trap handler returns.
+trap 'rm -f "$SUMMARY_FILE"' EXIT
+trap 'rm -f "$SUMMARY_FILE"; exit 1' INT TERM
 
 note_removed() {
     # $1: "kind:name", $2: size in KB (0 if unknown)
@@ -162,6 +173,7 @@ safe_rm() {
 
     case "$_kind" in
         target)
+            _parent_resolved="$(dirname "$_resolved")"
             case "$_resolved" in
                 */target) : ;;
                 *)
@@ -169,16 +181,30 @@ safe_rm() {
                     return 1
                     ;;
             esac
+            # The target's parent must be the primary checkout itself, or a direct child of
+            # .claude/worktrees/ (a worktree's own root) -- never an arbitrary "*/target" match.
+            if [ "$_parent_resolved" != "$REPO_ROOT_RESOLVED" ] && [ "$(dirname "$_parent_resolved")" != "$WORKTREES_DIR_RESOLVED" ]; then
+                echo "disk-guard.sh: refusing target outside the primary checkout or a worktree: '$_resolved'" >&2
+                return 1
+            fi
             ;;
         worktree)
-            if ! is_under "$_resolved" "$WORKTREES_DIR"; then
+            if ! is_under "$_resolved" "$WORKTREES_DIR_RESOLVED"; then
                 echo "disk-guard.sh: refusing worktree deletion outside .claude/worktrees: '$_resolved'" >&2
                 return 1
             fi
-            [ "$_resolved" = "$WORKTREES_DIR" ] && return 1
+            [ "$_resolved" = "$WORKTREES_DIR_RESOLVED" ] && return 1
             ;;
         scratch)
             _parent_resolved="$(dirname "$_resolved")"
+            _base_resolved="$(basename "$_resolved")"
+            case "$_base_resolved" in
+                tmp.* | tm-trials | tm-wide | tm-accidental-*) : ;;
+                *)
+                    echo "disk-guard.sh: refusing scratch path with an unrecognized name: '$_resolved'" >&2
+                    return 1
+                    ;;
+            esac
             _ok=0
             for _root in $SCRATCH_ROOTS; do
                 [ "$_parent_resolved" = "$_root" ] && _ok=1
@@ -194,24 +220,56 @@ safe_rm() {
             ;;
     esac
 
-    _before_kb="$(du_kb "$_resolved")"
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "  WOULD REMOVE $_kind: $_resolved"
     else
+        # Sized only when actually removing -- `du -sk` walking a 10GB tree just to print a
+        # number nobody reads would be real, pointless I/O on every dry-run.
+        _before_kb="$(du_kb "$_resolved")"
         vlog "  removing $_kind: $_resolved"
-        "$RM" -rf -- "$_resolved"
-        note_removed "$_kind:$(basename "$_resolved")" "$_before_kb"
+        # rm's own stderr is discarded, not logged: if something starts writing into $_resolved
+        # mid-delete (a build kicking off between our busy check and this rm), rm prints errors
+        # for every such file, which would blow through the "one line per run" log contract.
+        # A non-zero exit here just means the removal was partial -- recorded as such below,
+        # not treated as a reason to abort the rest of this run.
+        if "$RM" -rf -- "$_resolved" 2>/dev/null; then
+            note_removed "$_kind:$(basename "$_resolved")" "$_before_kb"
+        else
+            vlog "  note: rm -rf reported errors removing $_resolved (possibly partial)"
+            note_removed "$_kind:$(basename "$_resolved")(partial)" "$_before_kb"
+        fi
     fi
     return 0
 }
 
 # ---------------------------------------------------------------------------
-# One lsof snapshot for the whole run: absolute cwd of every process, cached so we don't spawn
-# lsof once per checkout. `-d cwd` limits it to the cwd file descriptor; `-Fn` emits one `n<path>`
-# line per matching process, filtered below to just the path.
+# One lsof snapshot for the whole run, cached so we don't spawn lsof once per checkout. `-d cwd`
+# limits it to the cwd file descriptor; `+c 0` disables lsof's default 9-character command-name
+# truncation (without it "rust-analyzer" comes back as "rust-anal", breaking the name match
+# below); `-Fcn` emits a `c<command>` line immediately followed by that process's `n<path>` line.
+# LSOF_CWD_LINES holds "command<TAB>path" pairs, one per process with a cwd; LSOF_CWDS holds just
+# the paths, for the "any process at all" checks.
 # ---------------------------------------------------------------------------
 
-LSOF_CWDS="$("$LSOF" -nP -d cwd -Fn 2>/dev/null | /usr/bin/sed -n 's/^n//p')"
+LSOF_CWD_LINES="$("$LSOF" -nP -d cwd +c 0 -Fcn 2>/dev/null | /usr/bin/awk '
+    /^c/ { cmd = substr($0, 2) }
+    /^n/ { print cmd "\t" substr($0, 2) }
+')"
+LSOF_CWDS="$(printf '%s\n' "$LSOF_CWD_LINES" | /usr/bin/awk -F'\t' '{print $2}')"
+
+# Every busy/cwd check below depends entirely on this one snapshot. lsof can't legitimately come
+# back empty -- this script's own shell process always has a cwd, so lsof would report at least
+# one line for itself -- so an empty snapshot means lsof itself failed or was blocked (permissions,
+# a hung lsof, an unexpected sandbox), and every "is anything busy here" check below would then
+# silently read as "nothing is busy", which is exactly backwards for a script whose first rule is
+# never deleting something in use. Refuse to delete anything this run rather than risk that.
+if [ -z "$LSOF_CWDS" ]; then
+    echo "disk-guard.sh: lsof returned no cwd data (a hung/blocked lsof, or nothing else went wrong but this shouldn't be possible) -- refusing to delete anything this run" >&2
+    /bin/mkdir -p "$LOG_DIR"
+    TS_ABORT="$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "$TS_ABORT [abort] lsof returned nothing; skipped" >>"$LOG_FILE"
+    exit 0
+fi
 
 # any_process_cwd_under PATH -- true if some process's cwd is PATH or beneath it.
 any_process_cwd_under() {
@@ -225,37 +283,65 @@ any_process_cwd_under() {
     done | /usr/bin/grep -q hit
 }
 
+# is_build_process COMMAND_NAME -- true for cargo/rustc/rust-analyzer* (matches spec 1a's "busy"
+# definition for a target dir specifically -- an editor, shell or unrelated tool sitting in the
+# checkout does not itself count). Deliberately a plain top-level function, not an inline `case`:
+# macOS ships bash 3.2 as both /bin/bash and /bin/sh, and 3.2 has a real, confirmed parser bug
+# where a `case ... esac` written directly inside a `$( ... )` command substitution fails with
+# "syntax error near unexpected token `newline'" even for entirely valid syntax; calling a
+# function that itself happens to contain a `case` from inside a substitution does not trigger it
+# (only the literal keyword sequence appearing inside the substitution's own text does), so every
+# `case` this script needs inside a `$( ... )` goes through a named function like this one.
+is_build_process() {
+    case "$1" in
+        cargo | rustc | rust-analyzer*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # ---------------------------------------------------------------------------
-# target_is_busy CHECKOUT_ROOT IDLE_MINUTES -- true (busy) if a cargo/rustc/rust-analyzer
-# process's cwd is under CHECKOUT_ROOT (excluding, for the primary checkout, any cwd that is
+# target_is_busy CHECKOUT_ROOT IDLE_MINUTES -- true (busy) if a cargo/rustc/rust-analyzer*
+# process's cwd is under CHECKOUT_ROOT (excluding, for the primary checkout, any such cwd that is
 # itself under WORKTREES_DIR -- the primary's path is a prefix of every worktree's path, so
-# without this exclusion a build running in any worktree would pin the primary's target
-# forever), or if target/*/.cargo-lock is held open, or if target/*/.fingerprint or
-# target/*/deps changed within IDLE_MINUTES.
+# without this exclusion a build running in any worktree would pin the primary's target forever),
+# or if target/*/.cargo-lock is held open, or if target/*/.fingerprint or target/*/deps changed
+# within IDLE_MINUTES. Deliberately narrower than "any process with a cwd here": an editor, an
+# MCP daemon, or a shell sitting in the checkout is not itself a reason to keep a target -- this
+# repo's own Claude Code session and orchestrator routinely leave exactly those in the primary
+# checkout and in tm-integrate, and counting them would pin the two largest targets permanently.
+# Sets TARGET_BUSY_REASON (for the caller's log line) whenever it returns true.
 # ---------------------------------------------------------------------------
 
 target_is_busy() {
     _root="$1"
     _idle_min="$2"
     _target="$_root/target"
+    TARGET_BUSY_REASON=""
 
     [ -d "$_target" ] || return 1
 
-    # 1. Any process with its cwd inside this checkout (not just inside target/) counts as busy
-    #    -- an editor, rust-analyzer or a shell sitting in the checkout while a build is about
-    #    to start is reason enough to leave it alone this run.
-    _hit=0
-    printf '%s\n' "$LSOF_CWDS" | while IFS= read -r _cwd; do
-        [ -z "$_cwd" ] && continue
-        if [ "$_root" = "$REPO_ROOT" ] && is_under "$_cwd" "$WORKTREES_DIR"; then
-            continue
-        fi
-        if is_under "$_cwd" "$_root"; then
-            echo "hit"
-            break
-        fi
-    done | /usr/bin/grep -q hit && _hit=1
-    if [ "$_hit" -eq 1 ]; then
+    # 1. A cargo/rustc/rust-analyzer* process with its cwd inside this checkout (not just inside
+    #    target/) -- a build about to write to target/ is reason enough to leave it alone. `$(...)`
+    #    around the pipeline captures the matching command's own stdout line even though the
+    #    `while` body is the pipeline's last (subshelled) stage -- command substitution reads the
+    #    subshell's stdout, it doesn't need the subshell's variables.
+    _hit_cmd="$(
+        printf '%s\n' "$LSOF_CWD_LINES" | while IFS= read -r _line; do
+            [ -z "$_line" ] && continue
+            _cmd="${_line%%	*}"
+            _cwd="${_line#*	}"
+            is_build_process "$_cmd" || continue
+            if [ "$_root" = "$REPO_ROOT" ] && is_under "$_cwd" "$WORKTREES_DIR"; then
+                continue
+            fi
+            if is_under "$_cwd" "$_root"; then
+                printf '%s\n' "$_cmd"
+                break
+            fi
+        done
+    )"
+    if [ -n "$_hit_cmd" ]; then
+        TARGET_BUSY_REASON="busy: cwd of $_hit_cmd"
         return 0
     fi
 
@@ -263,6 +349,7 @@ target_is_busy() {
     for _lock in "$_target"/*/.cargo-lock; do
         [ -e "$_lock" ] || continue
         if "$LSOF" -nP -- "$_lock" >/dev/null 2>&1; then
+            TARGET_BUSY_REASON="busy: .cargo-lock held ($_lock)"
             return 0
         fi
     done
@@ -274,6 +361,7 @@ target_is_busy() {
         [ -d "$_sub" ] || continue
         _recent="$("$FIND" "$_sub" -mindepth 0 -maxdepth 1 -mmin -"$_idle_min" -print -quit 2>/dev/null)"
         if [ -n "$_recent" ]; then
+            TARGET_BUSY_REASON="active: mtime within ${_idle_min}m ($_sub)"
             return 0
         fi
     done
@@ -306,7 +394,7 @@ clean_target_for() {
     [ -d "$_root/target" ] || return 0
 
     if target_is_busy "$_root" "$_idle_min"; then
-        vlog "  keep target ($_label): busy or active within ${_idle_min}m -- $_root/target"
+        vlog "  keep target ($_label): $TARGET_BUSY_REASON -- $_root/target"
         return 0
     fi
 
@@ -416,16 +504,21 @@ process_worktree_entry() {
     if [ "$DRY_RUN" -eq 1 ]; then
         echo "  WOULD REMOVE worktree: $_wt (branch: $_branch)"
     else
-        if "$GIT" -C "$REPO_ROOT" worktree remove "$_wt" 2>>"$LOG_FILE"; then
-            note_removed "worktree:$_name" 0
+        if "$GIT" -C "$REPO_ROOT" worktree remove "$_wt" >/dev/null 2>&1; then
             if [ -n "$_branch" ]; then
                 _branch_short="${_branch#refs/heads/}"
-                if ! "$GIT" -C "$REPO_ROOT" branch -d "$_branch_short" >>"$LOG_FILE" 2>&1; then
+                if "$GIT" -C "$REPO_ROOT" branch -d "$_branch_short" >/dev/null 2>&1; then
+                    note_removed "worktree:$_name" 0
+                else
                     vlog "  note: git branch -d $_branch_short failed (left in place)"
+                    note_removed "worktree:$_name(branch-kept)" 0
                 fi
+            else
+                note_removed "worktree:$_name" 0
             fi
         else
             vlog "  note: git worktree remove failed for $_wt (left in place)"
+            note_removed "worktree:$_name(remove-failed)" 0
         fi
     fi
 }
@@ -470,11 +563,11 @@ fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
     vlog "  (dry-run: git worktree prune -n)"
-    "$GIT" -C "$REPO_ROOT" worktree prune -n -v 2>>"$LOG_FILE" | while IFS= read -r _l; do
+    "$GIT" -C "$REPO_ROOT" worktree prune -n -v 2>/dev/null | while IFS= read -r _l; do
         vlog "  $_l"
     done
 else
-    "$GIT" -C "$REPO_ROOT" worktree prune >>"$LOG_FILE" 2>&1
+    "$GIT" -C "$REPO_ROOT" worktree prune >/dev/null 2>&1
 fi
 
 # ---------------------------------------------------------------------------
@@ -533,7 +626,19 @@ scan_scratch_root_glob() {
     "$FIND" "$_root" -mindepth 1 -maxdepth 1 -type d -name "$_name_glob" -print 2>/dev/null | while IFS= read -r _d; do
         [ -L "$_d" ] && continue
 
-        _mtime_recent="$("$FIND" "$_d" -maxdepth 0 -mmin -"$SCRATCH_IDLE_MIN" -print 2>/dev/null)"
+        # Signature check first (cheap, no tree walk): only a dir that already looks like tm
+        # scratch is worth the recursive mtime walk below.
+        if ! looks_like_tm_scratch "$_d"; then
+            vlog "  keep scratch: does not look like tm scratch -- $_d"
+            continue
+        fi
+
+        # Recency: a write anywhere under $_d counts, not just at its own top level -- a live
+        # trial writing files deeper in the tree, with its own cwd elsewhere, must not look idle
+        # just because $_d's own directory entry hasn't changed. -print -quit stops at the first
+        # recent entry found, so this only walks the whole tree for a dir that's already a real
+        # candidate for removal (one that passed the cheap signature check above).
+        _mtime_recent="$("$FIND" "$_d" -mmin -"$SCRATCH_IDLE_MIN" -print -quit 2>/dev/null)"
         if [ -n "$_mtime_recent" ]; then
             vlog "  keep scratch: too recent -- $_d"
             continue
@@ -544,22 +649,29 @@ scan_scratch_root_glob() {
             continue
         fi
 
-        if ! looks_like_tm_scratch "$_d"; then
-            vlog "  keep scratch: does not look like tm scratch -- $_d"
-            continue
-        fi
-
         vlog "  eligible scratch: $_d"
         safe_rm "$_d" scratch
     done
 }
 
-for _root in $SCRATCH_ROOTS; do
+# tmp.* is scoped to $TMPDIR (and DARWIN_USER_TEMP_DIR, when it resolves to something else) --
+# that's where `mktemp -d` actually creates them; the named tm-* dirs are scoped to /tmp, per the
+# spec's own paths (/tmp/tm-trials, /tmp/tm-wide, /tmp/tm-accidental-*). This also keeps the two
+# glob families from being run redundantly against roots they were never seen under.
+_tmp_roots_seen=""
+for _root in "$TMPDIR_RESOLVED" "$DARWIN_TMP_RESOLVED"; do
+    [ -z "$_root" ] && continue
+    case " $_tmp_roots_seen " in
+        *" $_root "*) continue ;;
+    esac
+    _tmp_roots_seen="$_tmp_roots_seen $_root"
     scan_scratch_root_glob "$_root" "tmp.*"
-    scan_scratch_root_glob "$_root" "tm-trials"
-    scan_scratch_root_glob "$_root" "tm-wide"
-    scan_scratch_root_glob "$_root" "tm-accidental-*"
 done
+if [ -n "$SLASH_TMP_RESOLVED" ]; then
+    scan_scratch_root_glob "$SLASH_TMP_RESOLVED" "tm-trials"
+    scan_scratch_root_glob "$SLASH_TMP_RESOLVED" "tm-wide"
+    scan_scratch_root_glob "$SLASH_TMP_RESOLVED" "tm-accidental-*"
+fi
 
 # ---------------------------------------------------------------------------
 # Logging.
@@ -581,7 +693,9 @@ fi
 
 SUMMARY_TRIMMED="$(/usr/bin/awk '{printf "%s%s", (NR==1?"":" "), $1}' "$SUMMARY_FILE")"
 [ -z "$SUMMARY_TRIMMED" ] && SUMMARY_TRIMMED="(nothing removed)"
+FREED_KB_TOTAL="$(/usr/bin/awk '{sum += $2} END {print sum + 0}' "$SUMMARY_FILE")"
+FREED_GB_H="$(awk -v kb="$FREED_KB_TOTAL" 'BEGIN{printf "%.1f", kb/1024/1024}')"
 
-echo "$TS [$MODE_TAG] free_before=${FREE_GB_START_H}G free_after=${FREE_GB_END_H}G removed: $SUMMARY_TRIMMED" >>"$LOG_FILE"
+echo "$TS [$MODE_TAG] free_before=${FREE_GB_START_H}G free_after=${FREE_GB_END_H}G freed=${FREED_GB_H}G removed: $SUMMARY_TRIMMED" >>"$LOG_FILE"
 
 exit 0

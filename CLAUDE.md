@@ -55,40 +55,10 @@ never drift between sessions:
   `.claude/worktrees/` unconditionally — prefer `mise run disk:guard` below for routine cleanup;
   it checks locks, uncommitted changes, busy targets and merge status before removing anything,
   same as it does when run unattended.
-
-### Keeping disk use bounded: `disk:guard`
-
-This machine's disk has hit 100% for real — `target/` growing unbounded (primary + every
-worktree, ~8-11GB each), stale worktrees piling up under `.claude/worktrees/`, and leftover probe
-scratch dirs under `$TMPDIR`/`/tmp` are the three causes seen so far. `scripts/disk-guard.sh`
-(POSIX `sh`, no non-macOS-base dependencies) is the guard against all three, and it's meant to run
-unattended, not just by hand:
-
-- `mise run disk:guard -- [--dry-run] [--verbose] [--aggressive]` runs it once. `--dry-run` prints
-  what it *would* remove without touching anything; always use this to check before an unattended
-  install, and whenever changing the script itself. `--aggressive` (or free disk already below
-  30GB, automatically) shortens every target dir's idle threshold to 15 minutes instead of the
-  normal 2h (worktrees)/6h (primary).
-- `mise run disk:guard:install` installs it as a launchd agent
-  (`~/Library/LaunchAgents/com.ticketmaster.disk-guard.plist`, `com.ticketmaster.disk-guard`)
-  running every 30 minutes, pointed at the primary checkout's own copy of the script — run this
-  from the primary checkout, not a worktree, and only when you've actually decided to install it
-  (it's not installed as a side effect of anything else). `mise run disk:guard:uninstall` reverses
-  it.
-- What it removes, every run: an idle `target/` dir (build output only — never anything else in a
-  checkout) in the primary checkout or any worktree, once idle past its threshold and not busy (no
-  cargo/rustc/rust-analyzer process cwd'd inside, no `.cargo-lock` held open, no recent
-  `.fingerprint`/`deps` activity); a worktree under `.claude/worktrees/` once it's unlocked, has no
-  uncommitted/untracked changes, its HEAD is contained in `main` or `integrate`, and no process has
-  its cwd inside it; and tm scratch dirs (`$TMPDIR/tmp.*`, `/tmp/tm-trials`, `/tmp/tm-wide`,
-  `/tmp/tm-accidental-*`) older than 6 hours that look like tm's own (a `.tm` dir, a `projects/`
-  dir, a `tm` binary, or a git repo whose only commits are from the last day).
-- What it never removes: anything under a worktree named `odw-*` or `tm-integrate` (owner
-  decision — those stay until their work lands, even though their `target/` dirs are still fair
-  game), a locked worktree, a worktree with local changes or an unmerged HEAD, or anything a live
-  process has its cwd inside.
-- Every run appends one line to `~/Library/Logs/tm-disk-guard.log`: timestamp, free space before
-  and after, and what was removed (or `(nothing removed)`).
+- `mise run disk:guard -- [--dry-run] [--verbose] [--aggressive]` — the periodic disk-space guard
+  for `target/` dirs, `.claude/worktrees/` and tm scratch dirs; see "Keeping disk use bounded"
+  below for what it does and doesn't remove. `mise run disk:guard:install`/`:uninstall` manage its
+  launchd agent.
 - `mise run tui` — build and launch the ratatui TUI against the current directory's project. It
   opens on the chat, which is Claude Code's chat (D-019 §1 and its "Implemented: chat"): nothing
   typed is a shortcut; on an empty prompt `/` opens commands, `?` the shortcuts panel, `!` shell
@@ -156,6 +126,50 @@ unattended, not just by hand:
 Every build/test/clippy call in these tasks is already capped at `-j 2` — this is an 8GB Mac,
 concurrent full-workspace compiles have caused real disk-space incidents. If you're driving
 several agents/worktrees at once, don't override that cap.
+
+## Keeping disk use bounded: `disk:guard`
+
+This machine's disk has hit 100% for real — `target/` growing unbounded (primary + every
+worktree, ~8-11GB each), stale worktrees piling up under `.claude/worktrees/`, and leftover probe
+scratch dirs under `$TMPDIR`/`/tmp` are the three causes seen so far. `scripts/disk-guard.sh`
+(POSIX `sh`, no non-macOS-base dependencies) is the guard against all three, and it's meant to run
+unattended, not just by hand — prefer it over `mise run worktree:clean`/`mise run clean` for
+routine cleanup, both of which act unconditionally rather than checking locks/busy/merge state
+first.
+
+- `mise run disk:guard -- [--dry-run] [--verbose] [--aggressive]` runs it once. `--dry-run` prints
+  what it *would* remove without touching anything; always use this to check before an unattended
+  install, and whenever changing the script itself. `--aggressive` (or free disk already below
+  30GB, automatically) shortens every target dir's idle threshold to 15 minutes instead of the
+  normal 2h (worktrees)/6h (primary).
+- `mise run disk:guard:install` installs it as a launchd agent
+  (`~/Library/LaunchAgents/com.ticketmaster.disk-guard.plist`, `com.ticketmaster.disk-guard`)
+  running every 30 minutes, pointed at the primary checkout's own copy of the script — run this
+  from the primary checkout, not a worktree, and only when you've actually decided to install it
+  (it's not installed as a side effect of anything else). `mise run disk:guard:uninstall` reverses
+  it.
+- What it removes, every run: an idle `target/` dir (build output only — never anything else in a
+  checkout) in the primary checkout or any worktree, once idle past its threshold and not busy (a
+  cargo/rustc/rust-analyzer process cwd'd inside it specifically — not just any process, since an
+  editor, MCP daemon or shell routinely sits in the primary checkout and in `tm-integrate` without
+  that meaning a build is in flight; a `.cargo-lock` held open; or recent `.fingerprint`/`deps`
+  activity); a worktree under `.claude/worktrees/` once it's unlocked, has no uncommitted/untracked
+  changes, its HEAD is contained in `main` or `integrate`, and no process at all has its cwd inside
+  it; and tm scratch dirs (`$TMPDIR/tmp.*`, `/tmp/tm-trials`, `/tmp/tm-wide`,
+  `/tmp/tm-accidental-*`) older than 6 hours that look like tm's own (a `.tm` dir, a `projects/`
+  dir, a `tm` binary, or a git repo whose only commits are from the last day).
+- What it never removes: the worktree itself for anything named `odw-*` or `tm-integrate` (owner
+  decision — those stay until their work lands; their `target/` dirs are still fair game and do
+  get cleaned on the normal idle schedule), a locked worktree, a worktree with local changes or an
+  unmerged HEAD, or anything a live process has its cwd inside.
+- Every run appends one line to `~/Library/Logs/tm-disk-guard.log`: timestamp, free space before
+  and after, and what was removed (or `(nothing removed)`).
+- The primary checkout's `target/` specifically stays pinned as long as an open Claude Code
+  session has `rust-analyzer-lsp` active there (see "Code intelligence" below) — `rust-analyzer`
+  itself counts as a busy build process by design (spec 1a), and this repo enables that plugin
+  project-wide, so a live session's own language server is usually why the primary's `target/`
+  never ages out on its own. `mise run clean` by hand is the way to reclaim it anyway while a
+  session is still open.
 
 ## Codebase search: zvec-grep is indexed for this repo
 
@@ -287,8 +301,9 @@ point several worktrees at one `CARGO_TARGET_DIR`: that was tried and is unsafe.
 path-dependency artifacts by a workspace-relative hash, so two worktrees of this workspace write the
 same files and one tree's build can silently link the other tree's code; a subagent hit exactly
 that (its build saw an error variant that only existed in the primary checkout). Disk is still the
-constraint on this machine: a worktree's `target/` grows to ~8GB, so run `mise run worktree:clean`
-after merging and keep concurrent heavy builds to about two.
+constraint on this machine: a worktree's `target/` grows to ~8GB. `mise run disk:guard` (see
+"Keeping disk use bounded" above) reclaims an idle one on its own schedule, or run it by hand with
+`--aggressive` right after merging; keep concurrent heavy builds to about two either way.
 
 **A worktree does not get `.env`, and nothing here auto-copies it in.** Git worktrees only ever
 contain tracked files (plus your own uncommitted changes on that branch) — a gitignored file like

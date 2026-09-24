@@ -120,15 +120,17 @@ description = "Run scripts/disk-guard.sh, the periodic disk-space guard for targ
 run = "scripts/disk-guard.sh {{arg(name=\"flags\", var=true, default=\"\")}}"
 
 [tasks."disk:guard:install"]
-description = "Install scripts/disk-guard.sh as a launchd agent (com.ticketmaster.disk-guard, every 30 minutes) so it runs unattended. Safe to re-run: replaces an existing install. Points at THIS checkout's copy of the script -- only run it from the primary checkout, not a worktree."
+description = "Install scripts/disk-guard.sh as a launchd agent (com.ticketmaster.disk-guard, every 30 minutes) so it runs unattended. Safe to re-run: replaces an existing install. Always points at the primary checkout's copy of the script, regardless of where this task itself is invoked from -- disk-guard.sh's own REPO_ROOT is pinned the same way, so a plist pointed anywhere else would eventually have the guard delete its own script out from under it."
 run = """
 set -eu
+PRIMARY_ROOT="/Users/allie/Develop/ticket-master"
 PLIST_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="$HOME/Library/Logs"
 PLIST="$PLIST_DIR/com.ticketmaster.disk-guard.plist"
-SCRIPT="$MISE_PROJECT_ROOT/scripts/disk-guard.sh"
+LABEL="com.ticketmaster.disk-guard"
+SCRIPT="$PRIMARY_ROOT/scripts/disk-guard.sh"
 if [ ! -f "$SCRIPT" ]; then
-  echo "disk:guard:install: $SCRIPT not found -- run this from the primary checkout, not a worktree" >&2
+  echo "disk:guard:install: $SCRIPT not found -- this task only installs the primary checkout's own copy; land this change on $PRIMARY_ROOT first" >&2
   exit 1
 fi
 mkdir -p "$PLIST_DIR" "$LOG_DIR"
@@ -138,7 +140,7 @@ cat > "$PLIST" <<EOF
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.ticketmaster.disk-guard</string>
+  <string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
     <string>/bin/sh</string>
@@ -155,8 +157,20 @@ cat > "$PLIST" <<EOF
 </dict>
 </plist>
 EOF
-launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
+plutil -lint "$PLIST"
+launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+i=0
+while [ "$i" -lt 3 ]; do
+  if launchctl bootstrap "gui/$(id -u)" "$PLIST"; then
+    break
+  fi
+  i=$((i + 1))
+  if [ "$i" -ge 3 ]; then
+    echo "disk:guard:install: launchctl bootstrap failed after 3 attempts" >&2
+    exit 1
+  fi
+  sleep 1
+done
 echo "installed: $PLIST -> $SCRIPT (every 30m, log: $LOG_DIR/tm-disk-guard.log)"
 """
 
@@ -165,7 +179,7 @@ description = "Unload and remove the disk:guard launchd agent installed by disk:
 run = """
 set -eu
 PLIST="$HOME/Library/LaunchAgents/com.ticketmaster.disk-guard.plist"
-launchctl bootout "gui/$(id -u)" "$PLIST" 2>/dev/null || true
+launchctl bootout "gui/$(id -u)/com.ticketmaster.disk-guard" 2>/dev/null || true
 rm -f "$PLIST"
 echo "uninstalled: $PLIST"
 """
