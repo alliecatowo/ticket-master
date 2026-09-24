@@ -15,6 +15,12 @@ never drift between sessions:
   `workflows/README.md` before launching it. Only the integration worker builds,
   and its final commit is reviewed and verified in the primary checkout before a release.
 - Releases: `.github/workflows/release.yml` runs on `v*` tags and attaches `tm-<target>.tar.gz` per OS to the GitHub Release (`git tag vX.Y.Z && git push origin vX.Y.Z`). The root README's install section names those assets — keep the two in sync.
+- `mise run release` — builds a release tarball locally: `dist/tm-<target-triple>.tar.gz`
+  (`bin/tm` + `share/tm/web/` + README-INSTALL.md) plus a `.sha256`, refusing to ship a
+  `.env`/`.tm` path (`scripts/release.sh`). `.github/workflows/release.yml` runs the same script
+  per OS on a `v*` tag push (or manual `workflow_dispatch`), so a CI-built and a locally-built
+  release install identically via `scripts/install.sh`. Pass `-- --publish` to also `gh release
+  create` — don't run `--publish` yourself, only the orchestrator publishes from main.
 - `mise run test` — `cargo test --workspace`.
 - `mise run test:crate -- <crate>` — one crate's tests.
 - `mise run test:otel` — clippy + test `tm-cli`'s opt-in OpenTelemetry export path
@@ -42,7 +48,10 @@ never drift between sessions:
   `crates/xtask/src/hygiene.rs`'s `DECISION_ID_EXAMPLE_ALLOWLIST` as the escape hatch for the
   handful of places (`SPEC.md`'s own ID-format table, mainly) that use a `D-NNN`-shaped string as
   an illustrative example of the *other*, unrelated `DecisionId` domain type rather than as a
-  cross-reference — see that check's own doc comment for the full reasoning.
+  cross-reference — see that check's own doc comment for the full reasoning. It also flags
+  dangling `D-NNN`/`crates/`/`tm_*::` jargon in `tm-cli`'s `--help` text (`args.rs`'s `///` doc
+  comments), on the theory that a user-facing help string shouldn't assume repo-internal
+  knowledge.
 - `mise run verify` — the full gate (fmt check + clippy + `cargo test --workspace` + hygiene).
   **Run this before considering any change done**, not just a crate-scoped test pass.
 - `mise run check-drift -- <sha>` — advisory, post-merge only, **not** part of `verify`: flags an
@@ -62,7 +71,7 @@ never drift between sessions:
   Shift+Tab cycles auto/plan/ask; Ctrl+O transcript viewer; Ctrl+T task checklist; Ctrl+G
   `$EDITOR`; Ctrl+K/U/W/Y, Alt+B/F/D, Ctrl+_ edit; permission prompts take 1/2/3;   `/resume`,
   `/compact`, `/model`, `/status`, `/cost`, `/connect`, `/provider`, `/config`, `/init`,
-  `/bg`; quit is Ctrl+C twice, Ctrl+D on an
+  `/bg`, `/context`, `/todos`; quit is Ctrl+C twice, Ctrl+D on an
   empty prompt, or `/exit`. The
   tickets screen is Claude Code's `claude agents` view with tickets as rows
   (`docs/decisions/D-019-claude-code-parity-shell.md` §2 and its "Implemented: tickets screen"):
@@ -78,15 +87,32 @@ never drift between sessions:
   If your shell inherited `CARGO_TARGET_DIR` from a parent session, prefix builds with
   `env -u CARGO_TARGET_DIR` so a worktree builds into its own `target/` (a worktree-isolated
   subagent's command guard refuses `env -u …`; use `unset CARGO_TARGET_DIR && mise run …` there,
-  in the same command, since shell state doesn't carry between calls).
+  in the same command, since shell state doesn't carry between calls). The tickets hub's tab
+  strip (Tickets · Board · Milestones · Timeline · Graph), the fuller slash-command table, the
+  daily/planning/serving/more CLI grouping, and the one-set-of-display-labels rule are designed
+  in `docs/decisions/D-024-command-surfaces.md`.
 - `tm tickets` opens the TUI straight onto the tickets screen (Esc goes to a fresh chat);
   `tm tickets --json` prints open tickets as a JSON array and exits (`--all` adds closed and
   cancelled), like `claude agents --json`, and never creates a project just to print `[]`.
+- `tm --help` groups the ~16 commands used day to day — daily (`init`, `status`, `tickets`,
+  `ticket`, `run`, `search`, `symbol`, `doctor`), planning (`milestone`, `dep`, `decision`),
+  serving (`serve`, `mcp`), plus `provider`/`auth` — and folds the rest of the tree (`lease`,
+  `harness`, `bench`, `browser`, `computer`, `attach`, `genesis`, `sched`, `history`, `docs`,
+  `workflow`, `mirror`, `templates`, `events`, `project`, `wiki`, plus `sched plan`/`tick`,
+  `events replay`/`verify`, and `ticket submit`/`delegate`) out of the listing into a `More
+  commands` note at the bottom of `--help` — every one of them still runs exactly as before, just
+  not listed by default. `tm search` gained `--exact`/`--semantic` flags (`tm search --exact foo`
+  is `tm search --mode exact foo`); `--mode` still works, hidden, and is the only way to reach
+  `--mode regex`.
 - `mise run dev` — same, with `RUST_LOG=tm=debug,tm_core=debug,tm_agent=debug` piped to
   `/tmp/tm-dev.log` instead of the alt-screen (so debug output doesn't corrupt the TUI's frame).
 - `mise run doctor` — `tm doctor` against the current directory.
 - `tm serve [--open] [--no-workers] [--web-dir DIR]` — the HTTP API plus the web client at
-  `/app/` (build it first: `pnpm -C clients/web install && pnpm -C clients/web build`). It also
+  `/app/` (build it first: `pnpm -C clients/web install && pnpm -C clients/web build`). An
+  installed `tm` (via `scripts/install.sh` or a release tarball) finds the web client
+  automatically at `<exe>/../share/tm/web` with no separate build step; lookup order is
+  `--web-dir`, then `TM_WEB_DIR`, then that installed layout, then `clients/web/dist` in a source
+  checkout. It also
   works ready tickets in-process, like the TUI does, so a ticket created and activated from the web
   client actually runs; `--no-workers` turns that off, and `GET /health`/`GET /state` report
   `workers: true/false` (false also when the runner couldn't start). A `POST /tickets` with only
@@ -116,6 +142,15 @@ never drift between sessions:
   no workers.
 - `mise run docs:wiki` — regenerate `docs/wiki/` (`tm wiki generate`); pass `-- --dry-run` to
   preview without writing (see "Navigation" below).
+
+`tm-codeintel`'s semantic search can now use real Potion static embeddings
+(`minishlab/potion-code-16M-v2`, via `model2vec-rs`) instead of the hash stand-in, but only
+through `CodeIntel::open_auto`/`open_at_auto` (picks Potion when it's already cached locally,
+hash otherwise, never downloads); `CodeIntel::open`/`open_at` still default to the hash embedder
+unconditionally so existing tests stay network-free. Env override `TM_EMBEDDER=hash|potion`
+(whitespace/case-insensitive), download opt-out `TM_EMBEDDER_DOWNLOAD=0`. See
+`docs/decisions/D-025-potion-semantic-embedder.md` — as of that doc, no real command path calls
+`open_auto` yet, so `tm search hybrid` does not yet benefit from this in practice.
 
 Every build/test/clippy call in these tasks is already capped at `-j 2` — this is an 8GB Mac,
 concurrent full-workspace compiles have caused real disk-space incidents. If you're driving

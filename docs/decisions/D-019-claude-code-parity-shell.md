@@ -289,9 +289,14 @@ transcript entries.
   turns`, the summary in the viewer), `/model` (a picker over `model_choices`, current marked;
   `/model <spec>` switches), `/status` (model, provider, directory, scope, mode, ticket, session,
   tokens), `/cost` (tokens by turn), `/init` (`init_prompt` sent as a turn), `/bg [task]`
-  ("Moved to the background as T-5"), `/tickets` (`/home`, `/agents`), `/attach`, `/detach`
+  ("Moved to the background as T-5"), `/context` (token use by section, plus the attached
+  ticket's prefetched context-pack sections), `/todos` (toggles the same task checklist as
+  Ctrl+T), `/tickets` (`/home`, `/agents`), `/attach`, `/detach`
   (now `detach_ticket`, the conversation carries on), `/decide`, `/exit`. A resumed conversation
-  (`tm -c`, `tm -r`, `/resume`) is rendered from its saved turns, `!` commands included.
+  (`tm -c`, `tm -r`, `/resume`) is rendered from its saved turns, `!` commands included. The
+  project-management, introspection, navigation and environment commands this table grows to
+  (`/board`, `/context`, `/search`, `/memory`, and the rest) are designed in
+  `docs/decisions/D-024-command-surfaces.md`.
 - **Keys the app root owns.** `←` `←` opens tickets only when `ChatScreen::left_opens_tickets` is
   true (empty prompt, no popup, panel, viewer, picker, search, prompt or shell mode), so the key
   never leaves an overlay. Ctrl+T in the chat is the checklist; from other screens it still

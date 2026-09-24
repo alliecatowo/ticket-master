@@ -53,21 +53,39 @@ full session [`tui-live.cast`](docs/showcase/tui-live.cast) (`asciinema play` it
 <summary><b>Option A — download a release (recommended)</b></summary>
 <br/>
 
-Prebuilt `tm` binaries ship with every [GitHub release](https://github.com/alliecatowo/ticket-master/releases).
+Prebuilt `tm` binaries ship with every [GitHub release](https://github.com/alliecatowo/ticket-master/releases),
+each one already bundling the built web client (`tm serve` finds it next to the binary — no
+separate `pnpm build` step needed after installing this way).
 This repo is private, so download authenticated (the `gh` CLI handles it):
 
 ```sh
 gh release download --repo alliecatowo/ticket-master \
   --pattern 'tm-aarch64-apple-darwin.tar.gz'
 tar -xzf tm-aarch64-apple-darwin.tar.gz
-./tm-aarch64-apple-darwin/tm --version && ./tm-aarch64-apple-darwin/tm init
+./tm-aarch64-apple-darwin/bin/tm --version && ./tm-aarch64-apple-darwin/bin/tm init
 ```
+
+Or let `scripts/install.sh` do the download, checksum verification and layout for you, into
+`${PREFIX:-$HOME/.local}`:
+
+```sh
+gh auth login   # once -- this repo is private
+scripts/install.sh
+```
+
+`mise run release` builds the same tarball layout locally (for testing a release before tagging,
+or a target the matrix below doesn't cover yet). See [`docs/install.md`](docs/install.md) for the
+full guide: upgrading, uninstalling, and installing from a local tarball.
 
 > **Platform status:** `v0.1.0` ships `tm-aarch64-apple-darwin`. The Linux asset is
 > blocked on a pre-existing break — `tm-computer` does not compile on Linux (CI is red
 > on `main` for the same reason) — so on Linux build from source (Option B) until that
 > is fixed. The release matrix already builds both targets; Linux attaches automatically
 > once it compiles.
+>
+> **Asset layout:** the `bin/tm` + `share/tm/web/` (bundled web client) layout above starts with
+> the next tag after this change. `v0.1.0`'s asset predates it and has the binary directly at
+> `tm-aarch64-apple-darwin/tm` (no web client bundled) — `scripts/install.sh` handles both layouts.
 
 </details>
 
@@ -130,6 +148,8 @@ mise run build            # build just the `tm` binary
 | `/cost` | Tokens this session used, turn by turn |
 | `/init` | Write an `AGENTS.md` for this project |
 | `/bg [task]` | Hand work to a background worker as a ticket |
+| `/context` | Token use by section, plus the attached ticket's prefetched context |
+| `/todos` | Toggle the task checklist |
 | `/tickets` | Background tickets and workers |
 | `/attach <ticket>`, `/detach` | Tie this chat to a ticket (or untie it) |
 | `/decide <text>` | Record a project decision |
@@ -172,6 +192,7 @@ Full matrix: [`docs/providers.md`](docs/providers.md).
 | Path | What's there |
 | --- | --- |
 | [`SPEC.md`](SPEC.md) | Binding project philosophy (§0) + full spec |
+| [`docs/install.md`](docs/install.md) | Full install guide: release download, `scripts/install.sh`, source, provider setup |
 | [`docs/decisions/`](docs/decisions/) | Architecture decision records (`D-NNN`) |
 | [`docs/providers.md`](docs/providers.md) | Provider matrix + wire-name mapping |
 | [`docs/showcase/`](docs/showcase/) | Real TUI recordings + friction log |

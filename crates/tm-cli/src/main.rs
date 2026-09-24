@@ -443,6 +443,8 @@ mod tests {
             resume: None,
             command: Some(Command::Search(tm_cli::args::SearchArgs {
                 query: "test".to_string(),
+                exact: false,
+                semantic: false,
                 mode: tm_cli::args::SearchMode::Hybrid,
                 limit: 20,
             })),

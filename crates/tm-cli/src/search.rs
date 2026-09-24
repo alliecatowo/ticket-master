@@ -150,7 +150,7 @@ struct WhyInfo {
 pub fn search(args: &SearchArgs, project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let code_intel = project.code_intel()?;
 
-    match args.mode {
+    match args.effective_mode() {
         SearchMode::Exact => {
             let result = code_intel.search_exact(&args.query)?;
             let hits: Vec<ExactSearchHit> = result

@@ -28,7 +28,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 /// up from the current directory for a `.tm` directory, per [`crate::project::locate`]). `tm -p
 /// <prompt>` runs that same agent non-interactively for one prompt, suitable for scripting.
 #[derive(Debug, Parser)]
-#[command(name = "tm", version, about, long_about = None)]
+#[command(name = "tm", version, about, long_about = None, after_help = AFTER_HELP)]
 pub struct Cli {
     /// Flags shared by every subcommand.
     #[command(flatten)]
@@ -61,8 +61,8 @@ pub struct Cli {
 /// Flags every subcommand accepts, declared once and flattened everywhere via `global = true`.
 #[derive(Debug, Clone, Args)]
 pub struct GlobalOpts {
-    /// Emit machine-readable JSON instead of human-formatted output. Every subcommand's JSON
-    /// schema is stable and snapshot-tested; human output is not.
+    /// Print machine-readable JSON instead of human-formatted output. The JSON shape is
+    /// stable; the human-readable output may change.
     #[arg(long, global = true)]
     pub json: bool,
 
@@ -74,140 +74,171 @@ pub struct GlobalOpts {
     #[arg(long = "no-color", global = true)]
     pub no_color: bool,
 
-    /// Force the plain, linear bare-`tm` loop instead of the ratatui TUI, even on a real tty:
-    /// same information, no cursor addressing, no alternate screen. For scripting, logging, and
-    /// screen readers (D-002, "Terminal surface quality bar").
+    // D-002, "Terminal surface quality bar".
+    /// Use plain, line-by-line output instead of the full-screen TUI, even in a real terminal:
+    /// same information, no cursor movement, no alternate screen. For scripting, logging, and
+    /// screen readers.
     #[arg(long, global = true)]
     pub plain: bool,
 
-    /// The project root to operate on: always repo scope at exactly this path, creating it if
-    /// absent (unchanged since before D-003). Defaults to resolving scope from the current
-    /// directory instead (see [`crate::project::resolve_scope`]): walking up for a `.tm`
-    /// directory (see [`crate::project::locate`]), then falling back to a project kept under
-    /// `$TM_HOME` outside the workspace.
+    // D-003: always repo scope at exactly this path (crate::project::resolve_scope / locate).
+    /// The project root to use, creating it if it doesn't already exist. Without this flag, tm
+    /// finds the project from the current directory: walking up for a `.tm` directory, then
+    /// falling back to a project kept under `$TM_HOME` outside the workspace.
     #[arg(long, global = true, value_name = "PATH")]
     pub project: Option<PathBuf>,
 }
+
+/// Commands that still work exactly as before, just folded out of `tm --help`'s default
+/// listing into this note so the daily-driver list stays short.
+const AFTER_HELP: &str = "More commands (still work, just not in the list above):\n  \
+    attach     Bring an existing repository into a project\n  \
+    genesis    Turn a prompt into a running project\n  \
+    sched      Run the scheduler loop directly (see also: tm sched tick, tm sched plan)\n  \
+    lease      Inspect and manage who holds a ticket's lease\n  \
+    history    Search git history\n  \
+    docs       Documentation as project state\n  \
+    harness    The project's harness configuration\n  \
+    bench      Run repository-local benchmark tasks\n  \
+    workflow   Reusable ticket-graph recipes\n  \
+    mirror     External tracker mirrors\n  \
+    templates  Project scaffolding templates\n  \
+    events     Inspect the event log directly\n  \
+    browser    Drive a headless browser\n  \
+    computer   Drive the real desktop\n  \
+    project    Inspect where a project's state lives\n  \
+    wiki       Regenerate the project wiki\n";
 
 /// Every `tm` subcommand.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Create a new Ticketmaster project (`.tm/`) in the current directory.
+    #[command(display_order = 1)]
     Init(InitArgs),
 
-    /// Assimilate an existing repository into a new or existing project.
+    /// Bring an existing repository into a new or existing project.
+    #[command(hide = true)]
     Attach(AttachArgs),
 
     /// Turn a natural-language prompt into a running project via Genesis.
+    #[command(hide = true)]
     Genesis(GenesisArgs),
 
     /// The "since you left" report: what changed, what needs attention, what's next.
+    #[command(display_order = 2)]
     Status(StatusArgs),
 
     /// Run invariants, the hash-chain check, index health, and computer-use permission probes.
+    #[command(display_order = 8)]
     Doctor(DoctorArgs),
 
     /// Ticket lifecycle: list, inspect, create, edit, and transition tickets.
-    #[command(subcommand)]
+    #[command(subcommand, display_order = 4)]
     Ticket(TicketCommand),
 
-    /// The tickets view, `tm`'s `claude agents` (D-019): opens the TUI on the tickets screen, or
-    /// with `--json` prints the ticket list as a JSON array and exits.
+    /// Open the tickets view (or print tickets with --json).
+    #[command(display_order = 3)]
     Tickets(TicketsArgs),
 
     /// Dependency edges between tickets.
-    #[command(subcommand)]
+    #[command(subcommand, display_order = 10)]
     Dep(DepCommand),
 
     /// Milestones: groupings of tickets with their own close/reopen lifecycle.
-    #[command(subcommand)]
+    #[command(subcommand, display_order = 9)]
     Milestone(MilestoneCommand),
 
     /// Decisions: the durable record of choices made, and their supersession chain.
-    #[command(subcommand)]
+    #[command(subcommand, display_order = 11)]
     Decision(DecisionCommand),
 
     /// The scheduler: plan, tick, and run the admission/selection loop.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Sched(SchedCommand),
 
     /// Leases: who currently holds authority over which ticket/resources.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Lease(LeaseCommand),
 
     /// Execute one ticket to completion in the foreground.
+    #[command(display_order = 5)]
     Run(RunArgs),
 
     /// Search the project's code index.
+    #[command(display_order = 6)]
     Search(SearchArgs),
 
     /// Symbol-level code intelligence: definitions, references, callers, callees, outlines.
-    #[command(subcommand)]
+    #[command(subcommand, display_order = 7)]
     Symbol(SymbolCommand),
 
     /// Git history queries: why a line changed, commit/message search, deleted-code search.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     History(HistoryCommand),
 
     /// Documentation as project state: list, staleness check, reconciliation.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Docs(DocsCommand),
 
     /// The provider fabric: registered providers, their health, and a live smoke test.
     #[command(subcommand)]
     Provider(ProviderCommand),
 
-    /// Interactive login for a provider's credential (`SPEC.md` §28.2's auth-adapter layer).
+    // See SPEC.md §28.2's auth-adapter layer.
+    /// Interactive login for a provider's credential.
     Auth(AuthArgs),
 
     /// The project's harness configuration and epoch history.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Harness(HarnessCommand),
 
     /// Repository-local benchmark tasks, scored against a seeded mock provider.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Bench(BenchCommand),
 
-    /// Workflow definitions (`SPEC.md` §25): reusable, parameterized recipes that expand into a
-    /// ticket graph.
-    #[command(subcommand)]
+    // See SPEC.md §25.
+    /// Workflow definitions: reusable, parameterized recipes that expand into a ticket graph.
+    #[command(subcommand, hide = true)]
     Workflow(WorkflowCommand),
 
     /// External tracker mirrors (GitHub, Linear, Jira, GitLab).
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Mirror(MirrorCommand),
 
-    /// Project scaffolding templates: the registry `tm-genesis` selects from by capability tag.
-    #[command(subcommand)]
+    /// Project scaffolding templates: pick from the registry by capability tag.
+    #[command(subcommand, hide = true)]
     Templates(TemplatesCommand),
 
     /// Serve the project over HTTP/SSE, optionally serving the built web client.
+    #[command(display_order = 12)]
     Serve(ServeArgs),
 
     /// Serve the project to an MCP host over stdio (Claude Code: `claude mcp add --transport
     /// stdio tm -- tm mcp`), and work the tickets it dispatches.
+    #[command(display_order = 13)]
     Mcp(McpArgs),
 
     /// The durable event log: tail, inspect, replay, and verify the hash chain.
-    #[command(subcommand)]
+    #[command(subcommand, hide = true)]
     Events(EventsCommand),
 
-    /// Drive a headless browser via `tm-browser`.
-    #[command(subcommand)]
+    /// Drive a headless browser.
+    #[command(subcommand, hide = true)]
     Browser(BrowserCommand),
 
-    /// Drive the real desktop via `tm-computer`.
-    #[command(subcommand)]
+    /// Drive the real desktop.
+    #[command(subcommand, hide = true)]
     Computer(ComputerCommand),
 
-    /// Inspect D-003 scope resolution: where a project's state lives, and every global project
-    /// `tm` has ever created under `$TM_HOME`.
-    #[command(subcommand)]
+    /// Show where a project's state lives, and list every global project tm has ever created
+    /// under `$TM_HOME`.
+    #[command(subcommand, hide = true)]
     Project(ProjectCommand),
 
-    /// The project wiki (`SPEC.md` §26): generated documentation pages assembled from live
-    /// project state and written under `docs/wiki/` at the workspace root.
-    #[command(subcommand)]
+    // See SPEC.md §26, B-14.
+    /// The project wiki: generated documentation pages assembled from live project state and
+    /// written under `docs/wiki/` at the workspace root.
+    #[command(subcommand, hide = true)]
     Wiki(WikiCommand),
 }
 
@@ -229,7 +260,7 @@ pub struct WikiGenerateArgs {
     pub dry_run: bool,
 }
 
-/// `tm project ...` (D-003).
+/// `tm project ...`
 #[derive(Debug, Subcommand)]
 pub enum ProjectCommand {
     /// Show the resolved scope for the current directory (or `--project`): repo or global,
@@ -246,9 +277,9 @@ pub struct InitArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 
-    /// Create an empty project even if a global session exists for this workspace (D-003 Phase
-    /// 1-C): by default, `tm init` promotes an existing `$TM_HOME` session for this workspace
-    /// into `<path>/.tm` instead of starting over.
+    /// Create an empty project even if a global session already exists for this workspace: by
+    /// default, `tm init` promotes that existing session into `<path>/.tm` instead of starting
+    /// over.
     #[arg(long)]
     pub fresh: bool,
 }
@@ -256,7 +287,7 @@ pub struct InitArgs {
 /// `tm attach [path]`
 #[derive(Debug, Args)]
 pub struct AttachArgs {
-    /// The repository to assimilate. Defaults to the current directory.
+    /// The repository to bring in. Defaults to the current directory.
     #[arg(value_name = "PATH")]
     pub path: Option<PathBuf>,
 }
@@ -317,11 +348,12 @@ pub enum TicketCommand {
     /// Print a ticket's parent/child tree.
     Tree(TicketRefArgs),
     /// Create a child ticket delegating part of this ticket's authority/objective.
+    #[command(hide = true)]
     Delegate(TicketDelegateArgs),
     /// Submit evidence for a ticket, moving it toward verification.
+    #[command(hide = true)]
     Submit(TicketSubmitArgs),
-    /// Fork a ticket's materialized state as of a past `seq` into a new ticket lineage
-    /// (`docs/decisions/D-008-ticket-checkpoint-fork.md`).
+    /// Fork a ticket's materialized state as of a past `seq` into a new ticket lineage.
     Fork(TicketForkArgs),
 }
 
@@ -347,7 +379,7 @@ pub struct TicketListArgs {
     pub parent: Option<String>,
 }
 
-/// The subset of `tm_core::ticket::TicketState` a user can filter on.
+/// Ticket states you can filter on.
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum TicketStateArg {
     /// Not yet ready for admission.
@@ -599,8 +631,10 @@ pub struct DecisionSupersedeArgs {
 #[derive(Debug, Subcommand)]
 pub enum SchedCommand {
     /// Print the actions the scheduler would take right now, without applying them.
+    #[command(hide = true)]
     Plan,
     /// Run one scheduler tick, applying its actions.
+    #[command(hide = true)]
     Tick,
     /// Run the scheduler loop continuously (ticks on interval and on event notification).
     Run(SchedRunArgs),
@@ -664,13 +698,13 @@ pub struct RunArgs {
     /// The ticket to execute to completion in the foreground.
     #[arg(value_name = "TICKET")]
     pub ticket: String,
-    /// Role to execute as, overriding the ticket's `ExecutorRequirements`.
+    /// Role to execute as, overriding what the ticket asks for.
     #[arg(long)]
     pub role: Option<String>,
     /// Isolate this run in a fresh `git worktree` (a new branch off `HEAD`, under
     /// `<state_dir>/worktrees/<ticket>-<suffix>/`) instead of executing against the main
     /// checkout — requires a repo-scoped project backed by a real git repository with at least
-    /// one commit (`docs/decisions/D-012-run-worktree-isolation.md`).
+    /// one commit.
     #[arg(long)]
     pub worktree: bool,
 }
@@ -688,18 +722,44 @@ pub enum SearchMode {
     Hybrid,
 }
 
-/// `tm search <query> [--exact|--regex|--semantic|--hybrid]`
+/// `tm search <query> [--exact|--semantic|--mode ...]`
 #[derive(Debug, Args)]
 pub struct SearchArgs {
     /// The search query.
     #[arg(value_name = "QUERY")]
     pub query: String,
-    /// Retrieval mode; defaults to hybrid.
-    #[arg(long, value_enum, default_value_t = SearchMode::Hybrid)]
+
+    /// Literal substring search (same as `--mode exact`).
+    #[arg(long, conflicts_with_all = ["semantic", "mode"])]
+    pub exact: bool,
+
+    /// Embedding-vector search (same as `--mode semantic`).
+    #[arg(long, conflicts_with_all = ["exact", "mode"])]
+    pub semantic: bool,
+
+    /// Retrieval mode; defaults to hybrid. Hidden: prefer `--exact`/`--semantic`, or plain
+    /// `tm search <query>` for hybrid; kept as a stable, scriptable alias for every mode,
+    /// including `--mode regex`, which has no dedicated flag.
+    #[arg(long, hide = true, value_enum, default_value_t = SearchMode::Hybrid)]
     pub mode: SearchMode,
+
     /// Maximum number of hits to print.
     #[arg(long, default_value_t = 20)]
     pub limit: usize,
+}
+
+impl SearchArgs {
+    /// The mode this invocation actually resolves to: `--exact`/`--semantic` if set, else
+    /// whatever `--mode` was given (defaulting to hybrid).
+    pub fn effective_mode(&self) -> SearchMode {
+        if self.exact {
+            SearchMode::Exact
+        } else if self.semantic {
+            SearchMode::Semantic
+        } else {
+            self.mode
+        }
+    }
 }
 
 /// `tm symbol ...`
@@ -958,8 +1018,8 @@ pub struct MirrorLinkArgs {
     #[arg(value_name = "ADAPTER")]
     pub adapter: String,
     /// Additional named credential fields beyond the adapter's default token, as
-    /// `field=ENV_VAR_NAME` (the value is an environment variable *name*, never a secret itself
-    /// — matching `tm_mirror::CredentialEnv`'s contract). Each adapter's tracker needs more than
+    /// `field=ENV_VAR_NAME` (the value is the *name* of an environment variable, never the
+    /// secret itself). Each adapter's tracker needs more than
     /// a bare token to identify *which* external project/team it talks to: `github` needs
     /// `owner`+`repo`; `gitlab` needs `project_id`; `jira` needs `email`+`api_token` (in place of
     /// the default `token` field) +`project_key`; `linear` needs `api_key` (in place of `token`)
@@ -1005,8 +1065,10 @@ pub enum EventsCommand {
     /// Show a single event by sequence number.
     Show(EventsShowArgs),
     /// Replay a range of events through materialization, without appending anything new.
+    #[command(hide = true)]
     Replay(EventsReplayArgs),
     /// Verify the hash chain end to end.
+    #[command(hide = true)]
     Verify,
 }
 
@@ -1058,9 +1120,10 @@ pub struct BrowserOpenArgs {
     /// The URL to navigate to.
     #[arg(value_name = "URL")]
     pub url: String,
-    /// Run without a visible browser window. Currently a no-op: the `managed` provider
-    /// (§19.1a) always launches headless, and there is no provider yet that can honor a
-    /// headed request, so this flag is accepted but ignored rather than silently degraded.
+    // §19.1a.
+    /// Run without a visible browser window. Currently a no-op: the managed provider always
+    /// launches headless, and there is no provider yet that can honor a headed request, so this
+    /// flag is accepted but ignored rather than silently degraded.
     #[arg(long)]
     pub headless: bool,
 }
@@ -1114,7 +1177,7 @@ pub struct ComputerSnapshotArgs {
     /// Force a screenshot even when the accessibility tree is available.
     #[arg(long)]
     pub force_screenshot: bool,
-    /// Run against a headless virtual display (Linux only; honestly refused on macOS).
+    /// Run against a headless virtual display (Linux only; not supported on macOS).
     #[arg(long)]
     pub headless: bool,
 }
@@ -1128,7 +1191,7 @@ pub struct ComputerClickArgs {
     /// The y coordinate.
     #[arg(value_name = "Y")]
     pub y: f64,
-    /// Run against a headless virtual display (Linux only; honestly refused on macOS).
+    /// Run against a headless virtual display (Linux only; not supported on macOS).
     #[arg(long)]
     pub headless: bool,
 }
@@ -1139,7 +1202,7 @@ pub struct ComputerTypeArgs {
     /// The text to type at the current focus.
     #[arg(value_name = "TEXT")]
     pub text: String,
-    /// Run against a headless virtual display (Linux only; honestly refused on macOS).
+    /// Run against a headless virtual display (Linux only; not supported on macOS).
     #[arg(long)]
     pub headless: bool,
 }
@@ -1150,7 +1213,7 @@ pub struct ComputerKeyArgs {
     /// The key chord, e.g. `cmd+shift+4` or `ctrl+c`.
     #[arg(value_name = "CHORD")]
     pub chord: String,
-    /// Run against a headless virtual display (Linux only; honestly refused on macOS).
+    /// Run against a headless virtual display (Linux only; not supported on macOS).
     #[arg(long)]
     pub headless: bool,
 }
@@ -1261,5 +1324,37 @@ mod tests {
             }
             other => panic!("unexpected parse: {other:?}"),
         }
+    }
+
+    #[test]
+    fn search_exact_flag_is_the_same_as_mode_exact() {
+        let cli = Cli::parse_from(["tm", "search", "--exact", "foo"]);
+        match cli.command {
+            Some(Command::Search(args)) => {
+                assert!(matches!(args.effective_mode(), SearchMode::Exact));
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn search_exact_and_mode_conflict() {
+        let result = Cli::try_parse_from(["tm", "search", "--exact", "--mode", "semantic", "foo"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn hidden_plumbing_subcommands_still_parse() {
+        let cli = Cli::parse_from(["tm", "lease", "list"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Lease(LeaseCommand::List(_)))
+        ));
+
+        let cli = Cli::parse_from(["tm", "sched", "tick"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Sched(SchedCommand::Tick))
+        ));
     }
 }
