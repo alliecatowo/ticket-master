@@ -851,7 +851,13 @@ fn portal_reachable_from(addr: Option<&str>) -> bool {
         Some(a) => a,
         None => return false,
     };
-    addr.split(',')
+    // A real `DBUS_SESSION_BUS_ADDRESS` is `<transport>:<key>=<value>,<key>=<value>,...`
+    // (e.g. `unix:path=/run/user/1000/bus`) -- strip the leading `<transport>:` before looking
+    // for the `path=` key, or it never matches (the whole `<transport>:path=...` string doesn't
+    // start with `path=`).
+    let params = addr.split_once(':').map_or(addr, |(_, rest)| rest);
+    params
+        .split(',')
         .find_map(|part| part.strip_prefix("path="))
         .is_some_and(|path| Path::new(path).exists())
 }
