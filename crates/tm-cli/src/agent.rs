@@ -2163,7 +2163,7 @@ fn plain_tool_error(detail: &str) -> String {
         "couldn't find that"
     } else if detail.starts_with("conflict: ") {
         "hit a conflict with existing state"
-    } else if detail.starts_with("invalid transition: ") {
+    } else if detail.starts_with("can't do that from this state: ") {
         "tried something that isn't allowed right now"
     } else if detail.starts_with("lease expired: ") {
         "lost its lease partway through"

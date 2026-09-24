@@ -22,7 +22,7 @@ pub enum TmError {
     Conflict(String),
 
     /// A state machine transition was not legal.
-    #[error("invalid transition: {0}")]
+    #[error("can't do that from this state: {0}")]
     InvalidTransition(String),
 
     /// The actor lacked the authority for the attempted action.

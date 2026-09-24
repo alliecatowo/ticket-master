@@ -639,7 +639,8 @@ pub fn ticket_close(
     let ticket_id = TicketId::new(&args.ticket)?;
     project
         .store
-        .close(&ticket_id, None, project.actor.clone())?;
+        .close(&ticket_id, None, project.actor.clone())
+        .map_err(|e| friendly_lifecycle_error(e, &ticket_id, "closed", project))?;
     renderer.emit(&ticket_id, &format!("Closed ticket {}", ticket_id))?;
     Ok(())
 }
@@ -653,7 +654,8 @@ pub fn ticket_cancel(
     let ticket_id = TicketId::new(&args.ticket)?;
     project
         .store
-        .cancel(&ticket_id, args.reason.clone(), project.actor.clone())?;
+        .cancel(&ticket_id, args.reason.clone(), project.actor.clone())
+        .map_err(|e| friendly_lifecycle_error(e, &ticket_id, "cancelled", project))?;
     renderer.emit(&ticket_id, &format!("Cancelled ticket {}", ticket_id))?;
     Ok(())
 }
@@ -667,7 +669,8 @@ pub fn ticket_reopen(
     let ticket_id = TicketId::new(&args.ticket)?;
     project
         .store
-        .reopen(&ticket_id, None, project.actor.clone())?;
+        .reopen(&ticket_id, None, project.actor.clone())
+        .map_err(|e| friendly_lifecycle_error(e, &ticket_id, "reopened", project))?;
     renderer.emit(&ticket_id, &format!("Reopened ticket {}", ticket_id))?;
     Ok(())
 }
@@ -679,7 +682,10 @@ pub fn ticket_activate(
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
     let ticket_id = TicketId::new(&args.ticket)?;
-    project.store.activate(&ticket_id, project.actor.clone())?;
+    project
+        .store
+        .activate(&ticket_id, project.actor.clone())
+        .map_err(|e| friendly_lifecycle_error(e, &ticket_id, "activated", project))?;
     renderer.emit(
         &ticket_id,
         &format!("Activated ticket {ticket_id}: ready for a worker (tm run {ticket_id})"),
@@ -696,7 +702,8 @@ pub fn ticket_accept(
     let ticket_id = TicketId::new(&args.ticket)?;
     project
         .store
-        .accept(&ticket_id, args.note.clone(), project.actor.clone())?;
+        .accept(&ticket_id, args.note.clone(), project.actor.clone())
+        .map_err(|e| friendly_lifecycle_error(e, &ticket_id, "accepted", project))?;
     renderer.emit(&ticket_id, &format!("Accepted {ticket_id}: closed."))?;
     Ok(())
 }
@@ -711,7 +718,8 @@ pub fn ticket_reject(
     let ticket_id = TicketId::new(&args.ticket)?;
     project
         .store
-        .reject(&ticket_id, args.reason.clone(), project.actor.clone())?;
+        .reject(&ticket_id, args.reason.clone(), project.actor.clone())
+        .map_err(|e| friendly_lifecycle_error(e, &ticket_id, "rejected", project))?;
     let state = project
         .store
         .view()?
@@ -735,7 +743,8 @@ pub fn ticket_retry(
     let ticket_id = TicketId::new(&args.ticket)?;
     project
         .store
-        .retry(&ticket_id, args.guidance.clone(), project.actor.clone())?;
+        .retry(&ticket_id, args.guidance.clone(), project.actor.clone())
+        .map_err(|e| friendly_lifecycle_error(e, &ticket_id, "retried", project))?;
     let told = if args.guidance.is_some() {
         ", and the next attempt will see your guidance"
     } else {
@@ -746,6 +755,100 @@ pub fn ticket_retry(
         &format!("Retrying {ticket_id}: it is queued for a worker again{told}."),
     )?;
     Ok(())
+}
+
+/// The command that moves `ticket_id` off of `state`, used as the "next step" half of
+/// [`friendly_lifecycle_error`]'s sentence. `None` for a terminal state with nothing left to do.
+fn transition_hint(state: TicketState, ticket_id: &TicketId) -> Option<String> {
+    match state {
+        TicketState::Draft => Some(format!("Activate it first: tm ticket activate {ticket_id}")),
+        TicketState::Blocked => Some(format!(
+            "It's waiting on its dependencies. Check them: tm dep graph {ticket_id}"
+        )),
+        TicketState::Ready => Some(format!("Run it: tm run {ticket_id}")),
+        TicketState::Leased | TicketState::Running => Some(format!(
+            "It's already being worked. Check its progress: tm ticket show {ticket_id}"
+        )),
+        TicketState::Submitted => Some(format!("Accept it: tm ticket accept {ticket_id}")),
+        TicketState::Verifying | TicketState::Auditing => Some(format!(
+            "It's being checked. Check its progress: tm ticket show {ticket_id}"
+        )),
+        TicketState::Rework | TicketState::Replan | TicketState::Recovery => {
+            Some(format!("Check its progress: tm ticket show {ticket_id}"))
+        }
+        TicketState::Escalated => Some(format!("Retry it: tm ticket retry {ticket_id}")),
+        TicketState::Closed | TicketState::Cancelled => None,
+    }
+}
+
+/// [`tm_core::machine::InvalidTransition`]'s own `Display` impl, verbatim: `"no transition from
+/// {from:?} on {trigger:?}"`. `Store::*` wraps that string as-is via `e.to_string()` at every
+/// `machine::transition` call site (e.g. `store.rs`'s `accept`/`reject`/`close`/`cancel`/
+/// `reopen`/`activate`/`submit`), so this prefix is how [`friendly_lifecycle_error`] tells a real
+/// "the state machine rejected this trigger" failure apart from `Store`'s own hand-written
+/// `TmError::InvalidTransition` messages for a different reason. `Store::retry`'s own
+/// not-escalated refusal (`store.rs` ~1216-1225) is state-shaped too but not prefix-shaped, so
+/// the `verb == "retried"` arm below covers it separately; only `rejection_reason`'s blank-reason
+/// refusal (not about state at all) is meant to pass through unrewritten.
+const MACHINE_REJECTION_PREFIX: &str = "no transition from ";
+
+/// Turn a lifecycle-verb (`activate`/`accept`/`reject`/`retry`/`close`/`cancel`/`reopen`/
+/// `submit`) failure into a sentence naming the ticket, its actual state, and the exact next
+/// command to run — but only when the failure is actually a state rejection: either the pure
+/// state machine's own refusal (see [`MACHINE_REJECTION_PREFIX`]) or `Store::retry`'s
+/// hand-written not-escalated refusal, which is state-shaped but not prefix-shaped since it
+/// short-circuits before ever calling `machine::transition`. `rejection_reason`'s blank-reason
+/// refusal is `Store`'s only other hand-written `InvalidTransition`, is not about state at all,
+/// and passes through unchanged. `verb` is the past-tense action a person typed (e.g.
+/// `"accepted"`), used to phrase "can't be accepted".
+fn friendly_lifecycle_error(
+    err: TmError,
+    ticket_id: &TicketId,
+    verb: &str,
+    project: &Project,
+) -> TmError {
+    match err {
+        TmError::InvalidTransition(msg)
+            if msg.starts_with(MACHINE_REJECTION_PREFIX) || verb == "retried" =>
+        {
+            let state = project
+                .store
+                .view()
+                .ok()
+                .and_then(|v| v.tickets.get(ticket_id).map(|t| t.state));
+            match state {
+                Some(state) => {
+                    let hint = transition_hint(state, ticket_id)
+                        .map(|h| format!(" {h}"))
+                        .unwrap_or_default();
+                    // "a draft" reads better than the bare label; every other label already
+                    // reads fine as a plain adjective ("is ready", "is escalated").
+                    let phrase = if state == TicketState::Draft {
+                        "a draft".to_string()
+                    } else {
+                        state_label(state).to_string()
+                    };
+                    TmError::InvalidTransition(format!(
+                        "{ticket_id} is {phrase}, so it can't be {verb}.{hint}"
+                    ))
+                }
+                None => {
+                    TmError::InvalidTransition(format!("{ticket_id} can't be {verb} right now."))
+                }
+            }
+        }
+        // `Store::submit` checks for evidence before it ever looks at the ticket's state, so
+        // this is a `TmError::Invariant` (whose `Display` prefix, "invariant violated:", isn't
+        // ours to change without touching every match on `TmError` across the workspace) rather
+        // than a transition rejection; remap it into `InvalidTransition` so the CLI-owned prefix
+        // (`error.rs`) applies and the message names the exact command to run.
+        TmError::Invariant(msg) if msg.contains("evidence") => TmError::InvalidTransition(format!(
+            "{ticket_id} needs evidence before it can be submitted. Provide at least one piece \
+             of evidence (code changes, test results, or documentation) with `tm ticket submit \
+             {ticket_id} --evidence <path>`."
+        )),
+        other => other,
+    }
 }
 
 /// `tm ticket tree`
@@ -920,7 +1023,8 @@ pub fn ticket_submit(
     let summary = args.summary.clone().unwrap_or_default();
     project
         .store
-        .submit(&ticket_id, summary, evidence_ids, project.actor.clone())?;
+        .submit(&ticket_id, summary, evidence_ids, project.actor.clone())
+        .map_err(|e| friendly_lifecycle_error(e, &ticket_id, "submitted", project))?;
     renderer.emit(&ticket_id, &format!("Submitted ticket {}", ticket_id))?;
 
     Ok(())
@@ -1755,5 +1859,206 @@ mod tests {
         // Confirm no ticket was silently created with the milestone dropped.
         let view = project.store.view().expect("view");
         assert!(view.tickets.is_empty());
+    }
+
+    #[test]
+    fn accepting_a_draft_ticket_names_the_state_and_the_next_command() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+
+        let events = project
+            .store
+            .create_ticket(
+                TicketKind::Work,
+                "do the thing".to_string(),
+                None,
+                None,
+                Authority::worker(),
+                vec![],
+                default_executor_requirements(),
+                Vec::new(),
+                Vec::new(),
+                VerificationPolicy::Single,
+                Budget::unlimited(),
+                default_retry_policy(),
+                0,
+                project.actor.clone(),
+            )
+            .expect("create ticket");
+        let ticket_id = event_ticket_id(&events[0].subject).expect("ticket id");
+
+        let err = ticket_accept(
+            &TicketAcceptArgs {
+                ticket: ticket_id.to_string(),
+                note: None,
+            },
+            &project,
+            &renderer,
+        )
+        .expect_err("a draft ticket can't be accepted");
+        let message = err.to_string();
+
+        assert!(
+            message.contains(ticket_id.as_str()) && message.contains("draft"),
+            "message should name the ticket and its state: {message:?}"
+        );
+        assert!(
+            message.contains("tm ticket activate"),
+            "message should name the next command: {message:?}"
+        );
+        assert!(
+            !message.contains("InvalidTransition")
+                && !message.contains("Draft")
+                && !message.contains("trigger")
+                && !message.contains("invariant violated"),
+            "message leaked internal debug output: {message:?}"
+        );
+    }
+
+    #[test]
+    fn submitting_without_evidence_names_the_submit_command() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+
+        let events = project
+            .store
+            .create_ticket(
+                TicketKind::Work,
+                "do the thing".to_string(),
+                None,
+                None,
+                Authority::worker(),
+                vec![],
+                default_executor_requirements(),
+                Vec::new(),
+                Vec::new(),
+                VerificationPolicy::Single,
+                Budget::unlimited(),
+                default_retry_policy(),
+                0,
+                project.actor.clone(),
+            )
+            .expect("create ticket");
+        let ticket_id = event_ticket_id(&events[0].subject).expect("ticket id");
+
+        let err = ticket_submit(
+            &TicketSubmitArgs {
+                ticket: ticket_id.to_string(),
+                summary: None,
+                evidence: vec![],
+            },
+            &project,
+            &renderer,
+        )
+        .expect_err("submitting with no evidence must fail");
+        let message = err.to_string();
+
+        assert!(
+            message.contains("tm ticket submit") && message.contains("--evidence"),
+            "message should name the exact command to run: {message:?}"
+        );
+        assert!(
+            !message.contains("invariant violated"),
+            "message leaked the internal invariant prefix: {message:?}"
+        );
+    }
+
+    #[test]
+    fn retrying_a_draft_ticket_names_the_state_and_the_next_command() {
+        // `Store::retry`'s not-escalated refusal is state-shaped but hand-written, not routed
+        // through `machine::transition`, so it doesn't carry `MACHINE_REJECTION_PREFIX` --
+        // `friendly_lifecycle_error` special-cases `verb == "retried"` to cover it anyway.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+
+        let events = project
+            .store
+            .create_ticket(
+                TicketKind::Work,
+                "do the thing".to_string(),
+                None,
+                None,
+                Authority::worker(),
+                vec![],
+                default_executor_requirements(),
+                Vec::new(),
+                Vec::new(),
+                VerificationPolicy::Single,
+                Budget::unlimited(),
+                default_retry_policy(),
+                0,
+                project.actor.clone(),
+            )
+            .expect("create ticket");
+        let ticket_id = event_ticket_id(&events[0].subject).expect("ticket id");
+
+        let err = ticket_retry(
+            &TicketRetryArgs {
+                ticket: ticket_id.to_string(),
+                guidance: None,
+            },
+            &project,
+            &renderer,
+        )
+        .expect_err("a draft ticket can't be retried");
+        let message = err.to_string();
+
+        assert!(
+            message.contains(ticket_id.as_str()) && message.contains("can't be retried"),
+            "message should name the ticket and the failed verb: {message:?}"
+        );
+        assert!(
+            message.contains("tm ticket activate"),
+            "message should name the next command: {message:?}"
+        );
+        assert!(
+            !message.contains("only an escalated ticket can be retried"),
+            "message should not leak Store's own hand-written refusal text: {message:?}"
+        );
+    }
+
+    #[test]
+    fn friendly_lifecycle_error_leaves_non_machine_invalid_transition_messages_alone() {
+        // `Store::rejection_reason`'s blank-reason refusal is `TmError::InvalidTransition` too,
+        // but it isn't about state at all -- rewriting it with a state/next-command sentence
+        // would be actively misleading.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+
+        let events = project
+            .store
+            .create_ticket(
+                TicketKind::Work,
+                "do the thing".to_string(),
+                None,
+                None,
+                Authority::worker(),
+                vec![],
+                default_executor_requirements(),
+                Vec::new(),
+                Vec::new(),
+                VerificationPolicy::Single,
+                Budget::unlimited(),
+                default_retry_policy(),
+                0,
+                project.actor.clone(),
+            )
+            .expect("create ticket");
+        let ticket_id = event_ticket_id(&events[0].subject).expect("ticket id");
+
+        let original = TmError::InvalidTransition("Rejecting ticket T-1 needs a reason: describe what was wrong so the next attempt knows what to fix".to_string());
+        let rewritten = friendly_lifecycle_error(original, &ticket_id, "rejected", &project);
+        let message = rewritten.to_string();
+        assert!(
+            message.contains("needs a reason"),
+            "a non-machine InvalidTransition message must pass through unchanged: {message:?}"
+        );
+        assert!(
+            !message.contains("so it can't be rejected"),
+            "must not be rewritten with an unrelated state/command sentence: {message:?}"
+        );
     }
 }
