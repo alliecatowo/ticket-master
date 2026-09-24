@@ -328,6 +328,39 @@ impl SessionRedactor {
         })
     }
 
+    /// [`SessionRedactor::redact_json`], applied to any `T` that round-trips through
+    /// `serde_json::Value` — the entry point `tm_provider`'s HTTP `systemone` `DecisionProvider`
+    /// (D-020) calls on a `DecideRequest` before it leaves this machine (decision 7, "Redaction
+    /// before anything leaves the machine"): every secret-shaped substring in the request's
+    /// free-text `state` and each question's own instructions/statement/labels comes back
+    /// scrubbed exactly as [`SessionRedactor::redact`] would scrub the same text in a normal
+    /// turn — a `DecideRequest` is a message sent onward to a remote decider, the same category
+    /// `SessionRedactor` (not the pure, keyless [`redact`]/[`redact_json`]) already owns for
+    /// `Fabric::execute`'s provider calls.
+    ///
+    /// Lives on `SessionRedactor` rather than as a free function named after the concrete
+    /// `DecideRequest` type, because `tm-provider` (where `DecideRequest` lives) already depends
+    /// on this crate for [`crate::EnvApiKey`] and friends — naming that concrete type here would
+    /// close the dependency into a cycle. Going through `serde_json::Value` sidesteps that: this
+    /// method never needs to know `DecideRequest`'s shape, only that it serializes and
+    /// deserializes, so the caller in `tm-provider` gets the same
+    /// `redactor.redact_decide_request(&req)` call site the task brief asks for, monomorphized to
+    /// its own type, with the redaction mapping recorded on the same `SessionRedactor` every
+    /// other outbound call already uses.
+    ///
+    /// Returns `Err` if `T`'s `Serialize`/`Deserialize` round-trip fails, which would mean `T` is
+    /// not genuinely JSON-representable (not a real-world case for a request/response DTO like
+    /// `DecideRequest`, whose fields are all plain strings, maps and enums) — the caller maps
+    /// this into its own `ProviderError` rather than this crate assuming how.
+    pub fn redact_decide_request<T>(&self, request: &T) -> Result<T, serde_json::Error>
+    where
+        T: serde::Serialize + serde::de::DeserializeOwned,
+    {
+        let value = serde_json::to_value(request)?;
+        let redacted = self.redact_json(&value);
+        serde_json::from_value(redacted)
+    }
+
     /// [`SessionRedactor::redact`], walked over a JSON value's string leaves — see
     /// [`redact_json`] for the plain-text equivalent's label-adjacency behavior, which this
     /// mirrors.
@@ -585,5 +618,82 @@ mod tests {
             "mapping grew past its cap: {}",
             redactor.mapping_len()
         );
+    }
+
+    /// A local mirror of `tm_provider::decide::{DecideRequest, Question}`'s serde shape (tag
+    /// `"type"`, `rename_all = "snake_case"`), used only so this test can exercise
+    /// `redact_decide_request` without `tm-auth` depending on `tm-provider` (which would close a
+    /// dependency cycle — see that method's own doc comment). The real `DecideRequest`'s outbound
+    /// body never containing a raw secret is proven where the HTTP `systemone` provider actually
+    /// calls this method, in `tm-provider`'s own tests.
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct MockDecideRequest {
+        model: String,
+        state: String,
+        questions: std::collections::BTreeMap<String, MockQuestion>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    #[serde(tag = "type", rename_all = "snake_case")]
+    enum MockQuestion {
+        Choice { instructions: String },
+        Noul { statement: String },
+    }
+
+    /// D-020 decision 7: a `DecideRequest`'s `state` and each `Question`'s own text must come
+    /// out redacted the same way [`SessionRedactor::redact`] would scrub the identical string in
+    /// a normal turn, before the request reaches a remote `DecisionProvider`.
+    #[test]
+    fn redact_decide_request_scrubs_state_and_question_text() {
+        use std::collections::BTreeMap;
+
+        let mut questions = BTreeMap::new();
+        questions.insert(
+            "q1".to_string(),
+            MockQuestion::Choice {
+                instructions: format!("Does this look risky? {OPENAI_KEY}"),
+            },
+        );
+        questions.insert(
+            "q2".to_string(),
+            MockQuestion::Noul {
+                statement: format!("The state contains {AWS_KEY}"),
+            },
+        );
+        let request = MockDecideRequest {
+            model: "systemone/jev-latest".to_string(),
+            state: format!("ticket objective: rotate {GITHUB_TOKEN} now"),
+            questions,
+        };
+
+        let redactor = SessionRedactor::new();
+        let redacted = redactor
+            .redact_decide_request(&request)
+            .expect("MockDecideRequest round-trips through serde_json::Value");
+
+        assert_eq!(
+            redacted.state,
+            redactor.redact(&request.state),
+            "state must be redacted identically to a normal SessionRedactor::redact call"
+        );
+        assert!(!redacted.state.contains(GITHUB_TOKEN), "{}", redacted.state);
+
+        let MockQuestion::Choice { instructions } = &redacted.questions["q1"] else {
+            panic!("expected MockQuestion::Choice to survive the round-trip");
+        };
+        assert!(!instructions.contains(OPENAI_KEY), "{instructions}");
+        assert!(
+            instructions.contains("<redacted:api_key:"),
+            "{instructions}"
+        );
+
+        let MockQuestion::Noul { statement } = &redacted.questions["q2"] else {
+            panic!("expected MockQuestion::Noul to survive the round-trip");
+        };
+        assert!(!statement.contains(AWS_KEY), "{statement}");
+        assert!(statement.contains("<redacted:aws_key:"), "{statement}");
+
+        // Unrelated fields (model, with no secret) pass through unchanged.
+        assert_eq!(redacted.model, request.model);
     }
 }
