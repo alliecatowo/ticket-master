@@ -5,7 +5,7 @@
 //! answer without the caller threading through a request id), plus optional injected failures,
 //! latency and quota-exhaustion behavior. No variant of this provider ever performs I/O.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
@@ -86,6 +86,9 @@ pub struct MockProvider {
     /// [`MockProvider::script_default_response`]. `None` (the default) preserves this type's
     /// original behavior exactly: an unscripted request fails with [`ProviderError::Unscripted`].
     default: Mutex<Option<Script>>,
+    /// A FIFO queue of completions to serve on successive `complete()` calls, regardless of
+    /// request content. Exhausted after all items are served; the normal script lookup then takes over.
+    sequence: Mutex<VecDeque<Completion>>,
 }
 
 impl MockProvider {
@@ -102,6 +105,7 @@ impl MockProvider {
             embed_dim: 8,
             call_log: Mutex::new(Vec::new()),
             default: Mutex::new(None),
+            sequence: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -124,6 +128,21 @@ impl MockProvider {
         self.scripts
             .lock()
             .insert(hash_request(req), Script::Exhausted { retry_after });
+    }
+
+    /// Script an ordered sequence of responses to serve on successive `complete()` calls,
+    /// regardless of request content. Once exhausted, falls through to exact-hash script lookup,
+    /// then default response, then `ProviderError::Unscripted`.
+    ///
+    /// All requests are still recorded in the call log, so a caller can inspect and verify
+    /// them after the sequence is exhausted.
+    pub fn script_sequence(&self, completions: Vec<Completion>) {
+        *self.sequence.lock() = VecDeque::from(completions);
+    }
+
+    /// Return the number of completions remaining in the sequence set by [`MockProvider::script_sequence`].
+    pub fn sequence_remaining(&self) -> usize {
+        self.sequence.lock().len()
     }
 
     /// Script the response served for *any* request that does not match a hash-keyed script
@@ -204,18 +223,27 @@ impl Provider for MockProvider {
         &self.id
     }
 
-    /// Serve `req` from the script table, falling back to [`ProviderError::Unscripted`].
+    /// Serve `req` from the script sequence first, then the script table, falling back to [`ProviderError::Unscripted`].
     ///
-    /// Pushes `req.clone()` onto `call_log`, looks up `hash_request(req)` in `scripts`.
-    /// If `Respond(completion)`, returns `Ok(completion.clone())`. If `Fail(f)`, decrements
-    /// `f.times` if `Some` (removing the script entry once it reaches zero so the next call falls
-    /// through), and returns `Err(f.error.clone())`. If `Exhausted { retry_after }`, returns
-    /// `Err(ProviderError::RateLimited { message: "mock quota exhausted".into(), retry_after:
-    /// Some(*retry_after) })`. Returns `Err(ProviderError::Unscripted)` if no script is found.
+    /// Pushes `req.clone()` onto `call_log`, then:
+    /// 1. If a sequence was set via [`MockProvider::script_sequence`], pops and returns the
+    ///    next completion from the front, regardless of request content.
+    /// 2. Looks up `hash_request(req)` in `scripts`. If `Respond(completion)`, returns
+    ///    `Ok(completion.clone())`. If `Fail(f)`, decrements `f.times` if `Some` (removing the
+    ///    script entry once it reaches zero so the next call falls through), and returns
+    ///    `Err(f.error.clone())`. If `Exhausted { retry_after }`, returns `Err(ProviderError::RateLimited { ... })`.
+    /// 3. Falls back to whatever `script_default_response` set, if anything.
+    /// 4. Returns `Err(ProviderError::Unscripted)` if no script or sequence is found.
+    ///
     /// This method never sleeps or awaits real time — latency is data on the returned
     /// `Completion`, not an actual delay, since tests must stay fast and deterministic.
     async fn complete(&self, req: CompletionRequest) -> Result<Completion, ProviderError> {
         self.call_log.lock().push(req.clone());
+
+        // Check the sequence first: if populated, serve the next completion regardless of request.
+        if let Some(completion) = self.sequence.lock().pop_front() {
+            return Ok(completion);
+        }
 
         let hash = hash_request(&req);
         {
@@ -242,10 +270,11 @@ impl Provider for MockProvider {
             }
         }
 
-        // No exact-hash script matched: fall back to whatever `script_default_response` set, if
-        // anything, before finally giving up as unscripted. The default never expires (unlike a
-        // `Script::Fail`'s `times`) — it exists precisely for a caller that cannot script by
-        // exact hash at all, so there is no notion of it being "used up".
+        // No sequence item or exact-hash script matched: fall back to whatever
+        // `script_default_response` set, if anything, before finally giving up as unscripted.
+        // The default never expires (unlike a `Script::Fail`'s `times`) — it exists precisely
+        // for a caller that cannot script by exact hash at all, so there is no notion of it
+        // being "used up".
         match self.default.lock().as_ref() {
             Some(Script::Respond(completion)) => Ok(completion.clone()),
             Some(Script::Fail(failure)) => Err(failure.error.clone()),
@@ -850,6 +879,111 @@ mod tests {
 
         assert_eq!(result.usage.input_tokens, 5 / 4);
         assert_eq!(result.usage.output_tokens, 0);
+    }
+
+    #[tokio::test]
+    async fn sequence_serves_completions_in_order() {
+        let clock = make_test_clock();
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock);
+
+        // Create three distinct completions with different text content.
+        let completion1 = Completion {
+            model: ModelId::new("test", "model"),
+            candidates: vec![Candidate {
+                content: vec![ContentBlock::Text {
+                    text: "first response".to_string(),
+                }],
+                stop_reason: StopReason::EndTurn,
+            }],
+            usage: Usage {
+                input_tokens: 10,
+                output_tokens: 5,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: Duration::from_millis(10),
+            received_at: tm_types::Timestamp::EPOCH,
+        };
+
+        let completion2 = Completion {
+            model: ModelId::new("test", "model"),
+            candidates: vec![Candidate {
+                content: vec![ContentBlock::Text {
+                    text: "second response".to_string(),
+                }],
+                stop_reason: StopReason::EndTurn,
+            }],
+            usage: Usage {
+                input_tokens: 20,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: Duration::from_millis(20),
+            received_at: tm_types::Timestamp::EPOCH,
+        };
+
+        let completion3 = Completion {
+            model: ModelId::new("test", "model"),
+            candidates: vec![Candidate {
+                content: vec![ContentBlock::Text {
+                    text: "third response".to_string(),
+                }],
+                stop_reason: StopReason::EndTurn,
+            }],
+            usage: Usage {
+                input_tokens: 30,
+                output_tokens: 15,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: Duration::from_millis(30),
+            received_at: tm_types::Timestamp::EPOCH,
+        };
+
+        provider.script_sequence(vec![
+            completion1.clone(),
+            completion2.clone(),
+            completion3.clone(),
+        ]);
+        assert_eq!(provider.sequence_remaining(), 3);
+
+        // Issue three non-matching requests (different max_tokens each time).
+        let mut req1 = make_test_request();
+        req1.max_tokens = 100;
+
+        let mut req2 = make_test_request();
+        req2.max_tokens = 200;
+
+        let mut req3 = make_test_request();
+        req3.max_tokens = 300;
+
+        // First request gets first completion, regardless of request content.
+        let result1 = provider.complete(req1).await;
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap(), completion1);
+        assert_eq!(provider.sequence_remaining(), 2);
+
+        // Second request gets second completion.
+        let result2 = provider.complete(req2).await;
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap(), completion2);
+        assert_eq!(provider.sequence_remaining(), 1);
+
+        // Third request gets third completion.
+        let result3 = provider.complete(req3).await;
+        assert!(result3.is_ok());
+        assert_eq!(result3.unwrap(), completion3);
+        assert_eq!(provider.sequence_remaining(), 0);
+
+        // Fourth request: sequence is exhausted, so it falls through to Unscripted.
+        let result4 = provider.complete(make_test_request()).await;
+        assert!(result4.is_err());
+        assert!(matches!(result4, Err(ProviderError::Unscripted(_))));
+
+        // Verify all four requests were logged.
+        let log = provider.call_log();
+        assert_eq!(log.len(), 4);
     }
 
     fn make_test_decide_request() -> DecideRequest {
