@@ -28,7 +28,7 @@
     },
     "TransitionRequest": {
       "type": "object",
-      "description": "externally tagged: one of activate|trigger|submit|verify|audit|close|cancel|reopen|fail"
+      "description": "externally tagged: exactly one of these keys"
     }
   }
 }

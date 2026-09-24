@@ -26,5 +26,5 @@ export interface CreateTicketRequest {
   "actor": ParticipantId;
 }
 
-/** externally tagged: one of activate|trigger|submit|verify|audit|close|cancel|reopen|fail */
+/** externally tagged: exactly one of these keys */
 export type TransitionRequest = Record<string, unknown>;
