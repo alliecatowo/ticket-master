@@ -4413,6 +4413,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tm-agent",
+ "tm-codeintel",
  "tm-context",
  "tm-core",
  "tm-docs",

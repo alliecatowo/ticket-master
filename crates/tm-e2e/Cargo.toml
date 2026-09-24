@@ -20,6 +20,8 @@ tm-harness = { workspace = true }
 tm-docs = { workspace = true }
 tm-mirror = { workspace = true }
 tm-context = { workspace = true }
+tm-agent = { workspace = true }
+tm-codeintel = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rusqlite = { workspace = true }
