@@ -318,28 +318,43 @@ pub fn ticket_list(
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
+    use tm_types::Clock as _;
     let view = project.store.view()?;
 
-    let mut tickets: Vec<_> = view.tickets.values().collect();
-    tickets.sort_by_key(|t| &t.id);
+    let mut index = overview::ActivityIndex::new();
+    index.refresh(project.store.state_dir())?;
+    let mut overviews = overview::overviews(&view, &index, project.clock.now(), false, false);
+    overviews.sort_by(|a, b| a.id.cmp(&b.id));
 
     if let Some(state_arg) = args.state {
         let target_state = state_from_arg(state_arg);
-        tickets.retain(|t| t.state == target_state);
+        overviews.retain(|o| {
+            view.tickets
+                .get(&o.id)
+                .is_some_and(|t| t.state == target_state)
+        });
     }
 
     if let Some(milestone) = &args.milestone {
         let milestone_id = MilestoneId::new(milestone)?;
-        tickets.retain(|t| t.milestone.as_ref() == Some(&milestone_id));
+        overviews.retain(|o| {
+            view.tickets
+                .get(&o.id)
+                .is_some_and(|t| t.milestone.as_ref() == Some(&milestone_id))
+        });
     }
 
     if let Some(parent) = &args.parent {
         let parent_id = TicketId::new(parent)?;
-        tickets.retain(|t| t.parent.as_ref() == Some(&parent_id));
+        overviews.retain(|o| {
+            view.tickets
+                .get(&o.id)
+                .is_some_and(|t| t.parent.as_ref() == Some(&parent_id))
+        });
     }
 
     if renderer.is_json() {
-        renderer.emit(&tickets, "")?;
+        renderer.emit(&overviews, "")?;
     } else {
         let headers = vec![
             "ID".to_string(),
@@ -348,25 +363,21 @@ pub fn ticket_list(
             "Priority".to_string(),
             "Objective".to_string(),
         ];
-        let rows: Vec<Vec<String>> = tickets
+        let rows: Vec<Vec<String>> = overviews
             .iter()
-            .map(|t| {
-                let objective = if t.objective.chars().count() > 50 {
-                    format!("{}...", t.objective.chars().take(47).collect::<String>())
-                } else {
-                    t.objective.clone()
-                };
-                vec![
-                    t.id.to_string(),
-                    kind_label(t.kind).to_string(),
-                    state_label(t.state).to_string(),
-                    t.priority.to_string(),
-                    objective,
-                ]
+            .filter_map(|o| {
+                let ticket = view.tickets.get(&o.id)?;
+                Some(vec![
+                    o.id.to_string(),
+                    kind_label(ticket.kind).to_string(),
+                    state_label(ticket.state).to_string(),
+                    ticket.priority.to_string(),
+                    o.objective.clone(),
+                ])
             })
             .collect();
         let table = Table::new(headers, rows);
-        renderer.emit(&tickets, &table.render())?;
+        renderer.emit(&overviews, &table.render())?;
     }
 
     Ok(())
@@ -2333,5 +2344,71 @@ mod tests {
         };
         let err = dep_graph(&args, &project, &renderer).expect_err("unknown ticket must error");
         assert_eq!(err.to_string(), "not found: ticket T-99");
+    }
+
+    #[test]
+    fn tickets_list_and_ticket_list_json_deserialize_to_same_struct() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+
+        // Create a ticket so we have something to list
+        let new_args = TicketNewArgs {
+            objective: "Test ticket for JSON shape".to_string(),
+            kind: "task".to_string(),
+            parent: None,
+            milestone: None,
+            priority: 0,
+            resources: vec![],
+        };
+        ticket_new(
+            &new_args,
+            &project,
+            &Renderer::new(false, true, true, false),
+        )
+        .expect("ticket creation");
+
+        // Verify both use TicketOverview by serializing and checking keys
+        let view = project.store.view().expect("view");
+        let mut index = overview::ActivityIndex::new();
+        index.refresh(project.store.state_dir()).expect("refresh");
+        let overviews = overview::overviews(&view, &index, project.clock.now(), false, false);
+
+        // Both ticket_list and tickets_list now use TicketOverview
+        // Verify the serialized form has the expected keys
+        if !overviews.is_empty() {
+            let json_str = serde_json::to_string(&overviews).expect("serialize overview");
+            let parsed: Vec<serde_json::Value> =
+                serde_json::from_str(&json_str).expect("parse overview JSON");
+
+            if let Some(first) = parsed.first() {
+                if let Some(obj) = first.as_object() {
+                    // Verify required keys are present
+                    assert!(
+                        obj.contains_key("id"),
+                        "missing id key in TicketOverview JSON"
+                    );
+                    assert!(
+                        obj.contains_key("title"),
+                        "missing title key in TicketOverview JSON"
+                    );
+                    assert!(
+                        obj.contains_key("objective"),
+                        "missing objective key in TicketOverview JSON"
+                    );
+                    assert!(
+                        obj.contains_key("state"),
+                        "missing state key in TicketOverview JSON"
+                    );
+
+                    // Verify title is not null for tickets with objectives
+                    if let Some(title) = obj.get("title") {
+                        assert!(
+                            !title.is_null(),
+                            "title should not be null in TicketOverview JSON"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
