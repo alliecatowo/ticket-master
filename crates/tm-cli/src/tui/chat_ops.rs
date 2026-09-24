@@ -474,6 +474,260 @@ impl App {
             .start_prompt(shown, slash_views::review_prompt(arg, &diff), now);
     }
 
+    /// `/memory`: open this project's `AGENTS.md` in `$VISUAL`/`$EDITOR` through the same
+    /// terminal-teardown path Ctrl+G uses (`tm_tui::chat::editor::edit`) -- it edits a scratch
+    /// copy of whatever text it's given and blocks the event loop for the editor's lifetime, so
+    /// this reads `AGENTS.md` (creating nothing yet if it's absent) as that starting text, then
+    /// writes what the editor saved back to the real path itself. Repaints fully afterward, since
+    /// the editor had the screen.
+    fn open_memory(&mut self) {
+        let path = self.project.root.join("AGENTS.md");
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let edited = tm_tui::chat::editor::edit(&existing);
+        self.chat.force_full_repaint();
+        match edited {
+            Ok(Some(text)) => {
+                // `editor::edit` trims the trailing newline a prompt doesn't want; a file does.
+                let text = if text.is_empty() {
+                    text
+                } else {
+                    format!("{text}\n")
+                };
+                match std::fs::write(&path, text) {
+                    Ok(()) => self
+                        .chat
+                        .push_notice(NoticeLevel::Success, format!("Saved {}.", path.display())),
+                    Err(e) => self.chat.push_notice(
+                        NoticeLevel::Error,
+                        format!("Could not save {}: {e}", path.display()),
+                    ),
+                }
+            }
+            Ok(None) => self.chat.push_notice(
+                NoticeLevel::Warning,
+                format!(
+                    "The editor exited with an error; {} is unchanged.",
+                    path.display()
+                ),
+            ),
+            Err(e) => self.chat.push_notice(
+                NoticeLevel::Error,
+                format!(
+                    "Could not open {} in {}: {e}",
+                    path.display(),
+                    tm_tui::chat::editor::editor_command()
+                ),
+            ),
+        }
+    }
+
+    /// `/export [path]`: write this conversation as markdown to `path` (default
+    /// `tm-session-<id>.md` in the current directory) and reply with where it went.
+    fn export_transcript(&mut self, arg: &str) {
+        let Ok(session) = self.agent_session.try_lock() else {
+            return self.chat.push_notice(
+                NoticeLevel::Warning,
+                "A turn is running; export once it finishes.",
+            );
+        };
+        let session_id = self.chat.session().to_string();
+        let text = slash_views::export_markdown(&session_id, session.conversation());
+        drop(session);
+        let path = arg.trim();
+        let path = if path.is_empty() {
+            PathBuf::from(format!("tm-session-{session_id}.md"))
+        } else {
+            PathBuf::from(path)
+        };
+        match std::fs::write(&path, text) {
+            Ok(()) => self.chat.push_notice(
+                NoticeLevel::Success,
+                format!("Wrote the conversation to {}.", path.display()),
+            ),
+            Err(e) => self.chat.push_notice(
+                NoticeLevel::Error,
+                format!("Could not write {}: {e}", path.display()),
+            ),
+        }
+    }
+
+    /// `/doctor`: the same checks `tm doctor` runs (`crate::project::doctor`), skipping the
+    /// computer-use permission probes -- they can prompt for OS permissions, which has nowhere
+    /// sensible to go from inside the chat. `doctor` always prints its own report through
+    /// `Renderer::emit`, which (unlike `Renderer::note`) is not suppressed by `--quiet` -- there
+    /// is no quiet way to call it and get back only the `DoctorReport`. Deliberately *not* using
+    /// Ctrl+G's editor's leave-the-alternate-screen dance here: that would leave `emit`'s raw
+    /// table sitting in the user's real terminal scrollback (the primary screen buffer) even
+    /// after the TUI quits, since `LeaveAlternateScreen` is what a shell prompt returns to.
+    /// Instead this just lets `emit` print into the alternate screen buffer, wherever the cursor
+    /// happens to be, and immediately asks for a full repaint (`ChatScreen::force_full_repaint`)
+    /// to overwrite it -- the same "editor had the screen, redraw everything" idiom Ctrl+G uses,
+    /// minus the terminal-mode teardown an external process actually needs. The pass/fail
+    /// summary itself is what's left as a normal transcript notice.
+    fn run_doctor(&mut self) {
+        let args = crate::args::DoctorArgs {
+            skip_computer_probe: true,
+        };
+        let renderer = Renderer::from_flags(false, true, true);
+        let result = crate::project::doctor(&self.project, &args, &renderer);
+        self.chat.force_full_repaint();
+        match result {
+            Ok(report) => {
+                let text = slash_views::doctor_report(&report.checks);
+                self.chat.push_notice(NoticeLevel::Info, text);
+            }
+            Err(e) => self
+                .chat
+                .push_notice(NoticeLevel::Warning, format!("Could not run doctor: {e}")),
+        }
+    }
+
+    /// `/permissions [mode]`: bare, the current auto/plan/ask mode and what each allows; with a
+    /// mode, set it the same way Shift+Tab does (`ChatScreen::set_mode` plus the session's own
+    /// mode, matching `ChatAction::SetMode`'s handler above).
+    fn permissions_cmd(&mut self, arg: &str) {
+        if arg.trim().is_empty() {
+            let text = slash_views::permissions_table(self.chat.mode());
+            return self.chat.push_notice(NoticeLevel::Info, text);
+        }
+        let Some(mode) = slash_views::parse_permission_mode(arg) else {
+            return self.chat.push_notice(
+                NoticeLevel::Warning,
+                format!("\"{}\" is not a mode — try auto, plan or ask.", arg.trim()),
+            );
+        };
+        self.chat.set_mode(mode);
+        if let Ok(mut session) = self.agent_session.try_lock() {
+            session.set_mode(to_agent_mode(mode));
+        }
+        self.chat.push_notice(
+            NoticeLevel::Success,
+            format!("Set permissions to {}.", mode.label()),
+        );
+    }
+
+    /// `/workflow [name]`: bare, every workflow discovered under `.tm/workflows/` (like `tm
+    /// workflow list`); named, expand and commit it (mirroring `crate::workflow::workflow_run`'s
+    /// own expand → validate → commit pipeline, since that function only reports through a
+    /// quiet-suppressible `Renderer::note` and doesn't hand back what it created) and queue every
+    /// ticket it created (`Store::activate`) for the in-process scheduler, the same way `/bg`
+    /// queues a single ticket.
+    fn run_workflow_cmd(&mut self, arg: &str) {
+        let name = arg.trim();
+        let workflows_dir = self.project.state_dir.join("workflows");
+        if name.is_empty() {
+            let names: Vec<String> = std::fs::read_dir(&workflows_dir)
+                .map(|entries| {
+                    let mut names: Vec<String> = entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
+                        .filter_map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+                        .collect();
+                    names.sort();
+                    names
+                })
+                .unwrap_or_default();
+            let results = names
+                .into_iter()
+                .map(|wf_name| {
+                    let path = workflows_dir.join(format!("{wf_name}.toml"));
+                    let loaded = std::fs::read_to_string(&path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|source| {
+                            tm_workflow::WorkflowDef::parse(&source).map_err(|e| e.to_string())
+                        });
+                    (wf_name, loaded)
+                })
+                .collect::<Vec<_>>();
+            let text = slash_views::workflow_list(&workflows_dir, &results);
+            return self.chat.push_notice(NoticeLevel::Info, text);
+        }
+
+        let path = workflows_dir.join(format!("{name}.toml"));
+        let source = match std::fs::read_to_string(&path) {
+            Ok(source) => source,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return self.chat.push_notice(
+                    NoticeLevel::Warning,
+                    format!(
+                        "Workflow \"{name}\" not found. Define it in {}.",
+                        path.display()
+                    ),
+                )
+            }
+            Err(e) => {
+                return self.chat.push_notice(
+                    NoticeLevel::Warning,
+                    format!("Could not read {}: {e}", path.display()),
+                )
+            }
+        };
+        let def = match tm_workflow::WorkflowDef::parse(&source) {
+            Ok(def) => def,
+            Err(e) => {
+                return self.chat.push_notice(
+                    NoticeLevel::Warning,
+                    format!("Workflow \"{name}\" won't parse: {e}"),
+                )
+            }
+        };
+        let outcome = self.commit_workflow(&def, &source);
+        match outcome {
+            Ok(outcome) => {
+                let mut started = Vec::new();
+                let mut failed = Vec::new();
+                for id in outcome.tickets.values() {
+                    match self.project.store.activate(id, self.project.actor.clone()) {
+                        Ok(_) => started.push(id.clone()),
+                        Err(e) => failed.push((id.clone(), e.to_string())),
+                    }
+                }
+                let text = slash_views::workflow_started(&def.name, &outcome, &started, &failed);
+                self.chat.push_notice(NoticeLevel::Success, text);
+            }
+            Err(e) => self.chat.push_notice(
+                NoticeLevel::Warning,
+                format!("Could not start workflow \"{name}\": {e}"),
+            ),
+        }
+    }
+
+    /// `def`/`source`'s expand → validate → commit pipeline, mirroring
+    /// `crate::workflow::workflow_run`'s own pipeline exactly (same three calls, same order):
+    /// that function isn't reused directly because it reports only through a
+    /// quiet-suppressible `Renderer::note` and doesn't hand its `CommitOutcome` back to the
+    /// caller, and `run_workflow_cmd` needs the created ticket ids to queue them.
+    fn commit_workflow(
+        &self,
+        def: &tm_workflow::WorkflowDef,
+        source: &str,
+    ) -> tm_types::Result<tm_workflow::CommitOutcome> {
+        let params = std::collections::BTreeMap::new();
+        let view = self.project.store.view()?;
+        let proposal = tm_workflow::expand(def, &params, &view)?;
+        let violations = tm_genesis::compile::validate_graph(&proposal, &view);
+        if !violations.is_empty() {
+            let detail = violations
+                .iter()
+                .map(|v| format!("{} ({}): {}", v.invariant, v.subject, v.detail))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(tm_types::TmError::invariant(format!(
+                "Workflow \"{}\" can't run: {detail}",
+                def.name
+            )));
+        }
+        tm_workflow::commit(
+            &self.project.store,
+            self.project.ids.as_ref(),
+            self.project.actor.clone(),
+            def,
+            source,
+            &proposal,
+        )
+    }
+
     fn answer_approval(&mut self, choice: ApprovalChoice, _now: Timestamp) {
         let pending = self
             .chat_ext
@@ -750,6 +1004,11 @@ impl App {
             CommandId::Todos => self.toggle_todos(),
             CommandId::Search => self.run_search(&arg),
             CommandId::Review => self.run_review(&arg, now),
+            CommandId::Memory => self.open_memory(),
+            CommandId::Export => self.export_transcript(&arg),
+            CommandId::Doctor => self.run_doctor(),
+            CommandId::Permissions => self.permissions_cmd(&arg),
+            CommandId::Workflow => self.run_workflow_cmd(&arg),
             // The chat screen answers these itself; handled anyway so the match stays exhaustive.
             CommandId::Status | CommandId::Cost => {}
             CommandId::Tickets => return self.open_tickets(now),

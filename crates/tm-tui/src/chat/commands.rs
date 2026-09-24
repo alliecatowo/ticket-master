@@ -47,6 +47,16 @@ pub enum CommandId {
     Search,
     /// Review the working tree's uncommitted changes.
     Review,
+    /// Open the project's AGENTS.md in `$EDITOR`.
+    Memory,
+    /// Save the conversation as a markdown file.
+    Export,
+    /// Run `tm doctor`'s checks inline.
+    Doctor,
+    /// Show or set the auto/plan/ask mode.
+    Permissions,
+    /// List workflows, or start one as a background ticket.
+    Workflow,
     /// Quit tm.
     Exit,
 }
@@ -218,6 +228,41 @@ pub const COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         arg: Arg::Optional("[focus]"),
         description: "Review the working tree's uncommitted changes",
+    },
+    SlashCommand {
+        id: CommandId::Memory,
+        name: "memory",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Open this project's AGENTS.md in $EDITOR",
+    },
+    SlashCommand {
+        id: CommandId::Export,
+        name: "export",
+        aliases: &[],
+        arg: Arg::Optional("[path]"),
+        description: "Save this conversation as a markdown file",
+    },
+    SlashCommand {
+        id: CommandId::Doctor,
+        name: "doctor",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Run tm doctor's checks inline",
+    },
+    SlashCommand {
+        id: CommandId::Permissions,
+        name: "permissions",
+        aliases: &[],
+        arg: Arg::Optional("[mode]"),
+        description: "Show or set the auto/plan/ask mode",
+    },
+    SlashCommand {
+        id: CommandId::Workflow,
+        name: "workflow",
+        aliases: &[],
+        arg: Arg::Optional("[name]"),
+        description: "List workflows, or start one as a background ticket",
     },
     SlashCommand {
         id: CommandId::Exit,
@@ -436,11 +481,59 @@ mod tests {
             "/model [model]"
         );
         for name in [
-            "help", "clear", "resume", "compact", "model", "status", "cost", "connect", "provider",
-            "config", "init", "bg", "context", "todos", "search", "review", "exit",
+            "help",
+            "clear",
+            "resume",
+            "compact",
+            "model",
+            "status",
+            "cost",
+            "connect",
+            "provider",
+            "config",
+            "init",
+            "bg",
+            "context",
+            "todos",
+            "search",
+            "review",
+            "memory",
+            "export",
+            "doctor",
+            "permissions",
+            "workflow",
+            "exit",
         ] {
             assert!(lookup(name).is_some(), "/{name} is a command");
         }
+    }
+
+    #[test]
+    fn memory_export_doctor_permissions_and_workflow_are_in_the_table() {
+        assert!(
+            matches!(parse("/memory"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Memory && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/export"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Export && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/export notes.md"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Export && arg == "notes.md")
+        );
+        assert!(
+            matches!(parse("/doctor"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Doctor)
+        );
+        assert!(
+            matches!(parse("/permissions"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Permissions && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/permissions plan"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Permissions && arg == "plan")
+        );
+        assert!(
+            matches!(parse("/workflow"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Workflow && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/workflow release"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Workflow && arg == "release")
+        );
     }
 
     #[test]

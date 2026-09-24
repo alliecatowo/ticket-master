@@ -4,10 +4,11 @@
 
 use tm_codeintel::hybrid::RankedHit;
 use tm_context::SectionKind;
-use tm_tui::chat::status::format_tokens;
+use tm_tui::chat::status::{format_tokens, PermissionMode};
 use tm_types::TicketId;
 
 use crate::agent::{ContextReport, AUTO_COMPACT_TOKENS};
+use crate::project::DoctorCheck;
 
 /// The most hits `/search` prints, matching `tm search`'s own default feel without letting one
 /// broad query flood the transcript.
@@ -151,6 +152,158 @@ pub(super) fn review_prompt(focus: &str, diff: &str) -> String {
          the rest of the codebase — not style nitpicks. Check `git status` for untracked files \
          that might belong in this change if that seems relevant."
     )
+}
+
+/// `/doctor`'s table: one `check  status  detail` line per [`DoctorCheck`]
+/// (`crate::project::doctor` — the same checks `tm doctor` runs). `status` is `ok`/`FAIL`/`warn`;
+/// an optional check's failure (e.g. `computer-use`) is a warning, not a doctor failure, matching
+/// `DoctorCheck::required`'s own convention.
+pub(super) fn doctor_report(checks: &[DoctorCheck]) -> String {
+    checks
+        .iter()
+        .map(|c| {
+            let status = match (c.ok, c.required) {
+                (true, _) => "ok",
+                (false, true) => "FAIL",
+                (false, false) => "warn",
+            };
+            format!("{:<14} {status:<4} {}", c.name, c.detail)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `/permissions` with no argument: the current auto/plan/ask mode, marked, with what each
+/// allows — the same three modes Shift+Tab cycles (`tm_tui::chat::status::PermissionMode`).
+pub(super) fn permissions_table(current: PermissionMode) -> String {
+    const ROWS: [(PermissionMode, &str); 3] = [
+        (
+            PermissionMode::Auto,
+            "acts on its own: edits, commands and git run without asking",
+        ),
+        (
+            PermissionMode::Plan,
+            "read-only: investigates and proposes a plan, changes nothing",
+        ),
+        (
+            PermissionMode::Ask,
+            "asks before every edit, command, git operation or pty keystroke",
+        ),
+    ];
+    ROWS.iter()
+        .map(|(mode, what)| {
+            let marker = if *mode == current { "* " } else { "  " };
+            format!("{marker}{:<7} {what}", mode.label())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n\n/permissions <auto|plan|ask> to set one, same as Shift+Tab."
+}
+
+/// `/permissions <mode>`: parse the argument against the same three names the table above shows.
+pub(super) fn parse_permission_mode(arg: &str) -> Option<PermissionMode> {
+    match arg.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(PermissionMode::Auto),
+        "plan" => Some(PermissionMode::Plan),
+        "ask" => Some(PermissionMode::Ask),
+        _ => None,
+    }
+}
+
+/// `/workflow` with no name: every workflow discovered under this project's workflows directory
+/// (`Project::state_dir`/`workflows`, not necessarily `<root>/.tm/workflows` — a global-scope
+/// project's `state_dir` lives elsewhere, D-003), one line each — text rendering of the same
+/// summary `tm workflow list` prints as a table. `results` pairs each discovered name with its
+/// parsed definition or the parse error for it; one malformed `.toml` does not hide the rest, the
+/// same convention `tm workflow list`'s own row-per-file handling follows.
+pub(super) fn workflow_list(
+    workflows_dir: &std::path::Path,
+    results: &[(String, Result<tm_workflow::WorkflowDef, String>)],
+) -> String {
+    if results.is_empty() {
+        return format!(
+            "No workflows defined yet. Add one under {}/<name>.toml.",
+            workflows_dir.display()
+        );
+    }
+    results
+        .iter()
+        .map(|(name, result)| match result {
+            Ok(def) => format!(
+                "{name}  {} node(s), {} param(s){}",
+                def.nodes.len(),
+                def.params.len(),
+                if def.is_one_by_one() { " (1x1)" } else { "" }
+            ),
+            Err(e) => format!("{name}  ERROR: {e}"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// `/workflow <name>`: what starting it did — every ticket the expansion created, and whether
+/// each was queued (`Store::activate`) for the in-process scheduler to work while the TUI is
+/// open, the same way `/bg` queues a single ticket.
+pub(super) fn workflow_started(
+    name: &str,
+    outcome: &tm_workflow::CommitOutcome,
+    started: &[TicketId],
+    failed: &[(TicketId, String)],
+) -> String {
+    let mut out = format!(
+        "Started workflow \"{name}\" (version {}): {} ticket(s) created.",
+        outcome.version,
+        outcome.tickets.len()
+    );
+    let mut refs: Vec<_> = outcome.tickets.iter().collect();
+    refs.sort_by(|a, b| a.0.cmp(b.0));
+    for (ticket_ref, id) in refs {
+        let note = if started.contains(id) {
+            "queued".to_string()
+        } else {
+            failed
+                .iter()
+                .find(|(f, _)| f == id)
+                .map(|(_, e)| format!("not queued: {e}"))
+                .unwrap_or_else(|| "not queued".to_string())
+        };
+        out.push_str(&format!("\n  {ticket_ref} -> {id} ({note})"));
+    }
+    out.push_str("\n\nPress \u{2190} to watch them on the tickets screen.");
+    out
+}
+
+/// `/export`'s markdown body: this session's saved turns, oldest first, each user message as a
+/// quote and each step's reply/tool calls as plain text (`crate::tui::steps::tool_target` for the
+/// same one-line call description the transcript itself shows). Written to disk by
+/// `chat_ops.rs::export_transcript`, not here, so this stays a pure function of the conversation.
+pub(super) fn export_markdown(session: &str, turns: &[tm_agent::ConversationTurn]) -> String {
+    let mut out = format!("# tm session {session}\n");
+    if turns.is_empty() {
+        out.push_str("\n(no turns yet)\n");
+        return out;
+    }
+    for turn in turns {
+        out.push_str("\n## You\n\n> ");
+        out.push_str(&turn.user_message.replace('\n', "\n> "));
+        out.push('\n');
+        for step in &turn.steps {
+            if let Some(text) = &step.assistant_text {
+                if !text.trim().is_empty() {
+                    out.push_str("\n### tm\n\n");
+                    out.push_str(text);
+                    out.push('\n');
+                }
+            }
+            for call in &step.tool_calls {
+                out.push_str(&format!(
+                    "\n- `{}`\n",
+                    crate::tui::steps::tool_target(&call.tool_name, &call.input)
+                ));
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -317,5 +470,126 @@ mod tests {
             text.len() < huge.len() + 500,
             "diff body itself was cut down"
         );
+    }
+
+    fn check(name: &str, ok: bool, required: bool, detail: &str) -> DoctorCheck {
+        DoctorCheck {
+            name: name.to_string(),
+            ok,
+            required,
+            detail: detail.to_string(),
+        }
+    }
+
+    #[test]
+    fn doctor_report_marks_ok_fail_and_warn() {
+        let text = doctor_report(&[
+            check("scope", true, true, "repo scope"),
+            check("hash-chain", false, true, "chain broken"),
+            check("computer-use", false, false, "no permission"),
+        ]);
+        assert!(text.contains("scope") && text.contains("ok"));
+        assert!(text.contains("hash-chain") && text.contains("FAIL"));
+        assert!(text.contains("computer-use") && text.contains("warn"));
+    }
+
+    #[test]
+    fn permissions_table_marks_the_current_mode_and_lists_the_others() {
+        let text = permissions_table(PermissionMode::Plan);
+        assert!(text.contains("* plan"));
+        assert!(text.contains("  auto"));
+        assert!(text.contains("  ask"));
+        assert!(text.contains("/permissions <auto|plan|ask>"));
+    }
+
+    #[test]
+    fn parse_permission_mode_reads_all_three_names_case_insensitively() {
+        assert_eq!(parse_permission_mode("AUTO"), Some(PermissionMode::Auto));
+        assert_eq!(parse_permission_mode(" plan "), Some(PermissionMode::Plan));
+        assert_eq!(parse_permission_mode("ask"), Some(PermissionMode::Ask));
+        assert_eq!(parse_permission_mode("nope"), None);
+    }
+
+    fn workflow_def(name: &str) -> tm_workflow::WorkflowDef {
+        let source = format!(
+            r#"
+name = "{name}"
+
+[[node]]
+id = "a"
+role = "coder_fast"
+objective = "a"
+budget = {{ tokens = 1 }}
+verification = "none"
+"#
+        );
+        tm_workflow::WorkflowDef::parse(&source).expect("valid workflow definition")
+    }
+
+    #[test]
+    fn workflow_list_empty_says_so() {
+        let dir = std::path::Path::new("/tmp/project/.tm/workflows");
+        let text = workflow_list(dir, &[]);
+        assert!(text.contains("No workflows defined yet"));
+        assert!(text.contains("/tmp/project/.tm/workflows"));
+    }
+
+    #[test]
+    fn workflow_list_shows_node_and_param_counts_and_parse_errors() {
+        let dir = std::path::Path::new("/tmp/project/.tm/workflows");
+        let text = workflow_list(
+            dir,
+            &[
+                ("release".to_string(), Ok(workflow_def("release"))),
+                ("broken".to_string(), Err("missing `name`".to_string())),
+            ],
+        );
+        assert!(text.contains("release  1 node(s), 0 param(s)"));
+        assert!(text.contains("broken  ERROR: missing `name`"));
+    }
+
+    #[test]
+    fn workflow_started_marks_queued_and_failed_tickets() {
+        let mut tickets = std::collections::BTreeMap::new();
+        tickets.insert("a".to_string(), ticket("T-1"));
+        tickets.insert("b".to_string(), ticket("T-2"));
+        let outcome = tm_workflow::CommitOutcome {
+            tickets,
+            content_hash: "abc123".to_string(),
+            version: 1,
+        };
+        let text = workflow_started(
+            "release",
+            &outcome,
+            &[ticket("T-1")],
+            &[(ticket("T-2"), "already leased".to_string())],
+        );
+        assert!(text.contains("Started workflow \"release\" (version 1): 2 ticket(s) created."));
+        assert!(text.contains("a -> T-1 (queued)"));
+        assert!(text.contains("b -> T-2 (not queued: already leased)"));
+    }
+
+    #[test]
+    fn export_markdown_includes_user_messages_and_replies() {
+        let turn = tm_agent::ConversationTurn {
+            user_message: "fix the build".to_string(),
+            steps: vec![tm_agent::outcome::StepRecord {
+                index: 1,
+                served_by: "anthropic/claude".to_string(),
+                assistant_text: Some("Fixed it.".to_string()),
+                tool_calls: Vec::new(),
+                spend: tm_types::Spend::default(),
+                at: tm_types::Timestamp::EPOCH,
+            }],
+        };
+        let text = export_markdown("S-1", &[turn]);
+        assert!(text.contains("# tm session S-1"));
+        assert!(text.contains("> fix the build"));
+        assert!(text.contains("Fixed it."));
+    }
+
+    #[test]
+    fn export_markdown_says_so_with_no_turns() {
+        assert!(export_markdown("S-1", &[]).contains("no turns yet"));
     }
 }

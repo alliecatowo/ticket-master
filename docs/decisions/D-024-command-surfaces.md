@@ -112,3 +112,48 @@ user already trusts, not a separate CLI they have to already know exists.
 - `due: Option<NaiveDate>` is a new persisted field on every ticket going forward; it needs a
   migration path in `materialize.rs` for tickets recorded before this date, same as any other
   schema addition.
+
+## Implemented: slash table — session and environment (2026-09-24)
+
+The five "Session and environment" commands §2 lists (`/memory`, `/export`, `/doctor`,
+`/permissions`, `/workflow`) are wired: `crates/tm-tui/src/chat/commands.rs` (the `CommandId`
+variants and `COMMANDS` rows), `crates/tm-cli/src/tui/chat_ops.rs` (each command's handler,
+matched in `App::run_command`), and `crates/tm-cli/src/tui/slash_views.rs` (the pure text/data
+renderers each handler hands to `ChatScreen::push_notice`).
+
+- **`/memory`** reads `AGENTS.md` (empty if it doesn't exist yet) and hands that text to the same
+  `tm_tui::chat::editor::edit` Ctrl+G already uses, then writes what the editor saved back to the
+  real path — no new editor entry point was needed, since `edit` already accepts arbitrary
+  starting text rather than assuming a scratch buffer.
+- **`/export [path]`** turns the attached `AgentSession`'s saved turns into markdown
+  (`slash_views::export_markdown`) and writes it to `path`, or `tm-session-<id>.md` in the current
+  directory when no path is given.
+- **`/doctor`** calls `crate::project::doctor` — the exact function `tm doctor` calls — with
+  `skip_computer_probe: true`. One real wrinkle: `doctor` always prints its own report through
+  `Renderer::emit`, which (unlike `Renderer::note`) is not suppressed by `--quiet`, so there is no
+  quiet way to call it and get only the returned `DoctorReport` back. `run_doctor` deliberately
+  does *not* use Ctrl+G's editor's leave-the-alternate-screen dance for this: that would leave
+  `emit`'s raw table sitting in the user's real terminal scrollback (the primary screen buffer)
+  even after the TUI quits. Instead it lets `emit` print into the alternate screen buffer and
+  immediately asks for a full repaint (`ChatScreen::force_full_repaint`) to overwrite it, and
+  separately renders `DoctorReport.checks` into a transcript notice, so the pass/fail summary is
+  what's actually left behind in scrollback.
+- **`/permissions [mode]`** reads/sets `ChatScreen::mode`/`set_mode` plus the session's own mode
+  the same way `ChatAction::SetMode` (Shift+Tab) already does.
+- **`/workflow [name]`** bare discovers and parses `.tm/workflows/*.toml` directly in
+  `chat_ops.rs` rather than calling `crate::workflow::workflow_list`, whose discovery/parsing
+  helpers (`discover_names`, `load`) are private to that module and whose own list rendering goes
+  through the same always-prints `Renderer::emit` path `doctor` does. Given a name, it mirrors
+  `crate::workflow::workflow_run`'s own expand → `tm_genesis::compile::validate_graph` → commit
+  pipeline locally, because `workflow_run` reports success only through quiet-suppressible
+  `Renderer::note` calls and does not hand its `CommitOutcome` back to the caller; running the
+  pipeline directly gives `/workflow` the created ticket ids, which it then queues with
+  `Store::activate`, the same way `/bg` queues a single ticket, and reports per-ticket
+  queued/failed status back into the transcript.
+
+What this leaves open: the small duplication between `chat_ops.rs`'s inlined workflow
+discover/expand/commit logic and `crate::workflow`'s own copies is a real seam — a future pass
+that makes `discover_names`/`load` `pub(crate)` and gives `workflow_run` a variant that returns
+`CommitOutcome` instead of only printing would let `/workflow` call through to `tm-cli`'s existing
+workflow module instead of re-implementing its core, the same way `/doctor` reuses
+`crate::project::doctor` outright.
