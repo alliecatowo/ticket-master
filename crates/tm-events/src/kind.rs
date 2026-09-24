@@ -61,6 +61,8 @@ pub enum EventCategory {
     Effect,
     /// `goal.*`
     Goal,
+    /// `classify.*`
+    Classify,
 }
 
 /// The closed set of event kinds a project's log may contain.
@@ -330,6 +332,14 @@ pub enum EventKind {
     /// verified.
     #[serde(rename = "goal.claimed_complete")]
     GoalClaimedComplete,
+    /// `classify.decided` (D-020): one `DecisionProvider` call's outcome — site, backend, model,
+    /// the redacted input/questions hashes, the answers and their calibrated confidence, the
+    /// thresholds applied, the resulting disposition (e.g. `"shadow"` while D-020 is still
+    /// shadow-only), latency and cost. Namespaced `classify.*`, not `decision.*` — that prefix
+    /// already belongs to the unrelated `DecisionId` ticket-decision domain
+    /// (`crates/tm-core/src/decision.rs`).
+    #[serde(rename = "classify.decided")]
+    ClassifyDecided,
 }
 
 /// Every kind, in catalogue order, for iteration in tests and diagnostics.
@@ -415,6 +425,7 @@ pub const ALL: &[EventKind] = &[
     EventKind::GoalStepCompleted,
     EventKind::GoalReoriented,
     EventKind::GoalClaimedComplete,
+    EventKind::ClassifyDecided,
 ];
 
 impl EventKind {
@@ -506,6 +517,7 @@ impl EventKind {
             EventKind::GoalStepCompleted => "goal.step_completed",
             EventKind::GoalReoriented => "goal.reoriented",
             EventKind::GoalClaimedComplete => "goal.claimed_complete",
+            EventKind::ClassifyDecided => "classify.decided",
         }
     }
 
@@ -589,6 +601,7 @@ impl EventKind {
             | EventKind::GoalStepCompleted
             | EventKind::GoalReoriented
             | EventKind::GoalClaimedComplete => EventCategory::Goal,
+            EventKind::ClassifyDecided => EventCategory::Classify,
         }
     }
 
@@ -953,8 +966,31 @@ mod tests {
 
     #[test]
     fn all_kinds_sorted_and_complete() {
-        assert_eq!(ALL.len(), 81);
+        assert_eq!(ALL.len(), 82);
         assert_eq!(ALL[0], EventKind::ProjectCreated);
-        assert_eq!(ALL[ALL.len() - 1], EventKind::GoalClaimedComplete);
+        assert_eq!(ALL[ALL.len() - 1], EventKind::ClassifyDecided);
+    }
+
+    #[test]
+    fn category_maps_classify_kinds() {
+        assert_eq!(
+            EventKind::ClassifyDecided.category(),
+            EventCategory::Classify
+        );
+    }
+
+    #[test]
+    fn classify_decided_round_trips_as_classify_decided() {
+        assert_eq!(EventKind::ClassifyDecided.as_str(), "classify.decided");
+        assert_eq!(
+            "classify.decided".parse::<EventKind>().unwrap(),
+            EventKind::ClassifyDecided
+        );
+        let json = serde_json::to_string(&EventKind::ClassifyDecided).unwrap();
+        assert_eq!(json, "\"classify.decided\"");
+        assert_eq!(
+            serde_json::from_str::<EventKind>(&json).unwrap(),
+            EventKind::ClassifyDecided
+        );
     }
 }
