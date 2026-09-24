@@ -8,11 +8,11 @@
 //! `tm_provider::MockProvider`, since this crate does not depend on `tm-provider`) and an
 //! injected `&dyn Clock`/`&dyn IdSource`, per `SPEC.md` §10's determinism requirement.
 //!
-//! [`evaluate_decisions`] is a second, unrelated eval mode: it scores a fixture of recorded
-//! `classify.decided(shadow)` decisions against their outcomes (D-020) for accuracy and expected
-//! calibration error. It shares this module because it's the same "score a fixture of static,
-//! hermetic recordings" shape as the [`BenchTask`] runner above, not because it drives
-//! [`SeededProvider`] — a decision-eval fixture has no steps to replay, only pre-recorded pairs.
+//! A fixture can be marked as "live-only" by setting [`BenchFixture::test_command`] without
+//! providing any scripted steps (an empty sequence from the provider). The scripted runner skips
+//! such tasks, allowing live-only fixtures to coexist with scripted tasks in the same repository
+//! without breaking deterministic replay mode. This separation is particularly useful for
+//! fixtures that require real-world resources only available in live mode.
 
 use std::collections::HashSet;
 
@@ -28,6 +28,16 @@ pub struct BenchFixture {
     pub path: String,
     /// Human-readable description of the fixture's starting state.
     pub description: String,
+    /// Optional command to run the test. When set, this fixture is marked for live mode (a mode
+    /// that is not implemented in tm-harness). When the seeded provider has no scripted steps for
+    /// this task, the scripted runner skips it, allowing live-only fixtures to coexist with
+    /// scripted ones without breaking deterministic replay.
+    #[serde(default)]
+    pub test_command: Option<Vec<String>>,
+    /// Optional setup commands to execute before running the test. Defaults to an empty list.
+    /// Intentionally unused in the scripted runner; this field exists for live mode.
+    #[serde(default)]
+    pub setup_commands: Vec<Vec<String>>,
 }
 
 /// Weights combining a [`TaskResult`] into one scalar score. Higher is better; each weight
@@ -284,6 +294,9 @@ impl<'a> BenchRunner<'a> {
     }
 
     /// Run every task in `tasks` and fold the results into one [`BenchmarkReport`].
+    ///
+    /// Tasks with a `test_command` but no scripted steps (live-only tasks) are skipped by the
+    /// scripted runner. The aggregate score is computed over only the tasks that ran.
     pub fn run_all(
         &self,
         tasks: &[BenchTask],
@@ -292,6 +305,11 @@ impl<'a> BenchRunner<'a> {
     ) -> Result<BenchmarkReport> {
         let mut results = Vec::with_capacity(tasks.len());
         for task in tasks {
+            // Skip live-only tasks (those with test_command but no scripted steps).
+            if task.fixture.test_command.is_some() && provider.is_finished(task, 0) {
+                tracing::warn!(task_id = %task.id, "skipping live-only task in scripted runner");
+                continue;
+            }
             results.push(self.run(task, provider)?);
         }
         let aggregate_score = if results.is_empty() {
@@ -557,6 +575,8 @@ mod tests {
             fixture: BenchFixture {
                 path: "fixtures/t-1".to_string(),
                 description: "starting state".to_string(),
+                test_command: None,
+                setup_commands: Vec::new(),
             },
             scoring,
             expected,
@@ -896,6 +916,111 @@ mod tests {
         let candidate = report(2, vec![task_result("only-candidate", 0.5)]);
         let promotion = compare(&baseline, &candidate);
         assert!(promotion.task_deltas.is_empty());
+    }
+
+    #[test]
+    fn parse_hello_world_fixture_unchanged() {
+        let hello_world_toml = include_str!("../../../bench/tasks/hello-world.toml");
+        let task = BenchTask::parse(hello_world_toml).expect("hello-world.toml parses");
+        assert_eq!(task.id, "hello-world");
+        assert_eq!(task.fixture.test_command, None);
+        assert_eq!(task.fixture.setup_commands, Vec::<Vec<String>>::new());
+    }
+
+    #[test]
+    fn parse_fixture_with_test_command_and_setup_commands() {
+        let toml = r#"
+            id = "t-live"
+            task = "live test"
+            [fixture]
+            path = "fixtures/t-live"
+            description = "a live-only task"
+            test_command = ["cargo", "test"]
+            setup_commands = [["cargo", "build"]]
+            [scoring]
+            success_weight = 1.0
+            cost_weight = 0.0
+            latency_weight = 0.0
+            tool_count_weight = 0.0
+            context_weight = 0.0
+            unnecessary_ops_weight = 0.0
+            [expected]
+            max_cost_micros = 100
+            max_wall_seconds = 10
+            max_tool_calls = 5
+            max_context_bytes = 1000
+            [expected.predicate]
+            file_exists = { path = "test.rs" }
+        "#;
+        let task = BenchTask::parse(toml).expect("well-formed task parses");
+        assert_eq!(
+            task.fixture.test_command,
+            Some(vec!["cargo".to_string(), "test".to_string()])
+        );
+        assert_eq!(
+            task.fixture.setup_commands,
+            vec![vec!["cargo".to_string(), "build".to_string()]]
+        );
+    }
+
+    #[test]
+    fn run_all_skips_live_only_tasks() {
+        // Provider that has no steps for task t-live but has steps for t-scripted.
+        struct SelectiveProvider;
+        impl SeededProvider for SelectiveProvider {
+            fn step(&self, task: &BenchTask, _step_index: u32) -> Result<String> {
+                match task.id.as_str() {
+                    "t-scripted" => Ok("t-scripted confirmed".to_string()),
+                    _ => Err(tm_types::TmError::not_found("step", "N/A")),
+                }
+            }
+            fn is_finished(&self, task: &BenchTask, step_index: u32) -> bool {
+                match task.id.as_str() {
+                    "t-scripted" => step_index > 0,
+                    _ => true, // No scripted steps: finished immediately, even at index 0.
+                }
+            }
+        }
+
+        let predicate = Predicate::FileExists {
+            path: "t-scripted".to_string(),
+        };
+
+        // Scripted task: will run normally
+        let mut scripted = task_with(
+            predicate.clone(),
+            generous_outcome(predicate.clone()),
+            full_weight_scoring(),
+        );
+        scripted.id = "t-scripted".to_string();
+
+        // Live-only task: has test_command but no script
+        let mut live_only = task_with(
+            predicate,
+            generous_outcome(Predicate::FileExists {
+                path: "live".to_string(),
+            }),
+            full_weight_scoring(),
+        );
+        live_only.id = "t-live".to_string();
+        live_only.fixture.test_command = Some(vec!["cargo".to_string(), "test".to_string()]);
+
+        let clock = FixedClock::epoch();
+        let ids = tm_types::TestIds::seeded(1);
+        let runner = BenchRunner {
+            clock: &clock,
+            ids: &ids,
+        };
+
+        let provider = SelectiveProvider;
+        let report = runner
+            .run_all(&[scripted, live_only], &provider, 0)
+            .expect("run_all succeeds");
+
+        // Only the scripted task should be in the report (live-only was skipped)
+        assert_eq!(report.tasks.len(), 1);
+        assert_eq!(report.tasks[0].task_id, "t-scripted");
+        assert!(report.tasks[0].passed);
     }
 
     fn decision(predicted: &str, confidence: f64, actual: &str) -> DecisionRecord {
