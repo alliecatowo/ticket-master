@@ -176,6 +176,30 @@ pub struct WireTool {
     pub description: String,
     /// The tool's JSON Schema input shape.
     pub input_schema: serde_json::Value,
+    /// A prompt-cache breakpoint (`{"type": "ephemeral"}`), set only on the last tool in the
+    /// request. Anthropic's Messages API caches everything up to and including the block that
+    /// carries `cache_control`, so one breakpoint here covers the whole (typically stable, whole
+    /// tool-schema) prefix ahead of the per-turn `messages` — see
+    /// [`build_wire_request_with_names`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
+/// An Anthropic prompt-cache breakpoint marker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheControl {
+    /// Always `"ephemeral"`, the only breakpoint type the Messages API currently defines.
+    #[serde(rename = "type")]
+    pub cache_type: String,
+}
+
+impl CacheControl {
+    /// The one breakpoint type the Messages API defines today.
+    pub fn ephemeral() -> Self {
+        CacheControl {
+            cache_type: "ephemeral".to_string(),
+        }
+    }
 }
 
 /// The Messages API response body (non-streaming).
@@ -329,19 +353,31 @@ pub fn build_wire_request_with_names(
         Some(system_parts.join("\n\n"))
     };
 
+    let tool_count = req.tools.len();
+    let tools = req
+        .tools
+        .iter()
+        .enumerate()
+        .map(|(i, t)| WireTool {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            input_schema: t.input_schema.clone(),
+            // The prompt-caching-eligible prefix is everything up to and including this
+            // block's position on the wire; one breakpoint on the last tool caches the whole
+            // (usually per-turn-identical) tool-schema block without touching `system`'s shape.
+            cache_control: if i + 1 == tool_count {
+                Some(CacheControl::ephemeral())
+            } else {
+                None
+            },
+        })
+        .collect();
+
     WireRequest {
         model: model.model.clone(),
         system,
         messages,
-        tools: req
-            .tools
-            .iter()
-            .map(|t| WireTool {
-                name: t.name.clone(),
-                description: t.description.clone(),
-                input_schema: t.input_schema.clone(),
-            })
-            .collect(),
+        tools,
         max_tokens: req.max_tokens,
         temperature: req.temperature,
         stop_sequences: req.stop_sequences.clone(),
@@ -963,6 +999,31 @@ mod tests {
         assert!(
             !body.contains("fs.read") && !body.contains("shell.run"),
             "{body}"
+        );
+    }
+
+    #[test]
+    fn build_wire_request_marks_only_the_last_tool_cacheable() {
+        let model = ModelId::new("anthropic", "claude-sonnet-5");
+        let wire = build_wire_request(&model, &dotted_tool_request());
+        assert_eq!(wire.tools.len(), 3, "fixture has three tools");
+        for tool in &wire.tools[..wire.tools.len() - 1] {
+            assert!(
+                tool.cache_control.is_none(),
+                "only the last tool should carry a cache breakpoint, found one on {}",
+                tool.name
+            );
+        }
+        let last = wire.tools.last().expect("at least one tool");
+        assert!(
+            last.cache_control.is_some(),
+            "the last tool should carry the prompt-cache breakpoint"
+        );
+        let body = serde_json::to_string(&wire).expect("serializes");
+        assert_eq!(
+            body.matches("cache_control").count(),
+            1,
+            "exactly one cache_control breakpoint should be on the wire: {body}"
         );
     }
 
