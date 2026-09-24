@@ -59,7 +59,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `grep -n 'Authority:\|Budget:' crates/tm-cli/src/tickets.rs` -> 378/382 debug format; multiple independent trial agents confirmed the same `Authority { repository: RepoAuthority { ... } }` output; byte-slice truncation confirmed at tickets.rs:327-328.
 
-- [ ] **s1-transition-error-copy** — Invalid ticket transitions explain the state and the next command
+- [x] **s1-transition-error-copy** — Invalid ticket transitions explain the state and the next command (landed 4a1bfb5)
   model: sonnet · severity: high · builds Rust: yes · area: cli/tickets · deps: s1-display-labels
   files: `crates/tm-cli/src/tickets.rs`, `crates/tm-types/src/error.rs`, `crates/tm-core/src/machine.rs`
   change: `InvalidTransition { from, trigger }` (tm-core/src/machine.rs:16) carries no ticket id, so build the friendly text in the CLI layer: a helper in tickets.rs mapping a TmError::InvalidTransition from accept/reject/retry/activate/close/cancel/reopen/submit to a sentence like "T-3 is a draft, so it can't be accepted. Activate it first: tm ticket activate T-3", using state_label plus a small table of which verb is valid from each state. Change the `#[error("invalid transition: {0}")]` prefix (error.rs:25) to "can't do that from this state: {0}". Cover submit-without-evidence ("invariant violated: submission requires at least one evidence artifact") with "Provide at least one piece of evidence (code changes, test results, or documentation) with `tm ticket attach T-N --evidence <path>` before submitting."
@@ -255,7 +255,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-templates`
   evidence: `tm templates list` with a missing template dir -> `error: io: reading /path/to/missing-template/manifest.toml: No such file or directory (os error 2)`.
 
-- [ ] **s1-provider-project-quiet-flags** — provider and project commands ignore --quiet
+- [x] **s1-provider-project-quiet-flags** — provider and project commands ignore --quiet (landed c98c1c7)
   model: haiku · severity: high · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/ops.rs`, `crates/tm-cli/src/project.rs`
   change: `provider_list`, `provider_detect`, `provider_status` and `provider_test` print their table unconditionally; wrap the table emission with `if !renderer.is_quiet()`, only suppressing `provider test`'s "ok" lines while keeping errors. `project_list()`/`project_show()` use `renderer.emit(&entries, "no global projects yet")`, which always prints the fallback narration regardless of `--quiet` — switch to the pattern used elsewhere (`renderer.emit(&json, "")`) so `--quiet` suppresses narration but not the payload, per render.rs's own documented contract (lines 5-8). While here, reword "no global projects yet" to explain what a global project is in plain terms ("no projects in $TM_HOME yet").
@@ -399,7 +399,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-cli`
   evidence: `tm -p --json "Where is the ticket state machine..."` exited 2 with `error: a value is required for '--prompt <TEXT>' but none was supplied`; reordering to `tm --json -p "..."` worked. The same exit code 2 is used for both a bad flag order and a genuinely failed turn.
 
-- [ ] **p1-e2e-ticket-lifecycle-scripted-provider** — Offline e2e test: full ticket lifecycle to closed with a scripted provider
+- [x] **p1-e2e-ticket-lifecycle-scripted-provider** — Offline e2e test: full ticket lifecycle to closed with a scripted provider (landed 0c79232)
   model: sonnet · severity: critical · builds Rust: yes · area: testing · deps: p1-mock-provider-scripted-tool-calls
   files: `crates/tm-e2e/tests/ticket_lifecycle_e2e.rs`
   change: No existing test drives a ticket through `new -> activate -> run -> submitted -> accept -> closed` against a scripted (mock) provider end to end — `crates/tm-e2e`'s current suite (`authority_e2e.rs`, `invariants.rs`, `genesis_e2e.rs`, `crash_recovery.rs`, `concurrency.rs`, `replay.rs`) covers authority, genesis and crash/concurrency invariants, not the plain worker-ticket lifecycle, and this is exactly what the `mock-provider-ticket-submit` probe found broken. Once `p1-mock-provider-scripted-tool-calls` fixes the mock provider's tool-call script, add a real-binary or in-process test that runs a ticket through the full happy path and asserts the final state is `closed`, with the expected events (`TicketSubmitted`, `TicketClosed`) present in the log.
@@ -415,7 +415,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-e2e`
   evidence: The `lifecycle-reject-retry` and `deps-sched` probes both passed manually (guidance appears in ticket state, `max_attempts` resets 3 -> 6, scheduler respects Hard edges) but via ad hoc CLI runs, not an automated regression test.
 
-- [ ] **p1-e2e-http-api-lifecycle** — Offline e2e test: `tm serve`'s HTTP API drives a ticket through creation, transitions and error paths
+- [x] **p1-e2e-http-api-lifecycle** — Offline e2e test: `tm serve`'s HTTP API drives a ticket through creation, transitions and error paths (landed af8c895)
   model: sonnet · severity: high · builds Rust: yes · area: testing · deps: p1-http-error-json-format
   files: `crates/tm-server/tests/http_lifecycle.rs`
   change: `crates/tm-server` has no `tests/` directory at all today, so nothing regression-tests the `serve-api` probe's findings: `POST /tickets` creating a ticket, `GET /tickets/{id}` and `/events` reading it back, `GET /schema`/`/health`/`/state`, and the accept/reject/retry transition endpoints, plus the JSON error-shape fix from `p1-http-error-json-format` (a 404 and a malformed `POST` body both return `{error, message}` JSON). Spin up the axum app in-process (or bind an ephemeral port) against a tempdir project with the mock provider and drive it with a real HTTP client.
@@ -455,7 +455,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-provider`
   evidence: WebFetch of https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe: base URL `https://ai-gateway.vercel.sh/typesafe`, POST `/typesafe/v1/systemone`, body `{"model":"typesafe-ai/jev","state":...,"questions":{...}}`, auth `Authorization: Bearer $AI_GATEWAY_API_KEY` or OIDC token.
 
-- [ ] **d20-decider-config-selection** — Add config to select the decider backend (mock/http) and its base URL/model per role_config's existing pattern
+- [x] **d20-decider-config-selection** — Add config to select the decider backend (mock/http) and its base URL/model per role_config's existing pattern (landed 03cd3e0)
   model: sonnet · severity: high · builds Rust: yes · area: providers (D-020) · deps: d20-decider-trait-and-mock
   files: `crates/tm-provider/src/role_config.rs`
   change: Extend `role_config.rs`'s TOML schema with a Decider role entry (candidates: mock, or systemone-http with base_url/model_id/env var name for the token) reusing the existing `RoleConfigError` variants (`UnknownRole`, `EmptyRole`, `ZeroConcurrency`) rather than inventing a parallel config path, so `tm doctor`/existing role-config validation covers it for free.
@@ -611,7 +611,7 @@ Gate: `mise run verify && pnpm -C clients/ts install && pnpm -C clients/ts test 
   acceptance: New tests: (a) a git tempdir with one commit containing a Rust fn, opened without tm doctor, resolves `symbol def` for that fn; (b) ProjectContextPackSource::compile over the same never-doctored project includes that file's outline or retrieval content; (c) code_intel() in a non-git tempdir and in a git repo with zero commits returns Ok and logs a warning. The handoff reports the measured no-op refresh time on this repo's tree. If it exceeds about 500ms, say so explicitly so a follow-up can gate the refresh on mtime.
   test: `mise run test:crate -- tm-cli`
 
-- [ ] **nav-fix-codeintel-self-reference** — Stop treating a definition's own name token as a reference to itself
+- [x] **nav-fix-codeintel-self-reference** — Stop treating a definition's own name token as a reference to itself (landed 9f52d4e)
   model: sonnet · size: S · builds Rust: yes · area: code-navigation · deps: none
   files: `crates/tm-codeintel/src/symbols.rs`
   change: In SymbolIndex::parse_file (around symbols.rs:399-421), after collecting name_ranges for this file's symbols, drop any captured reference whose (path, range) exactly equals a definition's own name range before pushing it onto self.references. Tighten rename_preview_edits_definition_and_confident_references (around symbols.rs:930-947) from `edits.len() >= 2` to `== 2`. Add a regression test that idx.callers(id) does not include the symbol's own definition when the function never calls itself.
@@ -691,7 +691,7 @@ Gate: `mise run verify`
   acceptance: A test starts the extracted loop from a GenesisState already at Stabilization, with a MockProvider whose default response is a mature=false judgment. It asserts the loop returns Ok within a small bounded number of advances, makes at most one maturity provider call, and reports next steps. A second test asserts that a V0 stage with an unclosed milestone stops rather than spinning. mise run hygiene resolves [new decision: genesis termination].
   test: `mise run test:crate -- tm-cli && mise run test:crate -- tm-genesis && mise run hygiene`
 
-- [ ] **nav-fix-cli-symbol-output-bugs** — Fix tm symbol refs/callers/callees output, the double parse, and `tm history why <path>` defaulting to line 1
+- [x] **nav-fix-cli-symbol-output-bugs** — Fix tm symbol refs/callers/callees output, the double parse, and `tm history why <path>` defaulting to line 1 (landed 9327843)
   model: sonnet · size: S · builds Rust: yes · area: code-navigation · deps: none
   files: `crates/tm-cli/src/search.rs`
   change: (1) symbol_refs (search.rs:~411) and symbol_callers (~455) put an absolute byte offset in ReferenceInfo.col. Compute a real line-relative column, or drop the field. (2) symbol_callers throws away the caller's name and kind; build SymbolInfo the way symbol_callees does (~480-524). (3) In refs/callers/callees, call code_intel.symbol_index() exactly once and resolve the symbol from that index, instead of also calling CodeIntel::resolve_symbol, which builds a second full tree-sitter parse. (4) In history_why (~583-591), when the locator has no :line, use the file's full line range (1..=line_count). Fall back to line 1 only if the file cannot be read, and say so in the output. Absorbs nav-fix-history-why-whole-file-default.
@@ -727,7 +727,7 @@ Gate: `mise run verify`
   acceptance: A tm-genesis unit test deserializes each fixture into the exact type that stage's parser expects and asserts success.
   test: `mise run test:crate -- tm-genesis`
 
-- [ ] **nav-fix-history-commits-table-fallback** — Don't silently drop blamed commits that are missing from the commits table
+- [x] **nav-fix-history-commits-table-fallback** — Don't silently drop blamed commits that are missing from the commits table (landed 2f6f769)
   model: sonnet · size: S · builds Rust: yes · area: code-navigation · deps: none
   files: `crates/tm-codeintel/src/history.rs`
   change: In HistoryIndex::why (history.rs:214-256), when a blamed sha has no row in the commits table, build its CommitSummary from a live git2 find_commit instead of skipping it.
