@@ -4,10 +4,11 @@
 //! `tests/auth_redaction.rs` already use — never the primary checkout, always a fresh tempdir.
 //!
 //! `TM_TEST_MOCK_PROVIDER=1` (`crates/tm-cli/src/agent.rs`) swaps the real model provider for a
-//! deterministic scripted one that always ends a run's single turn without submitting — enough
-//! to prove the CLI verb is wired end to end (a real `git worktree add` happens, on a fresh
-//! branch off `HEAD`, and it is *kept*, not silently deleted, since the run never reaches a
-//! forward-progress state) without a network call or a real API key. `crates/tm-cli/src/
+//! deterministic scripted one that, for a ticket-attached turn, plays a real
+//! artifact.store -> ticket.submit script — enough to prove the CLI verb is wired end to end (a
+//! real `git worktree add` happens, on a fresh branch off `HEAD`, and it is removed once the run
+//! is confirmed to have reached a forward-progress state) without a network call or a real API
+//! key. `crates/tm-cli/src/
 //! worktree.rs`'s own unit tests separately prove the git-level isolation guarantee itself in
 //! depth (a commit made inside the worktree never reaching the main branch); this file's job is
 //! narrower — prove `--worktree` reaches `crate::worktree::create` from real argument parsing.
@@ -79,7 +80,7 @@ fn run_tm_ok(dir: &Path, args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn run_with_worktree_creates_a_real_worktree_and_keeps_it_when_the_run_does_not_submit() {
+fn run_with_worktree_creates_a_real_worktree_and_removes_it_when_the_run_submits() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
     init_git_repo(root);
@@ -88,24 +89,25 @@ fn run_with_worktree_creates_a_real_worktree_and_keeps_it_when_the_run_does_not_
     let ticket_id: String = serde_json::from_slice(&created.stdout).expect("ticket id json");
     activate_ticket(root, &ticket_id);
 
-    // The mock provider only ever replies in text, so the attempt never submits: `tm run` reports
-    // that as the failure it is (exit 2), and the worktree is kept for inspection.
+    // Under `TM_TEST_MOCK_PROVIDER=1` a ticket-attached turn now plays a real scripted
+    // artifact.store -> ticket.submit turn (`ScriptedMockProvider`, `crates/tm-cli/src/
+    // agent.rs`), so a worker run reaches `submitted`: exit 0, and per
+    // `docs/decisions/D-012-run-worktree-isolation.md`'s policy the worktree is removed once the
+    // run is confirmed to have reached that forward-progress state.
     let output = run_tm(root, &["run", &ticket_id, "--worktree"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(
-        output.status.code(),
-        Some(2),
-        "a run that doesn't submit exits 2\nstdout: {stdout}\nstderr: {}",
+    assert!(
+        output.status.success(),
+        "a run that submits should succeed\nstdout: {stdout}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("did not finish"),
-        "the failure says what happened, got stderr {}",
-        String::from_utf8_lossy(&output.stderr)
+        stdout.contains("submitted its work"),
+        "the run's outcome is reported, got stdout {stdout}"
     );
     assert!(
-        stdout.contains("mock provider: this is a scripted reply"),
-        "the run's steps are shown as they happen, got stdout {stdout}"
+        stdout.contains("Removed worktree"),
+        "stdout should explain the worktree was removed, got stdout {stdout}"
     );
 
     let worktrees_dir = root.join(".tm").join("worktrees");
@@ -113,24 +115,9 @@ fn run_with_worktree_creates_a_real_worktree_and_keeps_it_when_the_run_does_not_
         .unwrap_or_else(|e| panic!("read {}: {e}\nstdout: {stdout}", worktrees_dir.display()))
         .collect::<Result<Vec<_>, _>>()
         .expect("read worktrees dir entries");
-    assert_eq!(
-        entries.len(),
-        1,
-        "exactly one worktree directory should exist\nstdout: {stdout}"
-    );
-    let wt_path = entries[0].path();
     assert!(
-        wt_path
-            .file_name()
-            .expect("worktree dir has a name")
-            .to_string_lossy()
-            .starts_with(&ticket_id),
-        "the worktree directory should be named after the ticket: {}",
-        wt_path.display()
-    );
-    assert!(
-        wt_path.join("README.md").exists(),
-        "the worktree must be a real checkout off HEAD"
+        entries.is_empty(),
+        "a submitted run's worktree checkout should be removed, found {entries:?}\nstdout: {stdout}"
     );
 
     let list = Command::new("git")
@@ -139,21 +126,8 @@ fn run_with_worktree_creates_a_real_worktree_and_keeps_it_when_the_run_does_not_
         .output()
         .expect("git worktree list");
     assert!(
-        String::from_utf8_lossy(&list.stdout).contains(&wt_path.to_string_lossy().into_owned()),
-        "git itself must know about the new worktree"
-    );
-
-    // The scripted mock provider ends the turn without submitting (see this file's own module
-    // doc comment), so the run never reaches a forward-progress state — per
-    // `docs/decisions/D-012-run-worktree-isolation.md`'s policy the worktree must be *kept*, not
-    // silently removed, since there is real state here worth inspecting.
-    assert!(
-        wt_path.exists(),
-        "a non-success run's worktree must be kept for inspection"
-    );
-    assert!(
-        stdout.contains("Kept worktree"),
-        "stdout should explain the worktree was kept: {stdout}"
+        !String::from_utf8_lossy(&list.stdout).contains(".tm/worktrees/"),
+        "git itself must no longer know about the removed worktree"
     );
 }
 

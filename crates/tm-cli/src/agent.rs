@@ -1619,7 +1619,7 @@ const TEST_MOCK_PROVIDER_ENV: &str = "TM_TEST_MOCK_PROVIDER";
 /// set, a deterministic mock (see that constant's docs).
 ///
 /// Provider selection, in order:
-/// - `TEST_MOCK_PROVIDER_ENV` set: a scripted [`tm_provider::MockProvider`], see
+/// - `TEST_MOCK_PROVIDER_ENV` set: a scripted [`ScriptedMockProvider`], see
 ///   [`build_mock_fabric`].
 /// - `DEVPASS_API_KEY`/`DEVPASS_BASE_URL`/`DEVPASS_MODEL` all set (see
 ///   [`DevPassProvider::preferred_model`]): a [`DevPassProvider`] is registered under the
@@ -1823,12 +1823,16 @@ fn fabric_model_for(fabric: &Fabric, slug: &str) -> Option<String> {
 }
 
 /// The [`TEST_MOCK_PROVIDER_ENV`] fabric: a `mock`/`m1` candidate for [`AGENT_ROLE`] backed by
-/// [`tm_provider::MockProvider`], scripted with a single default (any-request) text-only reply
-/// so a turn always completes deterministically as `AgentOutcome::Failed { detail: "model ended
-/// turn without submitting", .. }` after exactly one step — enough for a test to observe a real
-/// ticket getting created and real step output reaching the screen, without needing to predict
-/// the exact `CompletionRequest` `AgentLoop::drive` builds (which depends on the rendered system
-/// prompt/context pack) the way an in-process `MockProvider::script_response` test would.
+/// [`ScriptedMockProvider`], a tiny hand-rolled [`tm_provider::fabric::Provider`] that plays a
+/// real scripted turn — `artifact.store` an evidence artifact, then `ticket.submit` citing it —
+/// so `tm run`/`tm sched run` under `TM_TEST_MOCK_PROVIDER=1` actually reach `submitted`, not
+/// just a text-only reply that leaves the ticket `ready` forever. `tm_provider::MockProvider`'s
+/// own `script_default_response` can't do this: it replies with one fixed [`tm_provider::Completion`]
+/// for *every* request, so it has no way to see step 1's tool result (the new artifact's id) to
+/// build step 2's `ticket.submit` call. `ScriptedMockProvider` reads that id back out of the
+/// request's own `ContentBlock::ToolResult` text instead of predicting the exact
+/// `CompletionRequest` `AgentLoop::drive` builds (which depends on the rendered system
+/// prompt/context pack).
 fn build_mock_fabric(clock: Arc<dyn Clock>) -> Fabric {
     let table = RoleTable::parse(
         "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
@@ -1836,29 +1840,143 @@ fn build_mock_fabric(clock: Arc<dyn Clock>) -> Fabric {
     .expect("this crate's own static mock role table always parses");
     let fabric = Fabric::new(table, clock.clone());
     let model = ModelId::new("mock", "m1");
-    let received_at = clock.now();
-    let provider = tm_provider::MockProvider::new("mock", model.clone(), clock);
-    provider.script_default_response(tm_provider::Completion {
-        model,
-        candidates: vec![tm_provider::Candidate {
-            content: vec![tm_provider::ContentBlock::Text {
-                text: "mock provider: this is a scripted reply for TM_TEST_MOCK_PROVIDER, not a \
-                       real model turn."
-                    .to_string(),
-            }],
-            stop_reason: tm_provider::StopReason::EndTurn,
-        }],
-        usage: tm_provider::Usage {
-            input_tokens: 10,
-            output_tokens: 10,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-        },
-        latency: std::time::Duration::from_millis(0),
-        received_at,
-    });
+    let provider = ScriptedMockProvider { model, clock };
     fabric.register_provider(Arc::new(provider));
     fabric
+}
+
+/// The `mock`/`m1` provider [`build_mock_fabric`] registers: a deterministic, network-free
+/// scripted turn. Its shape depends on whether this turn has a ticket attached — a turn with no
+/// ticket (a plain chat session, `AGENT_ROLE`'s tool surface is still admitted under
+/// `Authority::root()` in that case, so `ticket.submit` is technically callable but would fail
+/// `require_ticket` at dispatch) replies in plain text and ends the turn instead, matching what a
+/// ticketless session actually needs:
+/// - [`chat_fragments`](tm_agent::chat_fragments)'s attached-ticket fragment is the only signal
+///   this provider has, since it only ever sees the rendered [`tm_provider::CompletionRequest`],
+///   never the `AgentContext` `AgentLoop::drive` built it from — so it greps `req.system` for the
+///   exact "attached to ticket" sentence `tm_agent::prompt::chat_fragments` renders when a ticket
+///   is attached, rather than guessing from tool availability alone.
+/// - Ticket attached: two steps, keyed on whether the request already carries a tool result
+///   naming the artifact this provider created in step 1. No artifact id seen yet: call
+///   `artifact.store` to record a short evidence note. Artifact id seen (step 1's result): call
+///   `ticket.submit`, citing that artifact as evidence — `Store::submit` rejects empty evidence
+///   and any artifact id it can't resolve (see `crates/tm-core/src/store.rs`'s `submit`), so a
+///   text-only or artifact-less script would never leave the ticket `ready`. This is what lets
+///   `tm run`/`tm sched run` under `TM_TEST_MOCK_PROVIDER=1` actually reach `submitted`.
+struct ScriptedMockProvider {
+    model: ModelId,
+    clock: Arc<dyn Clock>,
+}
+
+impl ScriptedMockProvider {
+    /// Substrings that only appear in the system prompt when a ticket is attached to this turn.
+    /// Two distinct prompts render a ticket line depending on which path built the turn (see
+    /// `crates/tm-agent/src/prompt.rs`): `chat_fragments`' "This session is attached to ticket"
+    /// (an interactive chat session with a ticket attached) and `worker_fragments`' "You are
+    /// executing ticket" (a background worker driving one ticket end to end — the path `tm run`/
+    /// `tm sched run` actually use). Checking only the chat marker meant this provider never saw
+    /// a ticket on the `tm run` path and always took the text-only branch, so a worker run under
+    /// `TM_TEST_MOCK_PROVIDER=1` never reached `submitted` — this is the fix for that.
+    const ATTACHED_TICKET_MARKERS: [&'static str; 2] = [
+        "This session is attached to ticket",
+        "You are executing ticket",
+    ];
+
+    /// The evidence artifact's id from `req`'s most recent `artifact.store` tool result (its
+    /// text is the compact JSON `{"artifact":"A-<n>"}` `ToolName::ArtifactStore` returns — see
+    /// `crates/tm-agent/src/tools.rs`), or `None` before that step has run.
+    fn stored_artifact_id(req: &tm_provider::CompletionRequest) -> Option<String> {
+        req.messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .filter_map(|b| match b {
+                tm_provider::ContentBlock::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .flat_map(|content| content.iter())
+            .filter_map(|b| match b {
+                tm_provider::ContentBlock::Text { text } => {
+                    serde_json::from_str::<serde_json::Value>(text).ok()
+                }
+                _ => None,
+            })
+            .find_map(|v| v.get("artifact")?.as_str().map(str::to_string))
+    }
+}
+
+#[async_trait::async_trait]
+impl tm_provider::fabric::Provider for ScriptedMockProvider {
+    fn id(&self) -> &str {
+        "mock"
+    }
+
+    async fn complete(
+        &self,
+        req: tm_provider::CompletionRequest,
+    ) -> Result<tm_provider::Completion, tm_provider::ProviderError> {
+        let model = req.model_or(&self.model);
+        let has_ticket = req
+            .system
+            .as_deref()
+            .is_some_and(|s| Self::ATTACHED_TICKET_MARKERS.iter().any(|m| s.contains(m)));
+        let (content, stop_reason) = if !has_ticket {
+            (
+                vec![tm_provider::ContentBlock::Text {
+                    text: "mock provider: this is a scripted reply for TM_TEST_MOCK_PROVIDER, \
+                           not a real model turn."
+                        .to_string(),
+                }],
+                tm_provider::StopReason::EndTurn,
+            )
+        } else {
+            let content = match Self::stored_artifact_id(&req) {
+                None => vec![tm_provider::ContentBlock::ToolUse {
+                    id: "call-0".to_string(),
+                    name: "artifact.store".to_string(),
+                    input: serde_json::json!({
+                        "kind": "report",
+                        "media_type": "text/plain",
+                        "content": "mock provider: scripted evidence for TM_TEST_MOCK_PROVIDER, \
+                                     not a real model turn.",
+                    }),
+                }],
+                Some(artifact) => vec![tm_provider::ContentBlock::ToolUse {
+                    id: "call-1".to_string(),
+                    name: "ticket.submit".to_string(),
+                    input: serde_json::json!({
+                        "summary": "mock provider: scripted reply for TM_TEST_MOCK_PROVIDER, not \
+                                     a real model turn.",
+                        "evidence": [artifact],
+                    }),
+                }],
+            };
+            (content, tm_provider::StopReason::ToolUse)
+        };
+        Ok(tm_provider::Completion {
+            model,
+            candidates: vec![tm_provider::Candidate {
+                content,
+                stop_reason,
+            }],
+            usage: tm_provider::Usage {
+                input_tokens: 10,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: std::time::Duration::from_millis(0),
+            received_at: self.clock.now(),
+        })
+    }
+
+    async fn embed(
+        &self,
+        _req: tm_provider::EmbedRequest,
+    ) -> Result<tm_provider::Embeddings, tm_provider::ProviderError> {
+        Err(tm_provider::ProviderError::MalformedResponse(
+            "the scripted TM_TEST_MOCK_PROVIDER provider does not script embeddings".to_string(),
+        ))
+    }
 }
 
 /// Plain words for why a turn failed, in place of the internal [`tm_core::FailureClass`] enum
@@ -3129,6 +3247,101 @@ mod tests {
         assert!(first.contains(&format!("# Ticket {ticket_id}")), "{first}");
         assert!(first.contains("original objective"));
         assert!(first.contains("a different prompt"));
+    }
+
+    /// The load-bearing regression this task fixes: under `TM_TEST_MOCK_PROVIDER=1`
+    /// (`build_mock_fabric`/`ScriptedMockProvider`), a turn against an attached ticket must
+    /// actually call tools and reach `AgentOutcome::Submitted`, not just reply in text and leave
+    /// the ticket `ready` forever — see `p1-mock-provider-scripted-tool-calls` in
+    /// `docs/tasks/TASKS.md`.
+    #[tokio::test]
+    async fn the_mock_fabric_scripts_a_real_submission_for_an_attached_ticket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = Arc::new(open_test_project(dir.path()));
+        let fabric = Arc::new(build_mock_fabric(project.clock.clone()));
+        let mut session =
+            AgentSession::new(project.clone(), Renderer::from_flags(false, true, true))
+                .with_fabric(fabric);
+        let ticket_id = create_scratch_ticket(&project.store, "ship the thing", &project.actor)
+            .expect("create ticket");
+        // `Store::submit` only accepts `(Running, Submit)` (`crates/tm-core/src/machine.rs`), so
+        // drive the ticket through the same states a real lease/attempt would before attaching
+        // it to this chat-style turn: Draft -> Blocked -> Ready (`activate`, no deps), then
+        // Ready -> Leased -> Running.
+        project
+            .store
+            .activate(&ticket_id, project.actor.clone())
+            .expect("activate");
+        project
+            .store
+            .transition(
+                &ticket_id,
+                tm_core::Trigger::LeaseAcquired,
+                project.actor.clone(),
+            )
+            .expect("lease");
+        project
+            .store
+            .transition(
+                &ticket_id,
+                tm_core::Trigger::WorkStarted,
+                project.actor.clone(),
+            )
+            .expect("start work");
+        session.attach_ticket(ticket_id.clone()).expect("attach");
+
+        let outcome = session
+            .run_turn_streaming("please finish this", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+
+        assert!(
+            matches!(outcome, AgentOutcome::Submitted { .. }),
+            "a ticket-attached turn under the scripted mock provider must reach Submitted, got \
+             {outcome:?}"
+        );
+        let ticket = project
+            .store
+            .view()
+            .expect("view")
+            .tickets
+            .get(&ticket_id)
+            .cloned()
+            .expect("ticket still exists");
+        assert_eq!(
+            ticket.state,
+            tm_core::TicketState::Submitted,
+            "the ticket itself must have transitioned to submitted, not stayed ready"
+        );
+    }
+
+    /// A ticketless chat turn under the same mock fabric must still reply in plain text and end
+    /// the turn instead of trying (and failing) to call `ticket.submit` with no ticket attached —
+    /// `ScriptedMockProvider` keys this off `chat_fragments`' attached-ticket sentence in the
+    /// system prompt, not tool availability, since `Authority::root()` admits `ticket.submit` for
+    /// a chat turn too.
+    #[tokio::test]
+    async fn the_mock_fabric_replies_in_text_with_no_ticket_attached() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = Arc::new(open_test_project(dir.path()));
+        let fabric = Arc::new(build_mock_fabric(project.clock.clone()));
+        let mut session =
+            AgentSession::new(project.clone(), Renderer::from_flags(false, true, true))
+                .with_fabric(fabric);
+
+        let outcome = session
+            .run_turn_streaming("hello", |_| {}, |_| Ok(false))
+            .await
+            .expect("turn runs");
+
+        assert!(
+            matches!(outcome, AgentOutcome::Replied { .. }),
+            "a ticketless turn under the scripted mock provider must reply, got {outcome:?}"
+        );
+        assert!(
+            project.store.view().expect("view").tickets.is_empty(),
+            "a chat turn must never create a ticket"
+        );
     }
 
     #[test]
