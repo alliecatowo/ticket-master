@@ -459,6 +459,9 @@ pub struct TicketNewArgs {
     /// Path patterns this ticket's lease may write to (repeatable).
     #[arg(long = "resource", value_name = "GLOB")]
     pub resources: Vec<String>,
+    /// Due date, `YYYY-MM-DD`.
+    #[arg(long, value_name = "DATE")]
+    pub due: Option<String>,
 }
 
 /// `tm ticket dispatch`
@@ -489,6 +492,9 @@ pub struct TicketEditArgs {
     /// New scheduling priority.
     #[arg(long)]
     pub priority: Option<i32>,
+    /// New due date, `YYYY-MM-DD`; `--due none` clears it.
+    #[arg(long, value_name = "DATE")]
+    pub due: Option<String>,
 }
 
 /// `tm ticket accept`

@@ -11,6 +11,10 @@ tm-types = { workspace = true }
 tm-events = { workspace = true }
 tm-auth = { workspace = true }
 rusqlite = { workspace = true }
+# `Ticket::due` (s1-ticket-due-date): a plain calendar date, no time-of-day/offset -- `time::Date`
+# rather than `tm_types::Timestamp`, matching how `tm-types`' own `Timestamp` already depends on
+# this same workspace `time` crate rather than pulling in a second date/time family (chrono).
+time = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

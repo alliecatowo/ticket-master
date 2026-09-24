@@ -736,6 +736,7 @@ mod tests {
             children: Vec::new(),
             dependencies: Vec::new(),
             milestone: None,
+            due: None,
             authority: Authority::none(),
             resources: Vec::new(),
             executor: tm_core::ExecutorRequirements {

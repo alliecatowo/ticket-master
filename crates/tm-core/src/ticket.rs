@@ -11,6 +11,58 @@
 use serde::{Deserialize, Serialize};
 use tm_types::{Authority, Budget, MilestoneId, Predicate, TicketId, Timestamp};
 
+/// `"YYYY-MM-DD"`, the one wire/CLI shape [`Ticket::due`] ever appears as -- both
+/// `due_date::{serialize,deserialize}` below and [`parse_due_date`]/[`format_due_date`] (used by
+/// `tm-cli`'s `--due` flag and `ticket show`/`ticket list`) share this single format constant so
+/// the shape can't drift between the two call sites.
+pub(crate) const DUE_DATE_FORMAT: &[time::format_description::BorrowedFormatItem<'static>] =
+    time::macros::format_description!("[year]-[month]-[day]");
+
+/// Parse a `--due`-flag-shaped date string, per `SPEC.md`'s "date literal" convention: exactly
+/// `YYYY-MM-DD`, no time-of-day, no offset. The error text is meant to reach a person verbatim
+/// (a CLI arg-parse error), so it stays plain rather than echoing `time`'s own parser diagnostic.
+pub fn parse_due_date(s: &str) -> Result<time::Date, String> {
+    time::Date::parse(s, DUE_DATE_FORMAT).map_err(|_| "use YYYY-MM-DD, e.g. 2026-10-01".to_string())
+}
+
+/// Render a due date back to its `YYYY-MM-DD` wire/display form.
+pub fn format_due_date(date: time::Date) -> String {
+    // `DUE_DATE_FORMAT` only ever fails to format on an out-of-range component, which
+    // `time::Date` cannot represent in the first place, so this is unreachable in practice; fall
+    // back to `time`'s own `Display` rather than panicking if it somehow ever did.
+    date.format(DUE_DATE_FORMAT)
+        .unwrap_or_else(|_| date.to_string())
+}
+
+/// `due`'s on-the-wire shape: a plain `"YYYY-MM-DD"` string (or absent/`null`), never `time`'s
+/// own internal representation -- matches [`Timestamp`]'s "stable string form" convention in
+/// `tm-types` rather than a machine-specific encoding.
+mod due_date {
+    use super::DUE_DATE_FORMAT as FORMAT;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use time::Date;
+
+    pub fn serialize<S: Serializer>(date: &Option<Date>, s: S) -> Result<S::Ok, S::Error> {
+        match date {
+            Some(d) => {
+                let formatted = d.format(FORMAT).map_err(serde::ser::Error::custom)?;
+                Some(formatted).serialize(s)
+            }
+            None => None::<String>.serialize(s),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Date>, D::Error> {
+        let opt: Option<String> = Option::deserialize(d)?;
+        match opt {
+            Some(s) => Date::parse(&s, FORMAT)
+                .map(Some)
+                .map_err(serde::de::Error::custom),
+            None => Ok(None),
+        }
+    }
+}
+
 /// What kind of work a ticket represents, per `SPEC.md` §4.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -365,6 +417,11 @@ pub struct Ticket {
     pub dependencies: Vec<TicketId>,
     /// The milestone this ticket belongs to, if any.
     pub milestone: Option<MilestoneId>,
+    /// When this ticket is due, if a date was set. `tm ticket new/edit --due YYYY-MM-DD` sets
+    /// it, `--due none` clears it; a milestone's own due date is the max of its member
+    /// tickets' due dates (`tm milestone show`).
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "due_date")]
+    pub due: Option<time::Date>,
     /// The authority this ticket may lease out to an executor.
     pub authority: Authority,
     /// Resource claims a lease on this ticket will hold.
@@ -792,6 +849,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             authority: Authority::none(),
             resources: vec![],
             executor: ExecutorRequirements {
@@ -839,6 +897,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             authority: Authority::read_only(),
             resources: vec![],
             executor: ExecutorRequirements {
@@ -894,6 +953,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             authority: Authority::none(),
             resources: vec![],
             executor: ExecutorRequirements {
@@ -936,6 +996,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             authority: Authority::default(),
             resources: vec![],
             executor: ExecutorRequirements {
@@ -963,5 +1024,79 @@ mod tests {
         let json = serde_json::to_string(&ticket).expect("serialize");
         let deserialized: Ticket = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(ticket, deserialized);
+    }
+
+    #[test]
+    fn parse_due_date_accepts_iso_date() {
+        let d = parse_due_date("2026-10-01").expect("valid date");
+        assert_eq!(format_due_date(d), "2026-10-01");
+    }
+
+    #[test]
+    fn parse_due_date_rejects_other_shapes_with_a_plain_message() {
+        let err = parse_due_date("10/01/2026").expect_err("not YYYY-MM-DD");
+        assert_eq!(err, "use YYYY-MM-DD, e.g. 2026-10-01");
+    }
+
+    #[test]
+    fn due_absent_serializes_without_the_field_and_round_trips_to_none() {
+        let ticket = ticket_minimal();
+        assert!(ticket.due.is_none());
+        let json = serde_json::to_value(&ticket).expect("serialize");
+        assert!(
+            json.get("due").is_none(),
+            "an absent due date should not appear in the JSON at all: {json}"
+        );
+        let back: Ticket = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.due, None);
+    }
+
+    #[test]
+    fn due_present_round_trips_as_a_plain_date_string() {
+        let mut ticket = ticket_minimal();
+        ticket.due = Some(parse_due_date("2026-10-01").expect("valid date"));
+        let json = serde_json::to_value(&ticket).expect("serialize");
+        assert_eq!(json["due"], "2026-10-01");
+        let back: Ticket = serde_json::from_value(json).expect("deserialize");
+        assert_eq!(back.due, ticket.due);
+    }
+
+    /// A minimal but complete [`Ticket`], for tests that only care about `due`.
+    fn ticket_minimal() -> Ticket {
+        let now = Timestamp::from_unix_seconds(0);
+        Ticket {
+            id: TicketId::new("T-1").expect("valid id"),
+            kind: TicketKind::Work,
+            objective: "x".to_string(),
+            state: TicketState::Draft,
+            parent: None,
+            children: vec![],
+            dependencies: vec![],
+            milestone: None,
+            due: None,
+            authority: Authority::default(),
+            resources: vec![],
+            executor: ExecutorRequirements {
+                role: tm_types::Role::ExplorerCheap,
+                human_required: false,
+                min_capability: tm_types::Tolerance::Any,
+            },
+            context_refs: vec![],
+            success: vec![],
+            verification: VerificationPolicy::Single,
+            budget: Budget::unlimited(),
+            retry: RetryPolicy {
+                max_attempts: 1,
+                base_delay_seconds: 0,
+                backoff_multiplier: 1.0,
+                max_delay_seconds: 0,
+            },
+            cycle: None,
+            attempts: 0,
+            failures: vec![],
+            priority: 0,
+            created: now,
+            updated: now,
+        }
     }
 }

@@ -65,7 +65,8 @@ pub use store::{
     DocRow, HarnessEpochRow, MirrorLinkRow, MirrorSyncDirection, Store, StoreTx, WorkflowDefRow,
 };
 pub use ticket::{
-    ContextRef, DependencyKind, ExecutorRequirements, FailureClass, FailureRecord, ResourceClaim,
-    ResourceMode, RetryPolicy, Ticket, TicketKind, TicketState, Trigger, VerificationPolicy,
+    format_due_date, parse_due_date, ContextRef, DependencyKind, ExecutorRequirements,
+    FailureClass, FailureRecord, ResourceClaim, ResourceMode, RetryPolicy, Ticket, TicketKind,
+    TicketState, Trigger, VerificationPolicy,
 };
 pub use view::{ProjectView, SchedulerView};

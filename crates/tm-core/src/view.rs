@@ -110,6 +110,7 @@ mod tests {
             children: Vec::new(),
             dependencies: Vec::new(),
             milestone: None,
+            due: None,
             authority: tm_types::Authority::none(),
             resources: Vec::new(),
             executor: crate::ticket::ExecutorRequirements {

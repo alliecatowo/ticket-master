@@ -1172,6 +1172,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             authority: Authority::none(),
             resources: vec![],
             executor: ExecutorRequirements {
@@ -1241,6 +1242,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             authority: Authority::none(),
             resources: vec![],
             executor: ExecutorRequirements {
@@ -1305,6 +1307,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             authority: Authority::none(),
             resources: vec![],
             executor: ExecutorRequirements {

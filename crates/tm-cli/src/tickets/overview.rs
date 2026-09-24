@@ -588,6 +588,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             state,
             priority: 0,
             authority: tm_types::Authority::default(),

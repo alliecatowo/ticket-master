@@ -28,6 +28,7 @@ fn test_ticket(id: &str, kind: TicketKind, state: TicketState, objective: &str) 
         children: Vec::new(),
         dependencies: Vec::new(),
         milestone: None,
+        due: None,
         authority: Authority::default(),
         resources: Vec::new(),
         executor: ExecutorRequirements {

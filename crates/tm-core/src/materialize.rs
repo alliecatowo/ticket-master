@@ -983,6 +983,17 @@ fn apply_ticket_updated(
                     )
                     .map_err(storage_err)?;
             }
+            "due" => {
+                // `value` is either a `"YYYY-MM-DD"` string (set) or JSON `null` (`--due none`
+                // clears it); `value.as_str()` is `None` for `null`, which binds SQL `NULL`, same
+                // convention as the `milestone` arm just above.
+                tx.raw()
+                    .execute(
+                        "UPDATE tickets SET due = ?2 WHERE id = ?1",
+                        params![ticket.as_str(), value.as_str()],
+                    )
+                    .map_err(storage_err)?;
+            }
             "created" | "updated" => {
                 if let Some(s) = value.as_str() {
                     let sql = if key == "created" {
@@ -1261,6 +1272,45 @@ mod tests {
                 .unwrap();
             assert_eq!(objective, "renamed");
             assert_eq!(priority, 5);
+        });
+    }
+
+    #[test]
+    fn ticket_updated_due_sets_then_clears_the_due_column() {
+        with_tx(|tx| {
+            let ticket = TicketId::new("T-1").unwrap();
+            let created = tm_events::Payload::from(TicketCreatedPayload {
+                ticket: ticket.clone(),
+                title: "T".into(),
+                parent: None,
+            });
+            apply(tx, &draft_event(1, EK::TicketCreated, created)).unwrap();
+
+            let set_due = tm_events::Payload::from(TicketUpdatedPayload {
+                ticket: ticket.clone(),
+                fields: serde_json::json!({ "due": "2026-10-01" }),
+            });
+            apply(tx, &draft_event(2, EK::TicketUpdated, set_due)).unwrap();
+
+            let due: Option<String> = tx
+                .raw()
+                .query_row("SELECT due FROM tickets WHERE id = 'T-1'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(due, Some("2026-10-01".to_string()));
+
+            // `--due none` sends JSON `null`, which must clear the column, same as the
+            // `milestone` field's convention just above.
+            let clear_due = tm_events::Payload::from(TicketUpdatedPayload {
+                ticket: ticket.clone(),
+                fields: serde_json::json!({ "due": null }),
+            });
+            apply(tx, &draft_event(3, EK::TicketUpdated, clear_due)).unwrap();
+
+            let due: Option<String> = tx
+                .raw()
+                .query_row("SELECT due FROM tickets WHERE id = 'T-1'", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(due, None);
         });
     }
 

@@ -474,6 +474,7 @@ pub fn validate_graph(proposal: &GraphCompilation, existing: &ProjectView) -> Ve
                 children: vec![],
                 dependencies,
                 milestone: None,
+                due: None,
                 authority,
                 resources: ticket.resources.clone(),
                 executor: ticket.executor.clone(),

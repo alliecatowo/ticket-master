@@ -24,6 +24,17 @@ use tm_core::ticket::{
 };
 use tm_types::{Authority, Budget, DecisionId, MilestoneId, PatternSet, Role, TicketId, TmError};
 
+/// Parse a `--due` flag value: `"none"` (case-insensitive) clears the due date, anything else
+/// must be `YYYY-MM-DD`. Shared by `ticket new --due`/`ticket edit --due`.
+fn parse_due_flag(s: &str) -> tm_types::Result<Option<time::Date>> {
+    if s.trim().eq_ignore_ascii_case("none") {
+        return Ok(None);
+    }
+    tm_core::ticket::parse_due_date(s)
+        .map(Some)
+        .map_err(TmError::parse)
+}
+
 /// One dependency edge, serializable for `--json` rendering (unlike
 /// [`tm_core::graph::DependencyEdge`], which intentionally carries no serde impl).
 #[derive(serde::Serialize)]
@@ -361,6 +372,7 @@ pub fn ticket_list(
             "Kind".to_string(),
             "State".to_string(),
             "Priority".to_string(),
+            "Due".to_string(),
             "Objective".to_string(),
         ];
         let rows: Vec<Vec<String>> = overviews
@@ -372,6 +384,10 @@ pub fn ticket_list(
                     kind_label(ticket.kind).to_string(),
                     state_label(ticket.state).to_string(),
                     ticket.priority.to_string(),
+                    ticket
+                        .due
+                        .map(tm_core::ticket::format_due_date)
+                        .unwrap_or_else(|| "-".to_string()),
                     o.objective.clone(),
                 ])
             })
@@ -456,6 +472,13 @@ fn format_ticket_text(ticket: &tm_core::ticket::Ticket) -> String {
             .milestone
             .as_ref()
             .map(|m| m.to_string())
+            .unwrap_or_else(|| "none".to_string())
+    ));
+    text.push_str(&format!(
+        "Due:          {}\n",
+        ticket
+            .due
+            .map(tm_core::ticket::format_due_date)
             .unwrap_or_else(|| "none".to_string())
     ));
     let depends_on = if ticket.dependencies.is_empty() {
@@ -566,6 +589,13 @@ pub fn ticket_new(
         Authority::worker()
     };
 
+    let due = args
+        .due
+        .as_deref()
+        .map(parse_due_flag)
+        .transpose()?
+        .flatten();
+
     let events = project.store.create_ticket(
         kind,
         args.objective.clone(),
@@ -585,6 +615,13 @@ pub fn ticket_new(
 
     if let Some(event) = events.first() {
         if let Some(created_id) = event_ticket_id(&event.subject) {
+            if let Some(due) = due {
+                project.store.update_ticket(
+                    &created_id,
+                    serde_json::json!({ "due": tm_core::ticket::format_due_date(due) }),
+                    project.actor.clone(),
+                )?;
+            }
             renderer.emit(&created_id, &format!("Created ticket {}", created_id))?;
         }
     }
@@ -617,9 +654,9 @@ pub fn ticket_edit(
 ) -> tm_types::Result<()> {
     let ticket_id = TicketId::new(&args.ticket)?;
 
-    if args.objective.is_none() && args.priority.is_none() {
+    if args.objective.is_none() && args.priority.is_none() && args.due.is_none() {
         return Err(TmError::parse(
-            "Provide --objective or --priority to update the ticket.",
+            "Provide --objective, --priority or --due to update the ticket.",
         ));
     }
 
@@ -631,6 +668,13 @@ pub fn ticket_edit(
 
     if let Some(pri) = args.priority {
         fields["priority"] = serde_json::json!(pri);
+    }
+
+    if let Some(due) = &args.due {
+        // `parse_due_flag` turns `--due none` into `None`, which serializes as JSON `null` here
+        // -- `apply_ticket_updated`'s `"due"` arm treats `null` the same as any other clear.
+        fields["due"] =
+            serde_json::json!(parse_due_flag(due)?.map(tm_core::ticket::format_due_date));
     }
 
     project
@@ -1345,11 +1389,24 @@ fn format_milestone_text(
         .count();
     let total = members.len();
 
+    // A milestone has no due date of its own; it's the max (latest) of its member tickets' due
+    // dates, per `--due`'s task spec, so setting the last member's due date moves the milestone's
+    // shown due date out automatically.
+    let due = members
+        .iter()
+        .filter_map(|t| tickets.get(t).and_then(|t| t.due))
+        .max();
+
     let mut text = format!("ID:      {}\n", milestone.id);
     text.push_str(&format!("Title:   {}\n", milestone.title));
     text.push_str(&format!(
         "State:   {}\n",
         milestone_state_label(milestone.state)
+    ));
+    text.push_str(&format!(
+        "Due:     {}\n",
+        due.map(tm_core::ticket::format_due_date)
+            .unwrap_or_else(|| "none".to_string())
     ));
     text.push_str(&format!("Tickets: {done}/{total} done\n"));
     if members.is_empty() {
@@ -1570,6 +1627,7 @@ mod tests {
                 children: vec![],
                 dependencies: vec![],
                 milestone: None,
+                due: None,
                 state: TicketState::Draft,
                 priority: 0,
                 authority: Authority::default(),
@@ -1722,6 +1780,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             state: TicketState::Draft,
             priority: 0,
             authority: Authority::default(),
@@ -1876,6 +1935,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone,
+            due: None,
             state,
             priority: 0,
             authority: Authority::default(),
@@ -1992,6 +2052,7 @@ mod tests {
                 kind: "task".to_string(),
                 parent: None,
                 milestone: Some("M-99".to_string()),
+                due: None,
                 priority: 0,
                 resources: vec![],
             },
@@ -2221,6 +2282,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             state: TicketState::Ready,
             priority: 0,
             authority: Authority::default(),
@@ -2357,6 +2419,7 @@ mod tests {
             kind: "task".to_string(),
             parent: None,
             milestone: None,
+            due: None,
             priority: 0,
             resources: vec![],
         };

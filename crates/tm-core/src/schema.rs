@@ -30,7 +30,13 @@ use tm_types::TmError;
 /// `3`: adds the `goals` table (`docs/audit-2026-09-18-fable.md` B-09, `SPEC.md` §29), following
 /// the same "add a table, bump the version, `migrate`'s existing forward-only loop picks it up"
 /// precedent `effects` (version 2, B-11) just set.
-pub const SCHEMA_VERSION: i64 = 3;
+///
+/// `4`: adds the `tickets.due` column (s1-ticket-due-date). Unlike a whole new table, `CREATE
+/// TABLE IF NOT EXISTS` does not retrofit a new column onto an existing `tickets` table, so
+/// `migrate` runs an explicit `ALTER TABLE tickets ADD COLUMN due TEXT` for this bump, guarded by
+/// a `pragma_table_info` check so it stays a no-op on a fresh database (whose `CREATE TABLE`
+/// already includes `due`) and on a database that already has it.
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// One materialized table's name, paired with the `CREATE TABLE IF NOT EXISTS` DDL for it.
 pub struct TableDef {
@@ -141,7 +147,8 @@ pub const TABLES: &[TableDef] = &[
                 failures TEXT NOT NULL,
                 priority INTEGER NOT NULL,
                 created TEXT NOT NULL,
-                updated TEXT NOT NULL
+                updated TEXT NOT NULL,
+                due TEXT
             )
         ",
     },
@@ -386,6 +393,23 @@ pub fn migrate(conn: &mut Connection, clock: &dyn tm_types::Clock) -> tm_types::
 
         // Create all indexes
         tx.execute_batch(INDEXES_SQL).map_err(storage_err)?;
+
+        // A brand-new `tickets` table already has `due` from its `CREATE TABLE` DDL above; an
+        // existing one predating schema version 4 does not, and `CREATE TABLE IF NOT EXISTS`
+        // cannot retrofit a column onto it. Add it explicitly, guarded so this stays a no-op once
+        // applied.
+        let has_due_column: bool = tx
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tickets') WHERE name = 'due'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(storage_err)?
+            > 0;
+        if !has_due_column {
+            tx.execute_batch("ALTER TABLE tickets ADD COLUMN due TEXT")
+                .map_err(storage_err)?;
+        }
 
         // Record the migration
         let now = clock.now();

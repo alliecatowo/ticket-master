@@ -315,6 +315,7 @@ mod tests {
             children: Vec::new(),
             dependencies: Vec::new(),
             milestone: None,
+            due: None,
             authority: Authority::none(),
             resources: Vec::<ResourceClaim>::new(),
             executor: ExecutorRequirements {

@@ -135,6 +135,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             authority: tm_types::Authority::none(),
             resources: vec![],
             executor: tm_core::ticket::ExecutorRequirements {

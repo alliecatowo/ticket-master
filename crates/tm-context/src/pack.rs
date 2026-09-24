@@ -313,6 +313,7 @@ fn query_carrier(query: &str) -> Result<Ticket> {
         children: Vec::new(),
         dependencies: Vec::new(),
         milestone: None,
+        due: None,
         authority: tm_types::Authority::none(),
         resources: Vec::new(),
         executor: ExecutorRequirements {
@@ -409,6 +410,7 @@ mod tests {
             children: vec![],
             dependencies: vec![],
             milestone: None,
+            due: None,
             authority: Authority::none(),
             resources: vec![],
             executor: ExecutorRequirements {

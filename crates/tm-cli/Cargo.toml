@@ -13,6 +13,10 @@ path = "src/main.rs"
 [dependencies]
 tm-types = { workspace = true }
 tm-core = { workspace = true }
+# `tickets.rs`'s `--due` flag parses/formats a plain calendar date (s1-ticket-due-date); already
+# pulled in transitively via `tm-core`, used directly here for `time::Date` in the parsed-flag
+# helper's return type.
+time = { workspace = true }
 tm-events = { workspace = true }
 tm-auth = { workspace = true }
 tm-acp = { workspace = true }

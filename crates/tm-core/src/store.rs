@@ -3185,7 +3185,7 @@ impl Store {
                 .prepare(
                     "SELECT id, kind, objective, state, parent, milestone, authority, resources, executor,
                             context_refs, success, verification, budget, retry, cycle, attempts, failures,
-                            priority, created, updated FROM tickets",
+                            priority, created, updated, due FROM tickets",
                 )
                 .map_err(storage_err)?;
             let rows = stmt
@@ -3211,6 +3211,7 @@ impl Store {
                         row.get::<_, i64>(17)?,
                         row.get::<_, String>(18)?,
                         row.get::<_, String>(19)?,
+                        row.get::<_, Option<String>>(20)?,
                     ))
                 })
                 .map_err(storage_err)?;
@@ -3236,6 +3237,7 @@ impl Store {
                     priority,
                     created,
                     updated,
+                    due,
                 ) = row.map_err(storage_err)?;
                 let ticket_id = TicketId::new(id)?;
                 let ticket = Ticket {
@@ -3261,6 +3263,10 @@ impl Store {
                     priority: priority as i32,
                     created: parse_ts(&created)?,
                     updated: parse_ts(&updated)?,
+                    due: due
+                        .map(|d| crate::ticket::parse_due_date(&d))
+                        .transpose()
+                        .map_err(TmError::invariant)?,
                 };
                 view.tickets.insert(ticket_id, ticket);
             }
