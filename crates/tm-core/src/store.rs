@@ -39,18 +39,19 @@ use std::sync::Arc;
 
 use rusqlite::{Connection, OptionalExtension};
 use tm_events::payload::{
-    ArtifactCreatedPayload, AuthorityRevertedPayload, CommandCompletedPayload,
-    CommandStartedPayload, DecisionCreatedPayload, DecisionSupersededPayload,
-    DocInvalidatedPayload, DocReconciledPayload, DocRegisteredPayload, EffectCompletedPayload,
-    EffectFailedPayload, EffectJournaledPayload, GoalClaimedCompletePayload, GoalReorientedPayload,
-    GoalSetPayload, GoalStepAddedPayload, GoalStepCompletedPayload, HarnessPromotedPayload,
-    MilestoneClosedPayload, MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload,
-    MirrorPulledPayload, MirrorPushedPayload, SessionEndedPayload, SessionJoinedPayload,
-    SessionStartedPayload, TicketAuditRejectedPayload, TicketAuditedPayload,
-    TicketBudgetExhaustedPayload, TicketBudgetHandoffPayload, TicketCancelledPayload,
-    TicketChildAddedPayload, TicketClosedPayload, TicketCreatedPayload,
-    TicketDependencyAddedPayload, TicketDependencyRemovedPayload, TicketEscalatedPayload,
-    TicketFailedPayload, TicketForkedPayload, TicketHeartbeatPayload, TicketLeaseExpiredPayload,
+    ArtifactCreatedPayload, AuthorityRevertedPayload, ClassifyDecidedPayload,
+    CommandCompletedPayload, CommandStartedPayload, DecisionCreatedPayload,
+    DecisionSupersededPayload, DocInvalidatedPayload, DocReconciledPayload, DocRegisteredPayload,
+    EffectCompletedPayload, EffectFailedPayload, EffectJournaledPayload,
+    GoalClaimedCompletePayload, GoalReorientedPayload, GoalSetPayload, GoalStepAddedPayload,
+    GoalStepCompletedPayload, HarnessPromotedPayload, MilestoneClosedPayload,
+    MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload, MirrorPulledPayload,
+    MirrorPushedPayload, SessionEndedPayload, SessionJoinedPayload, SessionStartedPayload,
+    TicketAuditRejectedPayload, TicketAuditedPayload, TicketBudgetExhaustedPayload,
+    TicketBudgetHandoffPayload, TicketCancelledPayload, TicketChildAddedPayload,
+    TicketClosedPayload, TicketCreatedPayload, TicketDependencyAddedPayload,
+    TicketDependencyRemovedPayload, TicketEscalatedPayload, TicketFailedPayload,
+    TicketForkedPayload, TicketHeartbeatPayload, TicketLeaseExpiredPayload,
     TicketLeaseReleasedPayload, TicketLeasedPayload, TicketReopenedPayload,
     TicketRetryScheduledPayload, TicketStateChangedPayload, TicketSubmittedPayload,
     TicketUpdatedPayload, TicketVerificationFailedPayload, TicketVerifiedPayload,
@@ -87,6 +88,10 @@ pub struct Store {
     /// `$TM_HOME/projects/<key>/` for a global-scope one), needed for artifact on-disk
     /// placement ([`crate::artifact::plan_storage`]).
     state_dir: PathBuf,
+    /// The shadow-triage decider [`Store::create_ticket`] calls, if any (D-020). `None` by
+    /// default on every constructor below, so an unconfigured `Store` behaves exactly as before
+    /// this field existed -- see [`Store::with_decider`].
+    decider: Option<Arc<dyn TriageDecider>>,
 }
 
 /// One open [`tm_events::log::Tx`], scoped to a single [`Store::transaction`] call.
@@ -225,6 +230,40 @@ pub struct WorkflowDefRow {
 
 fn storage_err(e: rusqlite::Error) -> TmError {
     TmError::storage(e.to_string())
+}
+
+/// A [`Store::create_ticket`]-local seam for shadow-mode triage (D-020): the trait a configured
+/// `Role::Decider` candidate is adapted to before this crate can call it. Defined here rather
+/// than depending on `tm_provider::decide::DecisionProvider` directly so tm-core's deterministic
+/// core keeps its existing dependency graph -- SPEC.md §0's "no network, no model calls" applies
+/// to this crate's own machinery, not to a caller-supplied seam it invokes best-effort. A real
+/// adapter (wrapping `tm_provider::decide::DecisionProvider`/`tm_provider::mock::
+/// MockDecisionProvider`) is built and injected by whichever caller wires up provider config
+/// (`tm-cli`, `tm-scheduler`); tests in this module use a small in-crate fake.
+pub trait TriageDecider: Send + Sync {
+    /// The provider slug this decider answers as (`ClassifyDecidedPayload::backend`).
+    fn backend(&self) -> &str;
+    /// The model id this decider answers as (`ClassifyDecidedPayload::model`).
+    fn model(&self) -> &str;
+    /// Answer a triage-shaped question (kind/routing) about `objective`. `Err` on any
+    /// decider-side failure; [`Store::create_ticket`] logs it and continues rather than failing
+    /// or blocking ticket creation on it (D-020 decision 6, "shadow first").
+    fn triage(&self, objective: &str) -> Result<TriageAnswer, String>;
+}
+
+/// One [`TriageDecider::triage`] outcome, shaped to fill [`tm_events::payload::
+/// ClassifyDecidedPayload`]'s `answers`/`thresholds`/`latency_ms`/`cost_micros` fields.
+#[derive(Debug, Clone)]
+pub struct TriageAnswer {
+    /// Per-question answers, keyed by question id (mirrors `tm_provider::decide::DecideResponse`
+    /// serialized to JSON).
+    pub answers: serde_json::Value,
+    /// The thresholds applied when interpreting `answers`, if any (empty object when none).
+    pub thresholds: serde_json::Value,
+    /// How long the decider call took.
+    pub latency_ms: u64,
+    /// The call's cost in micro-dollars, `None` for a free local backend.
+    pub cost_micros: Option<u64>,
 }
 
 fn to_json_text<T: serde::Serialize>(value: &T) -> tm_types::Result<String> {
@@ -541,7 +580,17 @@ impl Store {
             clock,
             ids,
             state_dir: state_dir.to_path_buf(),
+            decider: None,
         })
+    }
+
+    /// Configure the shadow-triage decider [`Store::create_ticket`] calls (D-020). Additive and
+    /// opt-in: a `Store` with no decider configured behaves exactly as it did before this field
+    /// existed.
+    #[must_use]
+    pub fn with_decider(mut self, decider: Arc<dyn TriageDecider>) -> Self {
+        self.decider = Some(decider);
+        self
     }
 
     /// The directory holding this project's `project.db` and `artifacts/` (not necessarily the
@@ -639,6 +688,18 @@ impl Store {
         priority: i32,
         actor: ParticipantId,
     ) -> tm_types::Result<Vec<Event>> {
+        // Call the decider (if configured) *before* opening the write transaction: a real
+        // decider backend is a network round-trip, and `run_command` holds `project.db`'s write
+        // lock for its whole closure -- calling out to the network from inside it would hold
+        // that lock open for the round-trip, which is exactly the "never block" guarantee this
+        // task exists to preserve. `redacted_objective` matches the redaction the persisted
+        // event itself gets (`StoreTx::append`'s `redact_event_draft`), so `input_hash` is a
+        // hash of what the classify.decided event actually carries, not of the raw text.
+        let redacted_objective = tm_auth::redact(&objective);
+        let triage_result = self
+            .decider
+            .as_ref()
+            .map(|decider| (decider.clone(), decider.triage(&redacted_objective)));
         self.run_command(move |view| {
             if let Some(parent_id) = &parent {
                 let parent_ticket = view
@@ -692,6 +753,41 @@ impl Store {
                 Id::from(id.clone()),
                 Payload::from(TicketUpdatedPayload { ticket: id.clone(), fields }),
             ));
+            if let Some((decider, result)) = &triage_result {
+                match result {
+                    Ok(answer) => {
+                        drafts.push(EventDraft::new(
+                            actor.clone(),
+                            Id::from(id.clone()),
+                            Payload::from(ClassifyDecidedPayload {
+                                site: "ticket.created".to_string(),
+                                backend: decider.backend().to_string(),
+                                model: decider.model().to_string(),
+                                input_hash: blake3::hash(redacted_objective.as_bytes())
+                                    .to_hex()
+                                    .to_string(),
+                                questions_hash: blake3::hash(b"triage/kind+routing")
+                                    .to_hex()
+                                    .to_string(),
+                                answers: answer.answers.clone(),
+                                thresholds: answer.thresholds.clone(),
+                                disposition: "shadow".to_string(),
+                                latency_ms: answer.latency_ms,
+                                cost_micros: answer.cost_micros,
+                            }),
+                        ));
+                    }
+                    Err(err) => {
+                        // Never fail or block ticket creation on a decider error (D-020
+                        // decision 6, "shadow first") -- log and move on.
+                        tracing::warn!(
+                            ticket = %id,
+                            error = %err,
+                            "shadow-triage decider call failed; continuing without classify.decided"
+                        );
+                    }
+                }
+            }
             Ok(drafts)
         })
     }
@@ -5777,5 +5873,171 @@ mod tests {
         let (_dir, store) = open_store();
         let subject = Id::new("T-999999");
         assert_eq!(store.event_count_for(&subject).expect("event_count_for"), 0);
+    }
+
+    /// A [`TriageDecider`] fake that always answers, standing in for the real adapter over
+    /// `tm_provider::mock::MockDecisionProvider` that a caller in a crate depending on both
+    /// tm-provider and tm-core (e.g. `tm-cli`) is expected to build -- see this module's
+    /// `TriageDecider` doc comment. Proves `d20-shadow-triage-new-tickets`'s acceptance at the
+    /// tm-core seam: creating a ticket with a decider configured appends both `ticket.created`
+    /// and `classify.decided(shadow)`.
+    struct FakeTriageDecider;
+
+    impl TriageDecider for FakeTriageDecider {
+        fn backend(&self) -> &str {
+            "mock"
+        }
+
+        fn model(&self) -> &str {
+            "mock-decider"
+        }
+
+        fn triage(&self, objective: &str) -> Result<TriageAnswer, String> {
+            Ok(TriageAnswer {
+                answers: serde_json::json!({"kind": {"value": "job"}, "objective": objective}),
+                thresholds: serde_json::json!({}),
+                latency_ms: 5,
+                cost_micros: None,
+            })
+        }
+    }
+
+    /// A [`TriageDecider`] fake that always fails, for the "decider error never blocks ticket
+    /// creation" half of `d20-shadow-triage-new-tickets`'s acceptance.
+    struct FailingTriageDecider;
+
+    impl TriageDecider for FailingTriageDecider {
+        fn backend(&self) -> &str {
+            "mock"
+        }
+
+        fn model(&self) -> &str {
+            "mock-decider"
+        }
+
+        fn triage(&self, _objective: &str) -> Result<TriageAnswer, String> {
+            Err("decider unreachable".to_string())
+        }
+    }
+
+    #[test]
+    fn create_ticket_with_a_decider_configured_appends_ticket_created_and_classify_decided_shadow()
+    {
+        let dir = TempDir::new().expect("tempdir");
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store = Store::open_with(dir.path(), clock, ids)
+            .expect("open store")
+            .with_decider(Arc::new(FakeTriageDecider));
+
+        let events = store
+            .create_ticket(
+                TicketKind::Work,
+                "do the thing".into(),
+                None,
+                None,
+                Authority::root(),
+                vec![],
+                executor(),
+                vec![],
+                vec![],
+                VerificationPolicy::None,
+                Budget::unlimited(),
+                retry(),
+                0,
+                actor(),
+            )
+            .expect("create_ticket should succeed");
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == tm_events::EventKind::TicketCreated),
+            "expected a ticket.created event"
+        );
+        let classify = events
+            .iter()
+            .find(|e| e.kind == tm_events::EventKind::ClassifyDecided)
+            .expect("expected a classify.decided event in the same append");
+        let payload = classify
+            .payload
+            .as_classify_decided()
+            .expect("classify.decided payload");
+        assert_eq!(payload.disposition, "shadow");
+        assert_eq!(payload.backend, "mock");
+        assert_eq!(payload.model, "mock-decider");
+    }
+
+    #[test]
+    fn create_ticket_with_no_decider_configured_behaves_exactly_as_before() {
+        let (_dir, store) = open_store();
+
+        let events = store
+            .create_ticket(
+                TicketKind::Work,
+                "do the thing".into(),
+                None,
+                None,
+                Authority::root(),
+                vec![],
+                executor(),
+                vec![],
+                vec![],
+                VerificationPolicy::None,
+                Budget::unlimited(),
+                retry(),
+                0,
+                actor(),
+            )
+            .expect("create_ticket should succeed");
+
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.kind == tm_events::EventKind::ClassifyDecided),
+            "no decider configured means no classify.decided event"
+        );
+    }
+
+    #[test]
+    fn create_ticket_with_a_failing_decider_still_succeeds_without_a_classify_decided_event() {
+        let dir = TempDir::new().expect("tempdir");
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store = Store::open_with(dir.path(), clock, ids)
+            .expect("open store")
+            .with_decider(Arc::new(FailingTriageDecider));
+
+        let events = store
+            .create_ticket(
+                TicketKind::Work,
+                "do the thing".into(),
+                None,
+                None,
+                Authority::root(),
+                vec![],
+                executor(),
+                vec![],
+                vec![],
+                VerificationPolicy::None,
+                Budget::unlimited(),
+                retry(),
+                0,
+                actor(),
+            )
+            .expect("a decider error must never fail ticket creation");
+
+        assert!(
+            events
+                .iter()
+                .any(|e| e.kind == tm_events::EventKind::TicketCreated),
+            "ticket.created must still be appended"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| e.kind == tm_events::EventKind::ClassifyDecided),
+            "a decider error must not produce a classify.decided event"
+        );
     }
 }
