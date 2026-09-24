@@ -447,19 +447,63 @@ impl SymbolIndex {
         }
     }
 
+    /// Symbols grouped by name, for O(bucket) lookup in [`SymbolIndex::candidates_in`] instead
+    /// of an `O(symbols)` scan per lookup. Built once per bulk resolution pass
+    /// ([`SymbolIndex::references`]/[`SymbolIndex::callers`], each of which resolves every
+    /// reference in the index) and reused across all of them — those two used to call
+    /// [`SymbolIndex::resolve`] (an `O(symbols)` scan) once per reference, and `callers` added
+    /// an outer scan over every function on top of that, so building this once up front turns
+    /// their dominant cost from `O(references * symbols)` (`callers`: `O(functions *
+    /// references) + O(references * symbols)`) into `O(symbols)` to build plus `O(references *
+    /// bucket size)` to resolve. Definition lookups keep the plain [`SymbolIndex::resolve`]/
+    /// [`SymbolIndex::candidates`] scan below; `callees` and `rename_preview` also resolve one
+    /// reference at a time on that plain scan and are left unbatched (`callees` scopes to one
+    /// function's own references already, and `rename_preview` isn't on this task's hot path) —
+    /// building a full name index for a single lookup would only add overhead, not remove it.
+    fn name_index(&self) -> HashMap<&str, Vec<&Symbol>> {
+        let mut map: HashMap<&str, Vec<&Symbol>> = HashMap::new();
+        // Iterate most-recently-parsed first, so within a tier the freshest definition of a
+        // repeated name wins ties deterministically — matches the scanning path's tie-break.
+        for s in self.symbols.iter().rev() {
+            map.entry(s.name.as_str()).or_default().push(s);
+        }
+        map
+    }
+
     /// All symbols named `name` visible from `from_path`, most-preferred resolution first:
     /// same-file, then same-package (same directory), then workspace-wide.
     pub fn candidates(&self, name: &str, from_path: &str) -> Vec<&Symbol> {
+        // Iterate most-recently-parsed first, so within a tier the freshest definition of a
+        // repeated name wins ties deterministically.
+        Self::tier_by_scope(
+            self.symbols.iter().rev().filter(|s| s.name == name),
+            from_path,
+        )
+    }
+
+    /// [`SymbolIndex::candidates`] against a pre-built [`SymbolIndex::name_index`], for callers
+    /// resolving many references in one pass.
+    fn candidates_in<'s>(
+        name_idx: &HashMap<&'s str, Vec<&'s Symbol>>,
+        name: &str,
+        from_path: &str,
+    ) -> Vec<&'s Symbol> {
+        Self::tier_by_scope(name_idx.get(name).into_iter().flatten().copied(), from_path)
+    }
+
+    /// Split an already name-filtered set of symbols into same-file/same-package/rest tiers
+    /// relative to `from_path`, most-preferred first — the scope-ranking half of
+    /// [`SymbolIndex::candidates`]/[`SymbolIndex::candidates_in`], shared so the plain-scan and
+    /// name-indexed paths can't drift apart on tie-break order.
+    fn tier_by_scope<'s>(
+        found: impl Iterator<Item = &'s Symbol>,
+        from_path: &str,
+    ) -> Vec<&'s Symbol> {
         let from_dir = dir_of(from_path);
         let mut same_file = Vec::new();
         let mut same_package = Vec::new();
         let mut rest = Vec::new();
-        // Iterate most-recently-parsed first, so within a tier the freshest definition of a
-        // repeated name wins ties deterministically.
-        for s in self.symbols.iter().rev() {
-            if s.name != name {
-                continue;
-            }
+        for s in found {
             if s.path == from_path {
                 same_file.push(s);
             } else if dir_of(&s.path) == from_dir {
@@ -481,6 +525,22 @@ impl SymbolIndex {
     /// rest listed in `ambiguous_with`. `None`/`Empty` candidates yield `symbol_id: None`.
     pub fn resolve(&self, reference: &Reference) -> Resolution {
         let candidates = self.candidates(&reference.symbol_hint, &reference.path);
+        Self::resolution_from(candidates, reference)
+    }
+
+    /// [`SymbolIndex::resolve`] against a pre-built [`SymbolIndex::name_index`], for callers
+    /// resolving many references in one pass.
+    fn resolve_in(name_idx: &HashMap<&str, Vec<&Symbol>>, reference: &Reference) -> Resolution {
+        let candidates = Self::candidates_in(name_idx, &reference.symbol_hint, &reference.path);
+        Self::resolution_from(candidates, reference)
+    }
+
+    /// The ranking half of [`SymbolIndex::resolve`]/[`SymbolIndex::resolve_in`]: given
+    /// `candidates` already tiered by [`SymbolIndex::tier_by_scope`], pick same-file if exactly
+    /// one, else same-package if exactly one, else workspace-wide if exactly one, else the
+    /// first workspace candidate with `Ambiguous` confidence and the rest listed in
+    /// `ambiguous_with`.
+    fn resolution_from(candidates: Vec<&Symbol>, reference: &Reference) -> Resolution {
         if candidates.is_empty() {
             // No better variant expresses "no candidates"; callers must check symbol_id first.
             return Resolution {
@@ -542,9 +602,10 @@ impl SymbolIndex {
 
     /// Every reference that resolves (per [`SymbolIndex::resolve`]) to `symbol_id`.
     pub fn references(&self, symbol_id: u64) -> Vec<&Reference> {
+        let name_idx = self.name_index();
         self.references
             .iter()
-            .filter(|r| self.resolve(r).symbol_id == Some(symbol_id))
+            .filter(|r| Self::resolve_in(&name_idx, r).symbol_id == Some(symbol_id))
             .collect()
     }
 
@@ -567,19 +628,42 @@ impl SymbolIndex {
 
     /// Symbols that reference `symbol_id` from within a function/method body, i.e. call sites
     /// (heuristic: references inside a Function-kind container that resolve to `symbol_id`).
+    ///
+    /// Resolves each reference in the index at most once (via a shared name index) and looks
+    /// up its containing function only among that reference's own file's functions, instead of
+    /// the old version's `O(functions * references)` outer path/range scan stacked on top of an
+    /// `O(references * symbols)` resolve cost (each resolve rescanning every symbol by name).
     pub fn callers(&self, symbol_id: u64) -> Vec<&Symbol> {
-        self.symbols
-            .iter()
-            .filter(|s| s.kind == SymbolKind::Function)
-            .filter(|func| {
-                self.references.iter().any(|r| {
-                    r.path == func.path
-                        && r.range.byte_start >= func.range.byte_start
-                        && r.range.byte_end <= func.range.byte_end
-                        && self.resolve(r).symbol_id == Some(symbol_id)
-                })
-            })
-            .collect()
+        let name_idx = self.name_index();
+        let mut funcs_by_path: HashMap<&str, Vec<&Symbol>> = HashMap::new();
+        for s in &self.symbols {
+            if s.kind == SymbolKind::Function {
+                funcs_by_path.entry(s.path.as_str()).or_default().push(s);
+            }
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        for r in &self.references {
+            if Self::resolve_in(&name_idx, r).symbol_id != Some(symbol_id) {
+                continue;
+            }
+            let Some(funcs) = funcs_by_path.get(r.path.as_str()) else {
+                continue;
+            };
+            for &func in funcs {
+                if r.range.byte_start >= func.range.byte_start
+                    && r.range.byte_end <= func.range.byte_end
+                    && seen.insert(func.id)
+                {
+                    out.push(func);
+                }
+            }
+        }
+        // Deterministic order (previously the self.symbols iteration order, roughly ascending
+        // id) independent of the reference-iteration order used to find matches above.
+        out.sort_by_key(|s| s.id);
+        out
     }
 
     /// Symbols called by the function/method `symbol_id` (heuristic: references contained
@@ -1144,5 +1228,149 @@ mod tests {
     #[test]
     fn grammar_for_other_language_is_none() {
         assert!(SymbolIndex::grammar_for(Language::Other).is_none());
+    }
+
+    // p1-symbol-refs-callers-perf: `references`/`callers` batch-resolve every reference in the
+    // index through one shared `name_index` instead of re-scanning every symbol by name per
+    // reference (`references`), or per reference per candidate function on top of that
+    // (`callers`, previously an `O(functions * references)` outer scan stacked on `O(references
+    // * symbols)` resolves). These tests pin the observable behavior — which reference/caller
+    // each name resolves to across files, name collisions and non-matching hints — so that
+    // batching can't silently change results.
+
+    #[test]
+    fn references_and_callers_work_across_multiple_files_sharing_one_index() {
+        let mut idx = SymbolIndex::new();
+        idx.parse_file("src/lib.rs", "fn helper() {}\n", Language::Rust)
+            .unwrap();
+        idx.parse_file(
+            "src/main.rs",
+            "fn main() { helper(); }\nfn other() { helper(); }\n",
+            Language::Rust,
+        )
+        .unwrap();
+        idx.parse_file("src/unrelated.rs", "fn noop() {}\n", Language::Rust)
+            .unwrap();
+
+        let helper_id = idx.definition("helper", "src/lib.rs").unwrap().id;
+        let main_id = idx.definition("main", "src/main.rs").unwrap().id;
+        let other_id = idx.definition("other", "src/main.rs").unwrap().id;
+
+        // Two call sites, both in src/main.rs, neither in src/unrelated.rs.
+        let refs = idx.references(helper_id);
+        assert_eq!(refs.len(), 2);
+        assert!(refs.iter().all(|r| r.path == "src/main.rs"));
+
+        let callers = idx.callers(helper_id);
+        let mut caller_ids: Vec<u64> = callers.iter().map(|s| s.id).collect();
+        caller_ids.sort_unstable();
+        let mut expected = vec![main_id, other_id];
+        expected.sort_unstable();
+        assert_eq!(caller_ids, expected);
+    }
+
+    #[test]
+    fn references_resolves_the_right_symbol_when_a_name_collides_across_files() {
+        let mut idx = SymbolIndex::new();
+        idx.parse_file("a/one.rs", "fn dup() {}", Language::Rust)
+            .unwrap();
+        idx.parse_file("b/two.rs", "fn dup() {}", Language::Rust)
+            .unwrap();
+        // Same directory as a/one.rs, so this call site resolves unambiguously (same-package)
+        // to a/one.rs's `dup`, never b/two.rs's — a name-collision case `references` must keep
+        // distinguishing per reference, not just per name, once it resolves in a shared batch.
+        idx.parse_file("a/caller.rs", "fn user() { dup(); }", Language::Rust)
+            .unwrap();
+
+        let one_id = idx.definition("dup", "a/one.rs").unwrap().id;
+        let two_id = idx.definition("dup", "b/two.rs").unwrap().id;
+        assert_ne!(one_id, two_id);
+
+        let refs_for_one = idx.references(one_id);
+        let refs_for_two = idx.references(two_id);
+        assert_eq!(refs_for_one.len(), 1);
+        assert_eq!(refs_for_one[0].path, "a/caller.rs");
+        assert!(refs_for_two.is_empty());
+    }
+
+    #[test]
+    fn references_excludes_a_reference_whose_hint_does_not_match_the_target_name() {
+        let mut idx = SymbolIndex::new();
+        idx.parse_file(
+            "src/a.rs",
+            "fn helper() {}\nfn other() {}\nfn main() { helper(); other(); }\n",
+            Language::Rust,
+        )
+        .unwrap();
+
+        let helper_id = idx.definition("helper", "src/a.rs").unwrap().id;
+        let refs = idx.references(helper_id);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].symbol_hint, "helper");
+    }
+
+    #[test]
+    fn callers_finds_a_caller_in_a_different_file_than_the_callee() {
+        let mut idx = SymbolIndex::new();
+        idx.parse_file("src/lib.rs", "pub fn helper() {}\n", Language::Rust)
+            .unwrap();
+        idx.parse_file("src/main.rs", "fn main() { helper(); }\n", Language::Rust)
+            .unwrap();
+
+        let helper_id = idx.definition("helper", "src/lib.rs").unwrap().id;
+        let main_id = idx.definition("main", "src/main.rs").unwrap().id;
+        assert_eq!(
+            idx.callers(helper_id)
+                .iter()
+                .map(|s| s.id)
+                .collect::<Vec<_>>(),
+            vec![main_id]
+        );
+    }
+
+    #[test]
+    fn name_indexed_resolve_agrees_with_the_plain_scan_for_every_reference() {
+        let mut idx = SymbolIndex::new();
+        // Same-file resolution.
+        idx.parse_file(
+            "a/one.rs",
+            "fn dup() {}\nfn user() { dup(); }\n",
+            Language::Rust,
+        )
+        .unwrap();
+        // A second `dup`, elsewhere in the workspace.
+        idx.parse_file("a/two.rs", "fn dup() {}", Language::Rust)
+            .unwrap();
+        // Same-package resolution: a third `dup`, with a caller in its own directory (`b/`) and
+        // no `dup` of its own, so it resolves via the same-package tier, not same-file.
+        idx.parse_file("b/three.rs", "fn dup() {}", Language::Rust)
+            .unwrap();
+        idx.parse_file("b/caller.rs", "fn user4() { dup(); }", Language::Rust)
+            .unwrap();
+        // Ambiguous resolution: a caller with no same-file/same-package `dup` candidate, so it
+        // must pick among every workspace `dup`.
+        idx.parse_file("c/caller.rs", "fn user2() { dup(); }", Language::Rust)
+            .unwrap();
+        // A hint with no matching definition anywhere.
+        idx.parse_file("d/four.rs", "fn user3() { missing(); }", Language::Rust)
+            .unwrap();
+
+        let name_idx = idx.name_index();
+        for r in &idx.references {
+            let scanned = idx.resolve(r);
+            let batched = SymbolIndex::resolve_in(&name_idx, r);
+            assert_eq!(
+                scanned.symbol_id, batched.symbol_id,
+                "symbol_id mismatch for reference {r:?}"
+            );
+            assert_eq!(
+                scanned.confidence, batched.confidence,
+                "confidence mismatch for reference {r:?}"
+            );
+            assert_eq!(
+                scanned.ambiguous_with, batched.ambiguous_with,
+                "ambiguous_with mismatch for reference {r:?}"
+            );
+        }
     }
 }
