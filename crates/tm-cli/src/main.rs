@@ -27,7 +27,19 @@ async fn main() {
     load_dotenv();
     let tracing_guard = install_tracing();
 
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => {
+            // `err.print()` matches `clap::Error::exit`'s own formatting (colored, routed to
+            // stdout for `--help`/`--version`, stderr otherwise) without `exit`'s hardcoded exit
+            // code -- `args::usage_exit_code` picks the code instead, so a real usage error (an
+            // unknown flag, a missing value, and so on) exits distinctly from
+            // `TmError::TurnFailed`'s 2 (a real, failed agent turn) or `TmError::BudgetExhausted`'s
+            // 4, letting a caller scripting against `tm -p`'s exit codes tell them apart.
+            let _ = err.print();
+            std::process::exit(tm_cli::args::usage_exit_code(&err));
+        }
+    };
     let renderer = Renderer::from_flags(cli.global.json, cli.global.quiet, cli.global.no_color);
 
     let result = dispatch(cli, &renderer).await;
@@ -149,7 +161,8 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
                 None => None,
             };
 
-            if let Some(prompt) = cli.prompt {
+            if cli.prompt {
+                let prompt = cli.prompt_text.unwrap_or_default();
                 let mut session =
                     resumed.unwrap_or_else(|| agent::AgentSession::new(project.clone(), *renderer));
                 return session.run_prompt(&prompt).await;
@@ -351,7 +364,8 @@ mod tests {
                 plain: false,
                 project: None,
             },
-            prompt: None,
+            prompt: false,
+            prompt_text: None,
             continue_session: false,
             resume: None,
             // `fresh: true` bypasses the D-003 Phase 1-C promotion check entirely (it never reads
@@ -402,7 +416,8 @@ mod tests {
                 plain: false,
                 project: None,
             },
-            prompt: None,
+            prompt: false,
+            prompt_text: None,
             continue_session: false,
             resume: None,
             command: Some(Command::Ticket(tm_cli::args::TicketCommand::List(
@@ -443,7 +458,8 @@ mod tests {
                 plain: false,
                 project: None,
             },
-            prompt: None,
+            prompt: false,
+            prompt_text: None,
             continue_session: false,
             resume: None,
             command: Some(Command::Search(tm_cli::args::SearchArgs {

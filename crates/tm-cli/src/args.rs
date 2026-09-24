@@ -22,6 +22,29 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
+/// Exit code for a malformed command line (`Cli::try_parse` failed on something other than a
+/// plain `--help`/`--version` request), distinct from a real turn's own exit codes (`2` for a
+/// failed turn, `4` for a budget run-out -- see `crate::render::exit_code`) so a caller scripting
+/// against `tm -p`'s exit code can tell a bad invocation apart from a real, failed agent turn.
+/// Matches sysexits' `EX_USAGE`.
+pub const USAGE_EXIT_CODE: i32 = 64;
+
+/// Map a [`clap::Error`] from [`Cli::try_parse`] to the process exit code `main` should use.
+///
+/// Only `--help`/`--version` exit `0`, matching `clap::Error::exit`'s own behavior for those --
+/// they aren't malformed input, just a request to print something and stop. Every other error
+/// (an unknown flag, a missing value, a bad or missing subcommand, and so on) is a real usage
+/// error and gets [`USAGE_EXIT_CODE`] -- including clap's "no subcommand given, so show help"
+/// case, since a required subcommand left off is exactly the kind of malformed invocation a
+/// caller's exit-code check should be able to see, not read as success.
+pub fn usage_exit_code(err: &clap::Error) -> i32 {
+    use clap::error::ErrorKind;
+    match err.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => 0,
+        _ => USAGE_EXIT_CODE,
+    }
+}
+
 /// `tm`: the Ticketmaster command line.
 ///
 /// With no subcommand, `tm` opens the interactive coding agent in the current project (walking
@@ -35,9 +58,20 @@ pub struct Cli {
     pub global: GlobalOpts,
 
     /// Run one prompt to completion and exit (scriptable; see `--json`). Exits 0 on a reply, 2
-    /// when the agent failed the task, 4 when it ran out of budget.
-    #[arg(short = 'p', long = "prompt", value_name = "TEXT")]
-    pub prompt: Option<String>,
+    /// when the agent failed the task, 4 when it ran out of budget, 64 when the command line
+    /// itself is malformed.
+    // A plain flag plus a trailing positional (below), not a value-taking `-p <text>`, so flag
+    // order never matters: `tm -p --json "text"` and `tm --json -p "text"` both work, and
+    // `tm -p --help` prints help instead of trying to parse `--help` as the prompt text.
+    #[arg(short = 'p', long = "prompt", requires = "prompt_text")]
+    pub prompt: bool,
+
+    /// The prompt to run with `-p`.
+    // Requires `-p`: a bare positional with no `-p` must be a usage error, not a silently
+    // accepted no-op, so a mistyped subcommand (`tm tikcets`) still fails loudly instead of
+    // being swallowed as prompt text.
+    #[arg(value_name = "TEXT", requires = "prompt")]
+    pub prompt_text: Option<String>,
 
     /// Continue the most recent conversation in this project.
     #[arg(short = 'c', long = "continue", conflicts_with = "resume")]
@@ -1315,14 +1349,57 @@ mod tests {
     fn bare_tm_means_the_agent() {
         let cli = Cli::parse_from(["tm"]);
         assert!(cli.command.is_none());
-        assert!(cli.prompt.is_none());
+        assert!(!cli.prompt);
+        assert!(cli.prompt_text.is_none());
     }
 
     #[test]
     fn bare_tm_with_prompt_is_the_scriptable_agent() {
         let cli = Cli::parse_from(["tm", "-p", "fix the build"]);
         assert!(cli.command.is_none());
-        assert_eq!(cli.prompt.as_deref(), Some("fix the build"));
+        assert!(cli.prompt);
+        assert_eq!(cli.prompt_text.as_deref(), Some("fix the build"));
+    }
+
+    #[test]
+    fn prompt_flag_order_does_not_matter() {
+        let a = Cli::parse_from(["tm", "-p", "--json", "fix it"]);
+        assert!(a.prompt);
+        assert_eq!(a.prompt_text.as_deref(), Some("fix it"));
+        let b = Cli::parse_from(["tm", "--json", "-p", "fix it"]);
+        assert!(b.prompt);
+        assert_eq!(b.prompt_text.as_deref(), Some("fix it"));
+    }
+
+    #[test]
+    fn prompt_flag_with_help_prints_help_not_a_parse_error() {
+        let err = Cli::try_parse_from(["tm", "-p", "--help"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn prompt_flag_without_text_is_a_usage_error() {
+        let err = Cli::try_parse_from(["tm", "-p"]).unwrap_err();
+        assert_eq!(usage_exit_code(&err), USAGE_EXIT_CODE);
+    }
+
+    #[test]
+    fn mistyped_subcommand_is_a_usage_error_not_prompt_text() {
+        let err = Cli::try_parse_from(["tm", "tikcets"]).unwrap_err();
+        assert_eq!(usage_exit_code(&err), USAGE_EXIT_CODE);
+    }
+
+    #[test]
+    fn subcommand_missing_its_own_verb_is_a_usage_error_not_success() {
+        let err = Cli::try_parse_from(["tm", "ticket"]).unwrap_err();
+        assert_eq!(usage_exit_code(&err), USAGE_EXIT_CODE);
+    }
+
+    #[test]
+    fn usage_exit_code_is_distinct_from_turn_failed_and_budget_exhausted() {
+        assert_ne!(USAGE_EXIT_CODE, 2);
+        assert_ne!(USAGE_EXIT_CODE, 4);
+        assert_eq!(USAGE_EXIT_CODE, 64);
     }
 
     #[test]
