@@ -51,8 +51,44 @@ never drift between sessions:
   parallel tracks, with `<sha>` set to the commit those tracks branched from. See "Parallel
   tracks against a moving `main`" below for what it does and honestly does not catch.
 - `mise run clean` — `rm -rf target`. This machine runs tight on disk; do this after a verify
-  pass lands, not mid-build. `mise run worktree:clean` sweeps every worktree under
-  `.claude/worktrees/` the same way.
+  pass lands, not mid-build. `mise run worktree:clean` force-removes every worktree under
+  `.claude/worktrees/` unconditionally — prefer `mise run disk:guard` below for routine cleanup;
+  it checks locks, uncommitted changes, busy targets and merge status before removing anything,
+  same as it does when run unattended.
+
+### Keeping disk use bounded: `disk:guard`
+
+This machine's disk has hit 100% for real — `target/` growing unbounded (primary + every
+worktree, ~8-11GB each), stale worktrees piling up under `.claude/worktrees/`, and leftover probe
+scratch dirs under `$TMPDIR`/`/tmp` are the three causes seen so far. `scripts/disk-guard.sh`
+(POSIX `sh`, no non-macOS-base dependencies) is the guard against all three, and it's meant to run
+unattended, not just by hand:
+
+- `mise run disk:guard -- [--dry-run] [--verbose] [--aggressive]` runs it once. `--dry-run` prints
+  what it *would* remove without touching anything; always use this to check before an unattended
+  install, and whenever changing the script itself. `--aggressive` (or free disk already below
+  30GB, automatically) shortens every target dir's idle threshold to 15 minutes instead of the
+  normal 2h (worktrees)/6h (primary).
+- `mise run disk:guard:install` installs it as a launchd agent
+  (`~/Library/LaunchAgents/com.ticketmaster.disk-guard.plist`, `com.ticketmaster.disk-guard`)
+  running every 30 minutes, pointed at the primary checkout's own copy of the script — run this
+  from the primary checkout, not a worktree, and only when you've actually decided to install it
+  (it's not installed as a side effect of anything else). `mise run disk:guard:uninstall` reverses
+  it.
+- What it removes, every run: an idle `target/` dir (build output only — never anything else in a
+  checkout) in the primary checkout or any worktree, once idle past its threshold and not busy (no
+  cargo/rustc/rust-analyzer process cwd'd inside, no `.cargo-lock` held open, no recent
+  `.fingerprint`/`deps` activity); a worktree under `.claude/worktrees/` once it's unlocked, has no
+  uncommitted/untracked changes, its HEAD is contained in `main` or `integrate`, and no process has
+  its cwd inside it; and tm scratch dirs (`$TMPDIR/tmp.*`, `/tmp/tm-trials`, `/tmp/tm-wide`,
+  `/tmp/tm-accidental-*`) older than 6 hours that look like tm's own (a `.tm` dir, a `projects/`
+  dir, a `tm` binary, or a git repo whose only commits are from the last day).
+- What it never removes: anything under a worktree named `odw-*` or `tm-integrate` (owner
+  decision — those stay until their work lands, even though their `target/` dirs are still fair
+  game), a locked worktree, a worktree with local changes or an unmerged HEAD, or anything a live
+  process has its cwd inside.
+- Every run appends one line to `~/Library/Logs/tm-disk-guard.log`: timestamp, free space before
+  and after, and what was removed (or `(nothing removed)`).
 - `mise run tui` — build and launch the ratatui TUI against the current directory's project. It
   opens on the chat, which is Claude Code's chat (D-019 §1 and its "Implemented: chat"): nothing
   typed is a shortcut; on an empty prompt `/` opens commands, `?` the shortcuts panel, `!` shell
