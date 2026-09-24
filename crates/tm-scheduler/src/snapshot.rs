@@ -100,6 +100,58 @@ pub fn capture_workspace_snapshot(repo_root: &Path) -> Option<WorkspaceSnapshot>
     })
 }
 
+/// Restore a previously captured [`WorkspaceSnapshot`] into a fresh, isolated `git worktree` at
+/// `target_dir`, following the same `git worktree add` convention `tm_cli::worktree` (D-012)
+/// already uses for `tm run --worktree`: a real, separate checkout in **detached HEAD** at the
+/// snapshot commit, rather than touching `repo_root`'s own working tree, index, or `HEAD`.
+/// `target_dir` should be absolute (it is resolved with `repo_root` as the child process's
+/// working directory) and must not exist yet, or must be an empty directory — `git worktree add`
+/// refuses an existing, non-empty path. Note that `git worktree add` does still write to
+/// `repo_root`'s `.git/worktrees/<name>/` admin metadata to register the new worktree, same as
+/// any `git worktree add`; the caller owns removing it (`git worktree remove`) once done with it.
+///
+/// Returns `None` (logged, not propagated as an error) on any `git` failure — no `git` on
+/// `$PATH`, `repo_root` isn't a git repository, or `snapshot.git_ref` no longer resolves (e.g.
+/// it was gc'd or its pinning ref was never actually written) — matching
+/// [`capture_workspace_snapshot`]'s "auxiliary, never load-bearing" convention.
+pub fn restore_workspace_snapshot(
+    repo_root: &Path,
+    snapshot: &WorkspaceSnapshot,
+    target_dir: &Path,
+) -> Option<()> {
+    let output = Command::new("git")
+        .args(["worktree", "add"])
+        .arg(target_dir)
+        .arg(&snapshot.git_ref)
+        .current_dir(repo_root)
+        // Never the parent's stdout: under `tm mcp` that is the JSON-RPC stream.
+        .stdout(std::process::Stdio::null())
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => Some(()),
+        Ok(out) => {
+            tracing::warn!(
+                sha = %snapshot.sha,
+                git_ref = %snapshot.git_ref,
+                target_dir = %target_dir.display(),
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "git worktree add did not succeed; skipping workspace snapshot restore"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                sha = %snapshot.sha,
+                git_ref = %snapshot.git_ref,
+                "could not run `git`; skipping workspace snapshot restore"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +237,48 @@ mod tests {
         assert!(
             !String::from_utf8_lossy(&status.stdout).trim().is_empty(),
             "working tree should still show the uncommitted modification"
+        );
+    }
+
+    #[test]
+    fn restore_puts_the_dirty_contents_into_a_fresh_worktree() {
+        let dir = init_repo();
+        let root = dir.path();
+        fs::write(root.join("a.txt"), "two\n").expect("modify a.txt");
+
+        let snapshot = capture_workspace_snapshot(root).expect("snapshot captured");
+
+        let target = tempfile::tempdir().expect("tempdir for target");
+        // `git worktree add` refuses an existing, non-empty path, so restore into a not-yet-
+        // existing subdirectory of a fresh tempdir, matching a real caller's "not created yet"
+        // target.
+        let target_dir = target.path().join("restored");
+
+        restore_workspace_snapshot(root, &snapshot, &target_dir)
+            .expect("restore into a fresh worktree");
+
+        let restored = fs::read_to_string(target_dir.join("a.txt")).expect("read restored a.txt");
+        assert_eq!(restored, "two\n");
+
+        // `repo_root` itself is never mutated: its own working tree still shows the original
+        // uncommitted modification, unaffected by the restore.
+        let original = fs::read_to_string(root.join("a.txt")).expect("read original a.txt");
+        assert_eq!(original, "two\n");
+    }
+
+    #[test]
+    fn restore_against_a_non_repo_returns_none() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let snapshot = WorkspaceSnapshot {
+            sha: "deadbeef".to_string(),
+            git_ref: "refs/tm/snapshots/deadbeef".to_string(),
+            base_head: None,
+        };
+        let target = tempfile::tempdir().expect("tempdir for target");
+        let target_dir = target.path().join("restored");
+        assert_eq!(
+            restore_workspace_snapshot(dir.path(), &snapshot, &target_dir),
+            None
         );
     }
 
