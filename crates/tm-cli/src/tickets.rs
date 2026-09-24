@@ -1400,6 +1400,17 @@ pub fn dispatch_decision(
     }
 }
 
+/// Truncate a decision's text to 40 characters for the `decision_list` Summary column, on
+/// character boundaries rather than byte offsets so a multi-byte character near the cutoff
+/// doesn't panic.
+fn decision_summary(text: &str) -> String {
+    if text.chars().count() > 40 {
+        format!("{}...", text.chars().take(37).collect::<String>())
+    } else {
+        text.to_string()
+    }
+}
+
 /// `tm decision list`
 pub fn decision_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let view = project.store.view()?;
@@ -1425,12 +1436,7 @@ pub fn decision_list(project: &Project, renderer: &Renderer) -> tm_types::Result
                     "Superseded"
                 }
                 .to_string();
-                let summary = if d.subject.len() > 40 {
-                    format!("{}...", &d.subject[..37])
-                } else {
-                    d.subject.clone()
-                };
-                vec![d.id.to_string(), status, summary]
+                vec![d.id.to_string(), status, decision_summary(&d.decision)]
             })
             .collect();
         let table = Table::new(headers, rows);
@@ -1752,6 +1758,75 @@ mod tests {
         };
         assert!(truncated.ends_with("..."));
         assert_eq!(truncated.chars().count(), 47 + 3);
+    }
+
+    #[test]
+    fn decision_supersede_links_the_new_decision_to_the_old_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = test_project(dir.path());
+        project
+            .store
+            .record_decision(
+                "decision".to_string(),
+                "Use SQLite".to_string(),
+                "simplicity".to_string(),
+                vec![],
+                vec![],
+                vec![],
+                project.actor.clone(),
+            )
+            .unwrap();
+        let old_id = DecisionId::new("D-001").unwrap();
+        project
+            .store
+            .supersede(
+                &old_id,
+                "decision".to_string(),
+                "Use MongoDB".to_string(),
+                "changed mind".to_string(),
+                vec![],
+                vec![],
+                vec![],
+                project.actor.clone(),
+            )
+            .unwrap();
+
+        let view = project.store.view().unwrap();
+        let new_id = DecisionId::new("D-002").unwrap();
+        let new_decision = view.decisions.get(&new_id).expect("D-002 materialized");
+        // The regression this guards: `supersedes` used to always materialize as NULL, so the
+        // new decision lost the link back to the one it superseded.
+        assert_eq!(new_decision.supersedes, Some(old_id));
+        assert_eq!(new_decision.decision, "Use MongoDB");
+    }
+
+    #[test]
+    fn decision_summary_leaves_short_text_unchanged() {
+        assert_eq!(decision_summary("Use SQLite"), "Use SQLite");
+    }
+
+    #[test]
+    fn decision_summary_truncates_long_ascii_text_with_ellipsis() {
+        let text = "This is a much longer decision text than forty characters";
+        let summary = decision_summary(text);
+        assert!(summary.ends_with("..."));
+        assert_eq!(summary.chars().count(), 37 + 3);
+        assert_ne!(
+            summary, "decision",
+            "must use the decision text, not the subject class"
+        );
+    }
+
+    #[test]
+    fn decision_summary_does_not_panic_on_a_multi_byte_character_at_the_cutoff() {
+        // `d.decision` is free text a user types, unlike `d.subject` (almost always the
+        // ASCII literal "decision"); a raw byte-slice `&s[..37]` would panic if byte 37 landed
+        // inside a multi-byte character. `decision_summary` truncates on character boundaries
+        // via `.chars().take(37)` instead.
+        let text: String = "é".repeat(60);
+        let summary = decision_summary(&text);
+        assert!(summary.ends_with("..."));
+        assert_eq!(summary.chars().count(), 37 + 3);
     }
 
     fn test_project(root: &std::path::Path) -> Project {

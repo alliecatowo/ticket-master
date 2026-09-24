@@ -218,6 +218,7 @@ payload_kinds! {
         decision: DecisionId,
         ticket: Option<TicketId>,
         summary: String,
+        supersedes: Option<DecisionId>,
     };
     "Payload for `decision.superseded`.", DecisionSupersededPayload, DecisionSuperseded, DecisionSuperseded, as_decision_superseded, {
         decision: DecisionId,
@@ -593,6 +594,7 @@ mod tests {
             decision: decision.clone(),
             ticket: Some(ticket.clone()),
             summary: "Use async Rust runtime".into(),
+            supersedes: None,
         });
 
         let json = original.to_json().unwrap();
@@ -611,6 +613,7 @@ mod tests {
             decision: decision.clone(),
             ticket: None,
             summary: "Project governance".into(),
+            supersedes: None,
         });
 
         let json = original.to_json().unwrap();

@@ -382,7 +382,7 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
                         "INSERT INTO decisions (id, subject, decision, reason, evidence,
                                 affected_tickets, affected_paths, author, ts, supersedes,
                                 superseded_by)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL, NULL)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)
                          ON CONFLICT(id) DO UPDATE SET subject = excluded.subject,
                             decision = excluded.decision, reason = excluded.reason,
                             evidence = excluded.evidence,
@@ -398,6 +398,7 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
                             affected_paths,
                             event.actor.as_str(),
                             event.ts.to_rfc3339(),
+                            p.supersedes.as_ref().map(|d| d.as_str()),
                         ],
                     )
                     .map_err(storage_err)?;
@@ -1407,6 +1408,7 @@ mod tests {
                 decision: d1.clone(),
                 ticket: None,
                 summary,
+                supersedes: None,
             });
             apply(tx, &draft_event(1, EK::DecisionCreated, created)).unwrap();
 

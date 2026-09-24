@@ -1760,6 +1760,7 @@ impl Store {
                     decision: id,
                     ticket: affected_tickets.first().cloned(),
                     summary,
+                    supersedes: None,
                 }),
             )])
         })
@@ -1810,6 +1811,7 @@ impl Store {
                         decision: new_id.clone(),
                         ticket: affected_tickets.first().cloned(),
                         summary,
+                        supersedes: Some(supersedes.clone()),
                     }),
                 ),
                 EventDraft::new(
@@ -4316,7 +4318,7 @@ mod tests {
             )
             .expect("record decision");
         let decision_id = DecisionId::new(events[0].subject.as_str()).unwrap();
-        store
+        let superseding_events = store
             .supersede(
                 &decision_id,
                 "naming".into(),
@@ -4328,8 +4330,14 @@ mod tests {
                 actor(),
             )
             .expect("supersede");
+        let new_id = DecisionId::new(superseding_events[0].subject.as_str()).unwrap();
         let view = store.view().expect("view");
         assert!(!view.decisions.get(&decision_id).unwrap().is_active());
+        // The new decision keeps a real link back to the one it superseded, not a dropped NULL.
+        assert_eq!(
+            view.decisions.get(&new_id).unwrap().supersedes,
+            Some(decision_id)
+        );
     }
 
     #[test]
