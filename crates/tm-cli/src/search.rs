@@ -374,8 +374,10 @@ pub fn symbol_def(
             renderer.emit(&info, &human)?;
         }
         None => {
-            let json = serde_json::json!(null);
-            renderer.emit(&json, "Symbol not found")?;
+            return Err(tm_types::TmError::not_found(
+                "symbol",
+                format!("`{}` in this project", args.name),
+            ));
         }
     }
 
@@ -430,8 +432,10 @@ pub fn symbol_refs(
 
         renderer.emit(&refs, &human)?;
     } else {
-        let json = serde_json::json!(null);
-        renderer.emit(&json, "Symbol not found")?;
+        return Err(tm_types::TmError::not_found(
+            "symbol",
+            format!("`{}` in this project", args.name),
+        ));
     }
 
     Ok(())
@@ -490,8 +494,10 @@ pub fn symbol_callers(
 
         renderer.emit(&caller_info, &human)?;
     } else {
-        let json = serde_json::json!(null);
-        renderer.emit(&json, "Symbol not found")?;
+        return Err(tm_types::TmError::not_found(
+            "symbol",
+            format!("`{}` in this project", args.name),
+        ));
     }
 
     Ok(())
@@ -548,8 +554,10 @@ pub fn symbol_callees(
 
         renderer.emit(&info, &human)?;
     } else {
-        let json = serde_json::json!(null);
-        renderer.emit(&json, "Symbol not found")?;
+        return Err(tm_types::TmError::not_found(
+            "symbol",
+            format!("`{}` in this project", args.name),
+        ));
     }
 
     Ok(())
@@ -564,7 +572,20 @@ pub fn symbol_outline(
     let code_intel = project.code_intel()?;
     let path_str = args.path.to_string_lossy();
 
+    // Check if file exists first to distinguish between "not found" and "no definitions"
+    let full_path = code_intel.project_root().join(path_str.as_ref());
+    if !full_path.exists() {
+        return Err(tm_types::TmError::not_found("file", path_str.as_ref()));
+    }
+
     let entries = code_intel.outline(&path_str)?;
+
+    if entries.is_empty() {
+        return Err(tm_types::TmError::not_found(
+            "file",
+            format!("{} contains no top-level definitions", path_str),
+        ));
+    }
 
     let outlines: Vec<OutlineInfo> = entries
         .iter()
@@ -574,19 +595,15 @@ pub fn symbol_outline(
         })
         .collect();
 
-    let human = if outlines.is_empty() {
-        "No outline entries found".to_string()
-    } else {
-        let rows: Vec<Vec<String>> = outlines
-            .iter()
-            .map(|o| {
-                let indent = "  ".repeat(o.depth as usize);
-                vec![format!("{}{}", indent, o.rendered)]
-            })
-            .collect();
-        let table = Table::new(vec!["Definition".to_string()], rows);
-        table.render()
-    };
+    let rows: Vec<Vec<String>> = outlines
+        .iter()
+        .map(|o| {
+            let indent = "  ".repeat(o.depth as usize);
+            vec![format!("{}{}", indent, o.rendered)]
+        })
+        .collect();
+    let table = Table::new(vec!["Definition".to_string()], rows);
+    let human = table.render();
 
     renderer.emit(&outlines, &human)?;
 
@@ -1014,5 +1031,53 @@ mod tests {
         assert!(!result.snippet.is_empty());
         let json = serde_json::to_string(&result).expect("should serialize");
         assert!(json.contains("\"snippet\":\"fn calculate() -> i32 { 42 }\""));
+    }
+
+    #[test]
+    fn test_symbol_error_message_format() {
+        // Verify that symbol not found errors use the correct message format
+        let symbol_name = "nonexistent_fn";
+        let err =
+            tm_types::TmError::not_found("symbol", format!("`{}` in this project", symbol_name));
+        let msg = err.to_string();
+        assert!(msg.contains("not found"), "Error should say not found");
+        assert!(
+            msg.contains(symbol_name),
+            "Error should include the symbol name"
+        );
+    }
+
+    #[test]
+    fn test_outline_file_not_found_error_message_format() {
+        // Verify that file not found errors in outline use the correct message format
+        let file_path = "no/such/file.rs";
+        let err = tm_types::TmError::not_found("file", file_path);
+        let msg = err.to_string();
+        assert!(msg.contains("file"), "Error should mention file");
+        assert!(msg.contains("not found"), "Error should say file not found");
+        assert!(
+            msg.contains(file_path),
+            "Error should include the file path"
+        );
+    }
+
+    #[test]
+    fn test_outline_no_definitions_error_message_format() {
+        // Verify that no definitions errors in outline use the correct message format
+        let file_path = "src/main.rs";
+        let err = tm_types::TmError::not_found(
+            "file",
+            format!("{} contains no top-level definitions", file_path),
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("file"), "Error should mention file");
+        assert!(
+            msg.contains("no top-level definitions"),
+            "Error should say no definitions"
+        );
+        assert!(
+            msg.contains(file_path),
+            "Error should include the file path"
+        );
     }
 }
