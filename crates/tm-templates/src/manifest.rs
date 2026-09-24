@@ -93,8 +93,12 @@ pub struct TemplateManifest {
 /// or missing a required field (`id`, `version`).
 pub fn load(dir: &Path) -> Result<TemplateManifest> {
     let manifest_path = dir.join("manifest.toml");
-    let contents = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| TmError::Io(format!("reading {}: {e}", manifest_path.display())))?;
+    let contents = std::fs::read_to_string(&manifest_path).map_err(|_e| {
+        TmError::Io(format!(
+            "template source not found: {} (manifest.toml)",
+            dir.display()
+        ))
+    })?;
     let file: ManifestFile = toml::from_str(&contents)
         .map_err(|e| TmError::parse(format!("{}: {e}", manifest_path.display())))?;
     let checksum = checksum_dir(dir)?;
@@ -205,6 +209,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let err = load(dir.path()).unwrap_err();
         assert!(matches!(err, TmError::Io(_)));
+        // Verify the error message is human-friendly and doesn't include OS error codes
+        let msg = err.to_string();
+        assert!(msg.contains("template source not found"));
+        assert!(msg.contains("manifest.toml"));
+        // Should not contain OS error noise
+        assert!(!msg.contains("No such file"));
+        assert!(!msg.contains("os error"));
     }
 
     #[test]
