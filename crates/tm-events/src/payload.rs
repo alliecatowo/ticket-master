@@ -443,18 +443,17 @@ payload_kinds! {
         ticket: TicketId,
         summary: String,
     };
-    "Payload for `classify.decided` (D-020): one `DecisionProvider` call's outcome -- site, backend, model, redacted input/questions hashes, answers with calibrated confidence, thresholds applied, resulting disposition, latency and cost.", ClassifyDecidedPayload, ClassifyDecided, ClassifyDecided, as_classify_decided, {
+    "Payload for `classify.decided` (D-020 decision 3): one `DecisionProvider` call's outcome -- site, backend, model revision, redacted input/questions hashes, answers (each already carrying its own calibrated `confidence`, `tm_provider::decide::Answer`'s shape, serialized here), thresholds applied, resulting disposition (`acted`/`fallback`/`abstained`/`shadow`), latency and cost. Matches `dollars_micros` on `usage.recorded` rather than a float, so both events share one cost unit; `None` for a free local backend (e.g. laya-mlx).", ClassifyDecidedPayload, ClassifyDecided, ClassifyDecided, as_classify_decided, {
         site: String,
         backend: String,
         model: String,
         input_hash: String,
         questions_hash: String,
         answers: Value,
-        confidence: f64,
         thresholds: Value,
         disposition: String,
         latency_ms: u64,
-        cost: Option<f64>,
+        cost_micros: Option<u64>,
     };
 }
 
