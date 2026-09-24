@@ -13,7 +13,9 @@
 use std::io::IsTerminal;
 
 use serde::Serialize;
-use tm_types::TmError;
+use tm_core::milestone::MilestoneState;
+use tm_core::ticket::{DependencyKind, TicketKind, TicketState};
+use tm_types::{Authority, Budget, TmError};
 
 /// How a command's output should be written.
 #[derive(Debug, Clone, Copy)]
@@ -316,6 +318,140 @@ impl Tree {
     }
 }
 
+/// The one place a [`TicketState`] becomes the word a person reads (and the word `tm ticket list
+/// --state` parses back, via `TicketStateArg` in `args.rs`) — every other call site should call
+/// this instead of `{:?}`-formatting the enum. States that
+/// `TicketStateArg` doesn't expose as a filter (`Leased`, `Submitted`, `Rework`, `Replan`,
+/// `Recovery`, `Escalated`) still get a plain lowercase word, just not one that round-trips
+/// through a CLI flag.
+pub fn state_label(state: TicketState) -> &'static str {
+    match state {
+        TicketState::Draft => "draft",
+        TicketState::Blocked => "blocked",
+        TicketState::Ready => "ready",
+        TicketState::Leased => "leased",
+        TicketState::Running => "active",
+        TicketState::Submitted => "submitted",
+        TicketState::Verifying => "verification",
+        TicketState::Auditing => "audit",
+        TicketState::Rework => "rework",
+        TicketState::Replan => "replan",
+        TicketState::Recovery => "recovery",
+        TicketState::Escalated => "escalated",
+        TicketState::Closed => "closed",
+        TicketState::Cancelled => "cancelled",
+    }
+}
+
+/// The word a person reads for a [`TicketKind`].
+pub fn kind_label(kind: TicketKind) -> &'static str {
+    match kind {
+        TicketKind::Work => "work",
+        TicketKind::Verification => "verification",
+        TicketKind::Audit => "audit",
+        TicketKind::Investigation => "investigation",
+        TicketKind::Recovery => "recovery",
+        TicketKind::Harness => "harness",
+    }
+}
+
+/// The word a person reads for a [`MilestoneState`].
+pub fn milestone_state_label(state: MilestoneState) -> &'static str {
+    match state {
+        MilestoneState::Open => "open",
+        MilestoneState::Closed => "closed",
+    }
+}
+
+/// The word a person reads for a [`DependencyKind`]: what one ticket depending on another means
+/// in practice, not the enum's internal name.
+pub fn dep_kind_label(kind: DependencyKind) -> &'static str {
+    match kind {
+        DependencyKind::Hard => "blocks",
+        DependencyKind::Soft => "advisory",
+        DependencyKind::Loop => "loop",
+    }
+}
+
+/// A one-line human summary of a [`Budget`]. `"unlimited"` when every component is `u64::MAX`
+/// (see [`Budget::unlimited`]), `"none"` when every component is zero (see [`Budget::none`]),
+/// otherwise the populated components joined by `, ` (e.g. `"50k tokens, 300s, $2.00"`). Any
+/// individual component that is `u64::MAX` on its own (unlimited tokens but a real dollar cap,
+/// say) reads as `"unlimited tokens"` rather than the raw number.
+pub fn budget_label(budget: &Budget) -> String {
+    if budget.tokens == u64::MAX
+        && budget.dollars_micros == u64::MAX
+        && budget.wall_seconds == u64::MAX
+    {
+        return "unlimited".to_string();
+    }
+
+    let mut parts = Vec::new();
+    if budget.tokens == u64::MAX {
+        parts.push("unlimited tokens".to_string());
+    } else if budget.tokens > 0 {
+        parts.push(if budget.tokens >= 1000 {
+            format!("{}k tokens", budget.tokens / 1000)
+        } else {
+            format!("{} tokens", budget.tokens)
+        });
+    }
+    if budget.wall_seconds == u64::MAX {
+        parts.push("unlimited time".to_string());
+    } else if budget.wall_seconds > 0 {
+        parts.push(format!("{}s", budget.wall_seconds));
+    }
+    if budget.dollars_micros == u64::MAX {
+        parts.push("no spending cap".to_string());
+    } else if budget.dollars_micros > 0 {
+        parts.push(format!(
+            "${:.2}",
+            budget.dollars_micros as f64 / 1_000_000.0
+        ));
+    }
+
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// A one-line human summary of an [`Authority`]: full authority, then the powers that most
+/// distinguish one grant from another, rather than the whole nested struct.
+pub fn authority_label(authority: &Authority) -> String {
+    if *authority == Authority::root() {
+        return "full authority".to_string();
+    }
+    if *authority == Authority::none() {
+        return "no authority".to_string();
+    }
+
+    let mut parts = Vec::new();
+    if authority.repository.write == tm_types::PatternSet::all() {
+        parts.push("read/write repo".to_string());
+    } else if authority.repository.read == tm_types::PatternSet::all() {
+        parts.push("read-only repo".to_string());
+    } else if authority.repository.read == tm_types::PatternSet::empty() {
+        parts.push("no repo access".to_string());
+    } else {
+        parts.push("scoped repo access".to_string());
+    }
+    if authority.shell.enabled {
+        parts.push("shell".to_string());
+    }
+    if authority.git.push {
+        parts.push("push".to_string());
+    }
+    if authority.tickets.close {
+        parts.push("can close tickets".to_string());
+    }
+    if authority.network.arbitrary {
+        parts.push("arbitrary network".to_string());
+    }
+    parts.join(", ")
+}
+
 /// The process exit code a [`TmError`] maps to, per `SPEC.md` §15: 1 domain failure, 3 authority
 /// denied, 4 budget exhausted, 5 invariant violation, and 1 for every other domain error.
 /// Usage errors (exit 2) are produced by `clap` itself before any `TmError` exists, so this
@@ -532,5 +668,106 @@ mod tests {
     fn exit_code_storage_returns_one() {
         let err = TmError::Storage("test".to_string());
         assert_eq!(exit_code(&err), 1);
+    }
+
+    #[test]
+    fn state_label_is_lowercase_for_every_state() {
+        for state in TicketState::ALL {
+            let label = state_label(*state);
+            assert_eq!(label, label.to_ascii_lowercase());
+            assert!(!label.contains(' '));
+        }
+    }
+
+    #[test]
+    fn state_label_running_matches_the_state_filter_flag() {
+        // `tm ticket list --state` (`TicketStateArg` in args.rs) calls the running state
+        // "active", not "running" — the label must match what that flag parses.
+        assert_eq!(state_label(TicketState::Running), "active");
+        assert_eq!(state_label(TicketState::Verifying), "verification");
+        assert_eq!(state_label(TicketState::Auditing), "audit");
+    }
+
+    #[test]
+    fn kind_label_is_lowercase_for_every_kind() {
+        for kind in [
+            TicketKind::Work,
+            TicketKind::Verification,
+            TicketKind::Audit,
+            TicketKind::Investigation,
+            TicketKind::Recovery,
+            TicketKind::Harness,
+        ] {
+            let label = kind_label(kind);
+            assert_eq!(label, label.to_ascii_lowercase());
+        }
+    }
+
+    #[test]
+    fn milestone_state_label_matches_lowercase() {
+        assert_eq!(milestone_state_label(MilestoneState::Open), "open");
+        assert_eq!(milestone_state_label(MilestoneState::Closed), "closed");
+    }
+
+    #[test]
+    fn dep_kind_label_uses_plain_words() {
+        assert_eq!(dep_kind_label(DependencyKind::Hard), "blocks");
+        assert_eq!(dep_kind_label(DependencyKind::Soft), "advisory");
+        assert_eq!(dep_kind_label(DependencyKind::Loop), "loop");
+    }
+
+    #[test]
+    fn budget_label_unlimited() {
+        assert_eq!(budget_label(&Budget::unlimited()), "unlimited");
+    }
+
+    #[test]
+    fn budget_label_none() {
+        assert_eq!(budget_label(&Budget::none()), "none");
+    }
+
+    #[test]
+    fn budget_label_renders_populated_components() {
+        let budget = Budget {
+            tokens: 50_000,
+            dollars_micros: 2_000_000,
+            wall_seconds: 300,
+            spent: Default::default(),
+        };
+        let label = budget_label(&budget);
+        assert_eq!(label, "50k tokens, 300s, $2.00");
+    }
+
+    #[test]
+    fn budget_label_handles_a_component_that_is_unlimited_on_its_own() {
+        // Unlimited tokens with a real dollar cap must not print the raw u64::MAX as a number.
+        let budget = Budget {
+            tokens: u64::MAX,
+            dollars_micros: 2_000_000,
+            wall_seconds: 0,
+            spent: Default::default(),
+        };
+        let label = budget_label(&budget);
+        assert_eq!(label, "unlimited tokens, $2.00");
+    }
+
+    #[test]
+    fn authority_label_root_is_full_authority() {
+        assert_eq!(authority_label(&Authority::root()), "full authority");
+    }
+
+    #[test]
+    fn authority_label_none_is_no_authority() {
+        assert_eq!(authority_label(&Authority::none()), "no authority");
+        assert_eq!(authority_label(&Authority::default()), "no authority");
+    }
+
+    #[test]
+    fn authority_label_worker_lists_its_powers() {
+        let label = authority_label(&Authority::worker());
+        assert!(label.contains("read/write repo"));
+        assert!(label.contains("shell"));
+        assert!(!label.contains("push"));
+        assert!(!label.contains("can close tickets"));
     }
 }

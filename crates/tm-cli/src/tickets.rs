@@ -12,7 +12,7 @@ use crate::args::{
 use crate::project::Project;
 
 pub mod overview;
-use crate::render::{Renderer, Table, Tree};
+use crate::render::{kind_label, milestone_state_label, state_label, Renderer, Table, Tree};
 use std::collections::BTreeMap;
 use std::fs;
 use tm_core::ticket::{
@@ -285,6 +285,22 @@ pub fn create_worker_ticket(project: &Project, objective: &str) -> tm_types::Res
         .ok_or_else(|| TmError::invariant("Could not create the ticket."))
 }
 
+/// The `--state` filter's vocabulary, translated to the full [`TicketState`] it matches. The
+/// inverse of [`crate::render::state_label`] for the states `--state` can filter on; kept as one
+/// function so the filter and the table's displayed label can't silently drift apart.
+fn state_from_arg(arg: TicketStateArg) -> TicketState {
+    match arg {
+        TicketStateArg::Draft => TicketState::Draft,
+        TicketStateArg::Ready => TicketState::Ready,
+        TicketStateArg::Active => TicketState::Running,
+        TicketStateArg::Verification => TicketState::Verifying,
+        TicketStateArg::Audit => TicketState::Auditing,
+        TicketStateArg::Closed => TicketState::Closed,
+        TicketStateArg::Cancelled => TicketState::Cancelled,
+        TicketStateArg::Blocked => TicketState::Blocked,
+    }
+}
+
 /// `tm ticket list`
 pub fn ticket_list(
     args: &TicketListArgs,
@@ -297,16 +313,7 @@ pub fn ticket_list(
     tickets.sort_by_key(|t| &t.id);
 
     if let Some(state_arg) = args.state {
-        let target_state = match state_arg {
-            TicketStateArg::Draft => TicketState::Draft,
-            TicketStateArg::Ready => TicketState::Ready,
-            TicketStateArg::Active => TicketState::Running,
-            TicketStateArg::Verification => TicketState::Verifying,
-            TicketStateArg::Audit => TicketState::Auditing,
-            TicketStateArg::Closed => TicketState::Closed,
-            TicketStateArg::Cancelled => TicketState::Cancelled,
-            TicketStateArg::Blocked => TicketState::Blocked,
-        };
+        let target_state = state_from_arg(state_arg);
         tickets.retain(|t| t.state == target_state);
     }
 
@@ -340,8 +347,8 @@ pub fn ticket_list(
                 };
                 vec![
                     t.id.to_string(),
-                    format!("{:?}", t.kind),
-                    format!("{:?}", t.state),
+                    kind_label(t.kind).to_string(),
+                    state_label(t.state).to_string(),
                     t.priority.to_string(),
                     objective,
                 ]
@@ -594,7 +601,7 @@ pub fn ticket_reject(
         .view()?
         .tickets
         .get(&ticket_id)
-        .map(|t| format!("{:?}", t.state).to_ascii_lowercase())
+        .map(|t| state_label(t.state).to_string())
         .unwrap_or_default();
     renderer.emit(
         &ticket_id,
@@ -658,7 +665,12 @@ fn build_tree(ticket_id: &TicketId, tickets: &BTreeMap<TicketId, tm_core::ticket
     } else {
         obj.clone()
     };
-    let label = format!("{} {:?} {}", ticket.id, ticket.state, truncated_objective);
+    let label = format!(
+        "{} {} {}",
+        ticket.id,
+        state_label(ticket.state),
+        truncated_objective
+    );
 
     let mut children = Vec::new();
     for child_id in &ticket.children {
@@ -912,7 +924,7 @@ pub fn milestone_list(project: &Project, renderer: &Renderer) -> tm_types::Resul
             .map(|m| {
                 vec![
                     m.id.to_string(),
-                    format!("{:?}", m.state),
+                    milestone_state_label(m.state).to_string(),
                     m.tickets.len().to_string(),
                 ]
             })
@@ -1209,5 +1221,59 @@ mod tests {
             k => Err(TmError::parse(format!("unknown dependency kind: {}", k))),
         };
         assert!(kind_result.is_err());
+    }
+
+    #[test]
+    fn every_filterable_state_label_round_trips_through_the_state_filter_flag() {
+        // For every `TicketStateArg` variant `--state` accepts: state_from_arg maps it to a
+        // TicketState, state_label renders that TicketState, and the flag's own parser must read
+        // that word back to a state_from_arg result that maps to the same TicketState. Driven
+        // from `TicketStateArg::value_variants()`, not a hand-copied list, so a variant added to
+        // args.rs without a matching arm here fails loudly instead of being silently skipped.
+        use clap::ValueEnum;
+
+        for arg in TicketStateArg::value_variants() {
+            let state = state_from_arg(*arg);
+            let label = state_label(state);
+            let parsed = TicketStateArg::from_str(label, true)
+                .unwrap_or_else(|e| panic!("label {label:?} didn't parse back: {e}"));
+            assert_eq!(
+                state_from_arg(parsed),
+                state,
+                "state_label({state:?}) = {label:?} didn't round-trip back to {state:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_ticket_state_has_a_lowercase_label_and_the_filterable_ones_round_trip() {
+        // `TicketState` has more variants than `--state` exposes as a filter (Leased, Submitted,
+        // Rework, Replan, Recovery, Escalated aren't filterable today) -- assert every state
+        // still gets a real lowercase label, and additionally round-trip the ones `--state` does
+        // support.
+        use clap::ValueEnum;
+
+        let not_filterable = [
+            TicketState::Leased,
+            TicketState::Submitted,
+            TicketState::Rework,
+            TicketState::Replan,
+            TicketState::Recovery,
+            TicketState::Escalated,
+        ];
+
+        for state in TicketState::ALL {
+            let label = state_label(*state);
+            assert!(!label.is_empty());
+            assert_eq!(label, label.to_ascii_lowercase());
+
+            if not_filterable.contains(state) {
+                continue;
+            }
+            let parsed = TicketStateArg::from_str(label, true).unwrap_or_else(|e| {
+                panic!("filterable state {state:?}'s label {label:?} didn't parse: {e}")
+            });
+            assert_eq!(state_from_arg(parsed), *state);
+        }
     }
 }
