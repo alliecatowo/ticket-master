@@ -107,7 +107,9 @@ never drift between sessions:
 - `tm milestone new "<title>" [--ticket <T>...]` (alias `create`) creates a milestone and attaches
   any given tickets; `tm milestone show <M>` prints its title, state, member tickets with state
   labels, and a done/total count. `tm ticket new --milestone <M>` now errors clearly instead of
-  silently dropping the milestone when `<M>` doesn't exist.
+  silently dropping the milestone when `<M>` doesn't exist. `tm ticket new`/`tm ticket edit` take
+  `--due YYYY-MM-DD` (`--due none` clears it on `edit`); `tm ticket show`/`tm ticket list` show
+  it, and `tm milestone show` shows the max due date of its member tickets.
 - `tm --help` groups the ~16 commands used day to day — daily (`init`, `status`, `tickets`,
   `ticket`, `run`, `search`, `symbol`, `doctor`), planning (`milestone`, `dep`, `decision`),
   serving (`serve`, `mcp`), plus `provider`/`auth` — and folds the rest of the tree (`lease`,
@@ -154,6 +156,13 @@ never drift between sessions:
   protocol). Stdout carries JSON-RPC only; log to stderr. `tm-mcp-server` (crate `tm-mcp`) is
   the older standalone form: explicit `--project-root`/`--state-dir`, `Content-Length` framing,
   no workers.
+- `tm genesis` stops for work instead of spinning: once V0 or V1's milestone isn't closed yet
+  (in practice this fires right after `Ignition` commits the Draft ticket graph, since nothing
+  activates those tickets on its own), or after the maturity gate fails once, it prints the
+  ticket count and milestone, says to run `tm sched run` (or `tm run <T>`) then re-run `tm
+  genesis`, and exits 0. Re-running today starts a fresh run rather than resuming the stopped
+  one — `GenesisDriver::resume` exists but `genesis()` doesn't call it yet (separate task:
+  `genesis-cli-resume-flag`). See `docs/decisions/D-027-genesis-cli-stops-for-work.md`.
 - `mise run docs:wiki` — regenerate `docs/wiki/` (`tm wiki generate`); pass `-- --dry-run` to
   preview without writing (see "Navigation" below).
 

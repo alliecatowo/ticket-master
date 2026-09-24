@@ -107,7 +107,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `tm tickets --json` shows `"title": "Fix the login redirect"` while `tm ticket list --json` shows `"title": null` for the same ticket; overview.rs:69-70 `pub title: String` only exists on the overview view.
 
-- [ ] **s1-ticket-due-date** — Tickets get an optional due date (tm ticket new/edit --due)
+- [x] **s1-ticket-due-date** — Tickets get an optional due date (tm ticket new/edit --due) (landed c841058)
   model: sonnet · severity: medium · builds Rust: yes · area: cli/tickets · deps: s1-cli-tree-regroup
   files: `crates/tm-core/src/ticket.rs`, `crates/tm-core/src/materialize.rs`, `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/tickets.rs`, `CLAUDE.md`
   change: Add `due: Option<chrono::NaiveDate>` (serde default) to Ticket (near `milestone`, ticket.rs:367). Persist through the existing ticket.created/ticket.updated field paths, migrating materialize.rs if tickets are stored per column. Add `--due YYYY-MM-DD` to `ticket new`/`ticket edit` (`--due none` clears it). Show it in `ticket show`/`ticket list`. A milestone's due date is the max of its tickets' due dates in `milestone show`. Parse errors say "use YYYY-MM-DD, e.g. 2026-10-01".
@@ -295,7 +295,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `echo '' | tm mcp; test $? -ne 0`
   evidence: `echo '' | tm mcp` prints "error: parse: EOF while parsing a value at line 1 column 0" and exits 0.
 
-- [ ] **s1-attach-output-copy-and-dedup** — tm attach output uses unexplained jargon and double-lists case-variant filenames
+- [~] **s1-attach-output-copy-and-dedup** — tm attach output uses unexplained jargon and double-lists case-variant filenames (needs the owner: the code that needs changing, render_attach_report in crates/tm-cli/src/project.rs, is owned by another agent and marked never-touch; the assigned file crates/tm-cli/src/ops.rs has no attach-related code)
   model: haiku · severity: medium · builds Rust: yes · area: cli/attach · deps: none
   files: `crates/tm-cli/src/ops.rs`
   change: Replace "indexed 1 files, 1 chunks, 1 commits ingested (symbol graph built: true)" with plain wording, e.g. "Indexed 1 file with 1 commit. Code navigation is ready." Separately, the attach doc-listing table shows both `README.md` and `readme.md` as distinct rows on a case-insensitive filesystem; dedupe by case-insensitive path before printing.
@@ -479,7 +479,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-core`
   evidence: `grep -rln '"ticket.created"' crates --include='*.rs'` (worktrees excluded) → `crates/tm-cli/tests/tui_tickets.rs`, `crates/tm-cli/tests/ticket_fork.rs`, `crates/tm-events/src/kind.rs` — the real append site in tm-core's own src needs its own grep at implementation time since this search only turned up test/event-kind references.
 
-- [~] **d20-redact-decide-request** — Add redact_decide_request through SessionRedactor before any remote DecisionProvider call (needs the owner: `redact_decide_request` landed in tm-auth, but wiring it into `crates/tm-provider/src/providers/systemone.rs`'s outbound POST body — the acceptance criterion — is still undone, deliberately left out of this task's owned files)
+- [x] **d20-redact-decide-request** — Add redact_decide_request through SessionRedactor before any remote DecisionProvider call (landed ae5c687)
   model: sonnet · severity: medium · builds Rust: yes · area: auth (D-020) · deps: d20-decider-trait-and-mock, d20-decider-http-systemone-client
   files: `crates/tm-auth/src/redact.rs`
   change: Per D-020 decision 7 ("Redaction before anything leaves the machine"), add a `redact_decide_request(&DecideRequest) -> DecideRequest` function alongside `SessionRedactor`'s existing redaction entry points in `crates/tm-auth/src/redact.rs`, applying the same secret-pattern scrubbing `SessionRedactor` already does to session/turn content, to the `DecideRequest`'s state and question text. Wire the HTTP decider provider (`d20-decider-http-systemone-client`) to call it before every outbound request; the mock/local backends don't need it (nothing leaves the machine).
@@ -543,7 +543,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: workflow wf_87a85411-848's critic result, "missing" item 6: dispatch.rs:281 and :322-326 build/open CodeIntel from `project.root`, while :305-307 execute tools at `exec_root`.
 
-- [~] **critic-nav-quality-eval** — A repeatable search-quality eval (query -> expected file in top-k), not two hand-picked queries (needs the owner: the fixture/test's own hit-rate@3 floor of 8/12 failed a real run at 6/12 against the hash embedder — reverted, no prior CI run existed to calibrate the floor against)
+- [x] **critic-nav-quality-eval** — A repeatable search-quality eval (query -> expected file in top-k), not two hand-picked queries (landed c0c6e0b)
   model: sonnet · severity: medium · builds Rust: yes · area: code-navigation · deps: nav-potion-embedder
   files: `crates/tm-codeintel/tests/nav_quality_eval.rs`, `crates/tm-codeintel/fixtures/nav_eval.toml`
   change: SPEC §10 asks for "searches before first relevant hit" and §32.2 asks `tm doctor` to surface rg-fallback counts as a measurement, but nothing computes either, and `nav-potion-embedder`'s acceptance only hand-picks two queries. Add a small fixture set of (query, expected top-k file) pairs against this repo (or a frozen snapshot of it), and a test/binary that runs each query through hybrid search and reports hit rate at k=1/3/5, so the embedder switch (and future retrieval changes) can be scored against a fixed baseline instead of eyeballed.
@@ -644,7 +644,7 @@ Gate: `mise run verify && pnpm -C clients/ts install && pnpm -C clients/ts test 
 
 Gate: `mise run verify && pnpm -C clients/ts build && pnpm -C clients/vscode run compile && pnpm -C clients/vscode test && swift test --package-path clients/macos && gh release view v0.1.0`
 
-- [ ] **nav-agent-tool-index-refresh** — Refresh the index inside the agent tool path after mutating tools
+- [x] **nav-agent-tool-index-refresh** — Refresh the index inside the agent tool path after mutating tools (landed 2a4511a)
   model: sonnet · size: S · builds Rust: yes · area: code-navigation · deps: nav-fix-project-codeintel-freshness
   files: `crates/tm-agent/src/tools.rs`
   change: The agent tool set holds one Arc<CodeIntel> for a whole session or dispatcher lifetime (tools.rs:793; built once at tm-cli dispatch.rs:267 and once per chat session). symbol_index() and search read the files table, which only update_incremental populates. So a file the agent creates mid-run never shows up in search.*/symbol.* results, and chunks for edited files stay stale. Add a dirty flag, set whenever a mutating tool completes (file write, edit, patch apply, shell exec). Before executing any search.*, symbol.* or history.* tool, if the flag is set, call ci.update_incremental(clock) and clear it. On error, warn and continue, the same policy as nav-fix-project-codeintel-freshness. Use the clock the tool set already has, or add one to its constructor.
@@ -658,14 +658,14 @@ Gate: `mise run verify && pnpm -C clients/ts build && pnpm -C clients/vscode run
   acceptance: A tm-core unit test exercises view_as_of: create two tickets, transition one, and replay to a seq before the transition shows the old state. The tm-cli test events_replay_empty_range still passes, and a new CLI-level test asserts the rendered states rather than an event count.
   test: `mise run test:crate -- tm-core && mise run test:crate -- tm-cli`
 
-- [ ] **vscode-migrate-to-shared-ts-sdk** — Move clients/vscode onto @ticketmaster/client, fixing every wire-shape bug, and delete the stand-in client
+- [x] **vscode-migrate-to-shared-ts-sdk** — Move clients/vscode onto @ticketmaster/client, fixing every wire-shape bug, and delete the stand-in client (landed 048e1f0)
   model: sonnet · size: M · builds Rust: no · area: clients/vscode · deps: vscode-bundle-and-link-shared-sdk, ts-sdk-add-accept-reject-retry
   files: `clients/vscode/src/extension.ts`, `clients/vscode/src/commands/commands.ts`, `clients/vscode/src/commands/commands.test.ts`, `clients/vscode/src/ticketmaster/client.ts`, `clients/vscode/src/ticketmaster/types.ts`, `clients/vscode/src/tree/ticketTreeProvider.ts`, `clients/vscode/src/tree/treeModel.ts`, `clients/vscode/src/tree/treeModel.test.ts`, `clients/vscode/src/leases/leaseDecorationProvider.ts`, `clients/vscode/src/leases/leaseDecorations.ts`, `clients/vscode/src/leases/leaseDecorations.test.ts`, `clients/vscode/src/codelens/decisionCodeLensProvider.ts`, `clients/vscode/src/codelens/decisionCodeLens.ts`, `clients/vscode/src/codelens/decisionCodeLens.test.ts`
   change: Replace every import of ./ticketmaster/client and ./ticketmaster/types with TicketmasterClient and the domain types from @ticketmaster/client, then delete the two stand-in files. The SDK's correct types fix these by construction: lowercase snake_case TicketState/TicketKind/Milestone state literals in treeModel's BADGES and in ticketTreeProvider's "closed" check; the field names closed_by, ttl_seconds, affected_tickets, affected_paths (not affectedDocs) and superseded_by; decisionCodeLens filtering on affected_paths. Fix the mutation commands. claimTicket calls acquireLease(id, {holder, ttl_seconds: 600, actor: holder}). submitWithEvidence first calls attachEvidence (EvidenceKind is snake_case on the wire, e.g. human_attestation), then transition(id, {submit: {summary, evidence: [artifactIds], actor}}). recordDecision uses the SDK's createDecision shape. Update the test fixtures. Absorbs vscode-fix-ticket-enum-casing, vscode-fix-field-name-casing, vscode-fix-lease-request-body and vscode-fix-submit-transition-shape.
   acceptance: src/ticketmaster/ no longer exists and compile (tsc --noEmit plus the esbuild bundle) passes. Tests assert: lowercase state literals in the tree model; a decision with affected_paths ['src/auth/**'] produces a CodeLens for src/auth/x.ts; the claimTicket lease body has ttl_seconds and actor (no ttlSeconds); submit posts {submit:{summary,evidence,actor}} with no top-level trigger. A grep for PascalCase state/kind literals under src/ returns nothing outside comments.
   test: `pnpm -C clients/ts build && pnpm -C clients/vscode install && pnpm -C clients/vscode run compile && pnpm -C clients/vscode test`
 
-- [ ] **macos-extend-transition-methods** — Add submit/accept/reject to TicketmasterKit's APIClient
+- [x] **macos-extend-transition-methods** — Add submit/accept/reject to TicketmasterKit's APIClient (landed b94121d)
   model: sonnet · size: S · builds Rust: no · area: clients/macos · deps: none
   files: `clients/macos/Sources/TicketmasterKit/APIClient.swift`, `clients/macos/Tests/TicketmasterKitTests/ModelDecodingTests.swift`
   change: Add submitTicket(id:summary:evidence:actor:), acceptTicket(id:note:actor:) and rejectTicket(id:reason:actor:) to the TicketmasterAPI protocol and to APIClient. Each POSTs an externally tagged transition body ({"submit": {...}}, {"accept": {...}}, {"reject": {...}}) whose field names match tm-server routes.rs:353-404 exactly, following the activateTicket pattern (APIClient.swift:95-98).
@@ -684,7 +684,7 @@ Gate: `mise run verify && pnpm -C clients/ts build && pnpm -C clients/vscode run
 
 Gate: `mise run verify`
 
-- [ ] **genesis-stop-infinite-maturity-loop** — Stop tm genesis from looping forever on a failing maturity gate ([new decision: genesis termination])
+- [x] **genesis-stop-infinite-maturity-loop** — Stop tm genesis from looping forever on a failing maturity gate ([new decision: genesis termination]) (landed 2abd15d)
   model: opus · size: M · builds Rust: yes · area: genesis · deps: none
   files: `crates/tm-cli/src/project.rs`, `crates/tm-genesis/src/stages.rs`, `docs/decisions/D-NNN-genesis-cli-stops-for-work.md`, `CLAUDE.md`
   change: The loop is verified: compile.rs:469 commits tickets as Draft, and nothing in genesis() (project.rs:1297-1315) activates them, so V1 never closes. A failed MaturityGate then goes back to Stabilization, which re-enters MaturityGate unconditionally (stages.rs:183-190), and every pass makes a real judge_maturity provider call. Recommended design is exit-and-resume. Extract the CLI loop into a testable function with an explicit stop policy. Stop after Ignition has committed the Draft graph, or at the latest on the first failed MaturityGate, and also when the V0 or V1 stage cannot advance because its milestone is not closed; never spin. On stopping, print or emit the status: N tickets committed under milestone <id>, run `tm sched run` (or `tm run <T>`) to work them, then re-run genesis to resume. Exit 0. Write [new decision: genesis termination], following the D-002 template, with the three alternatives and why exit-and-resume won. Add a CLAUDE.md line on tm genesis behavior.
