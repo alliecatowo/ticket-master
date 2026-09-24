@@ -7,6 +7,12 @@
 //! caller-supplied [`SeededProvider`] (an adapter the caller writes over e.g.
 //! `tm_provider::MockProvider`, since this crate does not depend on `tm-provider`) and an
 //! injected `&dyn Clock`/`&dyn IdSource`, per `SPEC.md` §10's determinism requirement.
+//!
+//! [`evaluate_decisions`] is a second, unrelated eval mode: it scores a fixture of recorded
+//! `classify.decided(shadow)` decisions against their outcomes (D-020) for accuracy and expected
+//! calibration error. It shares this module because it's the same "score a fixture of static,
+//! hermetic recordings" shape as the [`BenchTask`] runner above, not because it drives
+//! [`SeededProvider`] — a decision-eval fixture has no steps to replay, only pre-recorded pairs.
 
 use std::collections::HashSet;
 
@@ -300,6 +306,21 @@ impl<'a> BenchRunner<'a> {
             generated_at: self.clock.now(),
         })
     }
+
+    /// Score `fixture` via [`evaluate_decisions`], stamping the report's `generated_at` from this
+    /// runner's injected clock rather than the pure function's `Timestamp::EPOCH` default — the
+    /// entry point a `tm bench` decision-eval task calls, matching [`BenchRunner::run_all`]'s
+    /// shape for the scripted-task path.
+    pub fn run_decision_eval(
+        &self,
+        fixture: &DecisionEvalFixture,
+        bucket_count: usize,
+    ) -> DecisionEvalReport {
+        DecisionEvalReport {
+            generated_at: self.clock.now(),
+            ..evaluate_decisions(fixture, bucket_count)
+        }
+    }
 }
 
 /// The aggregate result of running a benchmark suite against one harness epoch.
@@ -330,6 +351,139 @@ pub struct PromotionReport {
     /// Whether `aggregate_gain` was positive (informational; [`crate::epoch::PromotionGate`] is
     /// what actually governs promotion).
     pub candidate_improved: bool,
+}
+
+/// One recorded `classify.decided(shadow)` decision paired with the outcome it would have
+/// predicted, for offline decision-eval scoring (D-020's "Why" section: shadow decisions are
+/// scored against `Session.promote`, a `StepRecord`, or a ticket end-state before any site is
+/// allowed to act on them). `predicted_label`/`actual_label` are opaque strings so this crate
+/// doesn't need to know the shape of a triage kind, a route, or any other decider question —
+/// only whether the two matched.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionRecord {
+    /// The decider's shadow answer.
+    pub predicted_label: String,
+    /// The decider's confidence in `predicted_label`, expected in `[0.0, 1.0]`; a value outside
+    /// that range is clamped before scoring rather than rejected, since a fixture is static data
+    /// and a bench run should degrade gracefully rather than fail on a bad recording.
+    pub confidence: f64,
+    /// What actually happened, read back from `Session.promote`/`StepRecord`/the ticket's
+    /// end-state.
+    pub actual_label: String,
+}
+
+/// A fixture of recorded `classify.decided(shadow)` decisions and their outcomes. Entirely
+/// offline and hermetic: this crate does not depend on `tm-provider` or `tm-events`, so a
+/// fixture's `predicted_label`/`confidence` are a flattened stand-in for what a caller would pull
+/// out of one `classify.decided` event's `answers` payload (`tm_provider::decide::Answer`'s
+/// `value`/`confidence`, per `crates/tm-events/src/payload.rs`'s `ClassifyDecidedPayload`) and
+/// its matching outcome — produced upstream (e.g. by `tm_provider::MockDecisionProvider` against
+/// scripted requests) and recorded here as plain data. Nothing in this module calls a decider,
+/// live or mocked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecisionEvalFixture {
+    /// Stable fixture identifier, unique among decision-eval fixtures.
+    pub id: String,
+    /// The recorded decision/outcome pairs to score.
+    pub records: Vec<DecisionRecord>,
+}
+
+impl DecisionEvalFixture {
+    /// Parse one fixture from the contents of a decision-eval fixture TOML file.
+    pub fn parse(source: &str) -> Result<DecisionEvalFixture> {
+        toml::from_str::<DecisionEvalFixture>(source)
+            .map_err(|e| tm_types::TmError::parse(e.to_string()))
+    }
+}
+
+/// Accuracy/calibration report for one [`DecisionEvalFixture`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DecisionEvalReport {
+    /// The fixture this report scored.
+    pub fixture_id: String,
+    /// Number of records the fixture contained.
+    pub sample_count: usize,
+    /// Fraction of records where `predicted_label == actual_label`.
+    pub accuracy: f64,
+    /// Expected calibration error: records are bucketed by `confidence` into `bucket_count`
+    /// equal-width bins, and each bucket's `|mean_confidence - empirical_accuracy|` is averaged,
+    /// weighted by bucket size. Lower is better-calibrated; `0.0` on an empty fixture or when
+    /// `bucket_count` is `0` (accuracy is unaffected either way — it doesn't bucket).
+    pub ece: f64,
+    /// When this report was produced; `Timestamp::EPOCH` from the pure [`evaluate_decisions`],
+    /// overwritten by an injected clock when scored through [`BenchRunner::run_decision_eval`].
+    pub generated_at: Timestamp,
+}
+
+/// Score `fixture` against its recorded outcomes: accuracy plus expected calibration error
+/// (ECE) over `bucket_count` equal-width confidence buckets. Pure and deterministic — no network,
+/// no clock, no live decider — so a `tm bench` decision-eval task can call this directly against
+/// a fixture of `classify.decided(shadow)` recordings (D-020 consequence: "a `tm bench` decision
+/// task scored against `Session.promote` and `StepRecord`"). Prefer
+/// [`BenchRunner::run_decision_eval`] when a report's `generated_at` should reflect the run.
+pub fn evaluate_decisions(
+    fixture: &DecisionEvalFixture,
+    bucket_count: usize,
+) -> DecisionEvalReport {
+    let sample_count = fixture.records.len();
+    let correct = fixture
+        .records
+        .iter()
+        .filter(|r| r.predicted_label == r.actual_label)
+        .count();
+    let accuracy = if sample_count == 0 {
+        0.0
+    } else {
+        correct as f64 / sample_count as f64
+    };
+
+    let ece = if sample_count == 0 || bucket_count == 0 {
+        0.0
+    } else {
+        // (sum of confidences, count correct, count total) per bucket.
+        let mut buckets = vec![(0.0f64, 0usize, 0usize); bucket_count];
+        for record in &fixture.records {
+            // A NaN confidence (never expected, but TOML can express `nan`) can't be clamped
+            // meaningfully; treat it as no confidence at all rather than letting it propagate
+            // into the report.
+            let confidence = if record.confidence.is_nan() {
+                0.0
+            } else {
+                record.confidence.clamp(0.0, 1.0)
+            };
+            let mut bucket_index = (confidence * bucket_count as f64) as usize;
+            if bucket_index >= bucket_count {
+                bucket_index = bucket_count - 1;
+            }
+            let bucket = &mut buckets[bucket_index];
+            bucket.0 += confidence;
+            bucket.2 += 1;
+            if record.predicted_label == record.actual_label {
+                bucket.1 += 1;
+            }
+        }
+
+        buckets
+            .iter()
+            .filter(|(_, _, count)| *count > 0)
+            .map(|(confidence_sum, correct, count)| {
+                let mean_confidence = confidence_sum / *count as f64;
+                let bucket_accuracy = *correct as f64 / *count as f64;
+                let weight = *count as f64 / sample_count as f64;
+                weight * (mean_confidence - bucket_accuracy).abs()
+            })
+            .sum()
+    };
+
+    DecisionEvalReport {
+        fixture_id: fixture.id.clone(),
+        sample_count,
+        accuracy,
+        ece,
+        generated_at: Timestamp::EPOCH,
+    }
 }
 
 /// Compare two epochs' benchmark reports.
@@ -742,5 +896,164 @@ mod tests {
         let candidate = report(2, vec![task_result("only-candidate", 0.5)]);
         let promotion = compare(&baseline, &candidate);
         assert!(promotion.task_deltas.is_empty());
+    }
+
+    fn decision(predicted: &str, confidence: f64, actual: &str) -> DecisionRecord {
+        DecisionRecord {
+            predicted_label: predicted.to_string(),
+            confidence,
+            actual_label: actual.to_string(),
+        }
+    }
+
+    #[test]
+    fn decision_eval_fixture_parses_from_toml() {
+        let toml = r#"
+            id = "shadow-triage-1"
+            [[records]]
+            predicted_label = "bug"
+            confidence = 0.9
+            actual_label = "bug"
+            [[records]]
+            predicted_label = "feature"
+            confidence = 0.4
+            actual_label = "bug"
+        "#;
+        let fixture = DecisionEvalFixture::parse(toml).expect("well-formed fixture parses");
+        assert_eq!(fixture.id, "shadow-triage-1");
+        assert_eq!(fixture.records.len(), 2);
+        assert_eq!(fixture.records[0].predicted_label, "bug");
+    }
+
+    #[test]
+    fn decision_eval_fixture_parse_rejects_an_unknown_field() {
+        let toml = r#"
+            id = "shadow-triage-1"
+            bogus = "field"
+            [[records]]
+            predicted_label = "bug"
+            confidence = 0.9
+            actual_label = "bug"
+        "#;
+        assert!(DecisionEvalFixture::parse(toml).is_err());
+    }
+
+    #[test]
+    fn evaluate_decisions_reports_zero_for_an_empty_fixture() {
+        let fixture = DecisionEvalFixture {
+            id: "empty".to_string(),
+            records: Vec::new(),
+        };
+        let report = evaluate_decisions(&fixture, 10);
+        assert_eq!(report.sample_count, 0);
+        assert_eq!(report.accuracy, 0.0);
+        assert_eq!(report.ece, 0.0);
+    }
+
+    #[test]
+    fn evaluate_decisions_computes_accuracy_even_with_zero_buckets() {
+        // bucket_count == 0 disables ECE, but accuracy doesn't bucket at all and should still be
+        // reported.
+        let fixture = DecisionEvalFixture {
+            id: "no-buckets".to_string(),
+            records: vec![decision("bug", 0.9, "bug"), decision("bug", 0.9, "feature")],
+        };
+        let report = evaluate_decisions(&fixture, 0);
+        assert_eq!(report.sample_count, 2);
+        assert!((report.accuracy - 0.5).abs() < 1e-9);
+        assert_eq!(report.ece, 0.0);
+    }
+
+    #[test]
+    fn evaluate_decisions_scores_accuracy_as_the_match_fraction() {
+        // Fully offline and hermetic: every record here is a plain, pre-recorded
+        // classify.decided(shadow) + outcome pair, standing in for what
+        // `tm_provider::MockDecisionProvider` would have produced upstream -- no network, no
+        // clock, no live decider is touched by this eval.
+        let fixture = DecisionEvalFixture {
+            id: "shadow-triage".to_string(),
+            records: vec![
+                decision("bug", 0.9, "bug"),
+                decision("bug", 0.8, "bug"),
+                decision("feature", 0.6, "bug"),
+                decision("chore", 0.7, "chore"),
+            ],
+        };
+        let report = evaluate_decisions(&fixture, 10);
+        assert_eq!(report.sample_count, 4);
+        assert!((report.accuracy - 0.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn evaluate_decisions_weights_ece_by_each_buckets_confidence_accuracy_gap() {
+        // Two buckets (< 0.5 and >= 0.5), two records each, equally weighted (0.5 apiece). The
+        // high-confidence bucket is all correct (mean confidence 0.9, accuracy 1.0, gap 0.1); the
+        // low-confidence bucket is all wrong (mean confidence 0.2, accuracy 0.0, gap 0.2). ECE is
+        // the weighted sum of those gaps: 0.5*0.1 + 0.5*0.2 = 0.15.
+        let fixture = DecisionEvalFixture {
+            id: "calibration".to_string(),
+            records: vec![
+                decision("bug", 0.9, "bug"),
+                decision("bug", 0.9, "bug"),
+                decision("feature", 0.2, "bug"),
+                decision("feature", 0.2, "bug"),
+            ],
+        };
+        let report = evaluate_decisions(&fixture, 2);
+        assert!(
+            (report.ece - 0.15).abs() < 1e-9,
+            "expected ece close to 0.15, got {}",
+            report.ece
+        );
+    }
+
+    #[test]
+    fn evaluate_decisions_clamps_out_of_range_confidence_instead_of_panicking() {
+        let fixture = DecisionEvalFixture {
+            id: "bad-confidence".to_string(),
+            records: vec![
+                decision("bug", 1.5, "bug"),
+                decision("bug", -0.5, "feature"),
+                decision("bug", f64::NAN, "bug"),
+            ],
+        };
+        let report = evaluate_decisions(&fixture, 4);
+        assert_eq!(report.sample_count, 3);
+        assert!(report.ece.is_finite());
+    }
+
+    #[test]
+    fn run_decision_eval_parses_and_scores_a_fixture_end_to_end() {
+        // The acceptance path: a decision-eval fixture (standing in for recorded
+        // classify.decided(shadow) + outcome pairs, D-020) parsed from TOML and scored through
+        // the same BenchRunner entry point tm bench would call, with zero network calls and a
+        // deterministic clock stamping the report.
+        let toml = r#"
+            id = "shadow-triage-1"
+            [[records]]
+            predicted_label = "bug"
+            confidence = 0.9
+            actual_label = "bug"
+            [[records]]
+            predicted_label = "feature"
+            confidence = 0.4
+            actual_label = "bug"
+            [[records]]
+            predicted_label = "chore"
+            confidence = 0.7
+            actual_label = "chore"
+        "#;
+        let fixture = DecisionEvalFixture::parse(toml).expect("well-formed fixture parses");
+        let clock = FixedClock::new(Timestamp::from_unix_seconds(99));
+        let ids = tm_types::TestIds::seeded(1);
+        let runner = BenchRunner {
+            clock: &clock,
+            ids: &ids,
+        };
+        let report = runner.run_decision_eval(&fixture, 5);
+        assert_eq!(report.fixture_id, "shadow-triage-1");
+        assert_eq!(report.sample_count, 3);
+        assert!((report.accuracy - (2.0 / 3.0)).abs() < 1e-9);
+        assert_eq!(report.generated_at, Timestamp::from_unix_seconds(99));
     }
 }
