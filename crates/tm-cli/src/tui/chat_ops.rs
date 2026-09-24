@@ -1009,6 +1009,12 @@ impl App {
             CommandId::Doctor => self.run_doctor(),
             CommandId::Permissions => self.permissions_cmd(&arg),
             CommandId::Workflow => self.run_workflow_cmd(&arg),
+            CommandId::Board => return self.open_hub_tab(super::ScreenId::Kanban, now),
+            CommandId::Milestones => return self.open_hub_tab(super::ScreenId::Milestones, now),
+            CommandId::Timeline => return self.open_hub_tab(super::ScreenId::Timeline, now),
+            CommandId::Deps => return self.open_hub_tab(super::ScreenId::Graph, now),
+            CommandId::Ticket => self.show_ticket_cmd(&arg),
+            CommandId::Run => self.run_ticket_cmd(&arg),
             // The chat screen answers these itself; handled anyway so the match stays exhaustive.
             CommandId::Status | CommandId::Cost => {}
             CommandId::Tickets => return self.open_tickets(now),

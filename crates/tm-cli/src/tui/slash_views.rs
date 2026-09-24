@@ -1,14 +1,24 @@
 //! Read-only text renderers for slash commands that answer with a notice in the chat transcript,
 //! kept separate from `chat_ops.rs`'s session/UI plumbing so the text is a pure function of its
-//! inputs and easy to unit test without a live `AgentSession`.
+//! inputs and easy to unit test without a live `AgentSession`. `/board`, `/milestones`,
+//! `/timeline` and `/deps` (screen navigation) live directly on `App` in `tui.rs`/`chat_ops.rs`;
+//! `/ticket` and `/run` (`show_ticket_cmd`/`run_ticket_cmd` below) need `App`'s `project`/`chat`
+//! fields for their one-shot store read, so they're `impl crate::tui::App` methods here rather
+//! than pure functions — placed in this file instead of `chat_ops.rs` to keep that file's diff to
+//! its six one-line match arms (`chat_ops.rs` carries uncommitted edits in the untouched
+//! `odw-integrate` worktree). `crate::tui::App`, not `super::super::App`, so the path still
+//! resolves once this file is folded into a plain `mod slash_views;` in `tui.rs` (see this file's
+//! own `#[path]` note in `chat_ops.rs`).
 
 use tm_codeintel::hybrid::RankedHit;
 use tm_context::SectionKind;
 use tm_tui::chat::status::{format_tokens, PermissionMode};
+use tm_tui::chat::transcript::NoticeLevel;
 use tm_types::TicketId;
 
 use crate::agent::{ContextReport, AUTO_COMPACT_TOKENS};
 use crate::project::DoctorCheck;
+use crate::render::{kind_label, state_label};
 
 /// The most hits `/search` prints, matching `tm search`'s own default feel without letting one
 /// broad query flood the transcript.
@@ -118,6 +128,150 @@ pub(super) fn search_results(hits: &[RankedHit], project_indexed: bool) -> Strin
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// `/ticket <T>`'s rendering: a readable one-ticket summary, the transcript-friendly cousin of
+/// `tm ticket show`'s own `format_ticket_text` (`crates/tm-cli/src/tickets.rs`) — fewer fields,
+/// laid out to read inline rather than as a full detail block.
+pub(super) fn ticket_summary(ticket: &tm_core::ticket::Ticket) -> String {
+    let mut out = format!(
+        "{} ({})\n  {} · {}",
+        ticket.id,
+        ticket.objective,
+        state_label(ticket.state),
+        kind_label(ticket.kind)
+    );
+    if let Some(milestone) = &ticket.milestone {
+        out.push_str(&format!("\n  Milestone: {milestone}"));
+    }
+    if let Some(due) = ticket.due {
+        out.push_str(&format!(
+            "\n  Due: {}",
+            tm_core::ticket::format_due_date(due)
+        ));
+    }
+    if !ticket.dependencies.is_empty() {
+        let deps = ticket
+            .dependencies
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!("\n  Depends on: {deps}"));
+    }
+    out
+}
+
+impl crate::tui::App {
+    /// `/ticket <T>`: a readable summary of one ticket, printed inline in the transcript
+    /// ([`ticket_summary`]) rather than switching screens.
+    pub(super) fn show_ticket_cmd(&mut self, arg: &str) {
+        let arg = arg.trim();
+        let Ok(id) = TicketId::new(arg) else {
+            return self.chat.push_notice(
+                NoticeLevel::Warning,
+                format!("\"{arg}\" doesn't look like a ticket id, like T-3."),
+            );
+        };
+        let Ok(view) = self.project.store.view() else {
+            return self
+                .chat
+                .push_notice(NoticeLevel::Warning, "Couldn't read the project.");
+        };
+        match view.tickets.get(&id) {
+            Some(ticket) => self
+                .chat
+                .push_notice(NoticeLevel::Info, ticket_summary(ticket)),
+            None => self
+                .chat
+                .push_notice(NoticeLevel::Warning, format!("No ticket {id}.")),
+        }
+    }
+
+    /// `/run <T>`: activate a Draft ticket (`Store::activate`, `Draft -> Blocked`, continuing to
+    /// `Ready` when its dependencies are already satisfied) so the in-process worker (or `tm
+    /// sched run`) picks it up — the same transition `tm ticket activate` drives from the CLI.
+    /// Any other starting state answers plainly instead of surfacing `activate`'s
+    /// `InvalidTransition` error.
+    pub(super) fn run_ticket_cmd(&mut self, arg: &str) {
+        let arg = arg.trim();
+        let Ok(id) = TicketId::new(arg) else {
+            return self.chat.push_notice(
+                NoticeLevel::Warning,
+                format!("\"{arg}\" doesn't look like a ticket id, like T-3."),
+            );
+        };
+        let Ok(view) = self.project.store.view() else {
+            return self
+                .chat
+                .push_notice(NoticeLevel::Warning, "Couldn't read the project.");
+        };
+        let Some(ticket) = view.tickets.get(&id) else {
+            return self
+                .chat
+                .push_notice(NoticeLevel::Warning, format!("No ticket {id}."));
+        };
+        use tm_core::ticket::TicketState;
+        match ticket.state {
+            TicketState::Draft => {}
+            TicketState::Ready => {
+                return self.chat.push_notice(
+                    NoticeLevel::Info,
+                    format!("{id} is already queued; watch it in /tickets."),
+                );
+            }
+            TicketState::Blocked => {
+                return self.chat.push_notice(
+                    NoticeLevel::Info,
+                    format!("{id} is already queued, waiting on its dependencies."),
+                );
+            }
+            TicketState::Closed => {
+                return self
+                    .chat
+                    .push_notice(NoticeLevel::Info, format!("{id} is already closed."));
+            }
+            TicketState::Escalated => {
+                return self.chat.push_notice(
+                    NoticeLevel::Info,
+                    format!("{id} ran out of attempts. Run `tm ticket retry {id}` to try again."),
+                );
+            }
+            other => {
+                return self.chat.push_notice(
+                    NoticeLevel::Info,
+                    format!(
+                        "{id} is {} right now, so there's nothing to queue.",
+                        state_label(other)
+                    ),
+                );
+            }
+        }
+        match self.project.store.activate(&id, self.project.actor.clone()) {
+            Ok(_) => {
+                let ready = self
+                    .project
+                    .store
+                    .view()
+                    .ok()
+                    .and_then(|v| v.tickets.get(&id).map(|t| t.state))
+                    == Some(TicketState::Ready);
+                let msg = if !ready {
+                    format!("{id} is waiting on its dependencies.")
+                } else if self.local_worker {
+                    format!("Queued {id}; watch it in /tickets.")
+                } else {
+                    format!(
+                        "Queued {id}, but no worker is running here — run `tm sched run` to work it."
+                    )
+                };
+                self.chat.push_notice(NoticeLevel::Success, msg);
+            }
+            Err(e) => self
+                .chat
+                .push_notice(NoticeLevel::Warning, format!("Couldn't queue {id}: {e}")),
+        }
+    }
 }
 
 /// The most `git diff HEAD` characters `/review` embeds directly in its prompt, past which the
@@ -591,5 +745,57 @@ verification = "none"
     #[test]
     fn export_markdown_says_so_with_no_turns() {
         assert!(export_markdown("S-1", &[]).contains("no turns yet"));
+    }
+
+    fn sample_ticket(id: &str, objective: &str) -> tm_core::ticket::Ticket {
+        tm_core::ticket::Ticket {
+            id: TicketId::new(id).unwrap(),
+            objective: objective.to_string(),
+            kind: tm_core::ticket::TicketKind::Work,
+            parent: None,
+            children: vec![],
+            dependencies: vec![],
+            milestone: None,
+            due: None,
+            state: tm_core::ticket::TicketState::Draft,
+            priority: 0,
+            authority: tm_types::Authority::default(),
+            resources: vec![],
+            executor: crate::tickets::default_executor_requirements(),
+            context_refs: vec![],
+            success: vec![],
+            verification: tm_core::ticket::VerificationPolicy::Single,
+            budget: tm_types::Budget::unlimited(),
+            retry: crate::tickets::default_retry_policy(),
+            attempts: 0,
+            failures: vec![],
+            created: tm_types::Timestamp::parse_rfc3339("2024-01-01T00:00:00Z").unwrap(),
+            updated: tm_types::Timestamp::parse_rfc3339("2024-01-01T00:00:00Z").unwrap(),
+            cycle: None,
+        }
+    }
+
+    #[test]
+    fn ticket_summary_reads_plainly_and_has_no_debug_syntax() {
+        let mut t = sample_ticket("T-1", "Fix the login redirect");
+        t.milestone = Some(tm_types::MilestoneId::new("M-1").unwrap());
+        t.due = Some(time::Date::from_calendar_date(2026, time::Month::October, 1).unwrap());
+        t.dependencies = vec![ticket("T-2")];
+        let text = ticket_summary(&t);
+        assert!(text.contains("T-1 (Fix the login redirect)"));
+        assert!(text.contains("draft"));
+        assert!(text.contains("Milestone: M-1"));
+        assert!(text.contains("Due: 2026-10-01"));
+        assert!(text.contains("Depends on: T-2"));
+        assert!(!text.contains('{'), "text contained a struct brace: {text}");
+        assert!(!text.contains("Some("), "text contained Some(...): {text}");
+    }
+
+    #[test]
+    fn ticket_summary_omits_optional_lines_when_unset() {
+        let text = ticket_summary(&sample_ticket("T-9", "No milestone yet"));
+        assert!(!text.contains("Milestone:"));
+        assert!(!text.contains("Due:"));
+        assert!(!text.contains("Depends on:"));
     }
 }

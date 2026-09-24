@@ -57,6 +57,18 @@ pub enum CommandId {
     Permissions,
     /// List workflows, or start one as a background ticket.
     Workflow,
+    /// Open the Kanban board.
+    Board,
+    /// Open the Milestones tab.
+    Milestones,
+    /// Open the Timeline tab.
+    Timeline,
+    /// Open the dependency graph.
+    Deps,
+    /// Show a ticket's summary inline.
+    Ticket,
+    /// Activate and queue a ticket.
+    Run,
     /// Quit tm.
     Exit,
 }
@@ -265,6 +277,48 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "List workflows, or start one as a background ticket",
     },
     SlashCommand {
+        id: CommandId::Board,
+        name: "board",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Open the Kanban board",
+    },
+    SlashCommand {
+        id: CommandId::Milestones,
+        name: "milestones",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Open the Milestones tab",
+    },
+    SlashCommand {
+        id: CommandId::Timeline,
+        name: "timeline",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Open the Timeline tab",
+    },
+    SlashCommand {
+        id: CommandId::Deps,
+        name: "deps",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Open the dependency graph",
+    },
+    SlashCommand {
+        id: CommandId::Ticket,
+        name: "ticket",
+        aliases: &[],
+        arg: Arg::Required("<ticket>"),
+        description: "Show a ticket's summary",
+    },
+    SlashCommand {
+        id: CommandId::Run,
+        name: "run",
+        aliases: &[],
+        arg: Arg::Required("<ticket>"),
+        description: "Activate and queue a ticket",
+    },
+    SlashCommand {
         id: CommandId::Exit,
         name: "exit",
         aliases: &["quit"],
@@ -405,7 +459,7 @@ mod tests {
     fn prefix_filters_and_ranks_name_before_alias() {
         assert_eq!(
             names(&filter("de")),
-            vec!["detach", "decide", "model", "provider"]
+            vec!["detach", "decide", "deps", "model", "provider"]
         );
         assert_eq!(names(&filter("att")), vec!["attach"]);
         let home = filter("hom");
@@ -570,5 +624,25 @@ mod tests {
             usage(lookup("clear").expect("clear is in the table")),
             "/clear"
         );
+    }
+
+    #[test]
+    fn pm_view_and_ticket_commands_are_in_the_table() {
+        assert!(names(&filter("mil")).contains(&"milestones"));
+        for name in ["board", "milestones", "timeline", "deps"] {
+            assert!(
+                matches!(parse(&format!("/{name}")), Some(Parsed::Known { command, arg }) if arg.is_empty() && command.name == name)
+            );
+        }
+        assert!(
+            matches!(parse("/ticket T-1"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Ticket && arg == "T-1")
+        );
+        assert!(
+            matches!(parse("/ticket"), Some(Parsed::MissingArg(c)) if c.id == CommandId::Ticket)
+        );
+        assert!(
+            matches!(parse("/run T-3"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Run && arg == "T-3")
+        );
+        assert!(matches!(parse("/run"), Some(Parsed::MissingArg(c)) if c.id == CommandId::Run));
     }
 }

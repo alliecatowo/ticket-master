@@ -751,6 +751,16 @@ impl App {
         self.current = ScreenId::Tickets;
     }
 
+    /// `/board`, `/milestones`, `/timeline`, `/deps`: jump straight to one of the hub's tabs from
+    /// the chat, the same landing spot `open_tickets` gives `/tickets` — Esc goes back to Chat.
+    fn open_hub_tab(&mut self, tab: ScreenId, now: Timestamp) {
+        self.refresh(now);
+        self.left_at = None;
+        self.back_stack.clear();
+        self.back_stack.push(ScreenId::Chat);
+        self.current = tab;
+    }
+
     fn open_detail(&mut self, ticket_id: &str) {
         let Ok(id) = TicketId::new(ticket_id) else {
             return;
