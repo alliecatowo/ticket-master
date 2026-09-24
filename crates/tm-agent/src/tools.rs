@@ -37,6 +37,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -794,6 +795,16 @@ pub struct BuiltinCapability {
     store: Arc<Store>,
     command_cache: Arc<dyn CommandCache + Send + Sync>,
     command_executor: Arc<dyn CommandExecutor + Send + Sync>,
+    /// Set whenever a mutating tool (a file write/edit/patch apply, or a shell/test/build
+    /// command run) completes, and consulted — then cleared — before the next `search.*`,
+    /// `symbol.*` or `history.*` call (`nav-agent-tool-index-refresh`). `self.ci` is held for a
+    /// whole session/dispatcher lifetime (`tm-cli`'s `dispatch.rs`/chat session builds it once),
+    /// but `symbol_index()`/search read the `files` table, which only
+    /// [`CodeIntel::update_incremental`] populates — without this, a file the agent creates or
+    /// edits mid-run never shows up in a later search/symbol/history result in that same
+    /// session. `AtomicBool` rather than `&mut self`: [`CapabilityProvider::invoke`] takes
+    /// `&self` (providers are shared behind `Arc` across concurrent tool calls).
+    dirty: AtomicBool,
 }
 
 impl BuiltinCapability {
@@ -809,6 +820,7 @@ impl BuiltinCapability {
             store,
             command_cache,
             command_executor,
+            dirty: AtomicBool::new(false),
         }
     }
 
@@ -2216,8 +2228,87 @@ impl CapabilityProvider for BuiltinCapability {
         let Some(name) = ToolName::parse(tool) else {
             return Err(TmError::parse(format!("unknown tool `{tool}`")));
         };
+        // `nav-agent-tool-index-refresh`: before a search/symbol/history call, bring the index
+        // up to date if a mutating tool has run since the last refresh — otherwise a file the
+        // agent just wrote/edited/patched (or a shell/test/build command just changed) never
+        // shows up in this session's `self.ci`, which is opened once and kept for the whole
+        // session/dispatcher lifetime. `swap(false, ...)` clears the flag up front so a failed
+        // refresh below is not retried on every subsequent call — same warn-and-continue policy
+        // as `Project::code_intel` (`crates/tm-cli/src/project.rs`): a possibly-stale index is
+        // still more useful to the caller than an error here would be. Also matches
+        // `Project::code_intel`'s git-repo guard: `update_incremental`'s history ingest needs a
+        // valid `HEAD`, and a global-scope project's root can be anywhere (including `$HOME`),
+        // so skip the refresh entirely rather than erroring/warning on every call there.
+        if tool_reads_index(name)
+            && self.ci.project_root().join(".git").exists()
+            && self.dirty.swap(false, Ordering::SeqCst)
+        {
+            if let Err(e) = self.ci.update_incremental(ctx.clock) {
+                tracing::warn!(
+                    error = %e,
+                    tool,
+                    "could not refresh the code index before this tool call; continuing with what's already indexed"
+                );
+            }
+        }
         let patch_engine = PatchEngine::new(ctx.root.to_path_buf(), ctx.authority.clone());
-        self.execute(name, &input, ctx, &patch_engine)
+        let result = self.execute(name, &input, ctx, &patch_engine);
+        if result.is_ok() && tool_mutates_index(name, &input) {
+            self.dirty.store(true, Ordering::SeqCst);
+        }
+        result
+    }
+}
+
+/// Tools whose result is affected by whether the code index (`self.ci`) reflects the current
+/// working tree — most directly the `files` table [`CodeIntel::update_incremental`] populates,
+/// which `symbol_index()`/`symbol.*`/`history.*` read from disk; `search.exact`/`search.regex`
+/// grep the live tree directly and would see a new/edited file regardless, but are included here
+/// too for `search_semantic`/`search_hybrid`'s sake and because a stale `files` row would still
+/// make an exact/regex hit's surrounding index metadata (e.g. a stale symbol overlapping the same
+/// range) inconsistent — refreshing before any `search.*`/`symbol.*`/`history.*` call is simply
+/// the least surprising place to draw the line (`nav-agent-tool-index-refresh`).
+fn tool_reads_index(tool: ToolName) -> bool {
+    matches!(
+        tool,
+        ToolName::SearchSemantic
+            | ToolName::SearchExact
+            | ToolName::SearchRegex
+            | ToolName::SearchHybrid
+            | ToolName::SymbolDefinition
+            | ToolName::SymbolReferences
+            | ToolName::SymbolCallers
+            | ToolName::SymbolCallees
+            | ToolName::SymbolOutline
+            | ToolName::SymbolRenamePreview
+            | ToolName::HistoryWhy
+            | ToolName::HistorySearch
+            | ToolName::HistoryDeleted
+    )
+}
+
+/// Tools that can change what's on disk under the project root — a file write/edit/patch apply,
+/// a shell/test/build command run, or a git operation that changes `HEAD`/branches (which
+/// `history.*`'s ingest walks) — and so should mark the index dirty for [`tool_reads_index`] to
+/// pick up next (`nav-agent-tool-index-refresh`). `edit.delete_file` is included: a deleted file
+/// must also drop out of the next search/symbol result. `shell.query_output` only counts when it
+/// actually runs a command (`input.artifact` absent) — with `artifact` set it just re-reads an
+/// already-captured result (`to_action`'s own `ShellQueryOutput if input.get("artifact")...`
+/// branch treats that case as a plain read too), so it must not spuriously dirty the index.
+fn tool_mutates_index(tool: ToolName, input: &Value) -> bool {
+    match tool {
+        ToolName::EditApplyPatch
+        | ToolName::EditWriteFile
+        | ToolName::EditCreateFile
+        | ToolName::EditDeleteFile
+        | ToolName::ShellRun
+        | ToolName::TestRun
+        | ToolName::BuildRun
+        | ToolName::GitCommit
+        | ToolName::GitBranch
+        | ToolName::GitWorktree => true,
+        ToolName::ShellQueryOutput => input.get("artifact").is_none(),
+        _ => false,
     }
 }
 
@@ -2662,6 +2753,26 @@ mod tests {
         }
     }
 
+    /// A real tempdir git repo with one commit, matching `crates/tm-cli/tests/worktree_run.rs`'s
+    /// helper of the same name: `CodeIntel::update_incremental`'s history ingest needs a valid
+    /// `HEAD` to walk, which a bare (non-git) tempdir does not have.
+    fn init_git_repo(root: &Path) {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(root.join("README.md"), "hello\n").expect("write file");
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "initial"]);
+    }
+
     struct Harness {
         dir: TempDir,
         authority: Authority,
@@ -2675,7 +2786,22 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
+            Self::build(false)
+        }
+
+        /// Same as [`Harness::new`], except `dir` is a real git repo with one commit
+        /// (`git init` + an initial commit, matching `tests/worktree_run.rs`'s
+        /// `init_git_repo`) instead of a bare tempdir — needed by any test that exercises
+        /// [`CodeIntel::update_incremental`], whose history ingest requires a valid `HEAD`.
+        fn new_with_git_repo() -> Self {
+            Self::build(true)
+        }
+
+        fn build(git_repo: bool) -> Self {
             let dir = TempDir::new().expect("tempdir");
+            if git_repo {
+                init_git_repo(dir.path());
+            }
             let authority = Authority::root();
             let ci = Arc::new(CodeIntel::open(dir.path()).expect("codeintel"));
             let store = Arc::new(
@@ -4322,5 +4448,124 @@ mod tests {
             matches!(outcome, ToolOutcome::Denied { .. }),
             "expected Denied (permits checked before invoke), got {outcome:?}"
         );
+    }
+
+    /// `nav-agent-tool-index-refresh`'s acceptance check: a write tool creates `new.rs`
+    /// containing `fn fresh_fn`, then a `symbol.definition` call finds it — this failed before
+    /// the fix, because `self.ci` is opened once for the whole session and `symbol_index()`
+    /// only ever sees files `update_incremental` has written to the `files` table, which no
+    /// tool call ever triggered mid-session.
+    #[tokio::test]
+    async fn write_tool_dirties_the_index_so_symbol_definition_finds_the_new_file() {
+        let h = Harness::new_with_git_repo();
+
+        let created = h
+            .registry
+            .dispatch(
+                &call(
+                    "edit.create_file",
+                    json!({"path": "new.rs", "content": "fn fresh_fn() {}\n"}),
+                ),
+                &h.ctx(),
+            )
+            .await;
+        let ToolOutcome::Completed { result, .. } = created else {
+            panic!("expected edit.create_file to complete, got {created:?}");
+        };
+        assert_eq!(result["applied"], true);
+
+        let found = h
+            .registry
+            .dispatch(
+                &call(
+                    "symbol.definition",
+                    json!({"name": "fresh_fn", "from_path": "new.rs"}),
+                ),
+                &h.ctx(),
+            )
+            .await;
+        match found {
+            ToolOutcome::Completed { result, .. } => assert!(
+                !result.is_null(),
+                "symbol.definition should find fresh_fn in new.rs right after it was written, got {result:?}"
+            ),
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    /// The other half of `nav-agent-tool-index-refresh`'s acceptance check: two consecutive
+    /// `symbol.definition` calls with no mutating tool between them trigger no refresh.
+    /// `symbol.definition` resolves purely from `self.store.list_files()` (the `files` table
+    /// `update_incremental` populates), so a file dropped straight on disk (never through a
+    /// write/edit/patch/shell tool, so `BuiltinCapability`'s dirty flag is never set by it) must
+    /// stay invisible across both calls. This first forces one real dirty->refresh->clear cycle
+    /// (an `edit.create_file` then a `symbol.definition` that finds it) before the out-of-band
+    /// write, specifically so this test would also catch a broken `swap` (e.g. `load` instead,
+    /// which never clears the flag): with `load`, the first cycle's dirty flag would still read
+    /// `true` afterwards and every following `symbol.definition` call would keep refreshing and
+    /// picking up `out_of_band.rs` too, silently passing a weaker version of this test that never
+    /// primed the flag at all.
+    #[tokio::test]
+    async fn consecutive_symbol_calls_with_no_mutating_tool_do_not_refresh_the_index() {
+        let h = Harness::new_with_git_repo();
+
+        let created = h
+            .registry
+            .dispatch(
+                &call(
+                    "edit.create_file",
+                    json!({"path": "new.rs", "content": "fn fresh_fn() {}\n"}),
+                ),
+                &h.ctx(),
+            )
+            .await;
+        assert!(
+            matches!(created, ToolOutcome::Completed { .. }),
+            "expected edit.create_file to complete, got {created:?}"
+        );
+        let found = h
+            .registry
+            .dispatch(
+                &call(
+                    "symbol.definition",
+                    json!({"name": "fresh_fn", "from_path": "new.rs"}),
+                ),
+                &h.ctx(),
+            )
+            .await;
+        match found {
+            ToolOutcome::Completed { result, .. } => {
+                assert!(
+                    !result.is_null(),
+                    "expected the refresh to find fresh_fn first"
+                )
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+
+        // Out-of-band write: not through `edit.*`/`shell.run`/etc, so `BuiltinCapability`'s
+        // dirty flag — already cleared by the refresh above — is never set again by this.
+        std::fs::write(h.root().join("out_of_band.rs"), "fn out_of_band_fn() {}\n").unwrap();
+
+        for _ in 0..2 {
+            let outcome = h
+                .registry
+                .dispatch(
+                    &call(
+                        "symbol.definition",
+                        json!({"name": "out_of_band_fn", "from_path": "out_of_band.rs"}),
+                    ),
+                    &h.ctx(),
+                )
+                .await;
+            match outcome {
+                ToolOutcome::Completed { result, .. } => assert!(
+                    result.is_null(),
+                    "no mutating tool ran since the refresh above, so the index must not have \
+                     refreshed again and picked up out_of_band.rs: {result:?}"
+                ),
+                other => panic!("expected Completed, got {other:?}"),
+            }
+        }
     }
 }
