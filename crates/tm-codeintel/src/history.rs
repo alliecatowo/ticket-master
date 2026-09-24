@@ -242,6 +242,18 @@ impl HistoryIndex {
                 .map_err(|e| TmError::storage(format!("query: {e}")))?;
             if let Some(row) = rows.next() {
                 commits.push(row.map_err(|e| TmError::storage(format!("row: {e}")))?);
+            } else {
+                // Not in the commits table yet (e.g. made after the last
+                // ingest_incremental) — don't silently drop it, build the summary
+                // straight from git2 instead.
+                let oid = git2::Oid::from_str(sha).map_err(git_err)?;
+                let commit = repo.find_commit(oid).map_err(git_err)?;
+                commits.push(CommitSummary {
+                    sha: commit.id().to_string(),
+                    author: commit.author().name().unwrap_or("").to_string(),
+                    authored_at: commit.time().seconds(),
+                    message: commit.message().unwrap_or("").to_string(),
+                });
             }
         }
 
@@ -544,6 +556,29 @@ mod tests {
         assert_eq!(answer.path, "a.txt");
         assert_eq!(answer.commits.len(), 1);
         assert_eq!(answer.commits[0].message.trim(), "add a.txt");
+    }
+
+    #[test]
+    fn why_includes_a_commit_made_after_the_last_ingest() {
+        let (dir, repo) = init_repo();
+        write_file(dir.path(), "a.txt", "line one\nline two\n");
+        commit_all(&repo, "add a.txt", 1_000);
+
+        let history = open_index(dir.path());
+        let clock = FixedClock::epoch();
+        history.ingest_incremental(&clock).unwrap();
+
+        // A later commit that never went through ingest_incremental — its sha has no
+        // row in the commits table.
+        write_file(dir.path(), "a.txt", "line one\nline two changed\n");
+        let later_oid = commit_all(&repo, "change line two", 2_000);
+
+        let answer = history.why("a.txt", 2, 2).unwrap();
+        assert_eq!(answer.commits.len(), 1);
+        let commit = &answer.commits[0];
+        assert_eq!(commit.sha, later_oid.to_string());
+        assert_eq!(commit.author, "Test Author");
+        assert_eq!(commit.message.trim(), "change line two");
     }
 
     #[test]
