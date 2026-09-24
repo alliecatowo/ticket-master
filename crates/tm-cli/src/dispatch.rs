@@ -27,7 +27,14 @@ use crate::project::Project;
 /// invocation's borrow of `Project`).
 struct ProjectContextPackSource {
     store: Arc<Store>,
+    /// The workspace `CodeIntel` indexes and searches — `exec_root` (`tm run --worktree`'s
+    /// isolated checkout) when it differs from `project.root`, so retrieval sees the tree the
+    /// run is actually executing in rather than the main checkout (`critic-worktree-exec-root-
+    /// indexing`). Equal to `project.root` outside `--worktree`.
     root: PathBuf,
+    /// Where this source's own `CodeIntel` reads/writes `index.db` — `root.join(".tm")` when
+    /// `root` is a worktree, so a worktree run's incremental reindex never contends with the main
+    /// checkout's `index.db` for writes. Equal to `project.state_dir` outside `--worktree`.
     state_dir: PathBuf,
     /// Used to refresh the index in [`ContextPackSource::compile`] before every pack, the same
     /// way [`Project::code_intel`](crate::project::Project::code_intel) refreshes on open — this
@@ -43,16 +50,7 @@ impl ContextPackSource for ProjectContextPackSource {
             .tickets
             .get(ticket)
             .ok_or_else(|| tm_types::TmError::not_found("ticket", ticket))?;
-        let ci = tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.root)?;
-        if git2::Repository::open(&self.root).is_ok() {
-            if let Err(e) = ci.update_incremental(self.clock.as_ref()) {
-                tracing::warn!(
-                    error = %e,
-                    root = %self.root.display(),
-                    "could not refresh the code index; continuing with what's already indexed"
-                );
-            }
-        }
+        let ci = open_and_refresh_code_intel(&self.state_dir, &self.root, self.clock.as_ref())?;
         let pack = tm_context::pack::compile(
             ticket_state,
             &view,
@@ -248,8 +246,12 @@ pub(crate) fn load_oversight(project: &Project) -> tm_types::Result<Oversight> {
 /// (`docs/decisions/D-012-run-worktree-isolation.md`) instead of the main working tree. `None`
 /// (what `tm sched run` and a normal `tm run` pass) resolves tool calls against `project.root`;
 /// `--worktree` passes that isolated root instead. The launcher process's current directory is
-/// never an execution-root fallback. Retrieval (`ProjectContextPackSource`'s `CodeIntel`) is
-/// deliberately *not* affected either way — see that struct's construction below.
+/// never an execution-root fallback. Retrieval (`ProjectContextPackSource`'s `CodeIntel`, and the
+/// `CodeIntel` wired into the `BuiltinExecutor` below) follows `exec_root` too, with its own
+/// per-worktree `index.db` under `exec_root.join(".tm")` — see `index_root_and_state_dir` —
+/// rather than sharing the main checkout's index, so `search.*`/`symbol.*` tool calls inside a
+/// `--worktree` run see the worktree's own tree instead of stale main-checkout results
+/// (`critic-worktree-exec-root-indexing`).
 ///
 /// `steps`, when `Some`, receives every step of every builtin-executed run as it happens (`tm
 /// run`'s live progress).
@@ -290,7 +292,12 @@ pub(crate) fn build_dispatcher_with_fabric(
     human_sink: Arc<dyn HumanApprovalSink>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
     let exec_root = execution_root(&project.root, exec_root);
-    let ci = Arc::new(project.code_intel()?);
+    let (index_root, index_state_dir) = index_root_and_state_dir(project, exec_root);
+    let ci = Arc::new(open_and_refresh_code_intel(
+        &index_state_dir,
+        &index_root,
+        project.clock.as_ref(),
+    )?);
     let command_cache: Arc<dyn tm_context::CommandCache + Send + Sync> =
         Arc::new(MemoryCommandCache::new(project.ids.clone()));
     let command_executor: Arc<dyn tm_context::CommandExecutor + Send + Sync> =
@@ -331,8 +338,8 @@ pub(crate) fn build_dispatcher_with_fabric(
 
     let context: Arc<dyn ContextPackSource> = Arc::new(ProjectContextPackSource {
         store: project.store.clone(),
-        root: project.root.clone(),
-        state_dir: project.state_dir.clone(),
+        root: index_root,
+        state_dir: index_state_dir,
         clock: project.clock.clone(),
     });
 
@@ -347,6 +354,48 @@ pub(crate) fn build_dispatcher_with_fabric(
 
 fn execution_root<'a>(project_root: &'a Path, override_root: Option<&'a Path>) -> &'a Path {
     override_root.unwrap_or(project_root)
+}
+
+/// Where a dispatched run's `CodeIntel` should read/write from, given the tool-call execution
+/// root the run resolved (`execution_root`): `(project.root, project.state_dir)` unchanged when
+/// `exec_root` is the main checkout, or `(exec_root, exec_root.join(".tm"))` when it's a `tm run
+/// --worktree` checkout, so the index tracks the tree the run actually executes in instead of the
+/// main checkout's, and a worktree run's incremental reindex writes to its own `index.db` rather
+/// than fighting the main checkout for the same one (`critic-worktree-exec-root-indexing`).
+/// `.tm` is already `.gitignore`d repo-wide, so this needs no extra ignore entry, and it never
+/// collides with a real `tm init`'d project's own `.tm` since a `--worktree` checkout is never
+/// itself doctored/initialized as a project.
+fn index_root_and_state_dir(project: &Project, exec_root: &Path) -> (PathBuf, PathBuf) {
+    if exec_root == project.root.as_path() {
+        (project.root.clone(), project.state_dir.clone())
+    } else {
+        (exec_root.to_path_buf(), exec_root.join(".tm"))
+    }
+}
+
+/// Opens a `CodeIntel` at `index_dir` over `workspace_root` and best-effort refreshes it via
+/// [`tm_codeintel::CodeIntel::update_incremental`], mirroring
+/// [`Project::code_intel`](crate::project::Project::code_intel)'s own open-and-refresh behavior
+/// (skipped when `workspace_root` isn't inside a git work tree; degrades to a `tracing::warn!`
+/// rather than failing when the refresh itself errors) — shared here so both the dispatcher's
+/// `BuiltinExecutor` and `ProjectContextPackSource` refresh the *same* index exactly once per
+/// dispatch build, whichever root (`project.root` or a `--worktree` checkout) that index is for.
+fn open_and_refresh_code_intel(
+    index_dir: &Path,
+    workspace_root: &Path,
+    clock: &dyn tm_types::Clock,
+) -> tm_types::Result<tm_codeintel::CodeIntel> {
+    let ci = tm_codeintel::CodeIntel::open_at(index_dir, workspace_root)?;
+    if git2::Repository::open(workspace_root).is_ok() {
+        if let Err(e) = ci.update_incremental(clock) {
+            tracing::warn!(
+                error = %e,
+                root = %workspace_root.display(),
+                "could not refresh the code index; continuing with what's already indexed"
+            );
+        }
+    }
+    Ok(ci)
 }
 
 #[cfg(test)]
@@ -650,6 +699,110 @@ mod tests {
             rendered.contains("widget.rs"),
             "expected the never-doctored project's committed widget.rs to show up in the \
              compiled context pack via a freshly refreshed index, got:\n{rendered}"
+        );
+    }
+
+    /// `critic-worktree-exec-root-indexing`, acceptance: a `tm run --worktree` dispatch's
+    /// `CodeIntel` must index the worktree checkout it actually executes in, not the main
+    /// checkout, with its own `index.db` so it never fights the main checkout's index for
+    /// writes. Exercised at the level this file owns — `index_root_and_state_dir` and
+    /// `open_and_refresh_code_intel`, the two helpers `build_dispatcher_with_fabric` and
+    /// `ProjectContextPackSource::compile` both now go through — over a real `git worktree`
+    /// whose branch has a file the main checkout never gets, the same shape `tm run --worktree`
+    /// (D-012) sets up.
+    #[test]
+    fn worktree_exec_root_indexes_the_worktree_and_finds_its_own_only_file() {
+        let repo = tempfile::tempdir().expect("tempdir");
+        let root = repo.path();
+
+        let run = |dir: &std::path::Path, args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .expect("git should run in test environment");
+            assert!(
+                status.success(),
+                "git {:?} failed in {}",
+                args,
+                dir.display()
+            );
+        };
+        run(root, &["init", "--quiet", "--initial-branch=main"]);
+        run(root, &["config", "user.email", "test@example.com"]);
+        run(root, &["config", "user.name", "Test"]);
+        std::fs::write(
+            root.join("main_only.rs"),
+            "fn compute_main_checkout_marker() -> i32 { 1 }\n",
+        )
+        .expect("write main_only.rs");
+        run(root, &["add", "main_only.rs"]);
+        run(root, &["commit", "--quiet", "-m", "main checkout file"]);
+
+        // A real `git worktree` branched off `main`, the same shape `tm run --worktree`'s
+        // isolation sets up (D-012) — with a file the main checkout never gets. A second, separate
+        // tempdir (rather than a path alongside `repo`) so it's cleaned up the same way `repo` is,
+        // without a manual `git worktree remove`.
+        let worktree_parent = tempfile::tempdir().expect("worktree tempdir");
+        let worktree_dir = worktree_parent.path().join("worktree");
+        run(
+            root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                worktree_dir.to_str().expect("utf8 path"),
+            ],
+        );
+        std::fs::write(
+            worktree_dir.join("worktree_only.rs"),
+            "fn find_worktree_only_marker() -> i32 { 2 }\n",
+        )
+        .expect("write worktree_only.rs");
+        run(&worktree_dir, &["add", "worktree_only.rs"]);
+        run(
+            &worktree_dir,
+            &["commit", "--quiet", "-m", "worktree-only file"],
+        );
+
+        let project = test_project(root);
+
+        // Outside `--worktree`, `exec_root` is `project.root` and the index stays the main
+        // checkout's own.
+        let (main_root, main_state_dir) = index_root_and_state_dir(&project, &project.root);
+        assert_eq!(main_root, project.root);
+        assert_eq!(main_state_dir, project.state_dir);
+
+        // Under `--worktree`, both the workspace `CodeIntel` indexes/searches and where its
+        // `index.db` lives follow the worktree instead — and never collide with the main
+        // checkout's own index.db.
+        let (wt_root, wt_state_dir) = index_root_and_state_dir(&project, &worktree_dir);
+        assert_eq!(wt_root, worktree_dir);
+        assert_eq!(wt_state_dir, worktree_dir.join(".tm"));
+        assert_ne!(
+            wt_state_dir, main_state_dir,
+            "a worktree run's index must not share the main checkout's index.db"
+        );
+
+        let ci = open_and_refresh_code_intel(&wt_state_dir, &wt_root, project.clock.as_ref())
+            .expect("open and refresh the worktree's own index");
+        let query = tm_codeintel::Query {
+            text: "find_worktree_only_marker".to_string(),
+            seed_symbols: vec![],
+            seed_paths: vec![],
+        };
+        let hits = ci
+            .search_hybrid(
+                &query,
+                &tm_codeintel::RetrievalContext::default(),
+                tm_codeintel::SignalWeights::default(),
+            )
+            .expect("search_hybrid over the worktree's own index");
+        assert!(
+            hits.iter().any(|h| h.path.contains("worktree_only.rs")),
+            "expected a search.*/symbol.* tool call inside a --worktree run to find the \
+             worktree-only file via the worktree's own index, got: {hits:?}"
         );
     }
 }
