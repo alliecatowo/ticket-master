@@ -1233,9 +1233,21 @@ where
 /// This gate (probe only when nothing else is configured) is deliberate: a slow-by-comparison
 /// network probe has no business running on every `tm genesis` invocation that already has a
 /// working credential for its configured provider.
+///
+/// Checked before any of that: [`crate::agent::TEST_MOCK_PROVIDER_ENV`] (see
+/// [`mock_genesis_provider`]) — the same offline test hook `crate::agent::build_fabric` already
+/// honors for `tm run`/chat turns, so `tm genesis` doesn't need a real credential under it
+/// either.
 fn resolve_genesis_provider(
     clock: Arc<dyn Clock>,
 ) -> tm_types::Result<(Arc<dyn tm_provider::Provider>, Option<String>)> {
+    if let Some(provider) = mock_genesis_provider(
+        std::env::var_os(crate::agent::TEST_MOCK_PROVIDER_ENV).as_deref(),
+        clock.clone(),
+    ) {
+        return Ok((provider, None));
+    }
+
     let known = tm_provider::Registry::known_providers();
     let table = tm_provider::RoleTable::default_table();
     let candidate = table
@@ -1310,6 +1322,53 @@ fn resolve_genesis_provider(
          account) run `gh auth login` and export GITHUB_TOKEN=$(gh auth token) to route through \
          GitHub Models instead."
     )))
+}
+
+/// When `mock_provider_env` is `Some` (i.e. [`crate::agent::TEST_MOCK_PROVIDER_ENV`] is set),
+/// builds a [`tm_provider::MockProvider`] scripted with `tm_genesis::fixtures::offline_sequence()`
+/// — a schema-correct canned response for each of Genesis's five provider-calling stages (Seed,
+/// Vision, Spec, GraphCompilation, MaturityGate), in order — so `tm genesis` can run offline and
+/// deterministically under that hook the same way `crate::agent::build_fabric` already lets `tm
+/// run`/chat turns. Returns `None` otherwise, leaving [`resolve_genesis_provider`]'s normal
+/// configured/local-fallback resolution untouched.
+///
+/// Takes the env var's *value* as a parameter, rather than reading `std::env::var_os` itself, so
+/// a test can exercise both branches without mutating process-global env.
+fn mock_genesis_provider(
+    mock_provider_env: Option<&std::ffi::OsStr>,
+    clock: Arc<dyn Clock>,
+) -> Option<Arc<dyn tm_provider::Provider>> {
+    mock_provider_env?;
+    let model = tm_provider::ModelId::new("mock", "genesis-mock");
+    let now = clock.now();
+    let provider = tm_provider::MockProvider::new("mock", model.clone(), clock);
+    provider.script_sequence(
+        tm_genesis::fixtures::offline_sequence()
+            .into_iter()
+            .map(|text| genesis_mock_completion(&model, now, text))
+            .collect(),
+    );
+    Some(Arc::new(provider))
+}
+
+/// One scripted, text-only [`tm_provider::Completion`] for [`mock_genesis_provider`] — the same
+/// shape `crates/tm-e2e/tests/genesis_e2e.rs`'s own `completion_with` helper builds, since every
+/// Genesis provider-calling stage only ever reads the response's first text block.
+fn genesis_mock_completion(
+    model: &tm_provider::ModelId,
+    now: Timestamp,
+    text: String,
+) -> tm_provider::Completion {
+    tm_provider::Completion {
+        model: model.clone(),
+        candidates: vec![tm_provider::Candidate {
+            content: vec![tm_provider::ContentBlock::Text { text }],
+            stop_reason: tm_provider::StopReason::EndTurn,
+        }],
+        usage: tm_provider::Usage::default(),
+        latency: std::time::Duration::ZERO,
+        received_at: now,
+    }
 }
 
 /// A short, human-readable label for a Genesis [`tm_genesis::Stage`], for progress notes and the
@@ -2548,6 +2607,55 @@ mod tests {
             genesis_provider_for_candidate(&genesis_candidate("ollama", "llama3"), &known, clock)
                 .expect("ollama constructs without any env var");
         assert_eq!(provider.id(), "ollama");
+    }
+
+    fn empty_completion_request() -> tm_provider::CompletionRequest {
+        tm_provider::CompletionRequest {
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            max_tokens: 1,
+            temperature: None,
+            stop_sequences: Vec::new(),
+            stream: false,
+            n: 1,
+            model: None,
+        }
+    }
+
+    #[test]
+    fn mock_genesis_provider_is_none_when_the_env_hook_is_unset() {
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        assert!(mock_genesis_provider(None, clock).is_none());
+    }
+
+    /// The load-bearing regression this task fixes: under
+    /// `TM_TEST_MOCK_PROVIDER` (`crate::agent::TEST_MOCK_PROVIDER_ENV`),
+    /// `mock_genesis_provider` returns a provider that serves
+    /// `tm_genesis::fixtures::offline_sequence()` in order — see
+    /// `genesis-cli-wire-mock-provider` in `docs/tasks/TASKS.md`.
+    #[tokio::test]
+    async fn mock_genesis_provider_serves_the_offline_fixture_sequence_in_order() {
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        let provider = mock_genesis_provider(Some(std::ffi::OsStr::new("1")), clock)
+            .expect("the env hook set must produce a provider");
+
+        let expected = tm_genesis::fixtures::offline_sequence();
+        for want in &expected {
+            let completion = provider
+                .complete(empty_completion_request())
+                .await
+                .expect("the scripted sequence has one entry per stage");
+            let got = match completion
+                .candidates
+                .first()
+                .and_then(|c| c.content.first())
+            {
+                Some(tm_provider::ContentBlock::Text { text }) => text.clone(),
+                other => panic!("expected a text completion, got {other:?}"),
+            };
+            assert_eq!(&got, want);
+        }
     }
 
     #[test]

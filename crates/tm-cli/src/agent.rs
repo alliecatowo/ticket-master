@@ -1610,9 +1610,10 @@ fn read_line<R: BufRead>(reader: &mut R, buf: &mut String) -> tm_types::Result<u
 /// `crates/tm-cli/tests/tui_turn.rs`, which types a prompt into the TUI's chat input and asserts
 /// on the resulting ticket/output. Out-of-process tests have no way to inject a Rust closure or
 /// a pre-built `Fabric` into the child, so this is the one runtime hook that lets them exercise
-/// the real turn-running path without hitting the network; nothing outside this module reads it,
-/// and it has no effect unless a test explicitly sets it.
-const TEST_MOCK_PROVIDER_ENV: &str = "TM_TEST_MOCK_PROVIDER";
+/// the real turn-running path without hitting the network; it has no effect unless a test
+/// explicitly sets it. `crate::project::resolve_genesis_provider` also reads it (via
+/// `crate::project::mock_genesis_provider`), so `tm genesis` gets the same offline path.
+pub(crate) const TEST_MOCK_PROVIDER_ENV: &str = "TM_TEST_MOCK_PROVIDER";
 
 /// Build the fabric this session issues completions through, registered against the workspace's
 /// default role table ([`RoleTable::default_table`]) — or, when [`TEST_MOCK_PROVIDER_ENV`] is
