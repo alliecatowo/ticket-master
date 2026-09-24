@@ -206,6 +206,13 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
 - `tm -p "<prompt>"` is the scriptable one-shot chat turn: exit 0 on a reply, 2 when the agent
   failed the task (`TmError::TurnFailed`), 4 when it ran out of budget; `--json -p` prints one
   result object (outcome, text, model, tokens, steps). Chatting never creates a ticket (D-017).
+- Provider configuration is project-scoped: `tm init` creates `providers.toml` for role routing
+  and `harness.toml` for `HarnessConfig`; `tm harness set` validates and persists a candidate,
+  which takes effect after `tm harness promote`.
+  Chat defaults live in `default-model.json`. Sessions, background workers, and provider list/status
+  use the same effective role-table loader (`providers.toml` → legacy role-shaped `harness.toml` →
+  built-in defaults). See `docs/providers.md` and D-022. Test the real `tm` binary only against a
+  fresh `mktemp` project root, never this checkout.
 - Ticket lifecycle from the CLI: `tm ticket new "<objective>"` (starts a global-scope project if
   none exists; new tickets get `Authority::worker()`), `tm ticket activate <T>` (draft -> ready),
   then `tm run <T>` (activates a draft itself, and prints each step live) or `tm sched run`. `tm

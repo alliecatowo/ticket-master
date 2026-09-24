@@ -16,7 +16,7 @@ use tm_core::ArtifactKind;
 use tm_scheduler::dispatch::{ContextPackSource, ExecutorDispatcher, ExecutorRegistry};
 use tm_types::{Oversight, Role, TicketId};
 
-use crate::agent::{build_fabric, MemoryCommandCache, ProcessCommandExecutor};
+use crate::agent::{build_fabric_for_project, MemoryCommandCache, ProcessCommandExecutor};
 use crate::project::Project;
 
 /// Compiles a ticket's context pack against the live project state and renders it to text via
@@ -46,7 +46,7 @@ impl ContextPackSource for ProjectContextPackSource {
             tm_context::tokens::TokenBudget::even(10_000),
             tm_codeintel::SignalWeights::default(),
             &[],
-            &tm_provider::RoleTable::default_table(),
+            &crate::ops::load_role_table_for_state_dir(&self.state_dir)?,
         )?;
         Ok(tm_agent::render_task_prompt(ticket, &pack))
     }
@@ -262,13 +262,13 @@ pub fn build_dispatcher_with_human(
     steps: Option<tokio::sync::mpsc::UnboundedSender<tm_agent::StepRecord>>,
     human_sink: Arc<dyn HumanApprovalSink>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
-    let fabric = build_fabric(project.clock.clone())?;
+    let fabric = build_fabric_for_project(project, project.clock.clone())?;
     build_dispatcher_with_fabric(project, handle, exec_root, steps, fabric, human_sink)
 }
 
 /// [`build_dispatcher`] over an already-built `fabric` instead of the one
-/// [`crate::agent::build_fabric`] would pick from the environment — the seam an in-process test
-/// uses to run the real dispatcher against a provider it controls.
+/// [`crate::agent::build_fabric_for_project`] would pick from the project's own configuration —
+/// the seam an in-process test uses to run the real dispatcher against a provider it controls.
 pub(crate) fn build_dispatcher_with_fabric(
     project: &Project,
     handle: tokio::runtime::Handle,

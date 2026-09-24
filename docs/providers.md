@@ -16,8 +16,19 @@ is the single place that knows all of their slugs, env vars, and capabilities:
   on) any that isn't.
 
 Run `tm provider detect` (add `--json` for machine-readable output) to see this list against your
-own environment. `tm provider list` shows the role -> candidate routing from the current
-project's `providers.toml` instead.
+own environment. `tm provider list` shows role -> candidate routing from the current project's
+`providers.toml`; if absent, it reads legacy role-shaped `harness.toml` and then falls back to the
+built-in table. `tm provider status` reports the same effective routing and providers registered
+for the turn path.
+
+`tm init` scaffolds `providers.toml` from the default role table and a distinct `harness.toml`
+from `HarnessConfig::default()`. `harness.toml` is only harness behavior; provider routing lives in
+`providers.toml`. `tm harness set` validates and persists a candidate harness configuration;
+promote the resulting epoch with `tm harness promote` to apply it. Chat model defaults use
+`<state_dir>/default-model.json`; selection order is the current
+session choice, saved project default, then the effective table's `coder.fast` primary. Interactive
+sessions and scheduler workers consume the same project role table. Local model names are never
+guessed; select one explicitly with `/model <provider>/<model>`.
 
 A `providers.toml` role candidate names any of the slugs below in its `provider` field:
 
@@ -195,6 +206,7 @@ never touched anyway.
 - Base URL: `http://localhost:11434`
 - Free tier: yes — runs entirely locally, no API key
 - Capabilities: completion, embedding, streaming, tool use
+- No guessed default model: select a pulled model explicitly, for example `/model ollama/qwen2.5-coder`.
 - Caveat: since every one of this backend's env vars is optional, `ProviderInfo::is_configured()`
   always reports it as "configured", regardless of whether an Ollama server is actually reachable
   at the configured host. Autodetection here means "constructible", not "reachable"; confirming
@@ -208,6 +220,7 @@ never touched anyway.
 - Base URL: `http://localhost:1234`
 - Free tier: yes — runs entirely locally, no API key
 - Capabilities: completion, embedding, streaming, tool use
+- No guessed default model: select a model exposed by LM Studio explicitly.
 - Same "configured means constructible, not reachable" caveat as Ollama above.
 
 ## llama.cpp (local)
@@ -219,6 +232,7 @@ never touched anyway.
 - Base URL: `http://localhost:8080`
 - Free tier: yes — runs entirely locally, no API key required by default
 - Capabilities: completion, embedding, streaming, tool use
+- No guessed default model: select the model served by `llama-server` explicitly.
 - Same "configured means constructible, not reachable" caveat as Ollama above.
 
 ## Azure OpenAI

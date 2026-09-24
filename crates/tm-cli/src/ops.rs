@@ -8,8 +8,8 @@ use std::sync::Arc;
 use crate::args::{
     BenchCommand, BenchCompareArgs, BenchRunArgs, DocsCommand, EventsCommand, EventsReplayArgs,
     EventsShowArgs, EventsTailArgs, HarnessCommand, HarnessPromoteArgs, HarnessSetArgs,
-    MirrorCommand, MirrorLinkArgs, ProviderCommand, ProviderTestArgs, TemplatesCommand,
-    TemplatesShowArgs,
+    MirrorCommand, MirrorLinkArgs, ProviderCommand, ProviderDefaultArgs, ProviderTestArgs,
+    TemplatesCommand, TemplatesShowArgs,
 };
 use crate::project::Project;
 use crate::render::{Renderer, Table};
@@ -520,8 +520,71 @@ pub async fn dispatch_provider(
     match cmd {
         ProviderCommand::List => provider_list(project, renderer).await,
         ProviderCommand::Detect => provider_detect(renderer).await,
-        ProviderCommand::Status => provider_status(renderer).await,
-        ProviderCommand::Test(args) => provider_test(args, renderer).await,
+        ProviderCommand::Status => provider_status(project, renderer).await,
+        ProviderCommand::Default(args) => provider_default(args, project, renderer),
+        ProviderCommand::Test(args) => provider_test(args, project, renderer).await,
+    }
+}
+
+fn provider_default(
+    args: &ProviderDefaultArgs,
+    project: Option<&Project>,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let project = project.ok_or_else(|| {
+        tm_types::TmError::parse(
+            "`tm provider default` requires a project; run `tm init` first".to_string(),
+        )
+    })?;
+    let path = project.state_dir.join("default-model.json");
+    match args.spec.as_deref().map(str::trim) {
+        None => {
+            let saved = crate::agent::load_default_model(project)
+                .map(|model| model.to_string())
+                .unwrap_or_else(|| "(not set)".to_string());
+            renderer.emit(
+                &serde_json::json!({"model": saved}),
+                &format!("Default model: {saved}"),
+            )
+        }
+        Some(spec) if spec.eq_ignore_ascii_case("clear") => {
+            match fs::remove_file(&path) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(error.into()),
+            }
+            renderer.emit(
+                &serde_json::json!({"model": null}),
+                "Cleared project default model.",
+            )
+        }
+        Some(spec) => {
+            let (provider, model) = spec
+                .split_once('/')
+                .filter(|(provider, model)| !provider.is_empty() && !model.is_empty())
+                .ok_or_else(|| {
+                    tm_types::TmError::parse("Expected `provider/model` or `clear`".to_string())
+                })?;
+            let known_providers = tm_provider::Registry::known_providers();
+            let provider_info = known_providers
+                .iter()
+                .find(|known| known.id == provider)
+                .ok_or_else(|| {
+                    tm_types::TmError::parse(format!("Unknown provider `{provider}`"))
+                })?;
+            if !provider_info.is_configured() {
+                return Err(tm_types::TmError::parse(format!(
+                    "Provider `{provider}` is not configured in this environment; configure its required credentials first (see `tm provider detect`)"
+                )));
+            }
+            fs::create_dir_all(&project.state_dir)?;
+            let value = serde_json::json!({"model": format!("{provider}/{model}")});
+            fs::write(&path, serde_json::to_vec(&value)?)?;
+            renderer.emit(
+                &value,
+                &format!("Saved project default model: {provider}/{model}"),
+            )
+        }
     }
 }
 
@@ -538,23 +601,42 @@ fn availability_label(availability: tm_provider::Availability) -> &'static str {
     }
 }
 
-/// Load the role table the turn path routes through: the project's `harness.toml` parsed as
-/// a [`tm_provider::RoleTable`] when it exists, else [`tm_provider::RoleTable::default_table`]
-/// (D-021: shared with the chat's `/provider` and `/config` so all three surfaces route
-/// identically).
+/// Load provider routing from `providers.toml`; read legacy role-shaped `harness.toml` only
+/// when the new file is absent.
 pub(crate) fn load_role_table(
     project: Option<&Project>,
 ) -> tm_types::Result<tm_provider::RoleTable> {
-    let harness_path = project.map(|p| p.state_dir.join("harness.toml"));
-    match harness_path.filter(|path| path.is_file()) {
-        Some(path) => {
-            let harness_content = fs::read_to_string(&path).map_err(|e| {
-                tm_types::TmError::storage(format!("Failed to read harness.toml: {e}"))
-            })?;
-            tm_provider::RoleTable::parse(&harness_content)
-                .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e}")))
-        }
+    match project {
+        Some(project) => load_role_table_for_state_dir(&project.state_dir),
         None => Ok(tm_provider::RoleTable::default_table()),
+    }
+}
+
+pub(crate) fn load_role_table_for_state_dir(
+    state_dir: &std::path::Path,
+) -> tm_types::Result<tm_provider::RoleTable> {
+    let providers_path = state_dir.join("providers.toml");
+    match providers_path.is_file().then_some(providers_path) {
+        Some(path) => {
+            let content = fs::read_to_string(&path).map_err(|e| {
+                tm_types::TmError::storage(format!("Failed to read providers.toml: {e}"))
+            })?;
+            tm_provider::RoleTable::parse(&content)
+                .map_err(|e| tm_types::TmError::parse(format!("Invalid providers.toml: {e:?}")))
+        }
+        None => {
+            let legacy = state_dir.join("harness.toml");
+            if legacy.is_file() {
+                let path = legacy;
+                let content = fs::read_to_string(&path).map_err(|e| {
+                    tm_types::TmError::storage(format!("Failed to read legacy role config: {e}"))
+                })?;
+                if let Ok(table) = tm_provider::RoleTable::parse(&content) {
+                    return Ok(table);
+                }
+            }
+            Ok(tm_provider::RoleTable::default_table())
+        }
     }
 }
 
@@ -748,10 +830,16 @@ fn roles_routed_to(table: &tm_provider::RoleTable, provider_id: &str) -> Vec<&'s
 /// in-memory fabric and is never persisted (see [`PROVIDER_LIVE_STATE_NOTE`]). No completion is
 /// sent; the only network I/O is [`tm_provider::Registry::availability`]'s short-timeout probe of
 /// the three local backends, exactly as `tm provider detect` does.
-pub async fn provider_status(renderer: &Renderer) -> tm_types::Result<()> {
+pub async fn provider_status(
+    project: Option<&Project>,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
     let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::SystemClock);
-    let table = tm_provider::RoleTable::default_table();
-    let (registered, fabric_error) = match crate::agent::build_fabric(clock.clone()) {
+    let table = load_role_table(project)?;
+    let (registered, fabric_error) = match project.map_or_else(
+        || crate::agent::build_fabric(clock.clone()),
+        |project| crate::agent::build_fabric_for_project(project, clock.clone()),
+    ) {
         Ok(fabric) => (fabric.provider_ids(), None),
         Err(e) => (Vec::new(), Some(e.to_string())),
     };
@@ -1075,10 +1163,17 @@ fn provider_test_verdict(outcomes: &[ProviderTestOutcome]) -> tm_types::Result<(
 /// This makes real, billed network calls. It exits non-zero if any tested provider failed, and
 /// errors (non-zero, nothing tested) for a provider name that is unknown, not configured, or not
 /// used by the turn path — never reporting such a name as reachable.
-pub async fn provider_test(args: &ProviderTestArgs, renderer: &Renderer) -> tm_types::Result<()> {
+pub async fn provider_test(
+    args: &ProviderTestArgs,
+    project: Option<&Project>,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
     let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::SystemClock);
     let known = tm_provider::Registry::known_providers();
-    let fabric = match crate::agent::build_fabric(clock.clone()) {
+    let fabric = match project.map_or_else(
+        || crate::agent::build_fabric(clock.clone()),
+        |project| crate::agent::build_fabric_for_project(project, clock.clone()),
+    ) {
         Ok(fabric) => fabric,
         Err(e) => {
             return Err(match &args.provider {
@@ -1126,11 +1221,14 @@ pub fn dispatch_harness(
 pub fn harness_show(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let _view = project.store.view()?;
     let harness_path = project.state_dir.join("harness.toml");
-    let harness_content = fs::read_to_string(&harness_path)
-        .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
-
-    let config = tm_harness::HarnessConfig::parse(&harness_content)
-        .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e}")))?;
+    let config = if harness_path.is_file() {
+        let content = fs::read_to_string(&harness_path)
+            .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
+        tm_harness::HarnessConfig::parse(&content)
+            .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?
+    } else {
+        tm_harness::HarnessConfig::default()
+    };
 
     if renderer.is_json() {
         renderer.emit(&config, "")?;
@@ -1156,14 +1254,21 @@ pub fn harness_set(
 ) -> tm_types::Result<()> {
     let _view = project.store.view()?;
     let harness_path = project.state_dir.join("harness.toml");
-    let harness_content = fs::read_to_string(&harness_path)
-        .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
-
+    let harness_content = if harness_path.is_file() {
+        fs::read_to_string(&harness_path)
+            .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?
+    } else {
+        toml::to_string_pretty(&tm_harness::HarnessConfig::default())
+            .map_err(|e| tm_types::TmError::parse(format!("Failed to serialize defaults: {e}")))?
+    };
     let mut config = tm_harness::HarnessConfig::parse(&harness_content)
         .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e}")))?;
 
-    let value: toml::Value = toml::from_str(&args.value)
+    let mut wrapped: toml::Table = toml::from_str(&format!("value = {}", args.value))
         .map_err(|e| tm_types::TmError::parse(format!("Invalid TOML value: {e}")))?;
+    let value = wrapped
+        .remove("value")
+        .ok_or_else(|| tm_types::TmError::parse("Invalid TOML value".to_string()))?;
 
     let config_str = toml::to_string(&config)
         .map_err(|e| tm_types::TmError::parse(format!("Failed to serialize config: {e}")))?;
@@ -1194,13 +1299,22 @@ pub fn harness_set(
         .validate()
         .map_err(|e| tm_types::TmError::parse(format!("Validation failed: {e}")))?;
 
+    let next_epoch = project
+        .store
+        .harness_epochs()?
+        .iter()
+        .map(|e| e.epoch)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    fs::write(&harness_path, &new_config_str)?;
     if renderer.is_json() {
         renderer.emit(
-            &serde_json::json!({"status": "pending", "next_epoch": 1}),
+            &serde_json::json!({"status": "saved", "next_epoch": next_epoch}),
             "",
         )?;
     } else {
-        renderer.note("New harness config proposed. Run 'tm harness promote' to apply.");
+        renderer.note(&format!("Saved validated harness config. Promote with 'tm harness promote {next_epoch} --force' (or provide a benchmark report)."));
     }
     Ok(())
 }

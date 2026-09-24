@@ -126,6 +126,8 @@ mise run build            # build just the `tm` binary
 | `/help` | Keyboard shortcuts |
 | `/clear`, `/resume`, `/compact` | Fresh chat · continue a past one · summarize to free context |
 | `/model [name]` | Show or switch the model |
+| `/level fast|deep` | Choose the fast or deep chat role |
+| `/connect`, `/provider`, `/config` | Set up providers, inspect routing, and view harness settings |
 | `/status` | Model, provider, directory, mode and ticket |
 | `/cost` | Tokens this session used, turn by turn |
 | `/init` | Write an `AGENTS.md` for this project |
@@ -136,6 +138,10 @@ mise run build            # build just the `tm` binary
 | `/exit` | Quit |
 
 </details>
+
+`/level` is an interactive chat command only; there is no noninteractive CLI tier-setting
+command. Use `/level fast` or `/level deep` in chat. `tm ticket dispatch "..."` creates
+and activates a worker ticket; `tm ticket new` alone creates a draft, which must be activated.
 
 <details>
 <summary><b>⌨️ Keyboard highlights</b></summary>
@@ -157,10 +163,21 @@ Vertex, Cloudflare, DevPass, …).
 ```sh
 tm provider detect   # which backends are configured in THIS environment
 tm provider list     # role → candidate routing from providers.toml
+tm provider default                  # show the project's default model
+tm provider default ollama/qwen2.5-coder  # set it; `clear` removes it
 tm provider test devpass  # one tiny billed smoke test
 ```
 
-Full matrix: [`docs/providers.md`](docs/providers.md).
+`tm init` creates project-scoped `harness.toml` (harness behavior) and `providers.toml`
+(provider role routing). `tm harness set` validates and persists a candidate; promote the resulting
+harness epoch to apply it. Chat model defaults are stored separately in `default-model.json`.
+Sessions and background workers use the same project provider table;
+local backends can be selected explicitly with `/model ollama/<pulled-model>`.
+`tm provider list` reports configured routing candidates, not whether credentials are present
+or a model can answer; use `tm provider detect` for environment availability and `tm provider test`
+for a real (potentially billed) round trip. Saving a default model does not verify service access.
+
+Full matrix and configuration details: [`docs/providers.md`](docs/providers.md).
 
 ---
 

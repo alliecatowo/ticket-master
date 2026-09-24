@@ -236,6 +236,13 @@ pub fn dispatch_ticket(
         TicketCommand::List(args) => ticket_list(args, project, renderer),
         TicketCommand::Show(args) => ticket_show(args, project, renderer),
         TicketCommand::New(args) => ticket_new(args, project, renderer),
+        TicketCommand::Dispatch(args) => {
+            let id = create_and_queue(project, &args.objective)?;
+            renderer.emit(
+                &id,
+                &format!("Dispatched ticket {id}: ready for a worker (tm run {id})"),
+            )
+        }
         TicketCommand::Edit(args) => ticket_edit(args, project, renderer),
         TicketCommand::Close(args) => ticket_close(args, project, renderer),
         TicketCommand::Cancel(args) => ticket_cancel(args, project, renderer),
