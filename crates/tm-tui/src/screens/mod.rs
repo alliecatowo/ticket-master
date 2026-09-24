@@ -25,6 +25,8 @@ pub mod diff_viewer;
 /// screen is on screen; this crate only supplies the screen itself, plain-data-in like every
 /// other screen here).
 pub mod kanban;
+/// The Milestones tab: progress per milestone, sourced from `tm_core::ProjectView::milestones`.
+pub mod milestones;
 /// A single agent/session's live streaming output.
 pub mod session_stream;
 /// A single ticket's full detail view.

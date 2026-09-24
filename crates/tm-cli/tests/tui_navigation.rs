@@ -77,8 +77,9 @@ const TICKETS_MARK: &str = "Describe a task for a background worker";
 const CHAT_MARK: &str = "Ask tm anything";
 /// Text only the Kanban board shows.
 const BOARD_MARK: &str = "Left/Right: columns";
-/// Text only the Milestones placeholder tab shows.
-const MILESTONES_MARK: &str = "Milestones: coming next";
+/// Text only the Milestones tab shows (its empty state, since `init_project_with_one_ticket`'s
+/// project has no milestones).
+const MILESTONES_MARK: &str = "No milestones. Create one with tm milestone new";
 /// The Tab key's escape sequence (plain, no CSI: crossterm reports Tab as `\t`).
 const TAB: &[u8] = b"\t";
 /// Shift+Tab's escape sequence (CSI Z).
@@ -298,12 +299,12 @@ fn tab_cycles_the_hub_and_esc_returns_straight_to_chat() {
         "Tab from tickets must open the board, got: {screen:?}"
     );
 
-    // Tab again: Board -> Milestones (a placeholder until its own task lands).
+    // Tab again: Board -> Milestones.
     pty.write(TAB).expect("Tab");
     let screen = pty.wait_for(MILESTONES_MARK, Duration::from_secs(10));
     assert!(
         has(&screen, MILESTONES_MARK),
-        "a second Tab must reach the Milestones placeholder, got: {screen:?}"
+        "a second Tab must reach the Milestones tab, got: {screen:?}"
     );
 
     // Shift+Tab: back to Board.

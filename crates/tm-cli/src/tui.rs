@@ -17,7 +17,8 @@
 //! `docs/decisions/D-019-claude-code-parity-shell.md` §2); `tm tickets` opens straight onto it.
 //! From there Enter attaches the chat to a ticket, and Ctrl+B opens the Kanban board. Tab/
 //! Shift+Tab cycle the hub's tab strip (Tickets, Board, Milestones, Timeline, Graph — the last
-//! three are placeholders until their own screens land); tab-cycling moves `App::current`
+//! two are placeholders until their own screens land; Milestones lists progress per milestone
+//! and Enter there filters Tickets to it); tab-cycling moves `App::current`
 //! directly rather than growing `App::back_stack`, so Esc from a tab reached only by Tab/
 //! Shift+Tab goes straight back to Chat. Esc walks back one level at a time (`App::back_stack`)
 //! everywhere else; Ctrl+T from anywhere else returns straight to the chat.
@@ -46,12 +47,13 @@ use tm_tui::event::{AppMessage, Event, InputEvent, KeyBinding, KeyChord, Propaga
 use tm_tui::runtime::{MessageSender, Runtime, RuntimeError};
 use tm_tui::screens::chat::{ChatAction, ChatScreen, TurnUpdate};
 use tm_tui::screens::kanban::{Kanban, KanbanCard, KanbanColumn};
+use tm_tui::screens::milestones::{MilestoneRow, MilestonesScreen};
 use tm_tui::screens::ticket_detail::TicketDetailScreen;
 use tm_tui::screens::tickets::{FlashTone, TicketsAction, TicketsScreen};
 use tm_tui::theme::Theme;
 use tm_tui::widgets_data::form::{Field, Form};
 use tm_tui::widgets_data::list::List;
-use tm_types::{Clock, TicketId, Timestamp};
+use tm_types::{Clock, MilestoneId, TicketId, Timestamp};
 use tokio::sync::{Mutex, Notify};
 
 use crate::agent::{self, AgentSession};
@@ -177,6 +179,10 @@ async fn run_on(
         ),
     );
     let kanban = Kanban::new(ComponentId::new("tm.kanban"), build_kanban_columns(&view));
+    let milestones = MilestonesScreen::new(
+        ComponentId::new("tm.milestones"),
+        build_milestone_rows(&view),
+    );
 
     // `sender` is held for the runtime's whole lifetime: `App::spawn_turn` clones it into each
     // background turn. Dropping it early would close `Runtime`'s message channel.
@@ -190,6 +196,8 @@ async fn run_on(
         worker_notice,
         left_at: None,
         kanban,
+        milestones,
+        milestone_filter: None,
         detail: None,
         current: ScreenId::Chat,
         back_stack: Vec::new(),
@@ -342,6 +350,39 @@ fn build_kanban_columns(view: &tm_core::ProjectView) -> Vec<KanbanColumn> {
         .collect()
 }
 
+/// One [`MilestoneRow`] per `view.milestones` entry, in id order (`BTreeMap` iteration), with
+/// done/total counts over its member tickets. `Ticket` has no due date yet
+/// (`s1-ticket-due-date`), so `due` is always `None` here until that field lands — the row still
+/// reads correctly (`MilestonesScreen` shows "—") rather than blocking on it.
+fn build_milestone_rows(view: &tm_core::ProjectView) -> Vec<MilestoneRow> {
+    view.milestones
+        .values()
+        .map(|milestone| {
+            let total = milestone.tickets.len();
+            let done = milestone
+                .tickets
+                .iter()
+                .filter(|id| {
+                    view.tickets.get(*id).is_some_and(|t| {
+                        matches!(
+                            t.state,
+                            tm_core::TicketState::Closed | tm_core::TicketState::Cancelled
+                        )
+                    })
+                })
+                .count();
+            MilestoneRow::new(
+                milestone.id.to_string(),
+                milestone.title.clone(),
+                format!("{:?}", milestone.state),
+                done,
+                total,
+                None,
+            )
+        })
+        .collect()
+}
+
 /// Build a read-only drill-down screen for `ticket_id`, or `None` if it no longer exists in
 /// `view` (the list went stale between drawing and Enter — declining to open anything is the
 /// honest resolution).
@@ -412,7 +453,8 @@ enum ScreenId {
     Tickets,
     /// The Kanban board, opened from `Tickets`.
     Kanban,
-    /// Progress per milestone (`s1-tui-milestones-view`). A placeholder until that screen lands.
+    /// Progress per milestone (`tm_tui::screens::milestones::MilestonesScreen`), opened from
+    /// `Tickets` or reached by Tab/Shift+Tab; Enter filters `Tickets` to the selected milestone.
     Milestones,
     /// Ticket bars against the event log (`s1-tui-timeline-view`). A placeholder until that
     /// screen lands.
@@ -498,6 +540,11 @@ struct App {
     /// When `←` was last pressed on an empty chat prompt, for "press ← again to open tickets".
     left_at: Option<Timestamp>,
     kanban: Kanban,
+    milestones: MilestonesScreen,
+    /// The milestone the Tickets screen is filtered to (id and title, so the header can say
+    /// which one without re-reading the store), set by [`App::open_tickets_filtered_by_milestone`]
+    /// and cleared by an Esc on the Tickets screen while it is set (`handle_tickets_actions`).
+    milestone_filter: Option<(MilestoneId, String)>,
     /// Rebuilt fresh on every open, so it never shows stale ticket data.
     detail: Option<TicketDetailScreen>,
     current: ScreenId,
@@ -591,6 +638,25 @@ impl App {
         }
     }
 
+    /// Enter on the Milestones tab: filter the Tickets screen to `milestone_id`'s member tickets
+    /// (`refresh` reads `self.milestone_filter` back out, into the header and the row filter) and
+    /// switch to it. Does nothing if the id no longer resolves (stale activation from a row that
+    /// existed on the previous frame).
+    fn open_tickets_filtered_by_milestone(&mut self, milestone_id: &str, now: Timestamp) {
+        let Ok(id) = MilestoneId::new(milestone_id) else {
+            return;
+        };
+        let Ok(view) = self.project.store.view() else {
+            return;
+        };
+        let Some(milestone) = view.milestones.get(&id) else {
+            return;
+        };
+        self.milestone_filter = Some((id, milestone.title.clone()));
+        self.refresh(now);
+        self.push_screen(ScreenId::Tickets);
+    }
+
     /// Re-read project state into every domain-derived view. A read failure keeps the previous
     /// data on screen rather than tearing the UI down over a transient store error.
     fn refresh(&mut self, now: Timestamp) {
@@ -601,15 +667,36 @@ impl App {
         if let Err(e) = self.activity.refresh(self.project.store.state_dir()) {
             tracing::debug!(error = %e, "could not read ticket activity");
         }
-        self.tickets.set_data(tickets_view::build(
+        // A filtered-to milestone that no longer exists (closed and pruned, or never real)
+        // clears itself rather than leaving the Tickets screen filtered to nothing forever.
+        if let Some((id, _)) = &self.milestone_filter {
+            if !view.milestones.contains_key(id) {
+                self.milestone_filter = None;
+            }
+        }
+        let mut header = tickets_header(&self.project);
+        let member_ids: Option<std::collections::HashSet<String>> =
+            self.milestone_filter.as_ref().map(|(id, title)| {
+                header.1 = format!("{} · Milestone: {title}", header.1);
+                view.milestones
+                    .get(id)
+                    .map(|m| m.tickets.iter().map(|t| t.to_string()).collect())
+                    .unwrap_or_default()
+            });
+        let mut data = tickets_view::build(
             &view,
             &self.activity,
             now,
             self.local_worker,
-            tickets_header(&self.project),
+            header,
             self.worker_notice.clone(),
-        ));
+        );
+        if let Some(member_ids) = member_ids {
+            data.rows.retain(|row| member_ids.contains(&row.id));
+        }
+        self.tickets.set_data(data);
         self.kanban.set_columns(build_kanban_columns(&view));
+        self.milestones.set_rows(build_milestone_rows(&view));
         if let Some(open) = self.detail.as_ref().map(|d| d.ticket().clone()) {
             if let Some(screen) = build_detail_screen(&view, &open) {
                 self.detail = Some(screen);
@@ -666,6 +753,13 @@ impl App {
         for action in self.tickets.take_actions() {
             let outcome: Result<String, String> = match action {
                 TicketsAction::BackToChat => {
+                    // Esc clears a milestone filter first, same as a peek/dispatch-input Esc
+                    // clears those before it means "leave the screen" — a second Esc goes on to
+                    // chat.
+                    if self.milestone_filter.take().is_some() {
+                        self.refresh(now);
+                        continue;
+                    }
                     self.back_to_chat();
                     continue;
                 }
@@ -802,8 +896,8 @@ impl App {
         );
     }
 
-    /// The Milestones/Timeline/Graph tabs, until their own screens land (`s1-tui-milestones-
-    /// view`, `s1-tui-timeline-view`, `s1-tui-graph-tab-prune-dead-screens`).
+    /// The Timeline/Graph tabs, until their own screens land (`s1-tui-timeline-view`,
+    /// `s1-tui-graph-tab-prune-dead-screens`).
     fn render_tab_placeholder(
         &self,
         area: ratatui_core::layout::Rect,
@@ -848,7 +942,7 @@ impl Component for App {
             ScreenId::Chat => self.chat.render(area, buf, ctx),
             ScreenId::Tickets => self.tickets.render(area, buf, ctx),
             ScreenId::Kanban => self.kanban.render(area, buf, ctx),
-            ScreenId::Milestones => self.render_tab_placeholder(area, buf, ctx, "Milestones"),
+            ScreenId::Milestones => self.milestones.render(area, buf, ctx),
             ScreenId::Timeline => self.render_tab_placeholder(area, buf, ctx, "Timeline"),
             ScreenId::Graph => self.render_tab_placeholder(area, buf, ctx, "Graph"),
             ScreenId::Detail => {
@@ -986,7 +1080,24 @@ impl Component for App {
                 }
                 propagation
             }
-            ScreenId::Milestones | ScreenId::Timeline | ScreenId::Graph => {
+            ScreenId::Milestones => {
+                if let Event::Input(InputEvent::Key(key)) = event {
+                    if is_back_chord(key, ScreenId::Milestones) {
+                        self.pop_screen();
+                        return Propagation::Consumed;
+                    }
+                    if let Some(forward) = tab_cycle_key(key) {
+                        self.cycle_tab(forward);
+                        return Propagation::Consumed;
+                    }
+                }
+                let propagation = self.milestones.handle_event(event, ctx);
+                if let Some(milestone_id) = self.milestones.take_activation() {
+                    self.open_tickets_filtered_by_milestone(&milestone_id, now);
+                }
+                propagation
+            }
+            ScreenId::Timeline | ScreenId::Graph => {
                 if let Event::Input(InputEvent::Key(key)) = event {
                     if is_back_chord(key, self.current) {
                         self.pop_screen();
@@ -1043,7 +1154,16 @@ impl Component for App {
                 ));
                 bindings.extend(self.kanban.keybindings(ctx));
             }
-            ScreenId::Milestones | ScreenId::Timeline | ScreenId::Graph => {
+            ScreenId::Milestones => {
+                bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back"));
+                bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Tab), "next tab"));
+                bindings.push(KeyBinding::new(
+                    KeyChord::plain(KeyCode::BackTab),
+                    "previous tab",
+                ));
+                bindings.extend(self.milestones.keybindings(ctx));
+            }
+            ScreenId::Timeline | ScreenId::Graph => {
                 bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back"));
                 bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Tab), "next tab"));
                 bindings.push(KeyBinding::new(
@@ -1064,14 +1184,11 @@ impl Component for App {
 
     fn focusable_children(&self) -> Vec<ComponentId> {
         // The chat and tickets screens take input straight from `App::handle_event`, not through
-        // the focus tree; the board and detail screens still use it.
+        // the focus tree; the board, milestones and detail screens still use it.
         match self.current {
-            ScreenId::Chat
-            | ScreenId::Tickets
-            | ScreenId::Milestones
-            | ScreenId::Timeline
-            | ScreenId::Graph => Vec::new(),
+            ScreenId::Chat | ScreenId::Tickets | ScreenId::Timeline | ScreenId::Graph => Vec::new(),
             ScreenId::Kanban => vec![self.kanban.id()],
+            ScreenId::Milestones => vec![self.milestones.id()],
             ScreenId::Detail => match &self.detail {
                 Some(detail) => {
                     let mut ids = vec![detail.id()];
@@ -1095,7 +1212,10 @@ impl ComponentParent for App {
                 (id == self.tickets.id()).then_some(&self.tickets as &dyn Component)
             }
             ScreenId::Kanban => (id == self.kanban.id()).then_some(&self.kanban as &dyn Component),
-            ScreenId::Milestones | ScreenId::Timeline | ScreenId::Graph => None,
+            ScreenId::Milestones => {
+                (id == self.milestones.id()).then_some(&self.milestones as &dyn Component)
+            }
+            ScreenId::Timeline | ScreenId::Graph => None,
             ScreenId::Detail => self.detail.as_ref().and_then(|detail| detail.resolve(id)),
         }
     }
@@ -1111,6 +1231,9 @@ impl ComponentParent for App {
             }
             ScreenId::Kanban if id == self.kanban.id() => {
                 Some(&mut self.kanban as &mut dyn Component)
+            }
+            ScreenId::Milestones if id == self.milestones.id() => {
+                Some(&mut self.milestones as &mut dyn Component)
             }
             ScreenId::Detail => self
                 .detail
@@ -1344,5 +1467,56 @@ mod tests {
             .expect("a ticket that was just created must still be in a freshly-read view");
         assert_eq!(screen.ticket(), &ticket_id);
         assert!(format!("{screen:?}").contains("no recorded activity yet"));
+    }
+
+    #[test]
+    fn build_milestone_rows_over_an_empty_project_has_no_rows() {
+        let view = tm_core::ProjectView::empty();
+        assert!(build_milestone_rows(&view).is_empty());
+    }
+
+    #[test]
+    fn build_milestone_rows_counts_done_member_tickets_and_carries_state_and_title() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).expect("open store");
+        let actor = ParticipantId::new("human:tester").unwrap();
+        let t1 = create_real_ticket(&store, "ship the beta");
+        let t2 = create_real_ticket(&store, "write the release notes");
+        store
+            .cancel(&t1, Some("no longer needed".to_string()), actor.clone())
+            .expect("cancel t1");
+        store
+            .create_milestone(
+                "Beta".to_string(),
+                vec![t1.clone(), t2.clone()],
+                Vec::new(),
+                actor.clone(),
+            )
+            .expect("create_milestone");
+        // A second, empty milestone — the done/total math must not divide by zero.
+        store
+            .create_milestone("Launch".to_string(), Vec::new(), Vec::new(), actor)
+            .expect("create_milestone");
+
+        let view = store.view().expect("view");
+        let rows = build_milestone_rows(&view);
+        assert_eq!(rows.len(), 2, "both milestones must show up: {rows:?}");
+
+        let beta = rows
+            .iter()
+            .find(|r| r.title == "Beta")
+            .expect("Beta milestone row");
+        assert_eq!(beta.state, "Open");
+        assert_eq!(
+            (beta.done, beta.total),
+            (1, 2),
+            "one of Beta's two member tickets was cancelled: {beta:?}"
+        );
+
+        let launch = rows
+            .iter()
+            .find(|r| r.title == "Launch")
+            .expect("Launch milestone row");
+        assert_eq!((launch.done, launch.total), (0, 0));
     }
 }
