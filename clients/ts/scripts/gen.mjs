@@ -101,8 +101,9 @@ function renderDefinition(name, node, definitions) {
   if (node.type === "object" && node.properties) {
     lines.push(`export interface ${typeName} ${renderObjectLiteral(node, definitions)}`);
   } else if (node.type === "object") {
-    // No `properties` in the schema (e.g. `TransitionRequest`, documented only): render as an
-    // opaque record rather than inventing shape the schema doesn't actually assert.
+    // No `properties` in the schema (documented only, e.g. a bare `{"type": "object"}` member of
+    // an externally-tagged union): render as an opaque record rather than inventing shape the
+    // schema doesn't actually assert.
     lines.push(`export type ${typeName} = Record<string, unknown>;`);
   } else {
     lines.push(`export type ${typeName} = ${renderType(node, definitions)};`);

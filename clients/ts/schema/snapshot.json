@@ -28,7 +28,47 @@
     },
     "TransitionRequest": {
       "type": "object",
-      "description": "externally tagged: exactly one of these keys"
+      "description": "externally tagged: exactly one of these keys",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "activate": { "type": "object", "required": ["actor"] },
+        "trigger": { "type": "object", "required": ["trigger", "actor"] },
+        "submit": { "type": "object", "required": ["summary", "actor"] },
+        "verify": { "type": "object", "required": ["verifier", "passed", "actor"] },
+        "audit": { "type": "object", "required": ["auditor", "outcome", "actor"] },
+        "close": { "type": "object", "required": ["actor"] },
+        "cancel": { "type": "object", "required": ["actor"] },
+        "reopen": { "type": "object", "required": ["actor"] },
+        "accept": {
+          "type": "object",
+          "description": "a human accepts submitted work, closing the ticket",
+          "required": ["actor"],
+          "properties": {
+            "note": { "type": "string" },
+            "actor": { "$ref": "#/definitions/ParticipantId" }
+          }
+        },
+        "reject": {
+          "type": "object",
+          "description": "a human sends submitted work back; the reason must not be blank",
+          "required": ["reason", "actor"],
+          "properties": {
+            "reason": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "actor": { "$ref": "#/definitions/ParticipantId" }
+          }
+        },
+        "retry": {
+          "type": "object",
+          "description": "a human sends an escalated ticket back to work",
+          "required": ["actor"],
+          "properties": {
+            "guidance": { "type": "string" },
+            "actor": { "$ref": "#/definitions/ParticipantId" }
+          }
+        },
+        "fail": { "type": "object", "required": ["class", "detail", "actor"] }
+      }
     }
   }
 }

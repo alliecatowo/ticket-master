@@ -27,4 +27,26 @@ export interface CreateTicketRequest {
 }
 
 /** externally tagged: exactly one of these keys */
-export type TransitionRequest = Record<string, unknown>;
+export interface TransitionRequest {
+  "activate"?: Record<string, unknown>;
+  "trigger"?: Record<string, unknown>;
+  "submit"?: Record<string, unknown>;
+  "verify"?: Record<string, unknown>;
+  "audit"?: Record<string, unknown>;
+  "close"?: Record<string, unknown>;
+  "cancel"?: Record<string, unknown>;
+  "reopen"?: Record<string, unknown>;
+  "accept"?: {
+  "note"?: string;
+  "actor": ParticipantId;
+};
+  "reject"?: {
+  "reason": string;
+  "actor": ParticipantId;
+};
+  "retry"?: {
+  "guidance"?: string;
+  "actor": ParticipantId;
+};
+  "fail"?: Record<string, unknown>;
+}
