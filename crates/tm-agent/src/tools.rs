@@ -2812,6 +2812,40 @@ mod tests {
     }
 
     #[test]
+    fn tool_defs_for_worker_authority_omits_tools_root_authority_admits() {
+        // SPEC.md §30.1 / critic-tool-schema-trim-prompt-caching's acceptance check: a
+        // `worker()`-authority request must omit tool schemas that a wider authority (this repo
+        // has no separate `Authority::admin()`; `Authority::root()` is the "can do everything"
+        // authority that plays that role here) would include — not merely deny them at dispatch
+        // time. `Authority::worker()`'s own doc comment says explicitly it grants "no desktop
+        // control", so `computer.*` is exactly the bucket this omits.
+        // `computer.*` tools only exist on a registry that was given a `tm-computer` capability
+        // (`ToolRegistry::standard`, which `Harness` builds on, never registers one) — use the
+        // same browser+computer registry `root_authority_admits_browser_and_computer_tools_
+        // alongside_the_builtin_set` exercises, rather than `Harness::new()`.
+        let (_dir, registry) = registry_with_browser_and_computer();
+        let worker_defs = registry.tool_defs_for(&Authority::worker());
+        let root_defs = registry.tool_defs_for(&Authority::root());
+
+        assert!(
+            !def_names(&worker_defs).contains(&"computer.click"),
+            "worker authority should not even see computer.click's schema: {:?}",
+            def_names(&worker_defs)
+        );
+        assert!(
+            def_names(&root_defs).contains(&"computer.click"),
+            "root authority should admit computer.click"
+        );
+        assert!(
+            worker_defs.len() < root_defs.len(),
+            "worker's tool surface ({}) should be strictly smaller than root's ({}), the exact \
+             per-turn token saving this task exists to realize",
+            worker_defs.len(),
+            root_defs.len()
+        );
+    }
+
+    #[test]
     fn tool_defs_for_shell_disabled_omits_every_shell_shaped_tool_entirely() {
         let mut h = Harness::new();
         h.authority.shell.enabled = false;
