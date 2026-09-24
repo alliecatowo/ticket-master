@@ -1809,6 +1809,39 @@ pub async fn bench_run(
     Ok(())
 }
 
+/// Format a benchmark comparison report as human-readable text.
+fn format_bench_comparison(report: &tm_harness::PromotionReport) -> String {
+    let improved_status = if report.candidate_improved {
+        "yes"
+    } else {
+        "no"
+    };
+    let mut output = format!(
+        "Baseline epoch {} vs candidate epoch {}\nCandidate improved: {}\nAggregate gain: {:+.2}",
+        report.baseline_epoch, report.candidate_epoch, improved_status, report.aggregate_gain
+    );
+
+    if !report.task_deltas.is_empty() {
+        let improved_count = report
+            .task_deltas
+            .iter()
+            .filter(|(_, delta)| *delta > 0.0)
+            .count();
+        let regressed_count = report
+            .task_deltas
+            .iter()
+            .filter(|(_, delta)| *delta < 0.0)
+            .count();
+        let unchanged_count = report.task_deltas.len() - improved_count - regressed_count;
+        output.push_str(&format!(
+            "\nTasks: {} improved, {} regressed, {} unchanged",
+            improved_count, regressed_count, unchanged_count
+        ));
+    }
+
+    output
+}
+
 /// `tm bench compare`
 ///
 /// # IMPL
@@ -1827,15 +1860,8 @@ pub fn bench_compare(args: &BenchCompareArgs, renderer: &Renderer) -> tm_types::
         .map_err(|e| tm_types::TmError::parse(format!("Invalid candidate JSON: {e}")))?;
 
     let report = tm_harness::compare(&baseline, &candidate);
+    renderer.emit(&report, &format_bench_comparison(&report))?;
 
-    if renderer.is_json() {
-        renderer.emit(&report, "")?;
-    } else {
-        renderer.note(&format!(
-            "Comparison: {} vs {}",
-            baseline.epoch, candidate.epoch
-        ));
-    }
     Ok(())
 }
 
@@ -3459,5 +3485,88 @@ mod tests {
     #[test]
     fn events_replay_empty_range() {
         // Replaying empty range should result in empty view
+    }
+
+    #[test]
+    fn format_bench_comparison_candidate_improved_yes() {
+        // s1-bench-compare-human-output: format_bench_comparison must show candidate-improved
+        // status and aggregate gain for improved candidates.
+        let report = tm_harness::PromotionReport {
+            baseline_epoch: 0,
+            candidate_epoch: 1,
+            candidate_improved: true,
+            aggregate_gain: 0.15,
+            task_deltas: vec![("task1".to_string(), 0.1), ("task2".to_string(), 0.05)],
+        };
+        let formatted = format_bench_comparison(&report);
+        assert!(formatted.contains("Baseline epoch 0 vs candidate epoch 1"));
+        assert!(formatted.contains("Candidate improved: yes"));
+        assert!(formatted.contains("Aggregate gain: +0.15"));
+        assert!(formatted.contains("Tasks: 2 improved, 0 regressed, 0 unchanged"));
+    }
+
+    #[test]
+    fn format_bench_comparison_candidate_not_improved() {
+        // Candidate not improved must show "no" and negative/zero aggregate gain.
+        let report = tm_harness::PromotionReport {
+            baseline_epoch: 0,
+            candidate_epoch: 1,
+            candidate_improved: false,
+            aggregate_gain: 0.0,
+            task_deltas: vec![("hello-world".to_string(), 0.0)],
+        };
+        let formatted = format_bench_comparison(&report);
+        assert!(formatted.contains("Candidate improved: no"));
+        assert!(formatted.contains("Aggregate gain: +0.00"));
+    }
+
+    #[test]
+    fn format_bench_comparison_mixed_task_deltas() {
+        // Task deltas with improvements, regressions, and unchanged tasks must be counted
+        // correctly.
+        let report = tm_harness::PromotionReport {
+            baseline_epoch: 0,
+            candidate_epoch: 1,
+            candidate_improved: false,
+            aggregate_gain: -0.05,
+            task_deltas: vec![
+                ("task1".to_string(), 0.1),   // improved
+                ("task2".to_string(), -0.05), // regressed
+                ("task3".to_string(), -0.1),  // regressed
+                ("task4".to_string(), 0.0),   // unchanged
+            ],
+        };
+        let formatted = format_bench_comparison(&report);
+        assert!(formatted.contains("Tasks: 1 improved, 2 regressed, 1 unchanged"));
+    }
+
+    #[test]
+    fn format_bench_comparison_no_task_deltas() {
+        // When task_deltas is empty, the task summary line must not be present.
+        let report = tm_harness::PromotionReport {
+            baseline_epoch: 0,
+            candidate_epoch: 1,
+            candidate_improved: false,
+            aggregate_gain: 0.0,
+            task_deltas: vec![],
+        };
+        let formatted = format_bench_comparison(&report);
+        assert!(!formatted.contains("Tasks:"));
+        assert!(formatted.contains("Candidate improved: no"));
+        assert!(formatted.contains("Aggregate gain: +0.00"));
+    }
+
+    #[test]
+    fn format_bench_comparison_negative_aggregate_gain() {
+        // Negative aggregate gain must be formatted with a minus sign.
+        let report = tm_harness::PromotionReport {
+            baseline_epoch: 0,
+            candidate_epoch: 1,
+            candidate_improved: false,
+            aggregate_gain: -0.25,
+            task_deltas: vec![],
+        };
+        let formatted = format_bench_comparison(&report);
+        assert!(formatted.contains("Aggregate gain: -0.25"));
     }
 }
