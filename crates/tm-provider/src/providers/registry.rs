@@ -391,6 +391,61 @@ impl Registry {
         Ok(provider)
     }
 
+    /// Dispatch table for `Role::Decider` candidates: [`crate::decide::DecisionProvider`], not
+    /// [`Provider`], so it is a separate function from [`Registry::build_provider`] above rather
+    /// than another arm in it — the two traits answer different questions (typed decisions vs.
+    /// text completion) and nothing constructs both from the same candidate.
+    ///
+    /// `"systemone"` and `"systemone-http"` both dispatch to the same
+    /// [`crate::providers::systemone::SystemOneProvider`] — accepting both slugs since D-020's
+    /// own task text names the candidate `"systemone-http"` while this crate's convention
+    /// (`ProviderInfo::id`-shaped, matching the file name) is the bare `"systemone"`; `token`
+    /// is `None` to read `AI_GATEWAY_API_KEY`/`TYPESAFE_API_KEY` from the environment, `Some` to
+    /// use a caller-resolved token instead (see `SystemOneProvider::with_token`); `base_url` is
+    /// `None` to use `SYSTEMONE_BASE_URL`/the default, `Some` for a per-config override (e.g. a
+    /// jevmlx-local endpoint named in `providers.toml`).
+    ///
+    /// `"mock"` dispatches to a [`crate::mock::MockDecisionProvider`] with no scripted
+    /// responses: every `decide` call it serves fails with [`ProviderError::Unscripted`] until
+    /// something scripts it, and there is no way to script the one returned here — the trait
+    /// object this function returns has no downcast path back to the concrete
+    /// `MockDecisionProvider`. That still resolves a `[decider]` role table entry to *something*
+    /// (e.g. local dev with no `AI_GATEWAY_API_KEY`), useful wherever a caller only checks that
+    /// `Role::Decider` has a candidate at all. A caller that actually needs answers (e.g.
+    /// `d20-shadow-triage-new-tickets`'s tests) constructs and scripts a
+    /// `MockDecisionProvider` directly instead of going through this function.
+    ///
+    /// `d20-decider-config-selection`'s role-config work is what actually resolves a
+    /// `[decider]` role table entry down to a `(slug, model, token, base_url)` call to this
+    /// function.
+    pub fn build_decider(
+        slug: &str,
+        model: ModelId,
+        token: Option<String>,
+        base_url: Option<String>,
+    ) -> Result<Arc<dyn crate::decide::DecisionProvider>, ProviderError> {
+        let provider: Arc<dyn crate::decide::DecisionProvider> = match slug {
+            "systemone" | "systemone-http" => Arc::new(match token {
+                Some(token) => crate::providers::systemone::SystemOneProvider::with_token(
+                    model, token, base_url,
+                )?,
+                None => crate::providers::systemone::SystemOneProvider::from_env_with_base_url(
+                    model, base_url,
+                )?,
+            }),
+            "mock" => Arc::new(crate::mock::MockDecisionProvider::new(
+                model.provider.clone(),
+                model,
+            )),
+            other => {
+                return Err(ProviderError::InvalidRequest(format!(
+                    "unknown decider provider: {other}"
+                )));
+            }
+        };
+        Ok(provider)
+    }
+
     /// Build a [`Fabric`] for `table`, registering every distinct `provider` slug the table
     /// references that is currently configured, and skipping (not erroring on) any that isn't.
     /// Errors only on a `provider` slug this crate does not recognize at all (surfaced through
@@ -399,6 +454,15 @@ impl Registry {
         let mut distinct: std::collections::BTreeMap<String, RoleCandidate> =
             std::collections::BTreeMap::new();
         for role in tm_types::Role::ALL {
+            // `Role::Decider` candidates dispatch through `Registry::build_decider` to a
+            // `DecisionProvider`, not through this loop's `Registry::build_provider` to a
+            // `Provider` — the two traits are different shapes (typed decisions vs. text
+            // completion) and a decider slug like `"systemone"` has no `Provider` impl at all.
+            // Skipping it here means a `[decider]` role-table entry never trips this fabric's
+            // "unknown provider slug" error below.
+            if role == tm_types::Role::Decider {
+                continue;
+            }
             for candidate in table.candidates_for(role) {
                 distinct
                     .entry(candidate.provider.clone())
@@ -657,5 +721,82 @@ mod tests {
             "an unconfigured provider must be skipped, not error: {:?}",
             fabric.err()
         );
+    }
+
+    /// `build_fabric` must not choke on a `[decider]` role-table entry, even one naming a
+    /// `provider` slug (`"systemone"`) that has no `Provider` impl at all — it dispatches
+    /// through `Registry::build_decider` instead, never through this fabric's
+    /// `Registry::build_provider` loop. Regression test for the failure this would otherwise
+    /// hit once `d20-decider-config-selection` lands a real `[decider]` section.
+    #[test]
+    fn build_fabric_skips_the_decider_role_entirely() {
+        let toml = r#"
+            [coder.fast]
+            candidates = [ { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 1 } ]
+            [decider]
+            candidates = [ { provider = "systemone", model = "typesafe-ai/jev", max_concurrency = 1 } ]
+        "#;
+        let table = RoleTable::parse(toml).expect("valid providers.toml with a decider role");
+        let clock = Arc::new(FixedClock::epoch());
+        let fabric = Registry::build_fabric(table, clock);
+        assert!(
+            fabric.is_ok(),
+            "a decider role candidate must never trip the completion fabric's unknown-slug \
+             error: {:?}",
+            fabric.err()
+        );
+    }
+
+    #[test]
+    fn build_decider_dispatches_systemone_with_a_caller_supplied_token() {
+        let provider = Registry::build_decider(
+            "systemone",
+            ModelId::new("systemone", "typesafe-ai/jev"),
+            Some("test-token".to_string()),
+            None,
+        )
+        .expect("systemone dispatches with a caller-supplied token");
+        assert_eq!(
+            crate::decide::DecisionProvider::id(provider.as_ref()),
+            "systemone"
+        );
+    }
+
+    #[test]
+    fn build_decider_dispatches_the_systemone_http_alias_too() {
+        Registry::build_decider(
+            "systemone-http",
+            ModelId::new("systemone", "typesafe-ai/jev"),
+            Some("test-token".to_string()),
+            Some("https://jevmlx.local".to_string()),
+        )
+        .expect("systemone-http is an alias for systemone");
+    }
+
+    #[test]
+    fn build_decider_dispatches_mock_unscripted() {
+        let provider = Registry::build_decider("mock", ModelId::new("mock", "decider"), None, None)
+            .expect("mock always constructs");
+        assert_eq!(
+            crate::decide::DecisionProvider::id(provider.as_ref()),
+            "mock"
+        );
+    }
+
+    #[test]
+    fn build_decider_rejects_unknown_slug() {
+        let err = match Registry::build_decider(
+            "not-a-real-decider",
+            ModelId::new("not-a-real-decider", "m"),
+            Some("test-token".to_string()),
+            None,
+        ) {
+            Ok(_) => panic!("unknown decider slug must error"),
+            Err(e) => e,
+        };
+        match err {
+            ProviderError::InvalidRequest(msg) => assert!(msg.contains("not-a-real-decider")),
+            other => panic!("expected InvalidRequest naming the unknown slug, got {other}"),
+        }
     }
 }

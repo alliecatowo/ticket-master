@@ -35,6 +35,13 @@
 //! a base-URL override does not gate autodetection; at least one *required* var present is what
 //! tells [`registry::Registry`] the backend is configured). [`ProviderInfo::capabilities`] is pure
 //! data the registry and any future CLI/config surface can inspect without a network call.
+//!
+//! [`systemone`]'s [`systemone::SystemOneProvider`] is exempt from the `info() -> ProviderInfo`
+//! convention above: it implements [`crate::decide::DecisionProvider`] (D-020), not
+//! [`crate::fabric::Provider`] — a different trait this module's "eleven agents, one
+//! `Provider`-shaped struct each" framing predates — so [`registry::Registry`] dispatches it
+//! through `Registry::build_decider`, not the `known_providers()`/`build_provider()`/
+//! `ProviderInfo` machinery this doc describes for the completion fleet.
 
 use crate::types::ProviderError;
 
@@ -50,6 +57,7 @@ pub mod openai;
 pub mod openrouter;
 pub mod registry;
 pub mod serverless;
+pub mod systemone;
 
 /// What a provider backend can do, as static data — never answered by making a network call.
 ///
