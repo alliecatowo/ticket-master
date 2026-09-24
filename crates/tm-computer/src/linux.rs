@@ -1276,7 +1276,7 @@ mod tests {
 
     #[test]
     fn encode_png_ends_with_an_iend_chunk() {
-        let rgba = vec![0u8; 1 * 1 * 4];
+        let rgba = vec![0u8; 4]; // 1x1 RGBA
         let png = encode_png(1, 1, &rgba);
         assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
     }
