@@ -618,7 +618,7 @@ Gate: `mise run verify && pnpm -C clients/ts install && pnpm -C clients/ts test 
   acceptance: In the two-function case (fn helper; fn main calls helper), refs(helper) returns exactly one hit, the call site, and callers(helper) is exactly [main]. The rename_preview test passes with == 2, and the new self-caller test passes.
   test: `mise run test:crate -- tm-codeintel`
 
-- [~] **release-build-artifact-and-install-guide** — Release workflow producing tm binaries, a mise install task, and README install guidance
+- [x] **release-build-artifact-and-install-guide** — Release workflow producing tm binaries, a mise install task, and README install guidance (already satisfied: .github/workflows/release.yml and `mise run release`)
   superseded on main by the parallel session: `.github/workflows/release.yml`, README install paths and release v0.1.0 exist. Remaining gap tracked as `release-web-assets` in section T.
   model: sonnet · size: S · builds Rust: no · area: release/packaging (user request) · deps: none
   files: `.github/workflows/release.yml`, `README.md`, `mise.toml`, `CLAUDE.md`
@@ -672,7 +672,7 @@ Gate: `mise run verify && pnpm -C clients/ts build && pnpm -C clients/vscode run
   acceptance: New unit tests assert that the encoded JSON body for each new method matches the server's shape, and swift test passes.
   test: `swift test --package-path clients/macos`
 
-- [~] **release-cut-v0-1-0** — Push main and cut v0.1.0 with release artifacts
+- [x] **release-cut-v0-1-0** — Push main and cut v0.1.0 with release artifacts (already satisfied: tag v0.1.0 exists)
   superseded: release v0.1.0 was published on 2026-09-23 from the parallel session.
   model: haiku · size: XS · builds Rust: no · area: release/packaging (user request) · deps: release-build-artifact-and-install-guide
   files: 
