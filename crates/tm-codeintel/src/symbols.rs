@@ -381,9 +381,11 @@ impl SymbolIndex {
             })
             .collect();
 
+        let mut def_name_ranges: Vec<Range> = Vec::with_capacity(raw.len());
         for (i, r) in raw.into_iter().enumerate() {
             let id = ids[i];
             self.name_ranges.insert(id, r.name_range);
+            def_name_ranges.push(r.name_range);
             self.symbols.push(Symbol {
                 id,
                 name: r.name,
@@ -413,10 +415,17 @@ impl SymbolIndex {
                 if text.is_empty() {
                     continue;
                 }
+                let range = node_range(cap.node);
+                // A definition's own name token (e.g. `fn helper` binds a reference capture to
+                // `helper` too) is not a reference to itself; drop it so `refs`/`callers` don't
+                // report a symbol as its own caller.
+                if def_name_ranges.contains(&range) {
+                    continue;
+                }
                 self.references.push(Reference {
                     symbol_hint: text.to_string(),
                     path: path.to_string(),
-                    range: node_range(cap.node),
+                    range,
                 });
             }
         }
@@ -943,7 +952,7 @@ mod tests {
             .edits
             .iter()
             .any(|e| e.replacement == "renamed" && e.path == "src/a.rs"));
-        assert!(patch.edits.len() >= 2); // definition + call site
+        assert!(patch.edits.len() == 2); // definition + call site, no self-reference
         assert!(patch.skipped_ambiguous.is_empty());
     }
 
@@ -985,6 +994,22 @@ mod tests {
 
         let callees = idx.callees(caller_id);
         assert!(callees.iter().any(|s| s.id == callee_id));
+    }
+
+    #[test]
+    fn callers_excludes_the_symbols_own_definition_when_it_never_calls_itself() {
+        let idx = rust_index("src/a.rs", "fn helper() {}\nfn main() { helper(); }\n");
+        let helper_id = idx.definition("helper", "src/a.rs").unwrap().id;
+        let main_id = idx.definition("main", "src/a.rs").unwrap().id;
+
+        let refs = idx.references(helper_id);
+        assert_eq!(refs.len(), 1); // the call site only, not helper's own name token
+
+        let callers = idx.callers(helper_id);
+        assert_eq!(
+            callers.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![main_id]
+        );
     }
 
     #[test]
