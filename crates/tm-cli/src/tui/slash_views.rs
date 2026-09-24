@@ -2,11 +2,16 @@
 //! kept separate from `chat_ops.rs`'s session/UI plumbing so the text is a pure function of its
 //! inputs and easy to unit test without a live `AgentSession`.
 
+use tm_codeintel::hybrid::RankedHit;
 use tm_context::SectionKind;
 use tm_tui::chat::status::format_tokens;
 use tm_types::TicketId;
 
 use crate::agent::{ContextReport, AUTO_COMPACT_TOKENS};
+
+/// The most hits `/search` prints, matching `tm search`'s own default feel without letting one
+/// broad query flood the transcript.
+const MAX_SEARCH_HITS: usize = 10;
 
 /// `/context`'s table: context-window size, then tokens by system prompt, instructions
 /// (AGENTS.md), tools and conversation, computed from `report` and `total_tokens` (the last
@@ -81,6 +86,71 @@ pub(super) fn context_table(
 /// the per-ticket section list below it.
 fn row(label: &str, tokens: u64) -> String {
     format!("\n  {label:<26} {:>7}", format_tokens(tokens))
+}
+
+/// `/search <query>`'s rendering: the top hits from the same hybrid search `tm search --mode
+/// hybrid` uses (`crates/tm-cli/src/search.rs`), one per line as `path:line  snippet`.
+///
+/// `project_indexed` distinguishes "nothing has ever been indexed for this project" from "the
+/// index is current and this query just has no matches" — the caller (`chat_ops.rs::run_search`)
+/// computes it from whether the index database existed before this call, or from this call's own
+/// `update_incremental` having just added files, so a project that has never run `tm doctor` (or
+/// any prior search) is told to build the index instead of being shown an empty list that looks
+/// identical to a real no-match.
+pub(super) fn search_results(hits: &[RankedHit], project_indexed: bool) -> String {
+    if hits.is_empty() {
+        return if project_indexed {
+            "No matches for that search.".to_string()
+        } else {
+            "This project has no indexed code yet. Run `tm doctor` to see why.".to_string()
+        };
+    }
+    hits.iter()
+        .take(MAX_SEARCH_HITS)
+        .map(|hit| {
+            let location = match hit.line_start {
+                Some(line) => format!("{}:{line}", hit.path),
+                None => hit.path.clone(),
+            };
+            let snippet = hit.snippet.lines().next().unwrap_or("").trim();
+            format!("{location}  {snippet}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The most `git diff HEAD` characters `/review` embeds directly in its prompt, past which the
+/// agent reads the rest itself with its own shell tool rather than the turn opening with an
+/// enormous diff — mirrors `agent.rs`'s `MAX_RESULT_CHARS` truncation of a tool call's own
+/// result, just with a larger budget since this is the turn's actual subject, not one call's log.
+const MAX_REVIEW_DIFF_CHARS: usize = 20_000;
+
+/// The prompt `/review [focus]` sends: `diff` is `git diff HEAD`'s own output
+/// (`chat_ops.rs::run_review` runs it, the way `/init` runs nothing and instead hands the agent a
+/// task — here the diff is the point, so it's read once here rather than asked of the agent a
+/// second time as a tool call).
+pub(super) fn review_prompt(focus: &str, diff: &str) -> String {
+    let focus = focus.trim();
+    let scoped = if focus.is_empty() {
+        String::new()
+    } else {
+        format!(" Focus on {focus}.")
+    };
+    let (diff, truncated) = match diff.char_indices().nth(MAX_REVIEW_DIFF_CHARS) {
+        Some((cut, _)) => (&diff[..cut], true),
+        None => (diff, false),
+    };
+    let note = if truncated {
+        "\n\n[diff truncated — read the rest yourself with `git diff HEAD` if you need it]"
+    } else {
+        ""
+    };
+    format!(
+        "Review these uncommitted changes against HEAD:{scoped}\n\n```diff\n{diff}\n```{note}\n\n\
+         Point out real bugs, correctness risks, and anything unfinished or inconsistent with \
+         the rest of the codebase — not style nitpicks. Check `git status` for untracked files \
+         that might belong in this change if that seems relevant."
+    )
 }
 
 #[cfg(test)]
@@ -189,5 +259,63 @@ mod tests {
         assert!(text.contains("Send a message to see what's prefetched for T-9"));
         assert!(!text.contains("Prefetched for T-9"));
         assert!(!text.contains("Objective"));
+    }
+
+    fn hit(path: &str, line: u32, snippet: &str) -> RankedHit {
+        RankedHit {
+            path: path.to_string(),
+            line_start: Some(line),
+            line_end: Some(line),
+            snippet: snippet.to_string(),
+            fused_score: 1.0,
+            explain: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn search_results_lists_path_line_and_snippet() {
+        let hits = vec![
+            hit("src/graph.rs", 42, "fn build_dependency_graph() {"),
+            hit("src/graph.rs", 60, "    graph.add_edge(a, b);"),
+        ];
+        let text = search_results(&hits, true);
+        assert_eq!(
+            text,
+            "src/graph.rs:42  fn build_dependency_graph() {\n\
+             src/graph.rs:60  graph.add_edge(a, b);"
+        );
+    }
+
+    #[test]
+    fn search_results_caps_at_ten_hits() {
+        let hits: Vec<RankedHit> = (0..15).map(|i| hit("f.rs", i, "line")).collect();
+        assert_eq!(search_results(&hits, true).lines().count(), MAX_SEARCH_HITS);
+    }
+
+    #[test]
+    fn search_results_distinguishes_no_matches_from_never_indexed() {
+        assert_eq!(search_results(&[], true), "No matches for that search.");
+        assert!(search_results(&[], false).contains("no indexed code yet"));
+    }
+
+    #[test]
+    fn review_prompt_embeds_the_diff_and_an_optional_focus() {
+        let plain = review_prompt("", "diff --git a/x b/x\n+added line\n");
+        assert!(plain.contains("diff --git a/x b/x"));
+        assert!(plain.contains("+added line"));
+        assert!(!plain.contains("Focus on"));
+        let focused = review_prompt("error handling", "diff --git a/x b/x\n");
+        assert!(focused.contains("Focus on error handling."));
+    }
+
+    #[test]
+    fn review_prompt_truncates_an_oversized_diff() {
+        let huge = "x".repeat(MAX_REVIEW_DIFF_CHARS + 500);
+        let text = review_prompt("", &huge);
+        assert!(text.contains("[diff truncated"));
+        assert!(
+            text.len() < huge.len() + 500,
+            "diff body itself was cut down"
+        );
     }
 }

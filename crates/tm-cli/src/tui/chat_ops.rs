@@ -384,6 +384,96 @@ impl App {
         }
     }
 
+    /// `/search <query>`: the same hybrid search `tm search` uses
+    /// (`crates/tm-cli/src/search.rs`'s `SearchMode::Hybrid` arm), printed as the top matches.
+    /// Brings the index up to date first (`CodeIntel::update_incremental` — a no-op re-check for
+    /// files already indexed, per its own doc comment) rather than searching whatever the index
+    /// happened to hold last, and notes whether the index existed before this call so
+    /// `slash_views::search_results` can tell "never indexed" apart from "indexed, no matches".
+    /// `update_incremental` can return `Err` in a project with no git history yet (no `.git`, or
+    /// a repo with no commits): its file/symbol indexing already committed before the trailing
+    /// history-ingest step that fails, so that error is a soft warning here, not a reason to
+    /// skip the search itself.
+    fn run_search(&mut self, query: &str) {
+        let index_existed = self.project.state_dir.join("index.db").is_file();
+        let code_intel = match self.project.code_intel() {
+            Ok(code_intel) => code_intel,
+            Err(e) => {
+                return self.chat.push_notice(
+                    NoticeLevel::Warning,
+                    format!("Could not open the index: {e}"),
+                )
+            }
+        };
+        let project_indexed = match code_intel.update_incremental(self.project.clock.as_ref()) {
+            Ok(delta) => index_existed || delta.files_added > 0,
+            Err(e) => {
+                self.chat.push_notice(
+                    NoticeLevel::Warning,
+                    format!("Could not fully update the index, searching anyway: {e}"),
+                );
+                index_existed
+            }
+        };
+        let query = tm_codeintel::hybrid::Query {
+            text: query.to_string(),
+            seed_symbols: vec![],
+            seed_paths: vec![],
+        };
+        let context = tm_codeintel::hybrid::RetrievalContext::default();
+        let weights = tm_codeintel::hybrid::SignalWeights::default();
+        match code_intel.search_hybrid(&query, &context, weights) {
+            Ok(hits) => {
+                let text = slash_views::search_results(&hits, project_indexed);
+                self.chat.push_notice(NoticeLevel::Info, text);
+            }
+            Err(e) => self
+                .chat
+                .push_notice(NoticeLevel::Warning, format!("Search failed: {e}")),
+        }
+    }
+
+    /// `/review [focus]`: a turn reviewing `git diff HEAD`, the same way `/init` sends
+    /// `agent::init_prompt`. Unlike `/init`, the diff is read here rather than left for the
+    /// agent to fetch itself with a tool call, since it's the whole subject of the turn.
+    fn run_review(&mut self, arg: &str, now: Timestamp) {
+        let output = std::process::Command::new("git")
+            .args(["diff", "HEAD"])
+            .current_dir(&self.project.root)
+            .output();
+        let diff = match output {
+            Ok(output) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).into_owned()
+            }
+            Ok(output) => {
+                return self.chat.push_notice(
+                    NoticeLevel::Warning,
+                    format!(
+                        "Could not diff the working tree: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                )
+            }
+            Err(e) => {
+                return self
+                    .chat
+                    .push_notice(NoticeLevel::Warning, format!("Could not run git: {e}"))
+            }
+        };
+        if diff.trim().is_empty() {
+            return self
+                .chat
+                .push_notice(NoticeLevel::Info, "No uncommitted changes to review.");
+        }
+        let shown = if arg.trim().is_empty() {
+            "/review".to_string()
+        } else {
+            format!("/review {}", arg.trim())
+        };
+        self.chat
+            .start_prompt(shown, slash_views::review_prompt(arg, &diff), now);
+    }
+
     fn answer_approval(&mut self, choice: ApprovalChoice, _now: Timestamp) {
         let pending = self
             .chat_ext
@@ -658,6 +748,8 @@ impl App {
             CommandId::Config => self.config_cmd(&arg),
             CommandId::Context => self.show_context(),
             CommandId::Todos => self.toggle_todos(),
+            CommandId::Search => self.run_search(&arg),
+            CommandId::Review => self.run_review(&arg, now),
             // The chat screen answers these itself; handled anyway so the match stays exhaustive.
             CommandId::Status | CommandId::Cost => {}
             CommandId::Tickets => return self.open_tickets(now),

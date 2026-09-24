@@ -71,7 +71,7 @@ never drift between sessions:
   Shift+Tab cycles auto/plan/ask; Ctrl+O transcript viewer; Ctrl+T task checklist; Ctrl+G
   `$EDITOR`; Ctrl+K/U/W/Y, Alt+B/F/D, Ctrl+_ edit; permission prompts take 1/2/3;   `/resume`,
   `/compact`, `/model`, `/status`, `/cost`, `/connect`, `/provider`, `/config`, `/init`,
-  `/bg`, `/context`, `/todos`; quit is Ctrl+C twice, Ctrl+D on an
+  `/bg`, `/context`, `/todos`, `/search`, `/review`; quit is Ctrl+C twice, Ctrl+D on an
   empty prompt, or `/exit`. The
   tickets screen is Claude Code's `claude agents` view with tickets as rows
   (`docs/decisions/D-019-claude-code-parity-shell.md` §2 and its "Implemented: tickets screen"):

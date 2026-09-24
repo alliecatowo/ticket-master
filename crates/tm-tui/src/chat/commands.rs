@@ -43,6 +43,10 @@ pub enum CommandId {
     Context,
     /// Toggle the Ctrl+T task checklist.
     Todos,
+    /// Search this project's code.
+    Search,
+    /// Review the working tree's uncommitted changes.
+    Review,
     /// Quit tm.
     Exit,
 }
@@ -202,6 +206,20 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "Toggle the task checklist",
     },
     SlashCommand {
+        id: CommandId::Search,
+        name: "search",
+        aliases: &[],
+        arg: Arg::Required("<query>"),
+        description: "Search this project's code",
+    },
+    SlashCommand {
+        id: CommandId::Review,
+        name: "review",
+        aliases: &[],
+        arg: Arg::Optional("[focus]"),
+        description: "Review the working tree's uncommitted changes",
+    },
+    SlashCommand {
         id: CommandId::Exit,
         name: "exit",
         aliases: &["quit"],
@@ -348,7 +366,7 @@ mod tests {
         let home = filter("hom");
         assert_eq!(names(&home), vec!["tickets"]);
         assert_eq!(home[0].via_alias, Some("home"));
-        assert_eq!(names(&filter("re")), vec!["resume", "provider"]);
+        assert_eq!(names(&filter("re")), vec!["resume", "review", "provider"]);
     }
 
     #[test]
@@ -419,7 +437,7 @@ mod tests {
         );
         for name in [
             "help", "clear", "resume", "compact", "model", "status", "cost", "connect", "provider",
-            "config", "init", "bg", "context", "todos", "exit",
+            "config", "init", "bg", "context", "todos", "search", "review", "exit",
         ] {
             assert!(lookup(name).is_some(), "/{name} is a command");
         }
@@ -432,6 +450,22 @@ mod tests {
         );
         assert!(
             matches!(parse("/todos"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Todos)
+        );
+    }
+
+    #[test]
+    fn search_requires_a_query_and_review_focus_is_optional() {
+        assert!(
+            matches!(parse("/search dependency graph"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Search && arg == "dependency graph")
+        );
+        assert!(
+            matches!(parse("/search"), Some(Parsed::MissingArg(c)) if c.id == CommandId::Search)
+        );
+        assert!(
+            matches!(parse("/review"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Review && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/review error handling"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Review && arg == "error handling")
         );
     }
 
