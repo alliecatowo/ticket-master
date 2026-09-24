@@ -1969,15 +1969,98 @@ pub(crate) fn format_step(step: &StepRecord) -> String {
 
 /// Render one resolved tool call as a single summary line.
 pub(crate) fn format_tool_call(call: &ToolCallRecord) -> String {
+    let action = plain_tool_action(&call.tool_name);
     match &call.resolution {
-        ToolCallResolution::Completed { .. } => format!("  * {} -> ok", call.tool_name),
+        ToolCallResolution::Completed { .. } => format!("  * {action}"),
         ToolCallResolution::Denied { reason } => {
-            format!("  * {} -> denied: {reason}", call.tool_name)
+            format!("  * {action} -> not allowed: {reason}")
         }
         ToolCallResolution::Errored { detail } => {
-            format!("  * {} -> error: {detail}", call.tool_name)
+            format!("  * {action} -> {}", plain_tool_error(detail))
         }
     }
+}
+
+/// A short plain-language phrase for a dotted tool-kind identifier (e.g. `fs.read` ->
+/// `"Read a file"`), for live `tm run` progress output — a person watching a run shouldn't see
+/// the wire-level tool catalog (`tm_agent::tools::ToolName`'s dotted names), matching this
+/// repo's voice rules (`CLAUDE.md`: no internal type/enum names in anything a person reads).
+/// Falls back to the raw name for anything not in the catalog rather than hiding it, since an
+/// unrecognized tool is more useful shown than silently genericized.
+fn plain_tool_action(tool_name: &str) -> String {
+    let phrase = match tool_name {
+        "search.semantic" | "search.exact" | "search.regex" | "search.hybrid" => {
+            "Searched the code"
+        }
+        "symbol.definition"
+        | "symbol.references"
+        | "symbol.callers"
+        | "symbol.callees"
+        | "symbol.outline"
+        | "symbol.rename_preview" => "Looked up code",
+        "history.why" | "history.search" | "history.deleted" => "Checked history",
+        "fs.read" | "fs.read_range" | "fs.stat" => "Read a file",
+        "fs.list" => "Listed files",
+        "edit.apply_patch" => "Edited a file",
+        "edit.write_file" | "edit.create_file" => "Created a file",
+        "edit.delete_file" => "Deleted a file",
+        "shell.run" | "shell.query_output" => "Ran a command",
+        "git.status" | "git.diff" | "git.log" | "git.branch" | "git.worktree" => "Checked git",
+        "git.commit" => "Made a commit",
+        "test.run" => "Ran tests",
+        "build.run" => "Built the project",
+        "ticket.create_child" | "ticket.delegate" => "Created a ticket",
+        "ticket.submit" => "Submitted the ticket",
+        "ticket.comment" => "Commented on the ticket",
+        "ticket.list" | "ticket.get" => "Checked the ticket",
+        "ticket.transition" => "Updated the ticket",
+        "decision.record" => "Recorded a decision",
+        "artifact.store" => "Saved a result",
+        "evidence.attach" => "Attached evidence",
+        "ask.human" => "Asked for input",
+        other => return other.to_string(),
+    };
+    phrase.to_string()
+}
+
+/// A plain-language rendering of a tool-call error's detail text, for the same live `tm run`
+/// progress output `plain_tool_action` covers. `detail` is `TmError`'s own `Display` text
+/// (`crates/tm-types/src/error.rs`), which is deliberately terse for logs/`Debug`-adjacent
+/// contexts (`"io: {0}"`, `"parse: {0}"`, `"invariant violated: {0}"`, ...) rather than written
+/// for a person — this maps each known prefix to a short plain phrase instead of surfacing that
+/// text verbatim. An unrecognized shape (no known prefix — a provider-specific message, say)
+/// falls back to a generic phrase rather than guessing at unfamiliar internals.
+fn plain_tool_error(detail: &str) -> String {
+    let phrase = if detail.starts_with("io: ") {
+        "couldn't read or write a file"
+    } else if detail.starts_with("parse: ") {
+        "got a response it couldn't understand"
+    } else if detail.starts_with("invariant violated: ") {
+        "hit an unexpected internal problem"
+    } else if detail.starts_with("authority denied: ") {
+        "wasn't allowed to do that"
+    } else if detail.starts_with("budget exhausted: ") {
+        "ran out of budget"
+    } else if detail.starts_with("not found: ") {
+        "couldn't find that"
+    } else if detail.starts_with("conflict: ") {
+        "hit a conflict with existing state"
+    } else if detail.starts_with("invalid transition: ") {
+        "tried something that isn't allowed right now"
+    } else if detail.starts_with("lease expired: ") {
+        "lost its lease partway through"
+    } else if detail.starts_with("storage: ") {
+        "couldn't save that"
+    } else if detail.starts_with("provider: ") {
+        "had a problem talking to the model"
+    } else if detail.starts_with("agent turn failed: ") {
+        "didn't finish the turn"
+    } else if detail.starts_with("check failed: ") {
+        "failed a check"
+    } else {
+        "ran into a problem"
+    };
+    format!("error: {phrase}")
 }
 
 /// Render a terminal (non-`AwaitingApproval`) outcome's one-line summary.
@@ -3426,5 +3509,74 @@ mod tests {
         assert!(init_prompt(dir.path()).starts_with("Create an AGENTS.md"));
         std::fs::write(dir.path().join("CLAUDE.md"), "# notes\n").expect("write");
         assert!(init_prompt(dir.path()).starts_with("Read the existing CLAUDE.md"));
+    }
+
+    /// Regression guard for p1-agent-run-progress-plain-language: live `tm run` progress must
+    /// speak in plain language, not the wire-level dotted tool catalog or raw `TmError` text.
+    fn tool_call(tool_name: &str, resolution: ToolCallResolution) -> ToolCallRecord {
+        ToolCallRecord {
+            tool_use_id: "call-1".to_string(),
+            tool_name: tool_name.to_string(),
+            input: serde_json::Value::Null,
+            resolution,
+        }
+    }
+
+    #[test]
+    fn format_tool_call_uses_plain_phrases_not_dotted_tool_names() {
+        for (dotted, phrase) in [
+            ("fs.list", "Listed files"),
+            ("fs.read", "Read a file"),
+            ("edit.apply_patch", "Edited a file"),
+            ("shell.run", "Ran a command"),
+            ("artifact.store", "Saved a result"),
+            ("ticket.submit", "Submitted the ticket"),
+        ] {
+            let line = format_tool_call(&tool_call(
+                dotted,
+                ToolCallResolution::Completed {
+                    result: serde_json::Value::Null,
+                    artifact: None,
+                },
+            ));
+            assert!(
+                line.contains(phrase),
+                "expected {line:?} to contain {phrase:?}"
+            );
+            assert!(
+                !line.contains(dotted),
+                "expected {line:?} to not contain the raw tool identifier {dotted:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_tool_call_plain_languages_raw_error_text() {
+        for (detail, must_not_contain) in [
+            ("io: stream did not contain valid UTF-8", "io:"),
+            (
+                "parse: unknown variant `test-output`, expected one of `command_output`, `patch`",
+                "parse: unknown variant",
+            ),
+            (
+                "invariant violated: submission requires at least one evidence artifact",
+                "invariant violated",
+            ),
+        ] {
+            let line = format_tool_call(&tool_call(
+                "artifact.store",
+                ToolCallResolution::Errored {
+                    detail: detail.to_string(),
+                },
+            ));
+            assert!(
+                !line.contains(must_not_contain),
+                "expected {line:?} to not contain raw error text {must_not_contain:?}"
+            );
+            assert!(
+                !line.contains("artifact.store"),
+                "expected {line:?} to not contain the raw tool identifier"
+            );
+        }
     }
 }
