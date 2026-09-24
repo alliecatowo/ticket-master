@@ -23,12 +23,12 @@ use parking_lot::RwLock;
 use tm_auth::SessionRedactor;
 use tm_types::{Clock, Result as TmResult, Role, Timestamp, TmError};
 
-use crate::role_config::RoleTable;
+use crate::role_config::{Price, RoleTable};
 use crate::route::{Need, RouteDecision};
 use crate::state::{BreakerState, FabricEvent, FabricState};
 use crate::types::{
     Completion, CompletionRequest, ContentBlock, EmbedRequest, Embeddings, Message, ModelId,
-    ProviderError,
+    ProviderError, Usage,
 };
 
 /// A backend the fabric can route to. Implemented by [`crate::anthropic::AnthropicProvider`] and
@@ -104,6 +104,17 @@ pub enum FabricRecord {
         /// The candidate that recovered.
         candidate: ModelId,
     },
+}
+
+/// The real priced cost of a completion, in micro-dollars, given the candidate's per-token
+/// [`Price`] and the [`Completion`]'s actual token [`Usage`] (`tel-completion-cost-field`).
+/// Cache tokens are not separately priced (no candidate configures a cache rate today), so only
+/// `input_tokens`/`output_tokens` count. Saturating rather than wrapping: an absurd token count
+/// from a misbehaving provider should clamp to `u64::MAX`, not silently wrap around to a tiny
+/// number that would then under-charge the ticket's budget.
+pub fn cost_micros(price: &Price, usage: &Usage) -> u64 {
+    (usage.input_tokens as u64).saturating_mul(price.input_micros_per_token)
+        + (usage.output_tokens as u64).saturating_mul(price.output_micros_per_token)
 }
 
 /// A registered provider plus the [`crate::role_config::RoleCandidate`] metadata it was
@@ -254,7 +265,25 @@ impl Fabric {
     }
 
     /// Route `role`, call the chosen provider, record the outcome, and return the completion.
+    /// Delegates to [`Fabric::execute_priced`], dropping the priced cost that call also
+    /// computes -- callers that need `usage.recorded`'s real `dollars_micros` (`SPEC.md`
+    /// §31/telemetry) should call `execute_priced` directly instead of recovering the price by
+    /// hand from [`Completion::usage`].
     pub async fn execute(&self, role: Role, req: CompletionRequest) -> TmResult<Completion> {
+        self.execute_priced(role, req).await.map(|(c, _)| c)
+    }
+
+    /// Same as [`Fabric::execute`], but also returns the call's priced cost in micro-dollars
+    /// (`None` when the candidate that actually served the request has no [`Price`] configured
+    /// -- `docs/tasks/TASKS.md`'s `tel-completion-cost-field`). The candidate looked up for
+    /// pricing is the one that actually served the call (`candidate_key`), not merely the one
+    /// [`Fabric::route`] initially selected, so a mid-flight [`RouteDecision::Degrade`] prices
+    /// correctly off the candidate that was actually billed.
+    pub async fn execute_priced(
+        &self,
+        role: Role,
+        req: CompletionRequest,
+    ) -> TmResult<(Completion, Option<u64>)> {
         let now = self.clock.now();
         self.state.write().roll_windows(now);
 
@@ -367,11 +396,7 @@ impl Fabric {
                             c.provider == candidate_key.provider && c.model == candidate_key.model
                         })
                         .and_then(|c| c.price)
-                        .map(|price| {
-                            completion.usage.input_tokens as u64 * price.input_micros_per_token
-                                + completion.usage.output_tokens as u64
-                                    * price.output_micros_per_token
-                        })
+                        .map(|price| cost_micros(&price, &completion.usage))
                 };
 
                 self.state.write().apply(
@@ -390,7 +415,7 @@ impl Fabric {
                     });
                 }
 
-                Ok(completion)
+                Ok((completion, cost_micros))
             }
             Err(err) => {
                 let counts_against_breaker = err.is_retryable();
@@ -568,6 +593,57 @@ mod tests {
                 candidate: ModelId::new("mock", "m1")
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn execute_priced_returns_the_priced_cost_for_a_priced_candidate() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "mock", model = "m1", max_concurrency = 1, price = { input_micros_per_token = 42, output_micros_per_token = 84 } }"#,
+        );
+        let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
+
+        let provider = Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "m1"),
+            clock.clone() as Arc<dyn Clock>,
+        ));
+        let request = req();
+        provider.script_response(&request, completion(ModelId::new("mock", "m1"), &clock));
+        fabric.register_provider(provider);
+
+        let (_, cost_micros) = fabric
+            .execute_priced(Role::CoderFast, req())
+            .await
+            .expect("call succeeds");
+        // completion()'s scripted usage is 10 input + 5 output tokens: 10*42 + 5*84 = 840.
+        assert_eq!(cost_micros, Some(840));
+    }
+
+    #[tokio::test]
+    async fn execute_priced_returns_none_for_an_unpriced_candidate() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "mock", model = "m1", max_concurrency = 1 }"#,
+        );
+        let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
+
+        let provider = Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "m1"),
+            clock.clone() as Arc<dyn Clock>,
+        ));
+        let request = req();
+        provider.script_response(&request, completion(ModelId::new("mock", "m1"), &clock));
+        fabric.register_provider(provider);
+
+        let (_, cost_micros) = fabric
+            .execute_priced(Role::CoderFast, req())
+            .await
+            .expect("call succeeds");
+        assert_eq!(cost_micros, None);
     }
 
     #[tokio::test]

@@ -590,7 +590,7 @@ impl AgentLoop {
     async fn execute_with_capacity_wait(
         &self,
         request: CompletionRequest,
-    ) -> Result<tm_provider::Completion> {
+    ) -> Result<(tm_provider::Completion, Option<u64>)> {
         let mut waited = std::time::Duration::ZERO;
         loop {
             // `Fabric::route` doesn't roll quota windows forward (only `execute` does), so a
@@ -605,8 +605,11 @@ impl AgentLoop {
                     continue;
                 }
             }
-            let err = match self.fabric.execute(self.role, request.clone()).await {
-                Ok(completion) => return Ok(completion),
+            // `execute_priced` (not `execute`) so the real per-call cost, when the served
+            // candidate has a `Price` configured, reaches the caller instead of being dropped
+            // (`tel-completion-cost-field`).
+            let err = match self.fabric.execute_priced(self.role, request.clone()).await {
+                Ok((completion, cost_micros)) => return Ok((completion, cost_micros)),
                 Err(err) => err,
             };
             if !is_capacity_refusal(&err) {
@@ -918,8 +921,8 @@ impl AgentLoop {
                 model: None,
             };
 
-            let completion = match self.execute_with_capacity_wait(request).await {
-                Ok(completion) => completion,
+            let (completion, cost_micros) = match self.execute_with_capacity_wait(request).await {
+                Ok(result) => result,
                 Err(e) => {
                     self.record_provider_events(task)?;
                     return Ok(AgentOutcome::Failed {
@@ -945,7 +948,7 @@ impl AgentLoop {
                     + u64::from(usage.output_tokens)
                     + u64::from(usage.cache_read_tokens)
                     + u64::from(usage.cache_write_tokens),
-                dollars_micros: 0,
+                dollars_micros: cost_micros.unwrap_or(0),
                 wall_seconds: completion.latency.as_secs(),
             };
             if effective_budget.try_spend(step_spend).is_err() {
@@ -2012,9 +2015,13 @@ mod tests {
     #[tokio::test]
     async fn run_records_usage_recorded_with_the_completions_actual_spend() {
         let h = LiveHarness::new();
-        let table =
-            RoleTable::parse("[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n")
-                .expect("role table parses");
+        // Priced at $0.042/M input + $0.084/M output tokens (a sub-$1/M model, per
+        // `tel-completion-cost-field`), so this test proves a real priced cost reaches
+        // `usage.recorded`'s `dollars_micros`, not just that the field exists.
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1, price = { input_micros_per_token = 42, output_micros_per_token = 84 } }]\n",
+        )
+        .expect("role table parses");
         let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
         let provider = Arc::new(MockProvider::new(
             "mock",
@@ -2058,6 +2065,9 @@ mod tests {
         assert_eq!(payload.tokens, 150);
         assert_eq!(payload.ticket, Some(h.ticket.clone()));
         assert_eq!(payload.session, Some(h.session.clone()));
+        // 100 * 42 + 50 * 84 = 4200 + 4200 = 8400 micro-dollars -- the completion's actual
+        // spend, priced, not the hardcoded 0 this test caught before `tel-completion-cost-field`.
+        assert_eq!(payload.dollars_micros, 8400);
     }
 
     #[tokio::test]
