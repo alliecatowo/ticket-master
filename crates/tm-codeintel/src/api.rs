@@ -650,7 +650,19 @@ impl CodeIntel {
     /// Load a fresh [`SymbolIndex`] by parsing every currently-indexed file with a grammar.
     /// Symbol/reference queries (`definition`, `references`, `outline`, etc.) go through the
     /// returned index directly; this facade does not cache it, since staleness after an
-    /// `update_incremental` would be surprising.
+    /// `update_incremental` would be surprising. Not caching costs a full re-parse of every
+    /// indexed file on each call, but a caller that holds a [`SymbolIndex`] across turns (e.g.
+    /// tm-mcp's `symbol_def`, whose id needs to round-trip into a later
+    /// `symbol_references`/`symbol_callers`/`symbol_callees` call within the same session) no
+    /// longer needs *this* facade to cache anything to get a stable id: symbol ids are now
+    /// content-derived (nav-design-symbol-index-caching-stable-ids, see
+    /// `crate::symbols::stable_symbol_id` and docs/decisions/D-029-stable-symbol-ids.md), so two
+    /// independently-parsed `SymbolIndex`es of the same files agree on a symbol's id without
+    /// needing to be the same index instance. Incremental re-parsing of only the files an
+    /// `IndexDelta` touched, keyed by that stability, is a real option `D-029` leaves open but
+    /// this task does not implement, given `self.store.list_files()` here already returns
+    /// every indexed file each call and there is no cached [`SymbolIndex`] instance for a delta
+    /// to patch into.
     pub fn symbol_index(&self) -> Result<SymbolIndex> {
         let files = self.store.list_files()?;
         let mut index = SymbolIndex::new();
@@ -1003,6 +1015,41 @@ mod tests {
 
         assert_eq!(delta.files_added, 1);
         assert_eq!(delta.chunks_written, 0);
+    }
+
+    #[test]
+    fn symbol_id_survives_update_incremental_adding_a_file_that_sorts_earlier() {
+        // nav-design-symbol-index-caching-stable-ids: symbol_index() re-parses the whole
+        // workspace on every call (staleness would be surprising, see symbol_index()'s own doc
+        // comment), in path-sorted order (Store::list_files()'s `ORDER BY path`). Before
+        // docs/decisions/D-029-stable-symbol-ids.md, an id was a per-parse positional counter,
+        // so adding a new file that sorts before an existing one would have shifted every id
+        // after it. Content-derived ids must not move here.
+        let dir = new_project();
+        fs::write(dir.path().join("z.rs"), "fn only() {}\n").expect("write");
+
+        let intel = CodeIntel::open(dir.path()).expect("open");
+        let clock = FixedClock::epoch();
+        intel.update_incremental(&clock).expect("first update");
+
+        let id_before = intel
+            .definition("only", "z.rs")
+            .expect("symbol_index")
+            .expect("only is defined in z.rs")
+            .id;
+
+        // a.rs sorts before z.rs.
+        fs::write(dir.path().join("a.rs"), "fn other() {}\n").expect("write");
+        let delta = intel.update_incremental(&clock).expect("second update");
+        assert_eq!(delta.files_added, 1, "a.rs must be a newly-added file");
+
+        let id_after = intel
+            .definition("only", "z.rs")
+            .expect("symbol_index")
+            .expect("only is still defined in z.rs")
+            .id;
+
+        assert_eq!(id_before, id_after);
     }
 
     #[test]

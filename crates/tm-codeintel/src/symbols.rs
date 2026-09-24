@@ -50,8 +50,10 @@ pub struct Range {
 /// A definition: a named, located, typed construct extracted from source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Symbol {
-    /// Unique id within one extraction pass (stable only for the lifetime of the
-    /// [`SymbolIndex`] that produced it; persistence assigns its own row id).
+    /// Content-derived id (see [`stable_symbol_id`]): stable across a re-parse of this or any
+    /// other file in the same [`SymbolIndex`], as long as this symbol's path, container chain,
+    /// kind, name and ordinal among same-named siblings don't change. Not a database row id;
+    /// persistence assigns its own.
     pub id: u64,
     /// Symbol name as written.
     pub name: String,
@@ -243,6 +245,59 @@ fn symbol_kind(lang: Language, node: tree_sitter::Node) -> SymbolKind {
     }
 }
 
+/// Fixed per-variant tag for [`SymbolKind`], used only as [`stable_symbol_id`] input — a plain
+/// string rather than `{kind:?}` so the id doesn't move if `SymbolKind`'s `Debug` output or
+/// discriminant order ever changes for unrelated reasons.
+fn symbol_kind_tag(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Function => "function",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Impl => "impl",
+        SymbolKind::Module => "module",
+        SymbolKind::Variable => "variable",
+        SymbolKind::TypeAlias => "type_alias",
+    }
+}
+
+/// Feeds one length-prefixed field into `hasher`, so e.g. `("ab", "c")` and `("a", "bc")` can't
+/// collide by naive concatenation.
+fn hash_field(hasher: &mut blake3::Hasher, field: &[u8]) {
+    hasher.update(&(field.len() as u64).to_le_bytes());
+    hasher.update(field);
+}
+
+/// Derives a [`Symbol::id`] from content instead of parse order
+/// (nav-design-symbol-index-caching-stable-ids; see docs/decisions/D-029-stable-symbol-ids.md):
+/// `blake3` over `path`, the container name chain (root-first), `kind`, `name` and `ordinal`
+/// (this symbol's position among same-named siblings sharing the same container, in source
+/// order), truncated to its low 8 bytes as a little-endian `u64` and then masked to 53 bits so
+/// it round-trips exactly through a JSON `number` (`tm-mcp`'s `symbol_def` and friends hand this
+/// id to a JavaScript client). Deliberately excludes the byte range, which shifts on every edit
+/// above the symbol.
+fn stable_symbol_id(
+    path: &str,
+    container_chain: &[String],
+    kind: SymbolKind,
+    name: &str,
+    ordinal: usize,
+) -> u64 {
+    let mut hasher = blake3::Hasher::new();
+    hash_field(&mut hasher, path.as_bytes());
+    hash_field(&mut hasher, &(container_chain.len() as u64).to_le_bytes());
+    for c in container_chain {
+        hash_field(&mut hasher, c.as_bytes());
+    }
+    hash_field(&mut hasher, symbol_kind_tag(kind).as_bytes());
+    hash_field(&mut hasher, name.as_bytes());
+    hash_field(&mut hasher, &(ordinal as u64).to_le_bytes());
+    let hash = hasher.finalize();
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(&hash.as_bytes()[..8]);
+    u64::from_le_bytes(buf) & ((1u64 << 53) - 1)
+}
+
 struct RawSymbol {
     name: String,
     name_range: Range,
@@ -260,7 +315,6 @@ struct RawSymbol {
 pub struct SymbolIndex {
     symbols: Vec<Symbol>,
     references: Vec<Reference>,
-    next_id: u64,
     /// The name-token range for each symbol id, kept separately from [`Symbol::range`] (which
     /// spans the whole definition, needed for containment checks in `callers`/`callees`) so
     /// [`SymbolIndex::rename_preview`] can target just the identifier.
@@ -273,7 +327,6 @@ impl SymbolIndex {
         SymbolIndex {
             symbols: Vec::new(),
             references: Vec::new(),
-            next_id: 0,
             name_ranges: HashMap::new(),
         }
     }
@@ -372,14 +425,38 @@ impl SymbolIndex {
             containers.push(best.map(|(j, _)| j));
         }
 
-        let ids: Vec<u64> = raw
-            .iter()
-            .map(|_| {
-                let id = self.next_id;
-                self.next_id += 1;
-                id
-            })
-            .collect();
+        // Stable, content-derived ids (nav-design-symbol-index-caching-stable-ids; see
+        // docs/decisions/D-029-stable-symbol-ids.md), instead of a per-parse positional
+        // counter: each id is `stable_symbol_id(path, container name chain, kind, name,
+        // ordinal among same-named siblings under the same container)`. That keeps a symbol's
+        // id unchanged when an unrelated file is parsed before or after it in the same
+        // `SymbolIndex` (e.g. `symbol_index()` re-parsing the whole workspace, or
+        // `update_incremental` adding a file that sorts earlier) — only a rename or a move to a
+        // different container/ordinal changes it. The ordinal is assigned in source order
+        // (ascending byte range) so it doesn't depend on the order the query engine reports
+        // matches in.
+        let mut order: Vec<usize> = (0..raw.len()).collect();
+        order.sort_by_key(|&i| (raw[i].node_start, raw[i].node_end));
+        let mut ordinal_counts: HashMap<(Vec<String>, SymbolKind, String), usize> = HashMap::new();
+        let mut ids = vec![0u64; raw.len()];
+        for i in order {
+            let mut chain = Vec::new();
+            let mut cur = containers[i];
+            while let Some(j) = cur {
+                chain.push(raw[j].name.clone());
+                cur = containers[j];
+            }
+            chain.reverse();
+            let ordinal = {
+                let counter = ordinal_counts
+                    .entry((chain.clone(), raw[i].kind, raw[i].name.clone()))
+                    .or_insert(0usize);
+                let ordinal = *counter;
+                *counter += 1;
+                ordinal
+            };
+            ids[i] = stable_symbol_id(path, &chain, raw[i].kind, &raw[i].name, ordinal);
+        }
 
         let mut def_name_ranges: Vec<Range> = Vec::with_capacity(raw.len());
         for (i, r) in raw.into_iter().enumerate() {
@@ -661,8 +738,12 @@ impl SymbolIndex {
             }
         }
         // Deterministic order (previously the self.symbols iteration order, roughly ascending
-        // id) independent of the reference-iteration order used to find matches above.
-        out.sort_by_key(|s| s.id);
+        // id) independent of the reference-iteration order used to find matches above. Sorts by
+        // (path, byte_start) rather than id now that ids are content-hashed
+        // (nav-design-symbol-index-caching-stable-ids) and no longer roughly track source order.
+        out.sort_by(|a, b| {
+            (a.path.as_str(), a.range.byte_start).cmp(&(b.path.as_str(), b.range.byte_start))
+        });
         out
     }
 
@@ -1372,5 +1453,52 @@ mod tests {
                 "ambiguous_with mismatch for reference {r:?}"
             );
         }
+    }
+
+    // nav-design-symbol-index-caching-stable-ids: ids are content-derived
+    // (`stable_symbol_id`), not a per-parse positional counter, so they stay stable across
+    // re-parses that add/remove unrelated files or symbols. See
+    // docs/decisions/D-029-stable-symbol-ids.md.
+
+    #[test]
+    fn symbol_id_is_unchanged_regardless_of_which_other_file_is_parsed_first() {
+        let mut alone = SymbolIndex::new();
+        alone
+            .parse_file("z.rs", "fn only() {}\n", Language::Rust)
+            .unwrap();
+        let id_alone = alone.definition("only", "z.rs").unwrap().id;
+
+        // a.rs sorts before z.rs; parsing it into the same index first must not perturb z.rs's
+        // symbol id, the way a positional counter would have.
+        let mut with_earlier_file = SymbolIndex::new();
+        with_earlier_file
+            .parse_file("a.rs", "fn other() {}\n", Language::Rust)
+            .unwrap();
+        with_earlier_file
+            .parse_file("z.rs", "fn only() {}\n", Language::Rust)
+            .unwrap();
+        let id_with_earlier_file = with_earlier_file.definition("only", "z.rs").unwrap().id;
+
+        assert_eq!(id_alone, id_with_earlier_file);
+    }
+
+    #[test]
+    fn symbol_id_disambiguates_same_named_siblings_by_ordinal() {
+        // Two `impl Foo` blocks each define a method named `new`: same path, same container
+        // name chain (`Foo`), same kind, same name -- only the ordinal among same-named
+        // siblings under that container tells them apart.
+        let idx = rust_index(
+            "src/a.rs",
+            "struct Foo;\n\
+             impl Foo { fn new() -> Self { Foo } }\n\
+             impl Foo { fn new() -> Self { Foo } }\n",
+        );
+        let news: Vec<&Symbol> = idx
+            .symbols
+            .iter()
+            .filter(|s| s.name == "new" && s.kind == SymbolKind::Function)
+            .collect();
+        assert_eq!(news.len(), 2);
+        assert_ne!(news[0].id, news[1].id);
     }
 }
