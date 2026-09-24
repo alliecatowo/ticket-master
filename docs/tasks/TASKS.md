@@ -792,7 +792,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify && pnpm -C clients/ts run gen && git diff --exit-code clients/ts/src/generated.ts clients/ts/schema/snapshot.json && pnpm -C clients/ts test && pnpm -C clients/ts build`
 
-- [x] **ts-sdk-schema-snapshot-drift-note** (landed 0660084) — Document accept/reject/retry in GET /schema and regenerate the TS snapshot
+- [x] **ts-sdk-schema-snapshot-drift-note** (landed 3207dcb) — Document accept/reject/retry in GET /schema and regenerate the TS snapshot
   model: haiku · size: XS · builds Rust: yes · area: tm-server / clients/ts · deps: ts-sdk-add-accept-reject-retry
   files: `crates/tm-server/src/routes.rs`, `clients/ts/schema/snapshot.json`, `clients/ts/src/generated.ts`
   change: get_schema's TransitionRequest description (routes.rs:595) still reads 'activate|trigger|submit|verify|audit|close|cancel|reopen|fail'; add accept, reject and retry. First check whether the server-fixes track has already landed this, and if so skip the routes.rs edit. Update schema/snapshot.json to match, then run `pnpm -C clients/ts run gen`, which falls back to the snapshot when no server is running, to regenerate src/generated.ts.
