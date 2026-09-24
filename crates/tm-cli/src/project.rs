@@ -1331,6 +1331,125 @@ fn genesis_stage_label(stage: tm_genesis::Stage) -> &'static str {
     }
 }
 
+/// Where [`run_genesis_stages`] stopped short of `SteadyState`, and enough context to report a
+/// human-readable status. See `docs/decisions/D-027-genesis-cli-stops-for-work.md`.
+#[derive(Debug, Clone, PartialEq)]
+enum GenesisStop {
+    /// `stage` (`V0` or `V1`) can't advance yet: its milestone (resolved via
+    /// [`tm_genesis::stages::milestone_for_stage`]) isn't closed. In practice this is almost always hit
+    /// right after `Ignition` commits the Draft ticket graph — nothing activates those tickets on
+    /// its own, so `V0` never closes by itself and this is the *earliest* safe point to stop,
+    /// before sailing through `V0`/`Evaluation`/`V1`/`Stabilization` on work nobody has done.
+    MilestoneNotClosed {
+        stage: tm_genesis::Stage,
+        milestone: tm_types::MilestoneId,
+        tickets: usize,
+    },
+    /// The maturity gate was just evaluated and did not pass. Stopping here, rather than looping
+    /// back through `Stabilization` for another real `judge_maturity` provider call, bounds a
+    /// single `tm genesis` run to at most one such call.
+    MaturityGateFailed { open_tickets: usize },
+}
+
+/// A human-readable status for `stop`, always ending in the same next step: work the outstanding
+/// tickets, then resume Genesis.
+fn genesis_stop_message(stop: &GenesisStop) -> String {
+    match stop {
+        GenesisStop::MilestoneNotClosed {
+            milestone, tickets, ..
+        } => format!(
+            "{tickets} ticket{s} committed under milestone {milestone}. Run `tm sched run` (or \
+             `tm run <T>`) to work them, then re-run `tm genesis` to resume.",
+            s = if *tickets == 1 { "" } else { "s" },
+        ),
+        GenesisStop::MaturityGateFailed { open_tickets } => format!(
+            "The maturity gate hasn't passed yet ({open_tickets} ticket{s} still open). Run `tm \
+             sched run` (or `tm run <T>`) to work them, then re-run `tm genesis` to resume.",
+            s = if *open_tickets == 1 { "" } else { "s" },
+        ),
+    }
+}
+
+/// The stop check [`run_genesis_stages`] applies before advancing out of `V0`/`V1`: `None` for
+/// every other stage, and for `V0`/`V1` once their milestone (per
+/// [`tm_genesis::stages::milestone_for_stage`]) is closed or can't be resolved yet (nothing to check —
+/// the stage's own `advance` call surfaces whatever that implies).
+fn genesis_stop_before(
+    state: &tm_genesis::GenesisState,
+    store: &tm_core::Store,
+) -> tm_types::Result<Option<GenesisStop>> {
+    if !matches!(state.stage, tm_genesis::Stage::V0 | tm_genesis::Stage::V1) {
+        return Ok(None);
+    }
+    let view = store.view()?;
+    let Some(milestone) =
+        tm_genesis::stages::milestone_for_stage(state.stage, state.ignition.as_ref(), &view)
+    else {
+        return Ok(None);
+    };
+    let Some(record) = view.milestones.get(&milestone) else {
+        return Ok(None);
+    };
+    if record.state == tm_core::MilestoneState::Closed {
+        return Ok(None);
+    }
+    Ok(Some(GenesisStop::MilestoneNotClosed {
+        stage: state.stage,
+        milestone,
+        tickets: record.tickets.len(),
+    }))
+}
+
+/// Advance `state` one stage at a time via `driver`, applying Genesis's termination policy
+/// ([`GenesisStop`]) so a run that can't make further progress on its own reports status and
+/// returns instead of spinning forever on repeated `MaturityGate` provider calls. `on_stage` is
+/// called once for `SteadyState` (so "genesis complete" still prints) and once per stage the loop
+/// is actually about to run via `advance` — never for a stage it stops before advancing, so the
+/// last thing reported always matches what [`genesis_stop_message`] says next (progress reporting
+/// only; a no-op in tests that don't care).
+///
+/// Returns the state as of wherever it stopped, plus `Some(reason)` unless it reached
+/// `SteadyState` cleanly. See `docs/decisions/D-027-genesis-cli-stops-for-work.md`.
+async fn run_genesis_stages(
+    driver: &tm_genesis::GenesisDriver<'_>,
+    store: &tm_core::Store,
+    mut state: tm_genesis::GenesisState,
+    actor: ParticipantId,
+    mut on_stage: impl FnMut(tm_genesis::Stage),
+) -> tm_types::Result<(tm_genesis::GenesisState, Option<GenesisStop>)> {
+    loop {
+        if state.stage == tm_genesis::Stage::SteadyState {
+            on_stage(state.stage);
+            return Ok((state, None));
+        }
+        if let Some(stop) = genesis_stop_before(&state, store)? {
+            return Ok((state, Some(stop)));
+        }
+        on_stage(state.stage);
+        let prev_stage = state.stage;
+        state = driver.advance(&state, actor.clone()).await?;
+        if prev_stage == tm_genesis::Stage::MaturityGate
+            && state.stage == tm_genesis::Stage::Stabilization
+        {
+            let open_tickets = store
+                .view()?
+                .tickets
+                .values()
+                .filter(|t| {
+                    !matches!(
+                        t.state,
+                        tm_core::TicketState::Closed | tm_core::TicketState::Cancelled
+                    )
+                })
+                .count();
+            return Ok((
+                state,
+                Some(GenesisStop::MaturityGateFailed { open_tickets }),
+            ));
+        }
+    }
+}
+
 /// `tm genesis [--prompt <text>|-]`: turn a prompt into a running project via the Genesis stage
 /// driver.
 pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> {
@@ -1375,30 +1494,34 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
     let quiet = renderer.is_quiet();
     let progress = *renderer;
 
-    let final_state = run_async(move || async move {
-        let mut state = initial_state;
+    let (final_state, stop) = run_async(move || async move {
         let driver = tm_genesis::GenesisDriver::new(
             project.store.as_ref(),
             provider.as_ref(),
             project.clock.as_ref(),
             project.ids.as_ref(),
         );
-        loop {
-            if !quiet {
-                progress.note(&format!("genesis: {}", genesis_stage_label(state.stage)));
-            }
-            if state.stage == tm_genesis::Stage::SteadyState {
-                break;
-            }
-            state = driver.advance(&state, actor.clone()).await?;
-        }
-        Ok(state)
+        run_genesis_stages(
+            &driver,
+            project.store.as_ref(),
+            initial_state,
+            actor,
+            |stage| {
+                if !quiet {
+                    progress.note(&format!("genesis: {}", genesis_stage_label(stage)));
+                }
+            },
+        )
+        .await
     })?;
 
-    let human = format!(
-        "genesis complete: {}",
-        genesis_stage_label(final_state.stage)
-    );
+    let human = match &stop {
+        Some(stop) => genesis_stop_message(stop),
+        None => format!(
+            "genesis complete: {}",
+            genesis_stage_label(final_state.stage)
+        ),
+    };
     renderer.emit(&final_state, &human)
 }
 
@@ -2473,6 +2596,134 @@ mod tests {
     fn resolve_genesis_prompt_refuses_a_bare_terminal_with_no_prompt() {
         let err = resolve_genesis_prompt(None, true, std::io::empty()).unwrap_err();
         assert!(matches!(err, TmError::Parse(_)));
+    }
+
+    /// `system()`, not a human/agent id: matches the actor every other test in this codebase that
+    /// exercises `Store::create_milestone`/`record_decision` (`stages.rs`, `maturity.rs`) uses,
+    /// so this test isn't the first to find out whether some other actor kind needs different
+    /// authority for those paths.
+    fn genesis_test_actor() -> ParticipantId {
+        ParticipantId::system()
+    }
+
+    fn genesis_test_store() -> (tempfile::TempDir, tm_core::Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store = tm_core::Store::open_with(dir.path(), clock, ids).expect("open store");
+        (dir, store)
+    }
+
+    // --- run_genesis_stages: the termination policy (D-027) ---
+
+    #[tokio::test]
+    async fn run_genesis_stages_stops_after_the_first_failed_maturity_gate() {
+        use tm_provider::mock::MockProvider;
+        use tm_provider::types::{Candidate, Completion, ContentBlock, ModelId, StopReason, Usage};
+
+        let (_dir, store) = genesis_test_store();
+        // A milestone must already exist for `Stage::MaturityGate`'s "V1" approximation
+        // (`tm_genesis::stages::milestone_for_stage`) to resolve at all, rather than erroring.
+        store
+            .create_milestone("v1".to_string(), vec![], vec![], genesis_test_actor())
+            .unwrap();
+
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        let ids = CounterIds::new();
+        let model = ModelId::new("test", "model");
+        let provider = MockProvider::new("test", model.clone(), clock.clone());
+        // A default response, not a hash-matched one: `judge_maturity`'s prompt embeds the
+        // clock's current timestamp and project summary, which this test has no reason to
+        // reproduce byte-for-byte to get an exact hash match.
+        provider.script_default_response(Completion {
+            model,
+            candidates: vec![Candidate {
+                content: vec![ContentBlock::Text {
+                    text: serde_json::json!({"mature": false, "rationale": "not yet"}).to_string(),
+                }],
+                stop_reason: StopReason::EndTurn,
+            }],
+            usage: Usage::default(),
+            latency: std::time::Duration::from_millis(1),
+            received_at: Timestamp::EPOCH,
+        });
+
+        let driver = tm_genesis::GenesisDriver::new(&store, &provider, clock.as_ref(), &ids);
+        let mut state = tm_genesis::GenesisState::new("demo".to_string(), clock.as_ref());
+        state.stage = tm_genesis::Stage::Stabilization;
+
+        let mut stages_seen = Vec::new();
+        let (final_state, stop) =
+            run_genesis_stages(&driver, &store, state, genesis_test_actor(), |stage| {
+                stages_seen.push(stage)
+            })
+            .await
+            .expect("the loop itself does not error");
+
+        assert_eq!(final_state.stage, tm_genesis::Stage::Stabilization);
+        assert_eq!(
+            stop,
+            Some(GenesisStop::MaturityGateFailed { open_tickets: 0 })
+        );
+        // Bounded: `on_stage` fires only for a stage the loop actually advances, so this proves
+        // exactly one pass through `Stabilization -> MaturityGate` happened — no ping-pong back
+        // through `Stabilization` a second time — and therefore at most one real `judge_maturity`
+        // call is ever made.
+        assert_eq!(
+            stages_seen,
+            vec![
+                tm_genesis::Stage::Stabilization,
+                tm_genesis::Stage::MaturityGate
+            ]
+        );
+        assert_eq!(provider.call_log().len(), 1);
+        let message = genesis_stop_message(&stop.unwrap());
+        assert!(message.contains("tm sched run"), "{message}");
+        assert!(message.contains("tm genesis"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn run_genesis_stages_stops_at_v0_when_its_milestone_is_not_closed() {
+        let (_dir, store) = genesis_test_store();
+        let events = store
+            .create_milestone("v0".to_string(), vec![], vec![], genesis_test_actor())
+            .unwrap();
+        let milestone = tm_types::MilestoneId::new(events[0].subject.as_str()).unwrap();
+
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::epoch());
+        let ids = CounterIds::new();
+        // No scripted response at all: a provider call here would panic/error, so this also
+        // proves the stop fires before any provider call is attempted.
+        let model = tm_provider::types::ModelId::new("test", "model");
+        let provider = tm_provider::mock::MockProvider::new("test", model, clock.clone());
+
+        let driver = tm_genesis::GenesisDriver::new(&store, &provider, clock.as_ref(), &ids);
+        let mut state = tm_genesis::GenesisState::new("demo".to_string(), clock.as_ref());
+        state.stage = tm_genesis::Stage::V0;
+        state.ignition = Some(tm_genesis::IgnitionPolicy::for_v0(milestone.clone()));
+
+        let mut reports = 0;
+        let (final_state, stop) =
+            run_genesis_stages(&driver, &store, state, genesis_test_actor(), |_| {
+                reports += 1
+            })
+            .await
+            .expect("the loop itself does not error");
+
+        assert_eq!(final_state.stage, tm_genesis::Stage::V0);
+        assert_eq!(
+            stop,
+            Some(GenesisStop::MilestoneNotClosed {
+                stage: tm_genesis::Stage::V0,
+                milestone,
+                tickets: 0,
+            })
+        );
+        assert_eq!(
+            reports, 0,
+            "stops before ever advancing V0, so nothing is reported"
+        );
+        assert!(provider.call_log().is_empty());
     }
 
     /// `git init` a directory so `CodeIntel`'s history ingest (which `doctor`'s index-health

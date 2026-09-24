@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use tm_core::{ArtifactKind, ArtifactStorage};
+use tm_core::{ArtifactKind, ArtifactStorage, ProjectView};
 use tm_types::{
     ArtifactId, Clock, IdSource, LeaseId, MilestoneId, ParticipantId, Result as TmResult, Role,
     TicketId, Timestamp, TmError,
@@ -192,6 +192,35 @@ pub fn transition(from: Stage, event: &StageEvent) -> Result<Stage, IllegalTrans
             Ok(Stage::SteadyState)
         }
         _ => Err(IllegalTransition { from }),
+    }
+}
+
+/// Best-effort resolution of the milestone `stage` (`V0` or `V1`) is gated on — shared by
+/// [`GenesisDriver::advance`]'s own `MaturityGate` step (which needs "the V1 milestone" to
+/// evaluate) and by a caller checking "is this milestone closed yet" before advancing past `V0`/
+/// `V1` at all (see `docs/decisions/D-027-genesis-cli-stops-for-work.md`'s termination policy),
+/// so the two agree on the same approximation instead of silently drifting apart.
+///
+/// `GenesisState` only tracks a V0 milestone id directly (via `ignition`'s
+/// [`crate::ignition::IgnitionPolicy::v0_objective_milestone`]); there is no dedicated "V1
+/// milestone" field, so V1 is approximated as the first milestone distinct from V0 (or the only
+/// milestone that exists, if there's just one). `None` for any other stage, or when nothing has
+/// been compiled/ignited yet to resolve from.
+pub fn milestone_for_stage(
+    stage: Stage,
+    ignition: Option<&IgnitionPolicy>,
+    view: &ProjectView,
+) -> Option<MilestoneId> {
+    let v0 = ignition.map(|p| p.v0_objective_milestone.clone());
+    match stage {
+        Stage::V0 => v0,
+        Stage::V1 => view
+            .milestones
+            .keys()
+            .find(|id| Some((*id).clone()) != v0)
+            .or_else(|| view.milestones.keys().next())
+            .cloned(),
+        _ => None,
     }
 }
 
@@ -456,19 +485,7 @@ impl<'a> GenesisDriver<'a> {
             }
             Stage::MaturityGate => {
                 let view = self.store.view()?;
-                let v0 = state
-                    .ignition
-                    .as_ref()
-                    .map(|p| p.v0_objective_milestone.clone());
-                // Approximation: `GenesisState` carries no dedicated "V1 milestone" field, so the
-                // first milestone distinct from the ignition's V0 objective stands in for V1 (or
-                // the same milestone, if there is only one).
-                let v1 = view
-                    .milestones
-                    .keys()
-                    .find(|id| Some((*id).clone()) != v0)
-                    .or_else(|| view.milestones.keys().next())
-                    .cloned()
+                let v1 = milestone_for_stage(Stage::V1, state.ignition.as_ref(), &view)
                     .ok_or_else(|| {
                         TmError::invariant(
                             "no milestone exists yet for the maturity gate to evaluate",
@@ -709,6 +726,42 @@ mod tests {
     fn transition_rejects_an_event_that_does_not_belong_to_the_stage() {
         let err = transition(Stage::Seed, &StageEvent::V0Reached).unwrap_err();
         assert_eq!(err, IllegalTransition { from: Stage::Seed });
+    }
+
+    #[test]
+    fn milestone_for_stage_v0_is_the_ignition_objective() {
+        let policy = sample_ignition();
+        let view = ProjectView::empty();
+        assert_eq!(
+            milestone_for_stage(Stage::V0, Some(&policy), &view),
+            Some(policy.v0_objective_milestone.clone())
+        );
+        assert_eq!(milestone_for_stage(Stage::V0, None, &view), None);
+    }
+
+    #[test]
+    fn milestone_for_stage_v1_picks_a_milestone_distinct_from_v0() {
+        let (_dir, store) = open_store();
+        let v0_events = store
+            .create_milestone("v0".to_string(), vec![], vec![], actor())
+            .unwrap();
+        let v0_id = MilestoneId::new(v0_events[0].subject.as_str()).unwrap();
+        store
+            .create_milestone("v1".to_string(), vec![], vec![], actor())
+            .unwrap();
+        let view = store.view().unwrap();
+        let policy = IgnitionPolicy::for_v0(v0_id.clone());
+
+        let resolved = milestone_for_stage(Stage::V1, Some(&policy), &view)
+            .expect("a milestone exists to resolve");
+        assert_ne!(resolved, v0_id);
+    }
+
+    #[test]
+    fn milestone_for_stage_is_none_for_other_stages() {
+        let view = ProjectView::empty();
+        assert_eq!(milestone_for_stage(Stage::Stabilization, None, &view), None);
+        assert_eq!(milestone_for_stage(Stage::Seed, None, &view), None);
     }
 
     #[test]
