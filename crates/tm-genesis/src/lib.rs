@@ -10,6 +10,7 @@
 
 pub mod attach;
 pub mod compile;
+pub mod fixtures;
 pub mod ignition;
 pub mod maturity;
 pub mod seed;
@@ -18,6 +19,7 @@ pub mod stages;
 pub mod vision;
 
 pub use compile::GraphCompilation;
+pub use fixtures::{graph_compilation, maturity, offline_sequence, seed, spec, vision};
 pub use ignition::IgnitionPolicy;
 pub use maturity::MaturityGateResult;
 pub use seed::{Assumption, Question, Seed};
