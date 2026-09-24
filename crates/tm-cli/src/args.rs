@@ -1156,6 +1156,16 @@ pub struct EventsTailArgs {
     /// Start from this sequence number instead of the current head.
     #[arg(long)]
     pub from: Option<u64>,
+    /// Only show events of this kind (e.g. `ticket.closed`). An unrecognized kind is an error.
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// Only show events about this ticket (or other id, e.g. `T-12`).
+    #[arg(long)]
+    pub ticket: Option<String>,
+    /// Stop at the current head instead of waiting for new events (add `--from 1` to see
+    /// everything so far).
+    #[arg(long)]
+    pub no_follow: bool,
 }
 
 /// `tm events show`

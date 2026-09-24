@@ -2539,26 +2539,152 @@ pub async fn dispatch_events(
     }
 }
 
+/// How often `tm events tail`'s follow mode re-reads the log for new events. `EventLog::subscribe`
+/// is deliberately not used here even though it exists: its `EventHub` is in-process only
+/// (`tm_events::stream`'s own doc comment), so it would only ever see events appended by *this*
+/// `tm events tail` process, never the ones that matter — a `tm sched run`/`tm serve`/`tm run`
+/// running as a separate process, which is the whole reason to tail in the first place. Polling
+/// `EventLog::read_from` (a cheap indexed SQLite query) sees every process's writes.
+const TAIL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// `tm events tail`
 ///
 /// # IMPL
 /// Open a second read-only `EventLog` handle on `.tm/project.db`, replay from `args.from` (else
-/// current head) via `EventLog::read_from`, then subscribe (`EventLog::subscribe`) and stream
-/// new events as they arrive until ctrl-c; render each `Event` as one line (seq, kind, subject)
-/// or one JSON object per line in `--json` mode (JSON Lines, not a single array, since this is
-/// an unbounded stream).
+/// current head) via `EventLog::read_from`, then poll for new events (see
+/// [`TAIL_POLL_INTERVAL`]'s doc comment for why not `EventLog::subscribe`) until ctrl-c; render
+/// each `Event` as one line (seq, kind, subject) or one JSON object per line in `--json` mode
+/// (JSON Lines, not a single array, since this is an unbounded stream).
 pub async fn events_tail(
     args: &EventsTailArgs,
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
+    // Validate --kind before touching the database: a bad argument should fail immediately, not
+    // after a wasted open.
+    let kind = args
+        .kind
+        .as_deref()
+        .map(|s| {
+            s.parse::<tm_events::EventKind>().map_err(|_| {
+                tm_types::TmError::parse(format!(
+                    "`{s}` isn't an event type. Event types look like `ticket.closed`; run `tm \
+                     events tail --no-follow --from 1` to see the ones in this project."
+                ))
+            })
+        })
+        .transpose()?;
+    let filter = EventFilter {
+        kind,
+        ticket: args.ticket.clone(),
+    };
+
     let db_path = project.state_dir.join("project.db");
     let log = tm_events::EventLog::open(&db_path)?;
+
     let head = log.head()?;
     let from = args.from.unwrap_or(head);
+    let (backlog, mut last_seen) = tail_backlog(&log, from, &filter)?;
+    for event in &backlog {
+        emit_event(renderer, event)?;
+    }
 
-    renderer.note(&format!("Tailing events from seq {}", from));
+    if !args.no_follow {
+        let mut stop = std::pin::pin!(tokio::signal::ctrl_c());
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(TAIL_POLL_INTERVAL) => {
+                    let (page, seen) = tail_backlog(&log, last_seen + 1, &filter)?;
+                    for event in &page {
+                        emit_event(renderer, event)?;
+                    }
+                    last_seen = seen;
+                }
+                _ = &mut stop => {
+                    break;
+                }
+            }
+        }
+    }
+
     Ok(())
+}
+
+/// Which events `tm events tail` admits. Built once from [`EventsTailArgs`]; kept separate from
+/// the CLI args type so [`event_matches`] is testable without constructing one.
+#[derive(Debug, Clone, Default)]
+struct EventFilter {
+    kind: Option<tm_events::EventKind>,
+    ticket: Option<String>,
+}
+
+/// Pure predicate for `tm events tail --kind`/`--ticket`: does `event` pass `filter`? Kept
+/// separate from the streaming loop so both the kind and ticket filters (and their combination)
+/// are unit-testable without a live `EventLog`.
+fn event_matches(event: &tm_events::Event, filter: &EventFilter) -> bool {
+    if let Some(kind) = filter.kind {
+        if event.kind != kind {
+            return false;
+        }
+    }
+    if let Some(ticket) = &filter.ticket {
+        if event.subject.as_str() != ticket {
+            return false;
+        }
+    }
+    true
+}
+
+/// Read every event matching `filter` from `from` to the log's current head, paging through
+/// `EventLog::read_from` rather than one unbounded query. Returns the matched events and the
+/// highest `seq` seen (matching or not), so callers streaming live afterward know where the
+/// backlog left off. Split out from [`events_tail`] so `--no-follow`'s behavior is testable
+/// directly, without a renderer.
+fn tail_backlog(
+    log: &tm_events::EventLog,
+    from: u64,
+    filter: &EventFilter,
+) -> tm_types::Result<(Vec<tm_events::Event>, u64)> {
+    const PAGE: usize = 500;
+    let mut cursor = from;
+    let mut last_seen = from.saturating_sub(1);
+    let mut matched = Vec::new();
+    loop {
+        let page = log.read_from(cursor, PAGE)?;
+        if page.is_empty() {
+            break;
+        }
+        let page_len = page.len();
+        for event in page {
+            last_seen = event.seq;
+            if event_matches(&event, filter) {
+                matched.push(event);
+            }
+        }
+        if page_len < PAGE {
+            break;
+        }
+        cursor = last_seen + 1;
+    }
+    Ok((matched, last_seen))
+}
+
+/// One line of `tm events tail` output: a compact JSON object in `--json` mode (JSON Lines, not
+/// a pretty-printed array — `Renderer::emit`'s pretty printer would split one event across
+/// several lines, which breaks JSON Lines framing for an unbounded stream), or `seq  kind
+/// subject` in human mode.
+fn emit_event(renderer: &Renderer, event: &tm_events::Event) -> tm_types::Result<()> {
+    if renderer.is_json() {
+        println!("{}", serde_json::to_string(&event_show_json(event))?);
+    } else {
+        println!("{}", event_tail_human(event));
+    }
+    Ok(())
+}
+
+/// Pure formatter for `tm events tail`'s human output.
+fn event_tail_human(event: &tm_events::Event) -> String {
+    format!("{}  {}  {}", event.seq, event.kind, event.subject)
 }
 
 /// `tm events show`
@@ -3644,5 +3770,163 @@ mod tests {
         };
         let formatted = format_bench_comparison(&report);
         assert!(formatted.contains("Aggregate gain: -0.25"));
+    }
+
+    /// A minimal, hash-unverified `Event` for exercising [`event_matches`], which only reads
+    /// `kind` and `subject` — mirrors `tm_events::stream::tests::make_test_event`.
+    fn make_event(seq: u64, kind: tm_events::EventKind, subject: &str) -> tm_events::Event {
+        tm_events::Event {
+            seq,
+            ts: Timestamp::EPOCH,
+            kind,
+            subject: tm_types::Id::new(subject),
+            actor: tm_types::ParticipantId::system(),
+            session: None,
+            causation: None,
+            correlation: None,
+            payload: tm_events::Payload::SessionStarted(
+                tm_events::payload::SessionStartedPayload {
+                    session: tm_types::SessionId::new("S-1").unwrap(),
+                    participant: tm_types::ParticipantId::system(),
+                },
+            ),
+            hash: "hash".to_string(),
+        }
+    }
+
+    #[test]
+    fn event_matches_with_no_filter_admits_everything() {
+        let event = make_event(1, tm_events::EventKind::TicketClosed, "T-1");
+        assert!(event_matches(&event, &EventFilter::default()));
+    }
+
+    #[test]
+    fn event_matches_filters_by_kind() {
+        let closed = make_event(1, tm_events::EventKind::TicketClosed, "T-1");
+        let created = make_event(2, tm_events::EventKind::TicketCreated, "T-1");
+        let filter = EventFilter {
+            kind: Some(tm_events::EventKind::TicketClosed),
+            ticket: None,
+        };
+        assert!(event_matches(&closed, &filter));
+        assert!(!event_matches(&created, &filter));
+    }
+
+    #[test]
+    fn event_matches_filters_by_ticket() {
+        let t1 = make_event(1, tm_events::EventKind::TicketClosed, "T-1");
+        let t2 = make_event(2, tm_events::EventKind::TicketClosed, "T-2");
+        let filter = EventFilter {
+            kind: None,
+            ticket: Some("T-1".to_string()),
+        };
+        assert!(event_matches(&t1, &filter));
+        assert!(!event_matches(&t2, &filter));
+    }
+
+    #[test]
+    fn event_matches_combined_filter_requires_both() {
+        let matches_both = make_event(1, tm_events::EventKind::TicketClosed, "T-1");
+        let wrong_kind = make_event(2, tm_events::EventKind::TicketCreated, "T-1");
+        let wrong_ticket = make_event(3, tm_events::EventKind::TicketClosed, "T-2");
+        let filter = EventFilter {
+            kind: Some(tm_events::EventKind::TicketClosed),
+            ticket: Some("T-1".to_string()),
+        };
+        assert!(event_matches(&matches_both, &filter));
+        assert!(!event_matches(&wrong_kind, &filter));
+        assert!(!event_matches(&wrong_ticket, &filter));
+    }
+
+    fn append_test_events(log: &tm_events::EventLog) {
+        use tm_events::payload::{ProjectCreatedPayload, TicketCreatedPayload};
+
+        log.append(tm_events::EventDraft::new(
+            tm_types::ParticipantId::system(),
+            tm_types::Id::none(),
+            tm_events::Payload::from(ProjectCreatedPayload {
+                name: "demo".into(),
+                root: "/tmp/demo".into(),
+            }),
+        ))
+        .unwrap();
+        let ticket = tm_types::TicketId::new("T-1").unwrap();
+        log.append(tm_events::EventDraft::new(
+            tm_types::ParticipantId::system(),
+            tm_types::Id::from(ticket.clone()),
+            tm_events::Payload::from(TicketCreatedPayload {
+                ticket: ticket.clone(),
+                title: "do it".into(),
+                parent: None,
+            }),
+        ))
+        .unwrap();
+        let other_ticket = tm_types::TicketId::new("T-2").unwrap();
+        log.append(tm_events::EventDraft::new(
+            tm_types::ParticipantId::system(),
+            tm_types::Id::from(other_ticket.clone()),
+            tm_events::Payload::from(TicketCreatedPayload {
+                ticket: other_ticket,
+                title: "do the other thing".into(),
+                parent: None,
+            }),
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn tail_backlog_no_follow_returns_only_matching_events_over_a_scratch_store() {
+        // Mixed events (project.created, two ticket.created for different tickets); filtering by
+        // --ticket must return exactly the one event about that ticket, per `tel-events-kind-
+        // ticket-filter`'s acceptance check.
+        let dir = tempfile::tempdir().unwrap();
+        let log = tm_events::EventLog::open(&dir.path().join("project.db")).unwrap();
+        append_test_events(&log);
+        assert_eq!(log.head().unwrap(), 3);
+
+        let filter = EventFilter {
+            kind: None,
+            ticket: Some("T-1".to_string()),
+        };
+        let (matched, last_seen) = tail_backlog(&log, 1, &filter).unwrap();
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].subject.as_str(), "T-1");
+        assert_eq!(
+            last_seen, 3,
+            "last_seen tracks the head regardless of filtering"
+        );
+    }
+
+    #[test]
+    fn tail_backlog_kind_filter_matches_across_both_tickets() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = tm_events::EventLog::open(&dir.path().join("project.db")).unwrap();
+        append_test_events(&log);
+
+        let filter = EventFilter {
+            kind: Some(tm_events::EventKind::TicketCreated),
+            ticket: None,
+        };
+        let (matched, _) = tail_backlog(&log, 1, &filter).unwrap();
+        assert_eq!(matched.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn events_tail_rejects_an_unrecognized_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+
+        let args = EventsTailArgs {
+            from: None,
+            kind: Some("not.a.real.kind".to_string()),
+            ticket: None,
+            no_follow: true,
+        };
+        let err = events_tail(&args, &project, &renderer)
+            .await
+            .expect_err("unknown kind must be rejected");
+        assert!(err.to_string().contains("not.a.real.kind"));
     }
 }
