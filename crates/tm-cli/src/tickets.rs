@@ -4,10 +4,10 @@
 
 use crate::args::{
     DecisionCommand, DecisionNewArgs, DecisionRefArgs, DecisionSupersedeArgs, DepCommand,
-    DepEdgeArgs, DepGraphArgs, MilestoneCommand, MilestoneRefArgs, TicketAcceptArgs,
-    TicketCancelArgs, TicketCommand, TicketDelegateArgs, TicketEditArgs, TicketForkArgs,
-    TicketListArgs, TicketNewArgs, TicketRefArgs, TicketRejectArgs, TicketRetryArgs,
-    TicketStateArg, TicketSubmitArgs, TicketsArgs,
+    DepEdgeArgs, DepGraphArgs, MilestoneCommand, MilestoneNewArgs, MilestoneRefArgs,
+    TicketAcceptArgs, TicketCancelArgs, TicketCommand, TicketDelegateArgs, TicketEditArgs,
+    TicketForkArgs, TicketListArgs, TicketNewArgs, TicketRefArgs, TicketRejectArgs,
+    TicketRetryArgs, TicketStateArg, TicketSubmitArgs, TicketsArgs,
 };
 use crate::project::Project;
 
@@ -111,6 +111,13 @@ impl<'a> From<&'a tm_core::decision::Decision> for DecisionView<'a> {
 pub(crate) fn event_ticket_id(subject: &tm_types::Id) -> Option<TicketId> {
     (subject.kind() == Some(tm_types::IdKind::Ticket))
         .then(|| TicketId::new(subject.as_str()).ok())
+        .flatten()
+}
+
+/// Re-parse an event's [`tm_types::Id`] subject as a [`MilestoneId`], when it looks like one.
+fn event_milestone_id(subject: &tm_types::Id) -> Option<MilestoneId> {
+    (subject.kind() == Some(tm_types::IdKind::Milestone))
+        .then(|| MilestoneId::new(subject.as_str()).ok())
         .flatten()
 }
 
@@ -255,6 +262,7 @@ pub fn dispatch_ticket(
         TicketCommand::Delegate(args) => ticket_delegate(args, project, renderer),
         TicketCommand::Submit(args) => ticket_submit(args, project, renderer),
         TicketCommand::Fork(args) => ticket_fork(args, project, renderer),
+        TicketCommand::Context(args) => crate::ticket::ticket_context(args, project, renderer),
     }
 }
 
@@ -419,13 +427,19 @@ pub fn ticket_new(
         None
     };
 
+    let view = project.store.view()?;
+
     let milestone = if let Some(m) = &args.milestone {
-        Some(MilestoneId::new(m)?)
+        let milestone_id = MilestoneId::new(m)?;
+        if !view.milestones.contains_key(&milestone_id) {
+            return Err(TmError::parse(format!(
+                "no milestone {milestone_id}. Run `tm milestone list` to see what exists, or `tm milestone new \"<title>\"` to create it."
+            )));
+        }
+        Some(milestone_id)
     } else {
         None
     };
-
-    let view = project.store.view()?;
 
     let authority = if let Some(parent_id) = &parent {
         let parent_ticket = view
@@ -902,6 +916,8 @@ pub fn dispatch_milestone(
 ) -> tm_types::Result<()> {
     match cmd {
         MilestoneCommand::List => milestone_list(project, renderer),
+        MilestoneCommand::New(args) => milestone_new(args, project, renderer),
+        MilestoneCommand::Show(args) => milestone_show(args, project, renderer),
         MilestoneCommand::Close(args) => milestone_close(args, project, renderer),
         MilestoneCommand::Reopen(args) => milestone_reopen(args, project, renderer),
     }
@@ -917,6 +933,11 @@ pub fn milestone_list(project: &Project, renderer: &Renderer) -> tm_types::Resul
 
     if renderer.is_json() {
         renderer.emit(&milestone_views, "")?;
+    } else if milestones.is_empty() {
+        renderer.emit(
+            &milestone_views,
+            "No milestones yet. Create one: tm milestone new \"<title>\"\n",
+        )?;
     } else {
         let headers = vec!["ID".to_string(), "State".to_string(), "Tickets".to_string()];
         let rows: Vec<Vec<String>> = milestones
@@ -925,7 +946,7 @@ pub fn milestone_list(project: &Project, renderer: &Renderer) -> tm_types::Resul
                 vec![
                     m.id.to_string(),
                     milestone_state_label(m.state).to_string(),
-                    m.tickets.len().to_string(),
+                    milestone_members(m, &view.tickets).len().to_string(),
                 ]
             })
             .collect();
@@ -934,6 +955,134 @@ pub fn milestone_list(project: &Project, renderer: &Renderer) -> tm_types::Resul
     }
 
     Ok(())
+}
+
+/// `tm milestone new` (alias `tm milestone create`)
+pub fn milestone_new(
+    args: &MilestoneNewArgs,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let tickets = args
+        .tickets
+        .iter()
+        .map(TicketId::new)
+        .collect::<tm_types::Result<Vec<_>>>()?;
+
+    let events = project.store.create_milestone(
+        args.title.clone(),
+        tickets,
+        Vec::new(),
+        project.actor.clone(),
+    )?;
+
+    let created_id = events.first().and_then(|e| event_milestone_id(&e.subject));
+    match created_id {
+        Some(id) => renderer.emit(&id, &format!("Created {}: {}", id, args.title))?,
+        None => renderer.emit(&(), &format!("Created milestone: {}", args.title))?,
+    }
+
+    Ok(())
+}
+
+/// `tm milestone show`: the milestone's title, state, and each member ticket with its state
+/// label, plus a done/total count (done = `Closed` or `Cancelled`, matching what
+/// [`tm_core::milestone::MilestoneStore::close`] requires of every member).
+pub fn milestone_show(
+    args: &MilestoneRefArgs,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let milestone_id = MilestoneId::new(&args.milestone)?;
+    let view = project.store.view()?;
+
+    let milestone = view
+        .milestones
+        .get(&milestone_id)
+        .ok_or_else(|| TmError::not_found("milestone", &milestone_id))?;
+
+    let members = milestone_members(milestone, &view.tickets);
+
+    if renderer.is_json() {
+        let json = serde_json::json!({
+            "id": milestone.id.as_str(),
+            "title": milestone.title,
+            "state": milestone.state,
+            "closed_by": milestone.closed_by,
+            "assumptions": milestone.assumptions,
+            "tickets": members,
+        });
+        renderer.emit(&json, "")?;
+        return Ok(());
+    }
+
+    let text = format_milestone_text(milestone, &members, &view.tickets);
+    let milestone_view: MilestoneView = milestone.into();
+    renderer.emit(&milestone_view, &text)?;
+
+    Ok(())
+}
+
+/// The tickets attached to `milestone`. `milestone.created`'s payload carries no ticket list at
+/// all (just the id and title), and the `milestones` SQL table's own `tickets` column is always
+/// written as `[]` and never updated afterward. `tm_core::Store::view` already reconstructs
+/// `Milestone.tickets` by unioning that (always-empty) column with every ticket whose own
+/// `milestone` field points at this id, so a `Milestone` obtained from `Store::view` already
+/// carries real membership. This helper exists for a `Milestone` obtained some other way (e.g.
+/// without a full view's `tickets` map already applied) -- it does the same union, deduplicated
+/// in ticket-id order, and is a harmless no-op when `milestone.tickets` is already complete.
+fn milestone_members(
+    milestone: &tm_core::milestone::Milestone,
+    tickets: &BTreeMap<TicketId, tm_core::ticket::Ticket>,
+) -> Vec<TicketId> {
+    let mut members: std::collections::BTreeSet<TicketId> =
+        milestone.tickets.iter().cloned().collect();
+    for (id, ticket) in tickets {
+        if ticket.milestone.as_ref() == Some(&milestone.id) {
+            members.insert(id.clone());
+        }
+    }
+    members.into_iter().collect()
+}
+
+/// The plain-text body of `tm milestone show`. Pulled out of [`milestone_show`] so it can be
+/// unit-tested against a constructed [`tm_core::milestone::Milestone`] and ticket map without a
+/// real [`Project`]/[`tm_core::Store`].
+fn format_milestone_text(
+    milestone: &tm_core::milestone::Milestone,
+    members: &[TicketId],
+    tickets: &BTreeMap<TicketId, tm_core::ticket::Ticket>,
+) -> String {
+    let done = members
+        .iter()
+        .filter(|t| {
+            matches!(
+                tickets.get(*t).map(|t| t.state),
+                Some(TicketState::Closed) | Some(TicketState::Cancelled)
+            )
+        })
+        .count();
+    let total = members.len();
+
+    let mut text = format!("ID:      {}\n", milestone.id);
+    text.push_str(&format!("Title:   {}\n", milestone.title));
+    text.push_str(&format!(
+        "State:   {}\n",
+        milestone_state_label(milestone.state)
+    ));
+    text.push_str(&format!("Tickets: {done}/{total} done\n"));
+    if members.is_empty() {
+        text.push_str("  (no tickets yet)\n");
+    } else {
+        for ticket_id in members {
+            let state = tickets
+                .get(ticket_id)
+                .map(|t| state_label(t.state).to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            text.push_str(&format!("  {ticket_id}  {state}\n"));
+        }
+    }
+    text
 }
 
 /// `tm milestone close`
@@ -1275,5 +1424,176 @@ mod tests {
             });
             assert_eq!(state_from_arg(parsed), *state);
         }
+    }
+
+    fn test_project(root: &std::path::Path) -> Project {
+        use std::sync::Arc;
+        use tm_types::{Clock, CounterIds, FixedClock, IdSource};
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store = Arc::new(
+            tm_core::Store::open_with(root, clock.clone(), ids.clone()).expect("open store"),
+        );
+        Project::for_test(root, store, clock, ids)
+    }
+
+    #[test]
+    fn milestone_members_unions_the_stale_milestone_tickets_field_with_each_ticket_own_field() {
+        let milestone_id = MilestoneId::new("M-1").unwrap();
+        let t1 = TicketId::new("T-1").unwrap();
+        let t2 = TicketId::new("T-2").unwrap();
+        // `Milestone.tickets` lists only T-1 here (standing in for the field's one real state
+        // in this codebase: always stale, see `milestone_members`'s doc comment); T-2 is
+        // attached only via its own `milestone` field, the way real membership actually works.
+        let milestone = tm_core::milestone::Milestone {
+            id: milestone_id.clone(),
+            title: "v0".to_string(),
+            tickets: vec![t1.clone()],
+            state: tm_core::milestone::MilestoneState::Open,
+            closed_by: None,
+            assumptions: vec![],
+        };
+
+        let make_ticket = |id: TicketId, state: TicketState, milestone| tm_core::ticket::Ticket {
+            id: id.clone(),
+            objective: "test".to_string(),
+            kind: TicketKind::Work,
+            parent: None,
+            children: vec![],
+            dependencies: vec![],
+            milestone,
+            state,
+            priority: 0,
+            authority: Authority::default(),
+            resources: vec![],
+            executor: default_executor_requirements(),
+            context_refs: vec![],
+            success: vec![],
+            verification: VerificationPolicy::Single,
+            budget: Budget::unlimited(),
+            retry: default_retry_policy(),
+            attempts: 0,
+            failures: vec![],
+            created: tm_types::Timestamp::parse_rfc3339("2024-01-01T00:00:00Z").unwrap(),
+            updated: tm_types::Timestamp::parse_rfc3339("2024-01-01T00:00:00Z").unwrap(),
+            cycle: None,
+        };
+
+        let mut tickets = BTreeMap::new();
+        tickets.insert(
+            t1.clone(),
+            make_ticket(t1.clone(), TicketState::Closed, Some(milestone_id.clone())),
+        );
+        tickets.insert(
+            t2.clone(),
+            make_ticket(t2.clone(), TicketState::Ready, Some(milestone_id.clone())),
+        );
+
+        let members = milestone_members(&milestone, &tickets);
+        assert_eq!(members, vec![t1.clone(), t2.clone()]);
+
+        let text = format_milestone_text(&milestone, &members, &tickets);
+        assert!(text.contains("Title:   v0"));
+        assert!(text.contains("Tickets: 1/2 done"));
+        assert!(text.contains("T-1"));
+        assert!(text.contains("T-2"));
+    }
+
+    #[test]
+    fn milestone_new_then_show_lists_the_attached_ticket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+
+        let events = project
+            .store
+            .create_ticket(
+                TicketKind::Work,
+                "do the thing".to_string(),
+                None,
+                None,
+                Authority::worker(),
+                vec![],
+                default_executor_requirements(),
+                Vec::new(),
+                Vec::new(),
+                VerificationPolicy::Single,
+                Budget::unlimited(),
+                default_retry_policy(),
+                0,
+                project.actor.clone(),
+            )
+            .expect("create ticket");
+        let ticket_id = event_ticket_id(&events[0].subject).expect("ticket id");
+
+        milestone_new(
+            &MilestoneNewArgs {
+                title: "v0".to_string(),
+                tickets: vec![ticket_id.to_string()],
+            },
+            &project,
+            &renderer,
+        )
+        .expect("milestone new");
+
+        let view = project.store.view().expect("view");
+        let milestone = view.milestones.values().next().expect("one milestone");
+        assert_eq!(milestone.title, "v0");
+        // `tm_core::Store::view` already unions each ticket's own `milestone` pointer into
+        // `Milestone.tickets` on read (`crates/tm-core/src/store.rs`'s materialization of the
+        // `milestones` table), so it's already populated here -- `milestone_members` below is a
+        // second, idempotent union over the same data, useful when a caller only has a
+        // `Milestone` without a full view.
+        assert_eq!(milestone.tickets, vec![ticket_id.clone()]);
+        let members = milestone_members(milestone, &view.tickets);
+        assert_eq!(members, vec![ticket_id.clone()]);
+
+        let text = format_milestone_text(milestone, &members, &view.tickets);
+        assert!(
+            text.contains(ticket_id.as_str()),
+            "milestone show text {text:?} should list {ticket_id}"
+        );
+        assert!(text.contains("Tickets: 0/1 done"));
+
+        // `tm milestone show` on that id must succeed and not error.
+        milestone_show(
+            &MilestoneRefArgs {
+                milestone: milestone.id.to_string(),
+            },
+            &project,
+            &renderer,
+        )
+        .expect("milestone show");
+    }
+
+    #[test]
+    fn ticket_new_with_unknown_milestone_errors_clearly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+
+        let err = ticket_new(
+            &TicketNewArgs {
+                objective: "x".to_string(),
+                kind: "task".to_string(),
+                parent: None,
+                milestone: Some("M-99".to_string()),
+                priority: 0,
+                resources: vec![],
+            },
+            &project,
+            &renderer,
+        )
+        .expect_err("M-99 does not exist");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("no milestone M-99"),
+            "unexpected error message: {message}"
+        );
+
+        // Confirm no ticket was silently created with the milestone dropped.
+        let view = project.store.view().expect("view");
+        assert!(view.tickets.is_empty());
     }
 }

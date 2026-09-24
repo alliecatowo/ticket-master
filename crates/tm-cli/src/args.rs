@@ -357,6 +357,8 @@ pub enum TicketCommand {
     Submit(TicketSubmitArgs),
     /// Fork a ticket's materialized state as of a past `seq` into a new ticket lineage.
     Fork(TicketForkArgs),
+    /// Show the context a ticket's next attempt would be given, and its token cost.
+    Context(TicketRefArgs),
 }
 
 /// Identifies a ticket by its `T-...` id.
@@ -577,10 +579,26 @@ pub struct DepGraphArgs {
 pub enum MilestoneCommand {
     /// List milestones.
     List,
+    /// Create a new milestone.
+    #[command(visible_alias = "create")]
+    New(MilestoneNewArgs),
+    /// Show one milestone and its member tickets.
+    Show(MilestoneRefArgs),
     /// Close a milestone.
     Close(MilestoneRefArgs),
     /// Reopen a closed milestone.
     Reopen(MilestoneRefArgs),
+}
+
+/// `tm milestone new`
+#[derive(Debug, Args)]
+pub struct MilestoneNewArgs {
+    /// The milestone's title.
+    #[arg(value_name = "TITLE")]
+    pub title: String,
+    /// Ticket ids to attach to the milestone (repeatable).
+    #[arg(long = "ticket", value_name = "TICKET")]
+    pub tickets: Vec<String>,
 }
 
 /// Identifies a milestone by its `M-...` id.

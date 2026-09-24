@@ -100,6 +100,10 @@ never drift between sessions:
 - `tm tickets` opens the TUI straight onto the tickets screen (Esc goes to a fresh chat);
   `tm tickets --json` prints open tickets as a JSON array and exits (`--all` adds closed and
   cancelled), like `claude agents --json`, and never creates a project just to print `[]`.
+- `tm milestone new "<title>" [--ticket <T>...]` (alias `create`) creates a milestone and attaches
+  any given tickets; `tm milestone show <M>` prints its title, state, member tickets with state
+  labels, and a done/total count. `tm ticket new --milestone <M>` now errors clearly instead of
+  silently dropping the milestone when `<M>` doesn't exist.
 - `tm --help` groups the ~16 commands used day to day — daily (`init`, `status`, `tickets`,
   `ticket`, `run`, `search`, `symbol`, `doctor`), planning (`milestone`, `dep`, `decision`),
   serving (`serve`, `mcp`), plus `provider`/`auth` — and folds the rest of the tree (`lease`,
@@ -320,6 +324,8 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   attempts) for `tm ticket retry <T> [--guidance "..."]`, which gives it a fresh round of attempts
   and appends the guidance to its objective. All three are human-only, and the tickets screen and
   `tm serve`'s `/tickets/{id}/transition` offer the same three.
+- `tm ticket context <ID>` shows the context pack a ticket's next attempt would be given —
+  admitted and dropped sections with token counts — without spending an attempt.
 - `tm run <ticket> --worktree` isolates one delegated run in a real `git worktree` (a fresh branch
   off `HEAD`, under `<state_dir>/worktrees/<ticket>-<suffix>/`) instead of the main checkout —
   requires a repo-scoped project backed by a real, non-bare git repository with at least one
