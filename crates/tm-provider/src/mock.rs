@@ -7,12 +7,14 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use tm_types::Clock;
 
+use crate::cassette::{hash_normalized_request, Cassette, Divergence};
 use crate::decide::{Answer, AnswerValue, DecideLimits, DecideRequest, DecideResponse, Question};
 use crate::fabric::Provider;
 use crate::types::{
@@ -89,6 +91,18 @@ pub struct MockProvider {
     /// A FIFO queue of completions to serve on successive `complete()` calls, regardless of
     /// request content. Exhausted after all items are served; the normal script lookup then takes over.
     sequence: Mutex<VecDeque<Completion>>,
+    /// Set alongside `sequence` by [`MockProvider::script_from_cassette`]: the `(seq,
+    /// request_hash)` recorded for each entry still in `sequence`, in the same order, so replay
+    /// can compare what it's actually being asked against what was recorded and report a
+    /// [`Divergence`] instead of failing. Empty when `sequence` was populated by
+    /// [`MockProvider::script_sequence`] directly rather than from a cassette.
+    replay_expected: Mutex<VecDeque<(u64, RequestHash)>>,
+    /// The `root` a cassette was loaded with (see [`crate::cassette::normalize_request`]), used
+    /// to normalize each served request the same way before comparing its hash.
+    replay_root: Mutex<Option<PathBuf>>,
+    /// Divergences recorded so far during cassette replay — see
+    /// [`MockProvider::script_from_cassette`] and [`MockProvider::divergences`].
+    divergences: Mutex<Vec<Divergence>>,
 }
 
 impl MockProvider {
@@ -106,6 +120,9 @@ impl MockProvider {
             call_log: Mutex::new(Vec::new()),
             default: Mutex::new(None),
             sequence: Mutex::new(VecDeque::new()),
+            replay_expected: Mutex::new(VecDeque::new()),
+            replay_root: Mutex::new(None),
+            divergences: Mutex::new(Vec::new()),
         }
     }
 
@@ -138,11 +155,48 @@ impl MockProvider {
     /// them after the sequence is exhausted.
     pub fn script_sequence(&self, completions: Vec<Completion>) {
         *self.sequence.lock() = VecDeque::from(completions);
+        // A prior script_from_cassette's expected hashes/root no longer apply to this sequence;
+        // leaving them would compare this sequence's calls against a stale cassette's recorded
+        // hashes and produce false divergences.
+        self.replay_expected.lock().clear();
+        *self.replay_root.lock() = None;
     }
 
     /// Return the number of completions remaining in the sequence set by [`MockProvider::script_sequence`].
     pub fn sequence_remaining(&self) -> usize {
         self.sequence.lock().len()
+    }
+
+    /// Load `cassette`'s entries into the ordered sequence API (same mechanism as
+    /// [`MockProvider::script_sequence`]), for a deterministic replay of a real recording.
+    ///
+    /// Replay is ordered, not exact-hash: the entries are served strictly in their recorded
+    /// order regardless of what each `complete()` call's request actually contains, because
+    /// exact-hash replay into a fresh project diverges on the very first call whenever a prompt
+    /// carries a path, timestamp or id that differs between the recording run and this one (see
+    /// `docs/decisions/D-028-record-replay-harness.md`). Each served request's normalized hash
+    /// (`root`-relative, same as [`CassetteEntry::request_hash`] was computed) is still compared
+    /// against what was recorded at that position; a mismatch is recorded as a [`Divergence`]
+    /// rather than failing the call, readable afterward through [`MockProvider::divergences`].
+    /// Clears any previously recorded divergences.
+    pub fn script_from_cassette(&self, cassette: &Cassette, root: &Path) {
+        let mut sequence = VecDeque::new();
+        let mut expected = VecDeque::new();
+        for entry in &cassette.entries {
+            sequence.push_back(entry.completion.clone());
+            expected.push_back((entry.seq, entry.request_hash));
+        }
+        *self.sequence.lock() = sequence;
+        *self.replay_expected.lock() = expected;
+        *self.replay_root.lock() = Some(root.to_path_buf());
+        self.divergences.lock().clear();
+    }
+
+    /// Every divergence recorded during cassette replay so far — a served request whose
+    /// normalized hash didn't match what [`MockProvider::script_from_cassette`]'s cassette
+    /// recorded at that position. Empty when nothing diverged, or when replay was never used.
+    pub fn divergences(&self) -> Vec<Divergence> {
+        self.divergences.lock().clone()
     }
 
     /// Script the response served for *any* request that does not match a hash-keyed script
@@ -226,8 +280,12 @@ impl Provider for MockProvider {
     /// Serve `req` from the script sequence first, then the script table, falling back to [`ProviderError::Unscripted`].
     ///
     /// Pushes `req.clone()` onto `call_log`, then:
-    /// 1. If a sequence was set via [`MockProvider::script_sequence`], pops and returns the
-    ///    next completion from the front, regardless of request content.
+    /// 1. If a sequence was set via [`MockProvider::script_sequence`] or
+    ///    [`MockProvider::script_from_cassette`], pops and returns the next completion from the
+    ///    front, regardless of request content. When the sequence came from a cassette, also
+    ///    compares `req`'s normalized hash to what was recorded at that position
+    ///    ([`crate::cassette::CassetteEntry::request_hash`]) and records a [`Divergence`] on a
+    ///    mismatch, rather than failing the call.
     /// 2. Looks up `hash_request(req)` in `scripts`. If `Respond(completion)`, returns
     ///    `Ok(completion.clone())`. If `Fail(f)`, decrements `f.times` if `Some` (removing the
     ///    script entry once it reaches zero so the next call falls through), and returns
@@ -241,7 +299,23 @@ impl Provider for MockProvider {
         self.call_log.lock().push(req.clone());
 
         // Check the sequence first: if populated, serve the next completion regardless of request.
-        if let Some(completion) = self.sequence.lock().pop_front() {
+        let popped = self.sequence.lock().pop_front();
+        if let Some(completion) = popped {
+            // If this sequence came from a cassette (script_from_cassette), compare this
+            // request's normalized hash against what was recorded at this position and record
+            // any mismatch as a Divergence rather than failing the call.
+            if let Some(root) = self.replay_root.lock().clone() {
+                if let Some((seq, expected_hash)) = self.replay_expected.lock().pop_front() {
+                    let actual_hash = hash_normalized_request(&req, &root);
+                    if actual_hash != expected_hash {
+                        self.divergences.lock().push(Divergence {
+                            seq,
+                            expected_hash,
+                            actual_hash,
+                        });
+                    }
+                }
+            }
             return Ok(completion);
         }
 

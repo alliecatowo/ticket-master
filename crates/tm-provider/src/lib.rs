@@ -16,6 +16,7 @@
 #![warn(missing_docs)]
 
 pub mod anthropic;
+pub mod cassette;
 pub mod decide;
 pub mod fabric;
 pub mod mock;
@@ -27,6 +28,10 @@ pub mod types;
 pub mod wire_names;
 
 pub use anthropic::AnthropicProvider;
+pub use cassette::{
+    Cassette, CassetteEntry, CassetteError, CassetteHeader, Divergence, RecordingProvider,
+    CASSETTE_FORMAT_VERSION,
+};
 pub use decide::{
     Answer, AnswerValue, DecideLimits, DecideRequest, DecideResponse, DecisionProvider, LevelSpec,
     OptionSpec, Question, QuestionId, QuestionKind,
