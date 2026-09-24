@@ -43,7 +43,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-core && mise run test:crate -- tm-cli`
   evidence: `sed -n 847,872p crates/tm-cli/src/tickets.rs` -> `let fields = serde_json::json!({"dependencies": updated_edges}); project.store.update_ticket(&ticket, fields, ...)` (materialize only deletes on EventKind::TicketDependencyRemoved). Confirmed independently: "tm dep rm T-2 T-1 --plain followed by tm dep graph --json still shows the edge."
 
-- [ ] **s1-display-labels** — One set of human display labels for ticket state, kind, milestone state, dep kind, budget and authority
+- [x] **s1-display-labels** (landed 8c01ef5) — One set of human display labels for ticket state, kind, milestone state, dep kind, budget and authority
   model: sonnet · severity: critical · builds Rust: yes · area: cli · deps: s1-surfaces-decision-doc
   files: `crates/tm-cli/src/render.rs`, `crates/tm-cli/src/tickets.rs`
   change: Add `pub fn state_label(TicketState)`, `kind_label`, `milestone_state_label`, `dep_kind_label` (Hard -> "blocks", Loop -> "loop"), `budget_label` ("unlimited" for u64::MAX, else e.g. "50k tokens, 20 steps, $2.00") and `authority_label` in render.rs. Labels are lowercase and match exactly what `tm ticket list --state` parses (tickets.rs:590). Replace `format!("{:?}", t.kind/t.state)` at tickets.rs:336-337, 654, and the milestone list (~941). Add a test that feeds every TicketState's label back through the `--state` parser.
@@ -123,7 +123,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
   evidence: `grep -n 'Tab' crates/tm-tui/src/screens/tickets.rs` -> 786: `KeyCode::Tab | KeyCode::BackTab => {}`; ScreenId (tui.rs:405) has only Chat/Tickets/Kanban/Detail; tester (TUI): "missing the project-management views (milestones, timeline, calendar)."
 
-- [ ] **s1-tui-milestones-view** — Milestones tab: progress per milestone, Enter filters tickets
+- [x] **s1-tui-milestones-view** (landed 9d68e8c) — Milestones tab: progress per milestone, Enter filters tickets
   model: sonnet · severity: medium · builds Rust: yes · area: tui · deps: s1-tui-hub-tabs, s1-milestone-new-show, s1-ticket-due-date
   files: `crates/tm-tui/src/screens/milestones.rs`, `crates/tm-tui/src/screens/mod.rs`, `crates/tm-cli/src/tui.rs`
   change: New screen, one row per milestone: title, state label, a done/total progress bar, derived due date, sourced from ProjectView.milestones. Enter returns to Tickets filtered to that milestone (header shows the filter); Esc clears it. Empty state: "No milestones. Create one with tm milestone new". Add a buffer-render unit test at the bottom of the file.
@@ -167,7 +167,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
   evidence: probe prefetch (pass=false): "Add a way to see a ticket's context pack (what was prefetched) and its token cost."
 
-- [ ] **s1-slash-search-review** — /search <q> inline hybrid code search, and /review of the working-tree diff
+- [x] **s1-slash-search-review** (landed 2e0c21a) — /search <q> inline hybrid code search, and /review of the working-tree diff
   model: sonnet · severity: medium · builds Rust: yes · area: tui/chat · deps: s1-slash-context-todos
   files: `crates/tm-tui/src/chat/commands.rs`, `crates/tm-cli/src/tui/slash_views.rs`, `crates/tm-cli/src/tui/chat_ops.rs`, `CLAUDE.md`
   change: `/search <q>` runs the same hybrid search `tm search` uses (crates/tm-cli/src/search.rs) against the project and prints the top 10 as `path:line  snippet`. When the index is not built yet, say so instead of printing an empty list (distinguish "not indexed" from "no matches" — same fix needed in s1-search-hybrid-empty-snippet's snippet plumbing). `/review [focus]` sends a turn asking the agent to review `git diff HEAD`, the way `/init` sends init_prompt.
@@ -191,7 +191,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-types && mise run test:crate -- tm-core && mise run test:crate -- tm-cli`
   evidence: findings: "Invalid decision ID error shows internal type name instead of plain language" (`error: parse: DecisionId must look like D-<n>, got "invalid-id"`); "Technical format strings in ID validation error messages" (LeaseId/ParticipantId); lease: `tm lease acquire T-1 --actor agent:mock/worker-2` on an already-leased ticket returns `error: conflict: ticket T-1 is not Ready`.
 
-- [ ] **s1-status-since-hours-error** — tm status --since-hours rejects bad input with a Rust parse error
+- [x] **s1-status-since-hours-error** (landed 84fa0b7) — tm status --since-hours rejects bad input with a Rust parse error
   model: haiku · severity: medium · builds Rust: yes · area: cli/copy · deps: none
   files: `crates/tm-cli/src/args.rs`
   change: Replace the default u64 parser for `since_hours` with a custom clap `value_parser` that validates a positive u64 and returns "Expected a positive integer (hours)" on failure, instead of surfacing the raw Rust parse error.
@@ -199,7 +199,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `tm status --since-hours invalid` -> `error: invalid value 'invalid' for '--since-hours <HOURS>': invalid digit found in string`.
 
-- [ ] **s1-events-sched-copy-and-quiet** — Humanize tm events show output and fix sched plan/tick's --quiet and event-name jargon
+- [x] **s1-events-sched-copy-and-quiet** (landed a3a30b2) — Humanize tm events show output and fix sched plan/tick's --quiet and event-name jargon
   model: sonnet · severity: high · builds Rust: yes · area: cli/copy · deps: none
   files: `crates/tm-cli/src/ops.rs`, `crates/tm-cli/src/sched.rs`
   change: In `tm events show`, change `format!("{:?}", event.kind)` (ops.rs ~2248) to the Display impl (dotted event names like `ticket.leased` instead of debug `TicketLeased`), and humanize field labels ("Sequence"/"Type"/"Related to"/"When" instead of "Seq"/"Kind"/"Subject"/"Timestamp"). In sched.rs, add `if !renderer.is_quiet()` guards before `renderer.emit()` in `sched_plan` (~line 90) and `sched_tick` (~line 117), matching the pattern already used in `sched_run` (~line 185). Reword `event_to_summary` (sched.rs:728-755): 'Ticked' -> 'Scheduler ticked', with detail "No work to do" (0 actions), "1 action queued", or "N actions queued" instead of "N actions planned at <ISO timestamp>".
@@ -207,7 +207,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `tm events show 1` -> `Kind: TicketLeased` (should be `ticket.leased`); `tm sched tick --quiet` still prints `Ticked: 0 actions planned at 2026-09-23T21:01:58.400868Z`.
 
-- [ ] **s1-search-hybrid-empty-snippet** — Hybrid search results show an empty snippet column
+- [x] **s1-search-hybrid-empty-snippet** (landed 5c0ae42) — Hybrid search results show an empty snippet column
   model: haiku · severity: medium · builds Rust: yes · area: cli/search · deps: none
   files: `crates/tm-cli/src/search.rs`, `crates/tm-codeintel/src/api.rs`, `crates/tm-codeintel/src/hybrid.rs`
   change: Hybrid search's human output shows an empty Snippet column (JSON confirms `"snippet": ""` always). Exact/regex modes properly show the matched line (`h.line_text`). Fix hybrid to extract the snippet from the hit data or source file at the matched line, same pattern as exact mode (search.rs ~line 180).
@@ -231,7 +231,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-core && mise run test:crate -- tm-cli`
   evidence: after `decision supersede D-001 'Use MongoDB'`, both text and JSON `decision show D-002` omit D-001, and the DB stores `supersedes=NULL`; `tm decision list` shows `D-001  Superseded  decision` / `D-002  Active  decision` instead of the actual text.
 
-- [ ] **s1-workflow-error-message-ux** — Workflow-not-found error dumps an internal filesystem path
+- [x] **s1-workflow-error-message-ux** (landed 35d6b3e) — Workflow-not-found error dumps an internal filesystem path
   model: haiku · severity: medium · builds Rust: yes · area: cli/copy · deps: none
   files: `crates/tm-cli/src/workflow.rs`
   change: Replace the raw io-error message on a missing workflow definition ("Failed to read workflow \"<name>\" at /path/...: No such file or directory (os error 2)") with "Workflow '<name>' not found. Define it in .tm/workflows/<name>.toml".
@@ -247,7 +247,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: after linking github, `tm mirror status` still returns `{"mirrors": []}` and "No active mirror links" despite `mirror.toml` containing `[adapters.github]` with `enabled=true`; `mirror push` prints "Mirror push completed: 0 pushed, 0 degraded" with no explanation; `mirror link` succeeds silently with unset `TM_GITHUB_OWNER`/`TM_GITHUB_REPO`, which only surfaces later as "Skipped adapter \"github\": ... is not set" on push.
 
-- [ ] **s1-templates-io-error-message** — Missing template source file shows a raw OS error
+- [x] **s1-templates-io-error-message** (landed c52ef07) — Missing template source file shows a raw OS error
   model: haiku · severity: medium · builds Rust: yes · area: cli/copy · deps: none
   files: `crates/tm-templates/src/manifest.rs`
   change: Change the `TmError::Io(format!("reading {}: {e}", manifest_path.display()))` at manifest.rs:63 to "template source not found: {} (manifest.toml)" — no OS error code, no "io:" prefix — matching the style of other not-found errors in this codebase.
