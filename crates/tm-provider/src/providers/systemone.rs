@@ -61,6 +61,13 @@
 //! option's own label doubles as its `criteria` description — a known simplification, not a
 //! documented TypeSafe requirement.
 //!
+//! # Redaction before the request leaves this machine
+//!
+//! [`DecisionProvider::decide`]'s `req` is a message sent onward to a remote decider, so it goes
+//! through [`tm_auth::SessionRedactor::redact_decide_request`] (D-020 decision 7) before any of
+//! its fields are read — see [`SystemOneProvider::decide`]'s own body. The mock/local backends
+//! (`d20-decider-trait-and-mock`) skip this: nothing there leaves the machine.
+//!
 //! # IMPL: transport is injectable for tests
 //!
 //! The acceptance test for this module proves the outbound request body and inbound response
@@ -74,7 +81,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use tm_auth::EnvApiKey;
+use tm_auth::{EnvApiKey, SessionRedactor};
 
 use crate::decide::{
     Answer, AnswerValue, DecideLimits, DecideRequest, DecideResponse, DecisionProvider, Question,
@@ -362,6 +369,11 @@ pub struct SystemOneProvider {
     token: String,
     default_model: String,
     transport: Arc<dyn Transport>,
+    /// Scrubs a [`DecideRequest`]'s `state` and question text before it leaves this machine
+    /// (D-020 decision 7, "Redaction before anything leaves the machine") — see
+    /// [`tm_auth::SessionRedactor::redact_decide_request`]. One redactor per provider instance,
+    /// matching the one-per-`Fabric` pattern `fabric.rs` already uses for its own outbound calls.
+    redactor: SessionRedactor,
 }
 
 impl SystemOneProvider {
@@ -409,6 +421,7 @@ impl SystemOneProvider {
             token,
             default_model: model.model,
             transport: Arc::new(HttpTransport { client }),
+            redactor: SessionRedactor::new(),
         })
     }
 
@@ -439,6 +452,15 @@ impl DecisionProvider for SystemOneProvider {
     }
 
     async fn decide(&self, req: DecideRequest) -> Result<DecideResponse, ProviderError> {
+        // Redact before anything else touches `req`: `state` and every question's own text may
+        // carry a secret-shaped substring, and this is a message sent onward to a remote decider
+        // (D-020 decision 7). Everything below — the wire body and the later answer lookup by
+        // question id — uses this redacted copy; question ids and answer matching are untouched,
+        // since only string leaves are scrubbed.
+        let req = self
+            .redactor
+            .redact_decide_request(&req)
+            .map_err(|e| ProviderError::InvalidRequest(format!("failed to redact request: {e}")))?;
         let model = if req.model.model.is_empty() {
             self.default_model.as_str()
         } else {
@@ -543,6 +565,7 @@ mod tests {
             token: token.to_string(),
             default_model: default_model.to_string(),
             transport,
+            redactor: SessionRedactor::new(),
         }
     }
 
@@ -643,6 +666,44 @@ mod tests {
         assert_eq!(wire_question["instructions"], "route this support ticket");
         assert_eq!(wire_question["criteria"]["billing"], "billing");
         assert_eq!(wire_question["criteria"]["technical"], "technical");
+    }
+
+    /// D-020 decision 7 ("Redaction before anything leaves the machine"), proven at the actual
+    /// outbound call site: a fake API-key-shaped string in `state` or a question's own
+    /// instructions must never reach `Transport::post`'s body, matching
+    /// `tm_auth::redact::tests::redact_decide_request_scrubs_state_and_question_text`'s claim
+    /// about the same string shape.
+    #[tokio::test]
+    async fn decide_never_sends_a_raw_secret_in_the_outbound_body() {
+        const OPENAI_KEY: &str = "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+
+        let response_body = br#"{"answers":{"route":{"type":"choice","choice":"billing","probabilities":{"billing":1,"technical":0}}}}"#;
+        let transport = Arc::new(FakeTransport::new(200, response_body.to_vec()));
+        let provider = test_provider(
+            "https://fake.example/typesafe",
+            "test-token",
+            "typesafe-ai/jev",
+            transport.clone(),
+        );
+
+        let mut request = choice_request();
+        request.state = format!("customer pasted their key {OPENAI_KEY} by mistake");
+        if let Some(Question::Choice { instructions, .. }) = request.questions.get_mut("route") {
+            *instructions = format!("route this ticket, key was {OPENAI_KEY}");
+        }
+
+        provider.decide(request).await.unwrap();
+
+        let (_, _, body) = transport.sent.lock().unwrap().clone().unwrap();
+        let body_text = String::from_utf8(body).unwrap();
+        assert!(
+            !body_text.contains(OPENAI_KEY),
+            "outbound body must not contain the raw secret: {body_text}"
+        );
+        assert!(
+            body_text.contains("<redacted:"),
+            "outbound body should carry a redaction placeholder: {body_text}"
+        );
     }
 
     #[tokio::test]

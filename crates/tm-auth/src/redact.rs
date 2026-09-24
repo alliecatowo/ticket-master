@@ -330,7 +330,8 @@ impl SessionRedactor {
 
     /// [`SessionRedactor::redact_json`], applied to any `T` that round-trips through
     /// `serde_json::Value` — the entry point `tm_provider`'s HTTP `systemone` `DecisionProvider`
-    /// (D-020) calls on a `DecideRequest` before it leaves this machine (decision 7, "Redaction
+    /// (`SystemOneProvider::decide`, `crates/tm-provider/src/providers/systemone.rs`, D-020)
+    /// calls on a `DecideRequest` before it leaves this machine (decision 7, "Redaction
     /// before anything leaves the machine"): every secret-shaped substring in the request's
     /// free-text `state` and each question's own instructions/statement/labels comes back
     /// scrubbed exactly as [`SessionRedactor::redact`] would scrub the same text in a normal
