@@ -367,3 +367,233 @@ async fn ticket_runs_to_closed_under_a_scripted_provider() {
         "ticket.submitted must precede ticket.closed in the log; got {kinds:?}"
     );
 }
+
+/// The `lifecycle-reject-retry` probe, automated: a ticket that exhausts every attempt of its
+/// `RetryPolicy` (`common::retry_policy()`'s `max_attempts: 3`) via `Store::record_failure` with
+/// a *retryable* failure class (`FailureClass::ExecutorCrash` — `BudgetExhausted` is deliberately
+/// non-retryable and would escalate on the very first failure, per `FailureClass::is_retryable`)
+/// lands in `Escalated` only once every attempt is spent, not on the first failure. A human's
+/// `Store::retry` with guidance must then both append that guidance to the ticket's objective
+/// and give it a fresh round of attempts (a non-human actor is refused, per `SPEC.md` §4.3) —
+/// mirroring `Store::retry`'s own `a_human_retries_an_escalated_ticket_with_guidance_and_fresh_
+/// attempts` unit test, but reaching `Escalated` by exhausting the retry budget rather than via a
+/// single non-retryable failure, and driven through `tm-e2e`'s offline fixtures rather than
+/// `tm-core`'s internal test helpers.
+#[tokio::test]
+async fn escalated_ticket_retried_with_guidance_gets_fresh_attempts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (_clock, store) = common::open_store(dir.path());
+    let worker = common::agent("worker");
+    let human = ParticipantId::new("human:owner").expect("well-formed human actor");
+
+    let ticket = common::ready_ticket(
+        &store,
+        "drive this ticket to escalated by exhausting every attempt",
+        Authority::worker(),
+    );
+
+    let max_attempts = common::retry_policy().max_attempts;
+    let state = |store: &Store| {
+        store
+            .view()
+            .expect("view")
+            .tickets
+            .get(&ticket)
+            .expect("ticket exists")
+            .state
+    };
+    for attempt in 1..=max_attempts {
+        assert_eq!(
+            state(&store),
+            TicketState::Ready,
+            "attempt {attempt} must start from Ready"
+        );
+        store
+            .acquire_lease(
+                &ticket,
+                worker.clone(),
+                Authority::none(),
+                vec![],
+                60,
+                worker.clone(),
+            )
+            .expect("acquire_lease");
+        store
+            .transition(&ticket, Trigger::WorkStarted, worker.clone())
+            .expect("work started");
+        store
+            .record_failure(
+                &ticket,
+                tm_core::FailureClass::ExecutorCrash,
+                format!("the executor crashed on attempt {attempt}"),
+                ParticipantId::system(),
+            )
+            .expect("record_failure");
+    }
+    let before = store.view().expect("view").tickets[&ticket].clone();
+    assert_eq!(
+        before.state,
+        TicketState::Escalated,
+        "exhausting every attempt of the retry policy must escalate the ticket, not leave it \
+         mid-recovery; ticket was {before:?}"
+    );
+    assert_eq!(
+        before.attempts, max_attempts,
+        "the ticket must have spent exactly max_attempts attempts before escalating"
+    );
+
+    // Only a human may resolve an escalation (SPEC.md §4.3); an agent actor is refused.
+    assert!(
+        matches!(
+            store
+                .retry(&ticket, None, worker.clone())
+                .expect_err("an agent actor must not be able to retry an escalated ticket"),
+            TmError::AuthorityDenied(_)
+        ),
+        "a non-human actor retrying an escalated ticket must be refused with AuthorityDenied"
+    );
+    assert_eq!(
+        state(&store),
+        TicketState::Escalated,
+        "a refused retry attempt must not change the ticket's state"
+    );
+
+    store
+        .retry(
+            &ticket,
+            Some("focus on the retry path, not the happy path".to_string()),
+            human,
+        )
+        .expect("a human's retry with guidance must succeed");
+    let after = store.view().expect("view").tickets[&ticket].clone();
+    assert_eq!(
+        after.state,
+        TicketState::Ready,
+        "a dependency-free ticket retried by a human must land back in Ready"
+    );
+    assert!(
+        after.objective.starts_with(&before.objective),
+        "retry must append guidance to the existing objective, not replace it; got \
+         {}",
+        after.objective
+    );
+    assert!(
+        after.objective.ends_with(&format!(
+            "From the user, after attempt {}: focus on the retry path, not the happy path",
+            before.attempts
+        )),
+        "the guidance text must be visible in the ticket's objective; got {}",
+        after.objective
+    );
+    assert_eq!(
+        after.retry.max_attempts,
+        before.attempts + before.retry.max_attempts,
+        "a retry must give the ticket a fresh round of attempts on top of what it already spent"
+    );
+}
+
+/// The `deps-sched` probe, automated: a `Hard` dependency edge keeps the dependent ticket out of
+/// `tm_scheduler::plan`'s `Lease` actions while the dependency is open, and `plan` only offers to
+/// lease it once the dependency closes — asserted against `tm_scheduler::plan` itself (the same
+/// pure function `SchedulerLoop::tick`/`tm sched tick` call), not just the dependent ticket's own
+/// `TicketState`.
+#[tokio::test]
+async fn hard_dependency_blocks_scheduler_lease_until_dependency_closes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (clock, store) = common::open_store(dir.path());
+
+    let dependency = common::ready_ticket(
+        &store,
+        "the dependency this test's dependent ticket blocks on",
+        Authority::worker(),
+    );
+    let dependent_events = store
+        .create_ticket(
+            TicketKind::Work,
+            "a ticket that must wait for its Hard dependency to close".to_string(),
+            None,
+            None,
+            Authority::worker(),
+            vec![],
+            common::executor_reqs(),
+            vec![],
+            vec![],
+            VerificationPolicy::Single,
+            Budget::unlimited(),
+            common::retry_policy(),
+            0,
+            common::system(),
+        )
+        .expect("create_ticket");
+    let dependent =
+        tm_types::TicketId::new(dependent_events[0].subject.as_str()).expect("ticket id");
+    store
+        .add_dependency(
+            &dependent,
+            &dependency,
+            tm_core::DependencyKind::Hard,
+            common::system(),
+        )
+        .expect("add_dependency");
+    store
+        .activate(&dependent, common::system())
+        .expect("activate never errors on an unsatisfied dependency; it just stops short of Ready");
+    assert_eq!(
+        store.view().expect("view").tickets[&dependent].state,
+        TicketState::Blocked,
+        "a ticket activated with an open Hard dependency must land in Blocked, not Ready"
+    );
+
+    let mut policy = tm_scheduler::SchedulingPolicy::conservative_default();
+    policy.available_roles = [tm_types::Role::CoderFast].into_iter().collect();
+    let now = clock.now();
+
+    let view = store.scheduler_view().expect("scheduler_view");
+    let actions = tm_scheduler::plan(&view, now, &policy);
+    assert!(
+        !actions.iter().any(
+            |a| matches!(a, tm_scheduler::SchedulerAction::Lease { ticket, .. } if *ticket == dependent)
+        ),
+        "the scheduler must never plan to lease a ticket whose Hard dependency is still open; \
+         got {actions:?}"
+    );
+
+    // Close the dependency the ordinary way: lease it, submit evidence, verify and audit it.
+    let auditor = common::agent("auditor");
+    common::close_ticket(&store, &dependency, common::agent("worker"), auditor);
+    assert_eq!(
+        store.view().expect("view").tickets[&dependency].state,
+        TicketState::Closed,
+        "close_ticket must have closed the dependency"
+    );
+
+    // One tick to notice the now-satisfied dependency and mark the dependent Ready...
+    let view = store.scheduler_view().expect("scheduler_view");
+    let actions = tm_scheduler::plan(&view, now, &policy);
+    assert!(
+        actions
+            .iter()
+            .any(|a| matches!(a, tm_scheduler::SchedulerAction::MarkReady(t) if *t == dependent)),
+        "once its Hard dependency closes, the scheduler must plan to mark the dependent ticket \
+         Ready; got {actions:?}"
+    );
+    store
+        .transition(&dependent, Trigger::DependenciesSatisfied, common::system())
+        .expect("DependenciesSatisfied always succeeds once the graph agrees");
+    assert_eq!(
+        store.view().expect("view").tickets[&dependent].state,
+        TicketState::Ready,
+        "the dependent ticket must now be Ready"
+    );
+
+    // ...and a second tick, over the now-Ready state, must offer to lease it.
+    let view = store.scheduler_view().expect("scheduler_view");
+    let actions = tm_scheduler::plan(&view, now, &policy);
+    assert!(
+        actions.iter().any(
+            |a| matches!(a, tm_scheduler::SchedulerAction::Lease { ticket, .. } if *ticket == dependent)
+        ),
+        "a Ready ticket with its dependency satisfied must now be leasable by the scheduler; \
+         got {actions:?}"
+    );
+}
