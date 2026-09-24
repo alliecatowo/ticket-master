@@ -1425,6 +1425,11 @@ pub fn harness_promote(
     }
 
     let harness_path = project.state_dir.join("harness.toml");
+    if !harness_path.is_file() {
+        return Err(tm_types::TmError::parse(
+            "No harness configuration found. Use `tm harness set <key> <value>` to create one before promoting an epoch.".to_string(),
+        ));
+    }
     let harness_content = fs::read_to_string(&harness_path)
         .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
     let candidate = tm_harness::HarnessConfig::parse(&harness_content)
@@ -3097,8 +3102,72 @@ mod tests {
     }
 
     #[test]
-    fn harness_show_renders_config() {
-        // Harness show should render current config
+    fn harness_show_renders_defaults_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+
+        harness_show(&project, &renderer).expect("harness_show succeeds on missing file");
+        // The test verifies no error is returned and defaults are rendered.
+    }
+
+    #[test]
+    fn harness_set_creates_file_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+        let args = HarnessSetArgs {
+            key: "routing.recency_weight".to_string(),
+            value: "0.5".to_string(),
+        };
+
+        harness_set(&args, &project, &renderer).expect("harness_set succeeds on missing file");
+        let harness_path = project.state_dir.join("harness.toml");
+        assert!(
+            harness_path.is_file(),
+            "harness.toml should be created after harness_set"
+        );
+        // Verify the value was set correctly by parsing the written file
+        let content = fs::read_to_string(&harness_path).expect("read written harness.toml");
+        let config =
+            tm_harness::HarnessConfig::parse(&content).expect("parse written harness.toml");
+        assert!(
+            (config.routing.recency_weight - 0.5).abs() < 0.001,
+            "routing.recency_weight should be set to 0.5, got: {}",
+            config.routing.recency_weight
+        );
+    }
+
+    #[test]
+    fn harness_promote_errors_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+        let args = HarnessPromoteArgs {
+            epoch: 1,
+            baseline: None,
+            report: None,
+            force: false,
+        };
+
+        let err = harness_promote(&args, &project, &renderer)
+            .expect_err("harness_promote should error on missing file");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("No harness configuration found"),
+            "Error message should mention missing configuration, got: {msg}"
+        );
+        assert!(
+            msg.contains("tm harness set"),
+            "Error message should suggest using `tm harness set`, got: {msg}"
+        );
+        assert!(
+            !msg.contains("invariant"),
+            "Error message should not use jargon like 'invariant', got: {msg}"
+        );
     }
 
     #[test]
