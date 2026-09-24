@@ -2,14 +2,14 @@
 //! `tm_core::TicketState` (this crate has no `tm_core` dependency, so the caller hands over
 //! already-labelled [`KanbanColumn`]s — see [`KanbanCard`]'s docs).
 //!
-//! Unlike [`super::dashboard::Dashboard`]'s ticket table (one flat list, sorted, scrolled
-//! vertically), this is a genuinely two-dimensional board: columns scroll horizontally, each
+//! Unlike a flat ticket table (one list, sorted, scrolled vertically), this is a genuinely
+//! two-dimensional board: columns scroll horizontally, each
 //! column's cards scroll vertically and independently of every other column's scroll position —
 //! the real point of a Kanban board over a table, and the literal reading of "paradigm-shifting"
 //! the caller's own product brief asked for over a second ticket table.
 //!
 //! IMPL:
-//! - This crate's other multi-pane screens (`Dashboard`, `TicketDetailScreen`) each fix their
+//! - This crate's other multi-pane screens (e.g. `TicketDetailScreen`) each fix their
 //!   focus to one pane at a time and forward events to whichever `Table`/`List` child owns it.
 //!   `Kanban` deliberately does not compose `Table`/`List` children the same way: this app's
 //!   `component::FocusTree` only ever advances focus for entries actually present in
@@ -34,7 +34,8 @@ use crate::text::truncate;
 
 /// One card: a ticket's id and a short label. Both already-formatted strings, not a `TicketId`/
 /// domain type — this crate has no `tm_core` dependency (see the module doc comment), matching
-/// `screens::dashboard::Dashboard`'s `Table` rows, which are `Vec<String>` for the same reason.
+/// this crate's other multi-pane screens' `Table` rows, which are `Vec<String>` for the same
+/// reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KanbanCard {
     /// The ticket's id, e.g. `"T-42"` — carried back out via [`Kanban::take_activation`] when

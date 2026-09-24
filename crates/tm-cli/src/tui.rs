@@ -16,9 +16,10 @@
 //! `tm_tui::screens::tickets::TicketsScreen`, Claude Code's agent view with tickets as rows;
 //! `docs/decisions/D-019-claude-code-parity-shell.md` §2); `tm tickets` opens straight onto it.
 //! From there Enter attaches the chat to a ticket, and Ctrl+B opens the Kanban board. Tab/
-//! Shift+Tab cycle the hub's tab strip (Tickets, Board, Milestones, Timeline, Graph — the last
-//! two are placeholders until their own screens land; Milestones lists progress per milestone
-//! and Enter there filters Tickets to it); tab-cycling moves `App::current`
+//! Shift+Tab cycle the hub's tab strip (Tickets, Board, Milestones, Timeline, Graph — Timeline is
+//! still a placeholder until its own screen lands; Milestones lists progress per milestone and
+//! Enter there filters Tickets to it; Graph shows the dependency graph and Enter there opens the
+//! selected ticket's detail); tab-cycling moves `App::current`
 //! directly rather than growing `App::back_stack`, so Esc from a tab reached only by Tab/
 //! Shift+Tab goes straight back to Chat. Esc walks back one level at a time (`App::back_stack`)
 //! everywhere else; Ctrl+T from anywhere else returns straight to the chat.
@@ -49,10 +50,12 @@ use tm_tui::screens::chat::{ChatAction, ChatScreen, TurnUpdate};
 use tm_tui::screens::kanban::{Kanban, KanbanCard, KanbanColumn};
 use tm_tui::screens::milestones::{MilestoneRow, MilestonesScreen};
 use tm_tui::screens::ticket_detail::TicketDetailScreen;
+use tm_tui::screens::ticket_graph::TicketGraphScreen;
 use tm_tui::screens::tickets::{FlashTone, TicketsAction, TicketsScreen};
 use tm_tui::theme::Theme;
 use tm_tui::widgets_data::form::{Field, Form};
 use tm_tui::widgets_data::list::List;
+use tm_tui::widgets_viz::graph::{Graph, GraphEdge, GraphNode, NodeState};
 use tm_types::{Clock, MilestoneId, TicketId, Timestamp};
 use tokio::sync::{Mutex, Notify};
 
@@ -81,7 +84,7 @@ enum StartOn {
     Tickets,
 }
 
-/// Whether a bare `tm` invocation (`cli.command.is_none()`, `cli.prompt.is_none()`) should open
+/// Whether a bare `tm` invocation (`cli.command.is_none()`, `!cli.prompt`) should open
 /// the ratatui TUI ([`run`]) rather than [`crate::agent::AgentSession::run_interactive`].
 ///
 /// Every one of these forces the plain loop, per D-002's "graceful degradation" and the backlog's
@@ -183,6 +186,12 @@ async fn run_on(
         ComponentId::new("tm.milestones"),
         build_milestone_rows(&view),
     );
+    let mut graph = TicketGraphScreen::new(
+        ComponentId::new("tm.graph"),
+        Graph::new(ComponentId::new("tm.graph.graph")),
+    );
+    let (graph_nodes, graph_edges) = build_graph(&view);
+    graph.set_graph(graph_nodes, graph_edges);
 
     // `sender` is held for the runtime's whole lifetime: `App::spawn_turn` clones it into each
     // background turn. Dropping it early would close `Runtime`'s message channel.
@@ -197,6 +206,7 @@ async fn run_on(
         left_at: None,
         kanban,
         milestones,
+        graph,
         milestone_filter: None,
         detail: None,
         current: ScreenId::Chat,
@@ -383,6 +393,51 @@ fn build_milestone_rows(view: &tm_core::ProjectView) -> Vec<MilestoneRow> {
         .collect()
 }
 
+/// The [`NodeState`] a ticket's real `TicketState` maps to for the graph's shape/glyph/colour —
+/// coarser than the full state machine (14 states down to 5), grouped by what a person looking at
+/// the graph actually wants to know: still to do, actively moving, done, stuck on something, or
+/// dead.
+fn node_state_for(state: tm_core::TicketState) -> NodeState {
+    use tm_core::TicketState::*;
+    match state {
+        Closed => NodeState::Done,
+        Cancelled => NodeState::Failed,
+        Blocked | Escalated => NodeState::Blocked,
+        Leased | Running | Submitted | Verifying | Auditing => NodeState::InProgress,
+        Draft | Ready | Rework | Replan | Recovery => NodeState::Pending,
+    }
+}
+
+/// Build the Graph tab's nodes and edges from `view.graph`'s real dependency edges, labelling
+/// each node with its ticket id and objective so the graph reads without needing the detail panel
+/// open. Only edges between tickets that still resolve in `view.tickets` are kept — a `graph`
+/// built from a stale/partial view should not crash rendering over a dangling edge.
+fn build_graph(view: &tm_core::ProjectView) -> (Vec<GraphNode>, Vec<GraphEdge>) {
+    let nodes = view
+        .graph
+        .nodes()
+        .filter_map(|id| view.tickets.get(id))
+        .map(|ticket| {
+            GraphNode::new(
+                ticket.id.clone(),
+                format!("{} {}", ticket.id, ticket.objective),
+                node_state_for(ticket.state),
+            )
+        })
+        .collect();
+    let edges = view
+        .graph
+        .edges()
+        .iter()
+        .filter(|edge| view.tickets.contains_key(&edge.from) && view.tickets.contains_key(&edge.to))
+        .map(|edge| GraphEdge {
+            from: edge.to.clone(),
+            to: edge.from.clone(),
+        })
+        .collect();
+    (nodes, edges)
+}
+
 /// Build a read-only drill-down screen for `ticket_id`, or `None` if it no longer exists in
 /// `view` (the list went stale between drawing and Enter — declining to open anything is the
 /// honest resolution).
@@ -459,8 +514,8 @@ enum ScreenId {
     /// Ticket bars against the event log (`s1-tui-timeline-view`). A placeholder until that
     /// screen lands.
     Timeline,
-    /// The dependency graph (`s1-tui-graph-tab-prune-dead-screens`). A placeholder until that
-    /// screen lands.
+    /// The dependency graph (`s1-tui-graph-tab-prune-dead-screens`): labelled ticket nodes and
+    /// their dependency edges, with Enter on a node opening that ticket's detail screen.
     Graph,
     /// One ticket's detail, opened from a Kanban card.
     Detail,
@@ -541,6 +596,7 @@ struct App {
     left_at: Option<Timestamp>,
     kanban: Kanban,
     milestones: MilestonesScreen,
+    graph: TicketGraphScreen,
     /// The milestone the Tickets screen is filtered to (id and title, so the header can say
     /// which one without re-reading the store), set by [`App::open_tickets_filtered_by_milestone`]
     /// and cleared by an Esc on the Tickets screen while it is set (`handle_tickets_actions`).
@@ -697,6 +753,8 @@ impl App {
         self.tickets.set_data(data);
         self.kanban.set_columns(build_kanban_columns(&view));
         self.milestones.set_rows(build_milestone_rows(&view));
+        let (graph_nodes, graph_edges) = build_graph(&view);
+        self.graph.set_graph(graph_nodes, graph_edges);
         if let Some(open) = self.detail.as_ref().map(|d| d.ticket().clone()) {
             if let Some(screen) = build_detail_screen(&view, &open) {
                 self.detail = Some(screen);
@@ -896,8 +954,7 @@ impl App {
         );
     }
 
-    /// The Timeline/Graph tabs, until their own screens land (`s1-tui-timeline-view`,
-    /// `s1-tui-graph-tab-prune-dead-screens`).
+    /// The Timeline tab, until its own screen lands (`s1-tui-timeline-view`).
     fn render_tab_placeholder(
         &self,
         area: ratatui_core::layout::Rect,
@@ -944,7 +1001,7 @@ impl Component for App {
             ScreenId::Kanban => self.kanban.render(area, buf, ctx),
             ScreenId::Milestones => self.milestones.render(area, buf, ctx),
             ScreenId::Timeline => self.render_tab_placeholder(area, buf, ctx, "Timeline"),
-            ScreenId::Graph => self.render_tab_placeholder(area, buf, ctx, "Graph"),
+            ScreenId::Graph => self.graph.render(area, buf, ctx),
             ScreenId::Detail => {
                 if let Some(detail) = &self.detail {
                     detail.render(area, buf, ctx);
@@ -1097,9 +1154,9 @@ impl Component for App {
                 }
                 propagation
             }
-            ScreenId::Timeline | ScreenId::Graph => {
+            ScreenId::Timeline => {
                 if let Event::Input(InputEvent::Key(key)) = event {
-                    if is_back_chord(key, self.current) {
+                    if is_back_chord(key, ScreenId::Timeline) {
                         self.pop_screen();
                         return Propagation::Consumed;
                     }
@@ -1109,6 +1166,25 @@ impl Component for App {
                     }
                 }
                 Propagation::Consumed
+            }
+            ScreenId::Graph => {
+                if let Event::Input(InputEvent::Key(key)) = event {
+                    if is_back_chord(key, ScreenId::Graph) {
+                        self.pop_screen();
+                        return Propagation::Consumed;
+                    }
+                    if let Some(forward) = tab_cycle_key(key) {
+                        self.cycle_tab(forward);
+                        return Propagation::Consumed;
+                    }
+                    if key.code == KeyCode::Enter {
+                        if let Some(id) = self.graph.selected().cloned() {
+                            self.open_detail(id.as_str());
+                            return Propagation::Consumed;
+                        }
+                    }
+                }
+                self.graph.handle_event(event, ctx)
             }
             ScreenId::Detail => {
                 if let Event::Input(InputEvent::Key(key)) = event {
@@ -1163,13 +1239,26 @@ impl Component for App {
                 ));
                 bindings.extend(self.milestones.keybindings(ctx));
             }
-            ScreenId::Timeline | ScreenId::Graph => {
+            ScreenId::Timeline => {
                 bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back"));
                 bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Tab), "next tab"));
                 bindings.push(KeyBinding::new(
                     KeyChord::plain(KeyCode::BackTab),
                     "previous tab",
                 ));
+            }
+            ScreenId::Graph => {
+                bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back"));
+                bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Tab), "next tab"));
+                bindings.push(KeyBinding::new(
+                    KeyChord::plain(KeyCode::BackTab),
+                    "previous tab",
+                ));
+                bindings.push(KeyBinding::new(
+                    KeyChord::plain(KeyCode::Enter),
+                    "open ticket detail",
+                ));
+                bindings.extend(self.graph.keybindings(ctx));
             }
             ScreenId::Detail => {
                 bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back"));
@@ -1186,9 +1275,14 @@ impl Component for App {
         // The chat and tickets screens take input straight from `App::handle_event`, not through
         // the focus tree; the board, milestones and detail screens still use it.
         match self.current {
-            ScreenId::Chat | ScreenId::Tickets | ScreenId::Timeline | ScreenId::Graph => Vec::new(),
+            ScreenId::Chat | ScreenId::Tickets | ScreenId::Timeline => Vec::new(),
             ScreenId::Kanban => vec![self.kanban.id()],
             ScreenId::Milestones => vec![self.milestones.id()],
+            // `TicketGraphScreen` forwards focus straight through to the [`Graph`] widget it
+            // wraps rather than taking focus itself (its own `focusable_children` already names
+            // that widget's id) — list that directly rather than the screen's own id, or the
+            // widget would never actually see itself as focused.
+            ScreenId::Graph => self.graph.focusable_children(),
             ScreenId::Detail => match &self.detail {
                 Some(detail) => {
                     let mut ids = vec![detail.id()];
@@ -1215,7 +1309,8 @@ impl ComponentParent for App {
             ScreenId::Milestones => {
                 (id == self.milestones.id()).then_some(&self.milestones as &dyn Component)
             }
-            ScreenId::Timeline | ScreenId::Graph => None,
+            ScreenId::Graph => (id == self.graph.id()).then_some(&self.graph as &dyn Component),
+            ScreenId::Timeline => None,
             ScreenId::Detail => self.detail.as_ref().and_then(|detail| detail.resolve(id)),
         }
     }
@@ -1235,6 +1330,7 @@ impl ComponentParent for App {
             ScreenId::Milestones if id == self.milestones.id() => {
                 Some(&mut self.milestones as &mut dyn Component)
             }
+            ScreenId::Graph if id == self.graph.id() => Some(&mut self.graph as &mut dyn Component),
             ScreenId::Detail => self
                 .detail
                 .as_mut()
@@ -1535,5 +1631,71 @@ mod tests {
             .find(|r| r.title == "Launch")
             .expect("Launch milestone row");
         assert_eq!((launch.done, launch.total), (0, 0));
+    }
+
+    #[test]
+    fn build_graph_over_an_empty_project_has_no_nodes_or_edges() {
+        let view = tm_core::ProjectView::empty();
+        let (nodes, edges) = build_graph(&view);
+        assert!(nodes.is_empty());
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn build_graph_carries_a_real_dependency_edge_with_labelled_nodes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).expect("open store");
+        let actor = ParticipantId::new("human:tester").unwrap();
+        let dependent = create_real_ticket(&store, "ship the release");
+        let dependency = create_real_ticket(&store, "finish the migration");
+        store
+            .add_dependency(
+                &dependent,
+                &dependency,
+                tm_core::DependencyKind::Hard,
+                actor,
+            )
+            .expect("add_dependency");
+
+        let view = store.view().expect("view");
+        let (nodes, edges) = build_graph(&view);
+
+        assert_eq!(nodes.len(), 2, "both tickets must appear as nodes");
+        let dependent_node = nodes
+            .iter()
+            .find(|n| n.id == dependent)
+            .expect("the dependent ticket is a node");
+        assert!(
+            dependent_node.label.contains("ship the release"),
+            "a node's label must show its ticket's objective, not just its id: {:?}",
+            dependent_node.label
+        );
+
+        assert_eq!(edges.len(), 1);
+        // The graph widget wants `from` = the dependency (completes first), `to` = the dependent
+        // (blocked on it) — the opposite direction from `tm_core::DependencyEdge`'s own
+        // `from`-depends-on-`to` convention.
+        assert_eq!(edges[0].from, dependency);
+        assert_eq!(edges[0].to, dependent);
+    }
+
+    #[test]
+    fn node_state_for_maps_closed_to_done_and_running_to_in_progress() {
+        assert_eq!(
+            node_state_for(tm_core::TicketState::Closed),
+            NodeState::Done
+        );
+        assert_eq!(
+            node_state_for(tm_core::TicketState::Running),
+            NodeState::InProgress
+        );
+        assert_eq!(
+            node_state_for(tm_core::TicketState::Blocked),
+            NodeState::Blocked
+        );
+        assert_eq!(
+            node_state_for(tm_core::TicketState::Cancelled),
+            NodeState::Failed
+        );
     }
 }

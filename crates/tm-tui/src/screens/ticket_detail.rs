@@ -11,8 +11,9 @@ use crate::theme::split_vertical;
 use crate::widgets_data::form::Form;
 use crate::widgets_data::list::List;
 
-/// Which of the two panes currently has internal focus; see `Dashboard`'s identical field for
-/// why this is screen-local rather than routed through `component::FocusTree`.
+/// Which of the two panes currently has internal focus, kept screen-local rather than routed
+/// through `component::FocusTree` (see `Kanban`'s module doc comment for why this crate's
+/// multi-pane screens do this).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Pane {
     Fields,
@@ -26,8 +27,7 @@ enum Pane {
 /// - `render`: `crate::theme::split_vertical(area, &[("fields", 1), ("activity", 2)])`. A heading
 ///   line above the form showing `self.ticket` (e.g. `"T-42"`) styled with `ctx.theme.accent`.
 /// - `handle_event`: Tab switches `self.active` between the two panes when this screen itself is
-///   focused (mirrors `Dashboard::handle_event`); otherwise forwards to whichever child
-///   `self.active` names.
+///   focused; otherwise forwards to whichever child `self.active` names.
 #[derive(Debug)]
 pub struct TicketDetailScreen {
     id: ComponentId,
@@ -118,8 +118,7 @@ impl Component for TicketDetailScreen {
 /// Resolves this screen's own id and its two panes' ids — added for `tm-cli`'s navigation shell
 /// (`tui.rs`'s `App`), which composes this screen as a drill-down target the same way it already
 /// composes `screens::home::Home` and needs a uniform way to reach into either one's children
-/// without knowing their internals. Mirrors `screens::dashboard::Dashboard`'s identical impl
-/// exactly (same two-child shape: a form/list pair instead of a table/list pair).
+/// without knowing their internals.
 impl ComponentParent for TicketDetailScreen {
     fn resolve(&self, id: ComponentId) -> Option<&dyn Component> {
         if id == self.id {

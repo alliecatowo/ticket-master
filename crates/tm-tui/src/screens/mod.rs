@@ -14,10 +14,6 @@
 /// The default screen bare `tm` opens into: a Claude-Code-style conversation with a prompt box, a
 /// `/` command popup, a `?` help overlay, and a status bar.
 pub mod chat;
-/// The command palette overlay: fuzzy-searchable actions and navigation.
-pub mod command_palette;
-/// The ticket/session overview: a ticket table on the left, a session list on the right.
-pub mod dashboard;
 /// The diff viewer screen, browsing changed files and their diffs.
 pub mod diff_viewer;
 /// The Kanban board: tickets as cards in columns named after their real `tm_core::TicketState`,
