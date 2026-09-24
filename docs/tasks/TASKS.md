@@ -12,7 +12,7 @@ Plan summary: tm is close to benchmark-ready on primitives, but the pieces are n
 
 Trial agents drive each surface for real (ticket request → implementation → verification → accepted, Genesis, TUI, server/web, MCP, code navigation) and append concrete tasks here. These run before the plan batches below.
 
-- [ ] **nav-potion-embedder** — Real semantic search: potion static embeddings, zvec-grep style
+- [x] **nav-potion-embedder** (landed a0bb73e) — Real semantic search: potion static embeddings, zvec-grep style
   model: sonnet · severity: high · builds Rust: yes · area: code-navigation · deps: none
   files: `crates/tm-codeintel/src/embed.rs`, `crates/tm-codeintel/src/potion.rs`, `crates/tm-codeintel/src/api.rs`, `crates/tm-codeintel/src/hybrid.rs`, `crates/tm-codeintel/Cargo.toml`, `Cargo.toml`, `Cargo.lock`, `CLAUDE.md`
   change: The semantic half of hybrid search runs on `LocalHashEmbedder`, a hash stand-in, so "semantic" search is lexical in disguise. The owner wants search like zvec-grep's (the tool this repo already uses), which embeds with model2vec static embeddings. Add a `PotionEmbedder` implementing `embed::Embedder` in a new `potion.rs`, using the `model2vec-rs` crate (MinishLab's official Rust port; pure Rust, CPU only, no ONNX). It uses `minishlab/potion-code-16M-v2` by default, the same model zvec-grep uses. Load it from the local HuggingFace cache (`$HF_HOME` or `~/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2/snapshots/*`, already present on this machine). Download it at runtime only if it's missing and the user hasn't opted out; never download in tests. Make it the default for `CodeIntel` when the model is available; fall back to `LocalHashEmbedder`, logging once through tracing, when it isn't. Keep the hash embedder for tests: hygiene forbids network in tests. The vectors table is already keyed by `embedder.identifier()`, so switching embedders must re-embed the stale chunks on the next `update_incremental` rather than mixing vector spaces. Make sure `hybrid` fuses FTS and vector hits with RRF the way zvec-grep does, and that code chunks are symbol- or line-window-sized, not whole files. Add an `index.embedder = "potion" | "hash"` project config key, plus `TM_EMBEDDER` for overrides. Record the choice in a new decision doc (next free D-NNN; D-002's format).
@@ -20,14 +20,14 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-codeintel`
   evidence: owner, 2026-09-23: "use potion like zvec grep for semantic search, basically zvec grep inspired"; `crates/tm-codeintel/src/embed.rs` only has `LocalHashEmbedder`.
 
-- [ ] **release-web-assets** — Ship the web client in the release tarball, and let an installed `tm serve` find it
+- [x] **release-web-assets** (landed 6065b21) — Ship the web client in the release tarball, and let an installed `tm serve` find it
   model: sonnet · size: S · builds Rust: yes · area: release · deps: none
   files: `crates/tm-cli/src/serve.rs`, `mise.toml`, `.github/workflows/release.yml`, `scripts/install.sh`, `docs/install.md`, `README.md`, `CLAUDE.md`
   change: Branch `worktree-agent-a279c9fa9d538d6a2` (commit 5c7f7db) holds unfinished work: a `mise run release` task that packs `bin/tm` plus `share/tm/web` and a sha256 (refusing to pack `.env` or `.tm`), `serve.rs` looking for the web client at `<exe>/../share/tm/web`, `scripts/install.sh` (via `gh release download`, since the repo is private) and `docs/install.md`. Merge that branch into your worktree and reconcile it with main, which already has `.github/workflows/release.yml`, README install paths (edd3d7e) and release v0.1.0: keep main's README and add to it rather than replacing it, and make `release.yml` build the web client (pnpm) and pack it the same way the mise task does. Don't publish a release.
   acceptance: `mise run release` builds a tarball whose `share/tm/web/index.html` exists and which contains no `.env`/`.tm`; a test covers the installed-layout lookup in `serve.rs`; README and docs/install.md agree with each other and with release.yml.
   test: `mise run test:crate -- tm-cli`
 
-- [ ] **s1-surfaces-decision-doc** — Write the command-surfaces decision doc (next free D-NNN)
+- [x] **s1-surfaces-decision-doc** (landed 1910989) — Write the command-surfaces decision doc (next free D-NNN)
   model: sonnet · severity: high · builds Rust: no · area: docs · deps: none
   files: `docs/decisions/D-0NN-command-surfaces.md`, `docs/decisions/D-019-claude-code-parity-shell.md`, `CLAUDE.md`
   change: Run `ls docs/decisions` and take the next free number (another track may claim the next-lowest first — re-check before naming the file). Write the design in the D-002 format (Status, Date, Supersedes, then Context, Decision, Why, "What this costs, stated plainly"). The Decision section covers: the visible/hidden CLI tree (daily/planning/serving/more groups, `#[command(hide = true)]` plumbing verbs), the slash-command table (existing plus `/context`, `/todos`, `/memory`, `/export`, `/doctor`, `/permissions`, `/review`, `/search`, `/run`, `/ticket`, `/board`, `/milestones`, `/timeline`, `/deps`, `/workflow`), the Tickets-hub tab strip (Tickets · Board · Milestones · Timeline · Graph), the one-set-of-display-labels rule, and ticket due dates. Add a one-line pointer in D-019's command list and in CLAUDE.md's surface paragraph.
@@ -35,7 +35,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run hygiene`
   evidence: `ls docs/decisions | tail -2` -> D-022-unified-provider-model-config-ux.md, D-023-capacity-wait-is-not-a-failed-attempt.md
 
-- [ ] **s1-dep-rm-emit-removed-event** — tm dep rm silently does nothing: emit ticket.dependency_removed
+- [x] **s1-dep-rm-emit-removed-event** (landed 8982edb) — tm dep rm silently does nothing: emit ticket.dependency_removed
   model: sonnet · severity: critical · builds Rust: yes · area: cli/tickets · deps: s1-surfaces-decision-doc
   files: `crates/tm-core/src/store.rs`, `crates/tm-cli/src/tickets.rs`
   change: `dep_rm` in tickets.rs (~line 835) writes a `dependencies` field through `update_ticket`, but materialize never reads that field — edges live in `ticket_deps` and are only removed by the TicketDependencyRemoved event (materialize.rs:210, payload TicketDependencyRemovedPayload). Add `Store::remove_dependency(ticket, depends_on, actor)` next to `add_dependency` (store.rs:728); it returns not_found when the edge is absent and otherwise emits TicketDependencyRemovedPayload. Rewrite `dep_rm` to call it. Add a store unit test (add, rm, then view.graph has no edge).
@@ -83,7 +83,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `grep -n 'List\|Close\|Reopen'` in MilestoneCommand (args.rs:535-541) -> only List/Close/Reopen, no New/Create/Show; `Store::create_milestone` exists at store.rs:1694 with no CLI caller; confirmed `tm ticket new "..." --milestone M-1` with no milestones creates the ticket and silently drops the milestone.
 
-- [ ] **s1-help-text-scrub-and-hygiene** — Strip D-NNN, crate paths and type names from user-facing help, and add a hygiene check for it
+- [x] **s1-help-text-scrub-and-hygiene** (landed a9dedde) — Strip D-NNN, crate paths and type names from user-facing help, and add a hygiene check for it
   model: sonnet · severity: high · builds Rust: yes · area: cli/copy · deps: s1-milestone-new-show
   files: `crates/tm-cli/src/args.rs`, `crates/xtask/src/hygiene.rs`
   change: Rewrite every `///` doc comment on clap items in args.rs mentioning `D-0NN`, `crates/`, `docs/decisions`, `tm_*::`, backticked crate names, or jargon ("honestly refused", "bare-`tm` loop", "snapshot-tested", "assimilate", "chunks"). Move rationale to plain `//` comments for maintainers. E.g. Tickets becomes "Open the tickets view (or print tickets with --json)"; the `--project` flag drops `[crate::project::resolve_scope]`/`[crate::project::locate]`/"(unchanged since before D-003)" for plain English ("walking up for a `.tm` directory, then falling back to a project kept under $TM_HOME"); `--plain` drops "(D-002, ...)"; `--json` drops "snapshot-tested"; `tm computer`'s `--headless` help changes "honestly refused on macOS" to "not supported on macOS" (4 occurrences), and its module doc drops the backticks around `tm-computer`. Add a hygiene check flagging `D-\d{3}|crates/|docs/decisions|tm_[a-z]+::` inside `///` lines of crates/tm-cli/src/args.rs only.
@@ -91,7 +91,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run hygiene && mise run test:crate -- tm-cli`
   evidence: `grep -nE 'D-0[0-9]{2}' crates/tm-cli/src/args.rs` -> 114, 324, plus `--project`'s rustdoc-style `[crate::project::resolve_scope]`/`[crate::project::locate]` links, confirmed by seven independent trial agents across different CLI verbs; `honestly refused on macOS` at 4 sites in ComputerSnapshotArgs/ComputerClickArgs/ComputerTypeArgs/ComputerKeyArgs.
 
-- [ ] **s1-cli-tree-regroup** — Group tm --help into daily/planning/serving/more and hide plumbing verbs as aliases
+- [x] **s1-cli-tree-regroup** (landed cddc57f) — Group tm --help into daily/planning/serving/more and hide plumbing verbs as aliases
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: s1-help-text-scrub-and-hygiene
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/tests/tui_launch.rs`, `CLAUDE.md`
   change: Use `display_order` so daily verbs (`tm`, `-p`, `init`, `status`, `tickets`, `ticket`, `run`, `search`, `symbol`, `doctor`) come first, then planning (`milestone`, `dep`, `decision`), then serving (`serve`, `mcp`). Add `#[command(hide = true)]` to `lease`, `harness`, `bench`, `browser`, `computer`, `sched plan/tick`, `events replay/verify`, `ticket submit/delegate` — all must still run. Add an `after_help` "More commands" list. Give `tm search` `--exact`/`--semantic` flags; keep `--mode` as a hidden alias. Don't touch `provider` or `auth`.
@@ -115,7 +115,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-core && mise run test:crate -- tm-cli`
   evidence: `grep -n 'due' crates/tm-types/src` -> no matches; probe deps-sched: "Add due-date field and CLI support to tickets."
 
-- [ ] **s1-tui-hub-tabs** — Tickets hub gets a tab strip: Tickets, Board, Milestones, Timeline, Graph
+- [x] **s1-tui-hub-tabs** (landed 8ce1818) — Tickets hub gets a tab strip: Tickets, Board, Milestones, Timeline, Graph
   model: sonnet · severity: high · builds Rust: yes · area: tui · deps: s1-dep-graph-human
   files: `crates/tm-tui/src/screens/tickets.rs`, `crates/tm-cli/src/tui.rs`, `crates/tm-cli/src/tui/tickets_view.rs`, `crates/tm-cli/tests/tui_navigation.rs`
   change: Render a tab strip in the tickets screen header. Tab/Shift+Tab (currently ignored at tickets.rs:786) cycle ScreenId among Tickets, Kanban, Milestones, Timeline, Graph. The last three show a "coming next" placeholder until their own tasks land. Ctrl+B still jumps to Board; Esc from any tab goes back to chat. Fix the stale module doc at tui.rs:18 ("`b` opens the Kanban board"; it is actually Ctrl+B). Extend tui_navigation.rs with Tab-cycling coverage.
@@ -155,7 +155,11 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
   evidence: `crates/tm-tui/src/chat/commands.rs` CommandId has 17 variants (Help..Exit) with no PM views, no /ticket and no /run.
 
-- [ ] **s1-slash-context-todos** — /context shows token use by section and the ticket's prefetched context pack; /todos
+- [x] **s1-slash-context-todos** (landed 144e269; note: landed ahead of its declared dep
+  s1-slash-pm-views, which hadn't landed in this worktree yet — CommandId/COMMANDS gained
+  Context/Todos as new variants appended to the existing list, so a later s1-slash-pm-views merge
+  should be a straightforward textual conflict, not a semantic one) — /context shows token use by
+  section and the ticket's prefetched context pack; /todos
   model: sonnet · severity: high · builds Rust: yes · area: tui/chat · deps: s1-slash-pm-views
   files: `crates/tm-tui/src/chat/commands.rs`, `crates/tm-cli/src/tui/slash_views.rs`, `crates/tm-cli/src/tui/chat_ops.rs`, `CLAUDE.md`
   change: `/context` prints a table into the transcript: context-window size, and tokens used by system prompt, instructions (AGENTS.md), tools, conversation, free space, from the session's real token counts. When a ticket is attached, also list that ticket's context-pack sections (prefetched files/symbols) with a token count each, reusing tm-context's section accounting (`crates/tm-context/src/tokens.rs` SectionKind) — don't invent numbers. `/todos` toggles the Ctrl+T checklist.
