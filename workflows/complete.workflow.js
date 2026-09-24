@@ -217,6 +217,7 @@ Files other agents own right now (never touch): ${others.join(', ') || 'none'}.
 Head start: branches named salvage/* hold unverified edits from a halted earlier run (list them with \`git -C ${INTEG} branch --list 'salvage/*'\`, then \`git -C ${INTEG} diff integrate <branch> -- <your files>\`). If one touches your files for this task, reuse what's right instead of starting over.
 Don't build, run cargo or tests, commit, or change git state (read-only git diff/log/show are fine). You may run \`rustfmt --edition 2021 --check <file>\` for syntax, and use LSP diagnostics if you have them. ${SEARCH} LSP diagnostics and go-to-definition are fine too. Match the surrounding style and comment density. Add or update the unit tests that prove the acceptance check in files you own (#[cfg(test)] at the bottom of the file). A task that needs a decision doc writes the next free docs/decisions/D-NNN-*.md (\`ls ${INTEG}/docs/decisions\`; D-002's format). If the code already does what the task asks, return already-done with evidence; if only the owner can decide something, return blocked and say what.
 ${VOICE}
+Budget: finish within about 60 tool calls. If the task is bigger than that, land the core of it and name the rest in summary. No polling loops.
 Return id, status, files (every file changed or created), shared_edits, summary (2 sentences), tests (which tests prove it).`
 }
 
@@ -225,7 +226,7 @@ async function integrate(n, batch, edits) {
 Tasks: ${batch.map(t => t.id).join(', ')} (specs in ${INTEG}/docs/tasks/TASKS.md).
 1. \`cd ${INTEG}; unset CARGO_TARGET_DIR\`. Apply each report's shared_edits.
 2. \`mise run fmt\`, then \`env -u CARGO_TARGET_DIR cargo check --workspace --all-targets -j 2\`; fix errors. If client files changed, run that client's pnpm test and build.
-3. \`mise run verify\` (run it in the background and wait; it is slow). Fix what fails (use zvec_grep_rg to find tests pinned to a message's text instead of reading test files): compile errors, clippy, tests pinned to old message text (update them when the new text is right), hygiene. A task you can't make work with a reasonable fix: revert only its files (\`git checkout -- <files>\`, delete files it created) and report it failed with a one-line reason. Re-run until green.
+3. Run the gate's four steps one at a time, each in the FOREGROUND with the Bash tool's timeout parameter set to 600000: \`mise run fmt\`, \`env -u CARGO_TARGET_DIR cargo clippy --workspace --all-targets -j 2 -- -D warnings\`, \`env -u CARGO_TARGET_DIR cargo test --workspace -j 2\`, \`mise run hygiene\`. If one times out, run it again; cargo picks up where it stopped. NEVER start a command in the background and then check on it with true, sleep, echo, tail or grep: every check is a full turn and burns the shared budget (one integrator did this 1,254 times). Don't watch GitHub Actions or any remote CI; the local gate is the gate. Stay within about 120 tool calls. Fix what fails (use zvec_grep_rg to find tests pinned to a message's text instead of reading test files): compile errors, clippy, tests pinned to old message text (update them when the new text is right), hygiene. A task you can't make work with a reasonable fix: revert only its files (\`git checkout -- <files>\`, delete files it created) and report it failed with a one-line reason. Re-run until green.
 4. Commit one commit per task whose files are its own ("<type>(<scope>): <summary>" and a "Task: <id>" line), shared-file changes in a final commit. In docs/tasks/TASKS.md turn each landed task's "- [ ]" or "- [~]" into "- [x]" and append " (landed <short sha>)"; tasks an editor reported already-done get "- [x]" with " (already satisfied)"; blocked ones get "- [~]" with " (needs the owner: <what>)". Commit "docs(tasks): land batch ${n}".
 5. \`git merge --no-edit main\` (re-run affected tests if main moved), \`git -C ${PRIMARY} merge --ff-only integrate\` (if refused because of someone's local changes, leave them: main_updated=false), \`git push origin integrate:main\` (if rejected, \`git fetch origin main && git merge --no-edit origin/main\`, re-check, push; retry network errors 4 times at 2s/4s/8s/16s; never force).
 Return landed, failed ({id, reason}), green, head (short sha), pushed, main_updated, notes (≤3 lines).
@@ -269,7 +270,7 @@ async function buildLoop(round) {
     if (halted) { for (const p of plan) p.t.status = 'pending'; break }
     const reports = edits.map((e, i) => e || { id: plan[i].t.id, status: 'blocked', summary: 'the editor died without reporting' })
     const res = await integrate(tag, plan.map(p => p.t), reports)
-    if (!res) { for (const p of plan) p.t.status = 'pending'; break }
+    if (!res) { for (const p of plan) p.t.status = 'pending'; halted = true; log('HALTED: the integrator died (usually a usage limit); stopping so a fresh relaunch resumes from TASKS.md and the salvaged edits.'); break }
     const landed = new Set(res.landed || [])
     const failed = new Map((res.failed || []).map(f => [f.id, f.reason]))
     for (const [i, p] of plan.entries()) {
