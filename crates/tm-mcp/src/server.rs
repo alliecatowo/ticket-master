@@ -515,17 +515,33 @@ impl McpServer {
     /// [`Transport`] (e.g. a test driving both ends of one `tokio::io::duplex`) does not need to
     /// go through a fresh [`FramedTransport`].
     pub async fn serve_transport(&self, transport: &mut dyn Transport) -> Result<()> {
+        let mut handled_any_message = false;
         loop {
             match transport.recv().await? {
-                None => return Ok(()),
+                None => {
+                    // Clean EOF: only OK if we handled at least one message. Otherwise, the peer
+                    // closed before sending anything, which is an error for a command-line tool
+                    // (e.g. `echo '' | tm mcp`).
+                    if handled_any_message {
+                        return Ok(());
+                    } else {
+                        return Err(TmError::parse(
+                            "peer closed stdin before sending any messages",
+                        ));
+                    }
+                }
                 Some(Message::Request(req)) => {
+                    handled_any_message = true;
                     let response = self.handle_request(req);
                     transport.send(&Message::Response(response)).await?;
                 }
                 // A client notification (e.g. `notifications/initialized`) needs no reply; a
                 // stray `Response` (this process is never itself a JSON-RPC client on this
                 // channel) is likewise not an error, just ignored.
-                Some(Message::Notification(_)) | Some(Message::Response(_)) => continue,
+                Some(Message::Notification(_)) | Some(Message::Response(_)) => {
+                    handled_any_message = true;
+                    continue;
+                }
             }
         }
     }
@@ -746,5 +762,31 @@ mod tests {
             DEFAULT_DISPATCH_ACTOR
         );
         assert!(dispatch_actor(Some("x")).is_agent());
+    }
+
+    #[tokio::test]
+    async fn eof_before_any_message_errors() {
+        let (server, _dir) = open_test_server();
+        // `tokio::io::empty()` returns `Ok(0)` (EOF) on the very first `read`, unlike a
+        // `tokio::io::duplex` pair fed to itself (reader and writer from the *same* pair): that
+        // would only see EOF once the writer half is dropped, which never happens while both
+        // halves are held alive inside the same transport — `recv()` then blocks forever waiting
+        // for bytes that are never written, hanging this test instead of exercising the EOF path.
+        let reader = tokio::io::empty();
+        let (_client_side, writer) = tokio::io::duplex(1024);
+        let mut transport =
+            crate::transport::FramedTransport::new(reader, writer, Framing::LineDelimited);
+
+        // Calling recv immediately on a closed stream returns Ok(None), signaling EOF.
+        // We expect serve_transport to turn this into an error when no message was handled.
+        let result = server.serve_transport(&mut transport).await;
+        assert!(result.is_err(), "EOF before any message should error");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("peer closed stdin before sending any messages"),
+            "error should explain that peer closed before sending messages"
+        );
     }
 }
