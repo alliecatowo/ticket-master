@@ -479,8 +479,17 @@ impl PtySession {
             // child is already gone is the common, harmless case.
             return Ok(());
         };
+        // pid 0 and 1 would make `-PID` mean "my own group" or "every process I may signal".
+        if pid <= 1 {
+            return Err(TmError::invariant(format!(
+                "refusing to signal process group {pid}"
+            )));
+        }
+        // `--` is load-bearing: procps-ng's `kill` (Ubuntu's /bin/kill) otherwise parses `-PID`
+        // as an option and keeps only its first digit, so `-12345` became `kill(-1, SIGTERM)`,
+        // which signalled every process this user owns and killed the CI runner.
         let status = std::process::Command::new("kill")
-            .arg("-TERM")
+            .args(["-s", "TERM", "--"])
             .arg(format!("-{pid}"))
             .status()?;
         // `kill` exits nonzero when the target no longer exists (already reaped between
