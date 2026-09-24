@@ -25,6 +25,10 @@ sccache = "latest"
 # a worktree compiling against an error variant that only existed in the primary checkout).
 [env]
 RUSTC_WRAPPER = "sccache"
+# Bounds sccache's own on-disk cache (default is 10GB); without this it's one more thing that can
+# quietly grow toward this machine's disk limit alongside target/ and worktrees. Takes effect on
+# the next sccache server start (`sccache --stop-server` to force one before it's read fresh).
+SCCACHE_CACHE_SIZE = "6G"
 
 # Every task here is the canonical way to do this thing in this repo. Use `mise run <task>`
 # instead of hand-rolling the equivalent `cargo`/`rm` invocation, so build flags (job caps on
@@ -103,7 +107,7 @@ description = "Full-workspace rust-analyzer diagnostics dump (informational, not
 run = "rust-analyzer diagnostics . || true"
 
 [tasks."worktree:clean"]
-description = "Remove every merged worktree under .claude/worktrees/ and prune"
+description = "Remove every merged worktree under .claude/worktrees/ and prune. Prefer `mise run disk:guard` for routine cleanup -- it also checks for lock files, uncommitted changes, busy targets and odw-*/tm-integrate exemptions before removing anything; this task force-removes unconditionally and is meant for a deliberate, by-hand sweep."
 run = """
 for wt in .claude/worktrees/*/; do
   git worktree remove --force "$wt" 2>/dev/null || true
@@ -114,3 +118,82 @@ git worktree prune
 [tasks.release]
 description = "Build a release tarball: cargo build --release -p tm-cli + the web client, packaged as dist/tm-<target-triple>.tar.gz (bin/tm + share/tm/web/ + README-INSTALL.md) with a .sha256 alongside -- the same layout .github/workflows/release.yml's CI job produces. Pass -- --publish to also `gh release create` -- see docs/install.md; don't run --publish yourself, only the orchestrator publishes from main."
 run = "bash scripts/release.sh"
+
+[tasks."disk:guard"]
+description = "Run scripts/disk-guard.sh, the periodic disk-space guard for target/ dirs, .claude/worktrees/ and tm scratch dirs (see CLAUDE.md's 'Keeping disk use bounded'). Pass flags through, e.g. `mise run disk:guard -- --dry-run --verbose`."
+run = "scripts/disk-guard.sh {{arg(name=\"flags\", var=true, default=\"\")}}"
+
+[tasks."disk:guard:install"]
+description = "Install scripts/disk-guard.sh as a launchd agent (com.ticketmaster.disk-guard, every 30 minutes) so it runs unattended. Safe to re-run: replaces an existing install. Always points at the primary checkout's copy of the script, regardless of where this task itself is invoked from -- disk-guard.sh's own REPO_ROOT is pinned the same way, so a plist pointed anywhere else would eventually have the guard delete its own script out from under it."
+run = """
+set -eu
+PRIMARY_ROOT="/Users/allie/Develop/ticket-master"
+PLIST_DIR="$HOME/Library/LaunchAgents"
+LOG_DIR="$HOME/Library/Logs"
+PLIST="$PLIST_DIR/com.ticketmaster.disk-guard.plist"
+LABEL="com.ticketmaster.disk-guard"
+SCRIPT="$PRIMARY_ROOT/scripts/disk-guard.sh"
+if [ ! -f "$SCRIPT" ]; then
+  echo "disk:guard:install: $SCRIPT not found -- this task only installs the primary checkout's own copy; land this change on $PRIMARY_ROOT first" >&2
+  exit 1
+fi
+mkdir -p "$PLIST_DIR" "$LOG_DIR"
+cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>$SCRIPT</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>$LOG_DIR/tm-disk-guard.log</string>
+  <key>StandardErrorPath</key>
+  <string>$LOG_DIR/tm-disk-guard.log</string>
+</dict>
+</plist>
+EOF
+plutil -lint "$PLIST"
+launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+i=0
+while [ "$i" -lt 3 ]; do
+  if launchctl bootstrap "gui/$(id -u)" "$PLIST"; then
+    break
+  fi
+  i=$((i + 1))
+  if [ "$i" -ge 3 ]; then
+    echo "disk:guard:install: launchctl bootstrap failed after 3 attempts" >&2
+    exit 1
+  fi
+  sleep 1
+done
+echo "installed: $PLIST -> $SCRIPT (every 30m, log: $LOG_DIR/tm-disk-guard.log)"
+# SCCACHE_CACHE_SIZE only takes effect on the next sccache server start, and sccache is a
+# long-lived daemon that normally stays up across sessions -- so a machine that already had one
+# running before this bound landed would otherwise keep the old, larger cache size indefinitely.
+# Installing the guard is a natural, infrequent point to force that pickup; best-effort since no
+# server running at all is also a fine outcome (the next `sccache` invocation starts one fresh
+# with the current env either way).
+if command -v sccache >/dev/null 2>&1; then
+  sccache --stop-server >/dev/null 2>&1 || true
+  echo "sccache server stopped so SCCACHE_CACHE_SIZE=6G (mise.toml) is picked up on next use"
+fi
+"""
+
+[tasks."disk:guard:uninstall"]
+description = "Unload and remove the disk:guard launchd agent installed by disk:guard:install."
+run = """
+set -eu
+PLIST="$HOME/Library/LaunchAgents/com.ticketmaster.disk-guard.plist"
+launchctl bootout "gui/$(id -u)/com.ticketmaster.disk-guard" 2>/dev/null || true
+rm -f "$PLIST"
+echo "uninstalled: $PLIST"
+"""
