@@ -89,4 +89,125 @@ describe("TicketmasterClient", () => {
       "/metrics",
     ]);
   });
+
+  it("posts accept transition with note and actor", async () => {
+    const fetchMock = vi.fn(async (url: URL, init?: RequestInit) => {
+      expect(url.toString()).toBe("http://127.0.0.1:4173/tickets/T-1/transition");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(init?.body as string)).toEqual({
+        accept: { note: "good work", actor: "P-1" },
+      });
+      return jsonResponse(200, { events: [] });
+    });
+
+    const client = new TicketmasterClient({
+      baseUrl: "http://127.0.0.1:4173",
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.transition("T-1", { accept: { note: "good work", actor: "P-1" } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("posts accept transition with null note", async () => {
+    const fetchMock = vi.fn(async (url: URL, init?: RequestInit) => {
+      expect(JSON.parse(init?.body as string)).toEqual({
+        accept: { note: null, actor: "P-1" },
+      });
+      return jsonResponse(200, { events: [] });
+    });
+
+    const client = new TicketmasterClient({
+      baseUrl: "http://127.0.0.1:4173",
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.transition("T-1", { accept: { note: null, actor: "P-1" } });
+  });
+
+  it("posts accept transition without note", async () => {
+    const fetchMock = vi.fn(async (url: URL, init?: RequestInit) => {
+      expect(JSON.parse(init?.body as string)).toEqual({
+        accept: { actor: "P-1" },
+      });
+      return jsonResponse(200, { events: [] });
+    });
+
+    const client = new TicketmasterClient({
+      baseUrl: "http://127.0.0.1:4173",
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.transition("T-1", { accept: { actor: "P-1" } });
+  });
+
+  it("posts reject transition with reason and actor", async () => {
+    const fetchMock = vi.fn(async (url: URL, init?: RequestInit) => {
+      expect(url.toString()).toBe("http://127.0.0.1:4173/tickets/T-1/transition");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(init?.body as string)).toEqual({
+        reject: { reason: "not ready", actor: "P-1" },
+      });
+      return jsonResponse(200, { events: [] });
+    });
+
+    const client = new TicketmasterClient({
+      baseUrl: "http://127.0.0.1:4173",
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.transition("T-1", { reject: { reason: "not ready", actor: "P-1" } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("posts retry transition with guidance and actor", async () => {
+    const fetchMock = vi.fn(async (url: URL, init?: RequestInit) => {
+      expect(url.toString()).toBe("http://127.0.0.1:4173/tickets/T-1/transition");
+      expect(init?.method).toBe("POST");
+      expect(JSON.parse(init?.body as string)).toEqual({
+        retry: { guidance: "try a different approach", actor: "P-1" },
+      });
+      return jsonResponse(200, { events: [] });
+    });
+
+    const client = new TicketmasterClient({
+      baseUrl: "http://127.0.0.1:4173",
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.transition("T-1", { retry: { guidance: "try a different approach", actor: "P-1" } });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("posts retry transition with null guidance", async () => {
+    const fetchMock = vi.fn(async (url: URL, init?: RequestInit) => {
+      expect(JSON.parse(init?.body as string)).toEqual({
+        retry: { guidance: null, actor: "P-1" },
+      });
+      return jsonResponse(200, { events: [] });
+    });
+
+    const client = new TicketmasterClient({
+      baseUrl: "http://127.0.0.1:4173",
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.transition("T-1", { retry: { guidance: null, actor: "P-1" } });
+  });
+
+  it("posts retry transition without guidance", async () => {
+    const fetchMock = vi.fn(async (url: URL, init?: RequestInit) => {
+      expect(JSON.parse(init?.body as string)).toEqual({
+        retry: { actor: "P-1" },
+      });
+      return jsonResponse(200, { events: [] });
+    });
+
+    const client = new TicketmasterClient({
+      baseUrl: "http://127.0.0.1:4173",
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+
+    await client.transition("T-1", { retry: { actor: "P-1" } });
+  });
 });

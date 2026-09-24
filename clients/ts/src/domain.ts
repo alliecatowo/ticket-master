@@ -466,7 +466,10 @@ export type TransitionCommand =
   | { close: { reason?: string | null; actor: ParticipantId } }
   | { cancel: { reason?: string | null; actor: ParticipantId } }
   | { reopen: { reason?: string | null; actor: ParticipantId } }
-  | { fail: { class: FailureClass; detail: string; actor: ParticipantId } };
+  | { fail: { class: FailureClass; detail: string; actor: ParticipantId } }
+  | { accept: { note?: string | null; actor: ParticipantId } }
+  | { reject: { reason: string; actor: ParticipantId } }
+  | { retry: { guidance?: string | null; actor: ParticipantId } };
 
 export interface AcquireLeaseInput {
   holder: ParticipantId;
