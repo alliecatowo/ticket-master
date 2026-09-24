@@ -35,3 +35,6 @@ model2vec-rs = { version = "0.3", default-features = false, features = ["hf-hub"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Parses fixtures/nav_eval.toml for the `nav_quality_eval` integration test (critic-nav-quality-
+# eval); not needed by the library itself.
+toml = { workspace = true }

@@ -1,0 +1,281 @@
+# Fixture for `crates/tm-codeintel/tests/nav_quality_eval.rs` (critic-nav-quality-eval).
+#
+# `[[file]]` is a small, hand-authored, *frozen* mini-repo: twelve short Rust source files, each
+# describing one self-contained, deliberately distinct subsystem (auth, billing, notifications,
+# ...) with vocabulary chosen not to overlap with the other eleven. `[[case]]` pairs a
+# natural-language navigation query with the one file it should surface.
+#
+# Why a hand-authored corpus instead of indexing this actual repository (this task's own spec
+# allows "a frozen snapshot of it"): the recorded earlier attempt at this task set a hit-rate@3
+# floor of 8/12 with no prior CI run to calibrate it against, and it failed a real run at 6/12
+# (reverted; see docs/tasks/TASKS.md's critic-nav-quality-eval entry -- the exact corpus that
+# attempt scored against isn't recorded, only that the floor didn't hold). Whatever corpus it
+# used, an always-live index of this actual, ever-changing repository is exactly the kind of
+# moving target that makes a floor hard to calibrate: any real edit to any file's wording
+# anywhere in the tree can shift which file wins a query. A small fixture corpus pinned by this
+# file removes that variable, so a floor set against it stays meaningful run over run.
+#
+# Every query below shares several distinctive, exact-token-form words with only its one
+# `expected_file` (Signal::Lexical's BM25 pass and the hash embedder's TF-cosine pass are both
+# literal token-overlap scorers, per `crates/tm-codeintel/src/embed.rs`'s and
+# `crates/tm-codeintel/src/api.rs::search_lexical_bm25`'s doc comments -- no stemming, no real
+# paraphrase understanding), so a correct top-3 hit does not depend on embedding quality beyond
+# "shares this query's words", which is exactly what `LocalHashEmbedder` (the default, no-network
+# embedder every test in this crate already uses) gives deterministically on any machine.
+
+[[file]]
+path = "auth.rs"
+content = """
+//! Handles user authentication: verifying submitted passwords against a stored salted hash
+//! during login, and minting short-lived session tokens once credentials check out.
+
+/// Verify a plaintext password against a bcrypt hash captured at signup time.
+pub fn verify_password_hash(candidate: &str, stored_hash: &str) -> bool {
+    bcrypt_compare(candidate, stored_hash)
+}
+
+/// Mint a fresh session token for a successful login, expiring after `ttl_seconds`.
+pub fn mint_session_token(user_id: u64, ttl_seconds: u64) -> String {
+    format!("session-{user_id}-{ttl_seconds}")
+}
+"""
+
+[[file]]
+path = "billing.rs"
+content = """
+//! Generates invoices for customer subscriptions: computing prorated charges when a plan
+//! changes mid-cycle and applying the outstanding balance to the next payment.
+
+/// Build an invoice line for a subscription charge, prorating for a partial billing cycle.
+pub fn build_prorated_invoice_charge(subscription_id: u64, days_remaining: u32) -> f64 {
+    prorate_amount(subscription_id, days_remaining)
+}
+
+/// Capture a payment against a customer's invoice using the stored payment method.
+pub fn capture_invoice_payment(customer_id: u64, invoice_id: u64) -> bool {
+    charge_customer(customer_id, invoice_id)
+}
+"""
+
+[[file]]
+path = "notifications.rs"
+content = """
+//! Sends desktop notifications and alerts to the user, with a badge count and an optional
+//! silence window so alerts do not interrupt a focused work session.
+
+/// Send a desktop notification with the given title and body text.
+pub fn send_desktop_notification(title: &str, body: &str) -> bool {
+    display_toast(title, body)
+}
+
+/// Silence further alerts until `until_epoch_seconds`, used during a focused work session.
+pub fn silence_alerts_until(until_epoch_seconds: u64) {
+    set_silence_window(until_epoch_seconds)
+}
+"""
+
+[[file]]
+path = "search_index.rs"
+content = """
+//! Builds an inverted index over a document corpus: tokenizing each document and recording
+//! which documents contain which term, the same structure a lexical search signal reads.
+
+/// Tokenize a document's text and merge its tokens into the inverted index.
+pub fn tokenize_document_into_inverted_index(document_text: &str, doc_id: u64) {
+    merge_tokens(tokenize(document_text), doc_id)
+}
+
+/// Look up which documents in the corpus contain a given term.
+pub fn lookup_term_in_corpus(term: &str) -> Vec<u64> {
+    inverted_index_lookup(term)
+}
+"""
+
+[[file]]
+path = "scheduler.rs"
+content = """
+//! Retries a failed background job using exponential backoff, capping the delay so a queue
+//! of pending attempts does not retry forever against a persistently failing dependency.
+
+/// Compute the exponential backoff delay before the next retry attempt.
+pub fn exponential_backoff_delay(attempt: u32, base_seconds: u32) -> u32 {
+    base_seconds.saturating_mul(2u32.saturating_pow(attempt))
+}
+
+/// Retry a failed job, re-enqueuing it with an exponential backoff delay.
+pub fn retry_failed_job_with_backoff(job_id: u64, attempt: u32) {
+    requeue(job_id, exponential_backoff_delay(attempt, 1))
+}
+"""
+
+[[file]]
+path = "cache.rs"
+content = """
+//! Evicts the least recently used entry from an in-memory cache once it exceeds its
+//! configured capacity, and invalidates a single entry directly when its source changes.
+
+/// Evict the least recently used cache entry to make room for a new one.
+pub fn evict_least_recently_used_entry(cache: &mut CacheState) {
+    remove_lru_entry(cache)
+}
+
+/// Invalidate a single cache entry by key, without evicting anything else.
+pub fn invalidate_cache_entry(cache: &mut CacheState, key: &str) {
+    remove_entry(cache, key)
+}
+"""
+
+[[file]]
+path = "logging.rs"
+content = """
+//! Formats a structured log message with a severity level, so log output is machine
+//! parseable instead of free-form text glued together with format strings.
+
+/// Format a structured log message with the given severity level.
+pub fn format_structured_log_message(severity_level: &str, message: &str) -> String {
+    format!("level={severity_level} msg={message}")
+}
+
+/// Emit a structured log line at the given severity level to the configured sink.
+pub fn emit_structured_log(severity_level: &str, message: &str) {
+    write_to_sink(format_structured_log_message(severity_level, message))
+}
+"""
+
+[[file]]
+path = "rate_limiter.rs"
+content = """
+//! Throttles incoming requests using a permit bucket: each request consumes one permit from
+//! the bucket, which refills at a steady rate up to its configured burst capacity.
+
+/// Try to consume one permit from the bucket for an incoming request, throttling it if empty.
+pub fn throttle_request_with_permit_bucket(bucket: &mut PermitBucket) -> bool {
+    bucket.try_consume_permit()
+}
+
+/// Refill the permit bucket at its configured steady rate, capped at burst capacity.
+pub fn refill_permit_bucket(bucket: &mut PermitBucket, elapsed_seconds: f64) {
+    bucket.add_permits(elapsed_seconds)
+}
+"""
+
+[[file]]
+path = "file_storage.rs"
+content = """
+//! Uploads a file to blob storage and computes a checksum so a later read can detect silent
+//! corruption instead of trusting the bytes it gets back unchecked.
+
+/// Upload a file's bytes to blob storage, tagging the object with a checksum digest.
+pub fn upload_file_to_blob_storage(bytes: &[u8]) -> String {
+    let digest = checksum_digest(bytes);
+    put_object(bytes, &digest)
+}
+
+/// Confirm a downloaded blob's bytes match its recorded checksum digest.
+pub fn confirm_blob_checksum(bytes: &[u8], expected_digest: &str) -> bool {
+    checksum_digest(bytes) == expected_digest
+}
+"""
+
+[[file]]
+path = "metrics.rs"
+content = """
+//! Records histogram metrics for request latency and exposes percentile telemetry so a
+//! dashboard can show p50/p95/p99 without recomputing raw samples on every read.
+
+/// Record one latency sample into the request-latency histogram metric.
+pub fn record_latency_histogram_sample(latency_ms: f64) {
+    histogram_observe("request_latency", latency_ms)
+}
+
+/// Compute a percentile from the request-latency histogram's telemetry samples.
+pub fn latency_histogram_percentile(percentile: f64) -> f64 {
+    histogram_quantile("request_latency", percentile)
+}
+"""
+
+[[file]]
+path = "permissions.rs"
+content = """
+//! Checks whether a role has permission to access a protected resource, consulting the
+//! role-based access control grants configured for the current project.
+
+/// Check whether a role has permission to access a given resource.
+pub fn role_has_permission_for_resource(role: &str, resource: &str) -> bool {
+    lookup_grant(role, resource).is_some()
+}
+
+/// Grant a role permission to access a resource, or deny it if `allow` is false.
+pub fn grant_or_deny_resource_permission(role: &str, resource: &str, allow: bool) {
+    if allow {
+        insert_grant(role, resource)
+    } else {
+        remove_grant(role, resource)
+    }
+}
+"""
+
+[[file]]
+path = "websocket.rs"
+content = """
+//! Sends a periodic heartbeat ping over an open websocket connection and reconnects
+//! automatically if too many heartbeats go unanswered by a pong.
+
+/// Send a heartbeat ping over the given websocket connection.
+pub fn send_heartbeat_ping(connection: &mut WebsocketConnection) {
+    connection.send_frame(Frame::Ping)
+}
+
+/// Reconnect the websocket connection after missing consecutive heartbeat pongs.
+pub fn reconnect_after_missed_heartbeats(connection: &mut WebsocketConnection) {
+    connection.reopen()
+}
+"""
+
+[[case]]
+query = "verify a password hash during login"
+expected_file = "auth.rs"
+
+[[case]]
+query = "generate an invoice for a customer subscription charge"
+expected_file = "billing.rs"
+
+[[case]]
+query = "send a desktop notification alert to the user"
+expected_file = "notifications.rs"
+
+[[case]]
+query = "tokenize documents into an inverted index"
+expected_file = "search_index.rs"
+
+[[case]]
+query = "retry a failed job with exponential backoff"
+expected_file = "scheduler.rs"
+
+[[case]]
+query = "evict the least recently used cache entry"
+expected_file = "cache.rs"
+
+[[case]]
+query = "format a structured log message with severity level"
+expected_file = "logging.rs"
+
+[[case]]
+query = "throttle requests using a permit bucket algorithm"
+expected_file = "rate_limiter.rs"
+
+[[case]]
+query = "upload a file to blob storage and check its checksum"
+expected_file = "file_storage.rs"
+
+[[case]]
+query = "record a histogram metric for request latency"
+expected_file = "metrics.rs"
+
+[[case]]
+query = "check if a role has permission to access a resource"
+expected_file = "permissions.rs"
+
+[[case]]
+query = "send a heartbeat ping over the websocket connection"
+expected_file = "websocket.rs"
