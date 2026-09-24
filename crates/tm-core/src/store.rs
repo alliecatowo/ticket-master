@@ -49,11 +49,12 @@ use tm_events::payload::{
     SessionStartedPayload, TicketAuditRejectedPayload, TicketAuditedPayload,
     TicketBudgetExhaustedPayload, TicketBudgetHandoffPayload, TicketCancelledPayload,
     TicketChildAddedPayload, TicketClosedPayload, TicketCreatedPayload,
-    TicketDependencyAddedPayload, TicketEscalatedPayload, TicketFailedPayload, TicketForkedPayload,
-    TicketHeartbeatPayload, TicketLeaseExpiredPayload, TicketLeaseReleasedPayload,
-    TicketLeasedPayload, TicketReopenedPayload, TicketRetryScheduledPayload,
-    TicketStateChangedPayload, TicketSubmittedPayload, TicketUpdatedPayload,
-    TicketVerificationFailedPayload, TicketVerifiedPayload, UsageRecordedPayload,
+    TicketDependencyAddedPayload, TicketDependencyRemovedPayload, TicketEscalatedPayload,
+    TicketFailedPayload, TicketForkedPayload, TicketHeartbeatPayload, TicketLeaseExpiredPayload,
+    TicketLeaseReleasedPayload, TicketLeasedPayload, TicketReopenedPayload,
+    TicketRetryScheduledPayload, TicketStateChangedPayload, TicketSubmittedPayload,
+    TicketUpdatedPayload, TicketVerificationFailedPayload, TicketVerifiedPayload,
+    UsageRecordedPayload,
 };
 use tm_events::{Event, EventDraft, EventLog, Payload, Tx};
 use tm_types::{
@@ -770,6 +771,43 @@ impl Store {
                 actor,
                 Id::from(ticket.clone()),
                 Payload::from(TicketDependencyAddedPayload { ticket, depends_on }),
+            )])
+        })
+    }
+
+    /// Remove the `ticket -> depends_on` dependency edge, emitting
+    /// `ticket.dependency_removed` (materialize.rs deletes the `ticket_deps` row on that event).
+    /// Returns `not_found` when the edge doesn't exist.
+    pub fn remove_dependency(
+        &self,
+        ticket: &TicketId,
+        depends_on: &TicketId,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        let ticket = ticket.clone();
+        let depends_on = depends_on.clone();
+        self.run_command(move |view| {
+            if !view.tickets.contains_key(&ticket) {
+                return Err(TmError::not_found("ticket", &ticket));
+            }
+            if !view.tickets.contains_key(&depends_on) {
+                return Err(TmError::not_found("ticket", &depends_on));
+            }
+            let has_edge = view
+                .graph
+                .edges()
+                .iter()
+                .any(|e| e.from == ticket && e.to == depends_on);
+            if !has_edge {
+                return Err(TmError::not_found(
+                    "dependency",
+                    format!("{ticket} -> {depends_on}"),
+                ));
+            }
+            Ok(vec![EventDraft::new(
+                actor,
+                Id::from(ticket.clone()),
+                Payload::from(TicketDependencyRemovedPayload { ticket, depends_on }),
             )])
         })
     }
@@ -3700,6 +3738,62 @@ mod tests {
             .add_dependency(&b, &a, DependencyKind::Hard, actor())
             .unwrap_err();
         assert!(matches!(err, TmError::Invariant(_)));
+    }
+
+    #[test]
+    fn remove_dependency_deletes_the_edge() {
+        let (_dir, store) = open_store();
+        let a = create_root_ticket(&store);
+        let b_events = store
+            .create_ticket(
+                TicketKind::Work,
+                "b".into(),
+                None,
+                None,
+                Authority::none(),
+                vec![],
+                executor(),
+                vec![],
+                vec![],
+                VerificationPolicy::None,
+                Budget::unlimited(),
+                retry(),
+                0,
+                actor(),
+            )
+            .unwrap();
+        let b = TicketId::new(b_events[0].subject.as_str()).unwrap();
+        store
+            .add_dependency(&a, &b, DependencyKind::Hard, actor())
+            .expect("a depends on b");
+        assert!(store
+            .view()
+            .unwrap()
+            .graph
+            .edges()
+            .iter()
+            .any(|e| e.from == a && e.to == b));
+
+        store
+            .remove_dependency(&a, &b, actor())
+            .expect("remove a -> b");
+        assert!(!store
+            .view()
+            .unwrap()
+            .graph
+            .edges()
+            .iter()
+            .any(|e| e.from == a && e.to == b));
+
+        let err = store.remove_dependency(&a, &b, actor()).unwrap_err();
+        assert!(matches!(
+            err,
+            TmError::NotFound {
+                kind: "dependency",
+                ..
+            }
+        ));
+        assert_eq!(err.to_string(), format!("not found: dependency {a} -> {b}"));
     }
 
     #[test]

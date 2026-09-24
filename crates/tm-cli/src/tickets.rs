@@ -836,42 +836,9 @@ pub fn dep_rm(args: &DepEdgeArgs, project: &Project, renderer: &Renderer) -> tm_
     let ticket = TicketId::new(&args.ticket)?;
     let depends_on = TicketId::new(&args.depends_on)?;
 
-    let view = project.store.view()?;
-
-    if !view.tickets.contains_key(&ticket) {
-        return Err(TmError::not_found("ticket", &ticket));
-    }
-    if !view.tickets.contains_key(&depends_on) {
-        return Err(TmError::not_found("ticket", &depends_on));
-    }
-
-    let edges = view.graph.edges();
-    let mut updated_edges = Vec::new();
-    let mut found = false;
-
-    for edge in edges {
-        if edge.from == ticket && edge.to == depends_on {
-            found = true;
-        } else {
-            updated_edges.push(serde_json::json!({
-                "from": edge.from,
-                "to": edge.to,
-                "kind": edge.kind,
-            }));
-        }
-    }
-
-    if !found {
-        return Err(TmError::not_found(
-            "dependency edge",
-            format!("{} -> {}", ticket, depends_on),
-        ));
-    }
-
-    let fields = serde_json::json!({"dependencies": updated_edges});
     project
         .store
-        .update_ticket(&ticket, fields, project.actor.clone())?;
+        .remove_dependency(&ticket, &depends_on, project.actor.clone())?;
     renderer.emit(
         &ticket,
         &format!("Removed dependency: {} -> {}", ticket, depends_on),
