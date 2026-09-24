@@ -93,7 +93,7 @@ fn valid_hex(s: &str, prefix: &str, len: usize) -> bool {
 }
 
 macro_rules! id_newtype {
-    ($name:ident, $doc:literal, $validate:expr, $shape:literal) => {
+    ($name:ident, $doc:literal, $validate:expr, $shape:literal, $friendly_name:literal) => {
         #[doc = $doc]
         #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(String);
@@ -107,10 +107,10 @@ macro_rules! id_newtype {
                     Ok($name(s))
                 } else {
                     Err(TmError::parse(format!(
-                        "{} must look like {}, got {:?}",
-                        stringify!($name),
+                        "{} must look like {} (e.g. {})",
+                        $friendly_name,
                         $shape,
-                        s
+                        $shape.split(',').next().unwrap_or($shape)
                     )))
                 }
             }
@@ -176,37 +176,43 @@ id_newtype!(
     TicketId,
     "A ticket identifier. Work tickets are `T-<n>`; verification nodes are `V-<n>`; audit nodes are `A-<n>`.",
     |s| valid_numeric(s, &["T-", "V-", "A-"]),
-    "T-<n>, V-<n> or A-<n>"
+    "T-<n>, V-<n> or A-<n>",
+    "ticket ID"
 );
 id_newtype!(
     MilestoneId,
     "A milestone identifier, `M-<n>`.",
     |s| valid_numeric(s, &["M-"]),
-    "M-<n>"
+    "M-<n>",
+    "milestone ID"
 );
 id_newtype!(
     DecisionId,
     "A decision identifier, `D-<n>`.",
     |s| valid_numeric(s, &["D-"]),
-    "D-<n>"
+    "D-<n>",
+    "decision ID"
 );
 id_newtype!(
     SessionId,
     "A session identifier, `S-<n>`.",
     |s| valid_numeric(s, &["S-"]),
-    "S-<n>"
+    "S-<n>",
+    "session ID"
 );
 id_newtype!(
     ArtifactId,
     "An artifact identifier, `ART-<hex12>`.",
     |s| valid_hex(s, "ART-", 12),
-    "ART-<12 lowercase hex digits>"
+    "ART-<12 lowercase hex digits>",
+    "artifact ID"
 );
 id_newtype!(
     LeaseId,
     "A lease identifier, `L-<hex12>`.",
     |s| valid_hex(s, "L-", 12),
-    "L-<12 lowercase hex digits>"
+    "L-<12 lowercase hex digits>",
+    "lease ID"
 );
 id_newtype!(
     ParticipantId,
@@ -221,7 +227,8 @@ id_newtype!(
             s == "system"
         }
     },
-    "agent:<provider>/<id>, human:<handle> or system"
+    "agent:<provider>/<id>, human:<handle> or system",
+    "participant ID"
 );
 
 impl TicketId {

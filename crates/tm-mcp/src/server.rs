@@ -252,6 +252,63 @@ impl McpServer {
         tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.project_root)
     }
 
+    /// Format a SymbolKind as a lowercase string.
+    fn symbol_kind_str(kind: tm_codeintel::symbols::SymbolKind) -> &'static str {
+        match kind {
+            tm_codeintel::symbols::SymbolKind::Function => "function",
+            tm_codeintel::symbols::SymbolKind::Struct => "struct",
+            tm_codeintel::symbols::SymbolKind::Enum => "enum",
+            tm_codeintel::symbols::SymbolKind::Interface => "interface",
+            tm_codeintel::symbols::SymbolKind::Impl => "impl",
+            tm_codeintel::symbols::SymbolKind::Module => "module",
+            tm_codeintel::symbols::SymbolKind::Variable => "variable",
+            tm_codeintel::symbols::SymbolKind::TypeAlias => "type_alias",
+        }
+    }
+
+    /// Strip error prefixes for user-friendly display in MCP responses.
+    fn clean_error_message(msg: &str) -> String {
+        // Strip "parse: ", "storage: ", "io: ", "provider: " etc. prefixes
+        if let Some(colon_pos) = msg.find(": ") {
+            let potential_prefix = &msg[..colon_pos];
+            // Check if this looks like an error prefix (short word + colon)
+            if potential_prefix.len() <= 15 && !potential_prefix.contains(' ') {
+                return msg[colon_pos + 2..].to_string();
+            }
+        }
+        msg.to_string()
+    }
+
+    /// Map Budget to a serializable response object, converting u64::MAX to null.
+    fn serialize_budget(budget: &Budget) -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert(
+            "tokens".to_string(),
+            if budget.tokens == u64::MAX {
+                Value::Null
+            } else {
+                Value::Number(budget.tokens.into())
+            },
+        );
+        obj.insert(
+            "dollars_micros".to_string(),
+            if budget.dollars_micros == u64::MAX {
+                Value::Null
+            } else {
+                Value::Number(budget.dollars_micros.into())
+            },
+        );
+        obj.insert(
+            "wall_seconds".to_string(),
+            if budget.wall_seconds == u64::MAX {
+                Value::Null
+            } else {
+                Value::Number(budget.wall_seconds.into())
+            },
+        );
+        Value::Object(obj)
+    }
+
     fn ticket_summary(t: &tm_core::Ticket) -> Value {
         json!({
             "id": t.id.to_string(),
@@ -301,7 +358,16 @@ impl McpServer {
             .tickets
             .get(&id)
             .ok_or_else(|| TmError::not_found("ticket", &id))?;
-        serde_json::to_value(ticket).map_err(TmError::from)
+        // Serialize with custom Budget formatting (u64::MAX -> null)
+        let mut value = serde_json::to_value(ticket).map_err(TmError::from)?;
+        if let Some(obj) = value.as_object_mut() {
+            if let Some(budget_val) = obj.get("budget") {
+                if let Ok(budget) = serde_json::from_value::<Budget>(budget_val.clone()) {
+                    obj.insert("budget".to_string(), Self::serialize_budget(&budget));
+                }
+            }
+        }
+        Ok(value)
     }
 
     /// Create a work ticket with `tm ticket new`'s defaults (`Authority::worker()`, an
@@ -339,7 +405,13 @@ impl McpServer {
             .tickets
             .get(&id)
             .ok_or_else(|| TmError::not_found("ticket", &id))?;
-        Ok(json!({ "id": id.to_string(), "state": ticket.state }))
+        // Return full ticket response with budget serialized properly
+        let response = json!({
+            "id": id.to_string(),
+            "state": ticket.state,
+            "budget": Self::serialize_budget(&ticket.budget),
+        });
+        Ok(response)
     }
 
     fn search_exact(&self, args: &Value) -> Result<Value> {
@@ -404,12 +476,12 @@ impl McpServer {
         match code_intel.definition(name, from)? {
             Some(sym) => Ok(json!({
                 "name": sym.name,
-                "kind": format!("{:?}", sym.kind),
+                "kind": Self::symbol_kind_str(sym.kind),
                 "path": sym.path,
                 "line_start": sym.range.line_start,
                 "line_end": sym.range.line_end,
             })),
-            None => Ok(Value::Null),
+            None => Err(TmError::not_found("symbol", name)),
         }
     }
 
@@ -474,7 +546,7 @@ impl McpServer {
                 "isError": false,
             }),
             Err(e) => json!({
-                "content": [{"type": "text", "text": e.to_string()}],
+                "content": [{"type": "text", "text": Self::clean_error_message(&e.to_string())}],
                 "isError": true,
             }),
         })
@@ -788,5 +860,102 @@ mod tests {
                 .contains("peer closed stdin before sending any messages"),
             "error should explain that peer closed before sending messages"
         );
+    }
+
+    #[test]
+    fn ticket_show_serializes_unlimited_budget_as_null() {
+        let (server, _dir) = open_test_server();
+        let result = call(&server, "ticket_dispatch", json!({"objective": "test"}));
+        assert_eq!(result["isError"], false);
+        let ticket_id = payload(&result)["id"].as_str().expect("id").to_string();
+
+        let result = call(&server, "ticket_show", json!({"id": ticket_id}));
+        assert_eq!(result["isError"], false);
+        let out = payload(&result);
+
+        // Budget should have unlimited components serialized as null
+        assert_eq!(out["budget"]["tokens"], Value::Null);
+        assert_eq!(out["budget"]["dollars_micros"], Value::Null);
+        assert_eq!(out["budget"]["wall_seconds"], Value::Null);
+    }
+
+    #[test]
+    fn ticket_dispatch_includes_budget_as_null() {
+        let (server, _dir) = open_test_server();
+        let result = call(&server, "ticket_dispatch", json!({"objective": "test"}));
+        assert_eq!(result["isError"], false);
+        let out = payload(&result);
+
+        // Budget should be in response and have unlimited components as null
+        assert_eq!(out["budget"]["tokens"], Value::Null);
+        assert_eq!(out["budget"]["dollars_micros"], Value::Null);
+        assert_eq!(out["budget"]["wall_seconds"], Value::Null);
+    }
+
+    #[test]
+    fn symbol_def_unknown_symbol_is_an_error() {
+        let (server, _dir) = open_test_server();
+        let result = call(
+            &server,
+            "symbol_def",
+            json!({"name": "nonexistent_symbol_xyz"}),
+        );
+        assert_eq!(result["isError"], true);
+        let msg = result["content"][0]["text"].as_str().expect("error text");
+        // Should not contain internal error prefixes or type names
+        assert!(!msg.contains("parse:"));
+        assert!(!msg.contains("SymbolKind"));
+    }
+
+    #[test]
+    fn symbol_kind_str_formats_correctly() {
+        use tm_codeintel::symbols::SymbolKind;
+        assert_eq!(McpServer::symbol_kind_str(SymbolKind::Function), "function");
+        assert_eq!(McpServer::symbol_kind_str(SymbolKind::Struct), "struct");
+        assert_eq!(McpServer::symbol_kind_str(SymbolKind::Enum), "enum");
+        assert_eq!(
+            McpServer::symbol_kind_str(SymbolKind::Interface),
+            "interface"
+        );
+        assert_eq!(McpServer::symbol_kind_str(SymbolKind::Impl), "impl");
+        assert_eq!(McpServer::symbol_kind_str(SymbolKind::Module), "module");
+        assert_eq!(McpServer::symbol_kind_str(SymbolKind::Variable), "variable");
+        assert_eq!(
+            McpServer::symbol_kind_str(SymbolKind::TypeAlias),
+            "type_alias"
+        );
+    }
+
+    #[test]
+    fn clean_error_message_strips_prefixes() {
+        assert_eq!(
+            McpServer::clean_error_message("parse: ticket ID must look like T-<n>"),
+            "ticket ID must look like T-<n>"
+        );
+        assert_eq!(
+            McpServer::clean_error_message("storage: connection failed"),
+            "connection failed"
+        );
+        assert_eq!(
+            McpServer::clean_error_message("io: file not found"),
+            "file not found"
+        );
+        // Message without a prefix should be unchanged
+        assert_eq!(
+            McpServer::clean_error_message("some error message"),
+            "some error message"
+        );
+    }
+
+    #[test]
+    fn ticket_show_on_bad_id_has_clean_error_message() {
+        let (server, _dir) = open_test_server();
+        let result = call(&server, "ticket_show", json!({"id": "INVALID"}));
+        assert_eq!(result["isError"], true);
+        let msg = result["content"][0]["text"].as_str().expect("error text");
+        // Should not contain "parse: " prefix or type names
+        assert!(!msg.contains("parse:"));
+        assert!(!msg.contains("TicketId"));
+        assert!(msg.contains("ticket ID"));
     }
 }
