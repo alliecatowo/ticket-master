@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use parking_lot::Mutex;
 use tm_types::Clock;
 
+use crate::decide::{Answer, AnswerValue, DecideLimits, DecideRequest, DecideResponse, Question};
 use crate::fabric::Provider;
 use crate::types::{
     Candidate, Completion, CompletionRequest, ContentBlock, EmbedRequest, Embeddings, ModelId,
@@ -304,6 +305,175 @@ impl Provider for MockProvider {
                 cache_write_tokens: 0,
             },
         })
+    }
+}
+
+/// A canonical hash of a [`DecideRequest`], used as [`MockDecisionProvider`]'s script lookup
+/// key — same purpose as [`hash_request`], for the decider request shape instead.
+pub type DecideRequestHash = u64;
+
+/// Hash a [`DecideRequest`] into a [`DecideRequestHash`] by serializing it to canonical JSON
+/// (stable because `DecideRequest`'s fields are declared in a fixed order and `questions` is a
+/// `BTreeMap`, so key order is stable too) and hashing the bytes.
+pub fn hash_decide_request(req: &DecideRequest) -> DecideRequestHash {
+    // Invariant: `DecideRequest` contains no type whose `Serialize` impl can fail.
+    let json = serde_json::to_string(req).expect("DecideRequest serialization should never fail");
+    let mut hasher = std::hash::DefaultHasher::new();
+    json.as_bytes().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// A deterministic, network-free [`crate::decide::DecisionProvider`]: every test that needs a
+/// decision uses this instead of a real System One backend. Responses are scripted by a hash of
+/// the request, same pattern as [`MockProvider`] — no variant of this provider ever performs I/O.
+/// `decide` returns [`ProviderError`], the same error type [`Provider::complete`] uses, so a
+/// caller doesn't need a second error path just because the candidate is a decider.
+pub struct MockDecisionProvider {
+    id: String,
+    model: ModelId,
+    limits: DecideLimits,
+    scripts: Mutex<HashMap<DecideRequestHash, Result<DecideResponse, ProviderError>>>,
+    call_log: Mutex<Vec<DecideRequest>>,
+}
+
+impl MockDecisionProvider {
+    /// A mock decider identifying itself as `id`/`model`, with no scripted responses yet: every
+    /// request will fail with [`ProviderError::Unscripted`] until
+    /// [`MockDecisionProvider::script`] is called.
+    pub fn new(id: impl Into<String>, model: ModelId) -> Self {
+        MockDecisionProvider {
+            id: id.into(),
+            model,
+            limits: DecideLimits {
+                max_context_tokens: 1024,
+                max_options: 10,
+                kinds: vec![
+                    crate::decide::QuestionKind::Choice,
+                    crate::decide::QuestionKind::Score,
+                    crate::decide::QuestionKind::Noul,
+                ],
+            },
+            scripts: Mutex::new(HashMap::new()),
+            call_log: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Override the [`DecideLimits`] this mock reports.
+    pub fn set_limits(&mut self, limits: DecideLimits) {
+        self.limits = limits;
+    }
+
+    /// Script the response for any request that hashes equal to `req`'s hash.
+    pub fn script(&self, req: &DecideRequest, response: DecideResponse) {
+        self.scripts
+            .lock()
+            .insert(hash_decide_request(req), Ok(response));
+    }
+
+    /// Script a failure for any request that hashes equal to `req`'s hash.
+    pub fn script_failure(&self, req: &DecideRequest, error: ProviderError) {
+        self.scripts
+            .lock()
+            .insert(hash_decide_request(req), Err(error));
+    }
+
+    /// Every request this provider has received, in order, for test assertions.
+    pub fn call_log(&self) -> Vec<DecideRequest> {
+        self.call_log.lock().clone()
+    }
+
+    /// Build a deterministic [`DecideResponse`] for `req` without registering it as a script: a
+    /// convenience for tests that don't care about exact content, only that a call succeeded and
+    /// is stable across repeated calls with the same request.
+    ///
+    /// For each question, picks an answer derived from `hash_decide_request(req)` mixed with the
+    /// question id, so the same request always answers the same way and a different request
+    /// answers differently.
+    pub fn deterministic_response(&self, req: &DecideRequest) -> DecideResponse {
+        let base_hash = hash_decide_request(req);
+        let mut answers = std::collections::BTreeMap::new();
+
+        for (qid, question) in &req.questions {
+            let mut hasher = std::hash::DefaultHasher::new();
+            (base_hash, qid).hash(&mut hasher);
+            let mixed = hasher.finish();
+
+            let answer = match question {
+                Question::Choice { options, .. } => {
+                    let n = options.len().max(1);
+                    let idx = (mixed as usize) % n;
+                    let mut probabilities = vec![0.0f32; options.len()];
+                    if let Some(slot) = probabilities.get_mut(idx) {
+                        *slot = 1.0;
+                    }
+                    Answer {
+                        value: AnswerValue::Choice(
+                            options
+                                .get(idx)
+                                .map(|o| o.label.clone())
+                                .unwrap_or_else(|| "none".to_string()),
+                        ),
+                        confidence: 0.9,
+                        probabilities,
+                    }
+                }
+                Question::Score { levels, .. } => {
+                    let n = levels.len().max(1);
+                    let idx = (mixed as usize) % n;
+                    let mut probabilities = vec![0.0f32; levels.len()];
+                    if let Some(slot) = probabilities.get_mut(idx) {
+                        *slot = 1.0;
+                    }
+                    Answer {
+                        value: AnswerValue::Score(
+                            levels
+                                .get(idx)
+                                .map(|l| l.label.clone())
+                                .unwrap_or_else(|| "none".to_string()),
+                        ),
+                        confidence: 0.9,
+                        probabilities,
+                    }
+                }
+                Question::Noul { .. } => Answer {
+                    value: AnswerValue::Noul(mixed % 2 == 0),
+                    confidence: 0.9,
+                    probabilities: vec![],
+                },
+            };
+
+            answers.insert(qid.clone(), answer);
+        }
+
+        DecideResponse {
+            model: self.model.clone(),
+            answers,
+        }
+    }
+}
+
+#[async_trait]
+impl crate::decide::DecisionProvider for MockDecisionProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn limits(&self) -> DecideLimits {
+        self.limits.clone()
+    }
+
+    /// Serve `req` from the script table, falling back to [`ProviderError::Unscripted`].
+    async fn decide(&self, req: DecideRequest) -> Result<DecideResponse, ProviderError> {
+        self.call_log.lock().push(req.clone());
+
+        let hash = hash_decide_request(&req);
+        match self.scripts.lock().get(&hash) {
+            Some(Ok(response)) => Ok(response.clone()),
+            Some(Err(error)) => Err(error.clone()),
+            None => Err(ProviderError::Unscripted(format!(
+                "no script for hash {hash:x}"
+            ))),
+        }
     }
 }
 
@@ -680,5 +850,140 @@ mod tests {
 
         assert_eq!(result.usage.input_tokens, 5 / 4);
         assert_eq!(result.usage.output_tokens, 0);
+    }
+
+    fn make_test_decide_request() -> DecideRequest {
+        let mut questions = std::collections::BTreeMap::new();
+        questions.insert(
+            "family".to_string(),
+            Question::Choice {
+                instructions: "which tool family?".into(),
+                options: vec![
+                    crate::decide::OptionSpec { label: "fs".into() },
+                    crate::decide::OptionSpec {
+                        label: "shell".into(),
+                    },
+                ],
+            },
+        );
+        DecideRequest {
+            model: ModelId::new("mock", "decider"),
+            state: "run `ls -la`".into(),
+            questions,
+        }
+    }
+
+    #[tokio::test]
+    async fn decide_deterministic_response_is_stable_across_calls() {
+        use crate::decide::DecisionProvider;
+
+        let provider = MockDecisionProvider::new("mock-decider", ModelId::new("mock", "decider"));
+        let req = make_test_decide_request();
+        provider.script(&req, provider.deterministic_response(&req));
+
+        let first = provider.decide(req.clone()).await.unwrap();
+        let second = provider.decide(req.clone()).await.unwrap();
+        assert_eq!(first, second, "same request should decide identically");
+        assert_eq!(provider.call_log().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn decide_differs_for_a_different_request() {
+        use crate::decide::DecisionProvider;
+
+        let provider = MockDecisionProvider::new("mock-decider", ModelId::new("mock", "decider"));
+        let req1 = make_test_decide_request();
+        let mut req2 = make_test_decide_request();
+        req2.state = "run `rm -rf /`".into();
+
+        assert_ne!(
+            hash_decide_request(&req1),
+            hash_decide_request(&req2),
+            "different requests should hash differently"
+        );
+
+        let response1 = DecideResponse {
+            model: ModelId::new("mock", "decider"),
+            answers: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert(
+                    "family".to_string(),
+                    Answer {
+                        value: AnswerValue::Choice("fs".into()),
+                        confidence: 0.9,
+                        probabilities: vec![1.0, 0.0],
+                    },
+                );
+                m
+            },
+        };
+        let response2 = DecideResponse {
+            model: ModelId::new("mock", "decider"),
+            answers: {
+                let mut m = std::collections::BTreeMap::new();
+                m.insert(
+                    "family".to_string(),
+                    Answer {
+                        value: AnswerValue::Choice("shell".into()),
+                        confidence: 0.9,
+                        probabilities: vec![0.0, 1.0],
+                    },
+                );
+                m
+            },
+        };
+        provider.script(&req1, response1.clone());
+        provider.script(&req2, response2.clone());
+
+        let decided1 = provider.decide(req1).await.unwrap();
+        let decided2 = provider.decide(req2).await.unwrap();
+        assert_eq!(decided1, response1);
+        assert_eq!(decided2, response2);
+        assert_ne!(
+            decided1, decided2,
+            "different requests should decide differently"
+        );
+    }
+
+    #[tokio::test]
+    async fn decide_unscripted_error() {
+        use crate::decide::DecisionProvider;
+
+        let provider = MockDecisionProvider::new("mock-decider", ModelId::new("mock", "decider"));
+        let req = make_test_decide_request();
+
+        let result = provider.decide(req).await;
+        assert!(matches!(result, Err(ProviderError::Unscripted(_))));
+    }
+
+    #[tokio::test]
+    async fn decide_with_scripted_failure() {
+        use crate::decide::DecisionProvider;
+
+        let provider = MockDecisionProvider::new("mock-decider", ModelId::new("mock", "decider"));
+        let req = make_test_decide_request();
+        provider.script_failure(
+            &req,
+            ProviderError::Unavailable("simulated outage".to_string()),
+        );
+
+        let result = provider.decide(req).await;
+        assert!(matches!(result, Err(ProviderError::Unavailable(_))));
+    }
+
+    #[test]
+    fn limits_are_reportable_and_overridable() {
+        use crate::decide::DecisionProvider;
+
+        let mut provider =
+            MockDecisionProvider::new("mock-decider", ModelId::new("mock", "decider"));
+        assert_eq!(provider.limits().max_options, 10);
+
+        provider.set_limits(DecideLimits {
+            max_context_tokens: 512,
+            max_options: 4,
+            kinds: vec![crate::decide::QuestionKind::Noul],
+        });
+        assert_eq!(provider.limits().max_options, 4);
     }
 }

@@ -32,11 +32,14 @@ pub enum Role {
     Embedder,
     /// Driving a computer or browser.
     ComputerUse,
+    /// Bounded, typed-question System One decisions (D-020): is this a question or a job,
+    /// which tool family, is this command risky — never text generation.
+    Decider,
 }
 
 impl Role {
     /// Every role, in a stable order.
-    pub const ALL: [Role; 12] = [
+    pub const ALL: [Role; 13] = [
         Role::VisionFrontier,
         Role::PlannerFrontier,
         Role::ArchitectFrontier,
@@ -49,6 +52,7 @@ impl Role {
         Role::SummarizerCheap,
         Role::Embedder,
         Role::ComputerUse,
+        Role::Decider,
     ];
 
     /// The dotted name used in configuration and events, e.g. `coder.fast`.
@@ -66,6 +70,7 @@ impl Role {
             Role::SummarizerCheap => "summarizer.cheap",
             Role::Embedder => "embedder",
             Role::ComputerUse => "computer_use",
+            Role::Decider => "decider",
         }
     }
 
@@ -159,5 +164,13 @@ mod tests {
             Role::SynthesizerLongContext.config_key(),
             "synthesizer_long_context"
         );
+    }
+
+    #[test]
+    fn all_includes_decider() {
+        assert_eq!(Role::ALL.len(), 13);
+        assert!(Role::ALL.contains(&Role::Decider));
+        assert_eq!(Role::Decider.as_str(), "decider");
+        assert_eq!(Role::from_str("decider").unwrap(), Role::Decider);
     }
 }

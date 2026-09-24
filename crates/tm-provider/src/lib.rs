@@ -16,6 +16,7 @@
 #![warn(missing_docs)]
 
 pub mod anthropic;
+pub mod decide;
 pub mod fabric;
 pub mod mock;
 pub mod providers;
@@ -26,8 +27,12 @@ pub mod types;
 pub mod wire_names;
 
 pub use anthropic::AnthropicProvider;
+pub use decide::{
+    Answer, AnswerValue, DecideLimits, DecideRequest, DecideResponse, DecisionProvider, LevelSpec,
+    OptionSpec, Question, QuestionId, QuestionKind,
+};
 pub use fabric::{Fabric, Provider, ProviderRecord};
-pub use mock::MockProvider;
+pub use mock::{MockDecisionProvider, MockProvider};
 pub use providers::compat::DevPassProvider;
 pub use providers::registry::Registry;
 pub use providers::{
