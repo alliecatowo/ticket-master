@@ -83,7 +83,7 @@ use tm_types::Clock;
 
 use crate::fabric::{Fabric, Provider};
 use crate::providers::{
-    Availability, Capabilities, EnvVarRequirement, LOCAL_PROVIDER_IDS, LocalProbe, ProviderInfo,
+    Availability, Capabilities, EnvVarRequirement, LocalProbe, ProviderInfo, LOCAL_PROVIDER_IDS,
 };
 use crate::role_config::{RoleCandidate, RoleTable};
 use crate::types::{ModelId, ProviderError};

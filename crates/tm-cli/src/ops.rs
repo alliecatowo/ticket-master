@@ -589,14 +589,17 @@ fn provider_default(
 }
 
 /// Human/JSON label for [`tm_provider::Availability`], shared by [`provider_list`] and
-/// [`provider_detect`] so both commands describe the same three states the same way: `"ready"`
+/// [`provider_detect`] so both commands describe the same four states the same way: `"ready"`
 /// (safe to route traffic to right now), `"unreachable"` (configured, but a reachability probe
-/// found nothing listening — today only reachable for the three local backends), or
-/// `"not-configured"` (no required env var set).
+/// found nothing listening — today only reachable for the three local backends), `"unusable"`
+/// (either a cloud backend whose configuration exists but cannot currently construct a usable
+/// provider, e.g. Bedrock before SigV4 exists, or a local backend that answered the reachability
+/// probe but has no model pulled yet), or `"not-configured"` (no required env var set).
 fn availability_label(availability: tm_provider::Availability) -> &'static str {
     match availability {
         tm_provider::Availability::NotConfigured => "not-configured",
         tm_provider::Availability::ConfiguredButUnreachable => "unreachable",
+        tm_provider::Availability::Unusable => "unusable",
         tm_provider::Availability::Ready => "ready",
     }
 }
@@ -622,7 +625,7 @@ pub(crate) fn load_role_table_for_state_dir(
                 tm_types::TmError::storage(format!("Failed to read providers.toml: {e}"))
             })?;
             tm_provider::RoleTable::parse(&content)
-                .map_err(|e| tm_types::TmError::parse(format!("Invalid providers.toml: {e:?}")))
+                .map_err(|e| tm_types::TmError::parse(format!("Invalid providers.toml: {e}")))
         }
         None => {
             let legacy = state_dir.join("harness.toml");
@@ -1225,7 +1228,7 @@ pub fn harness_show(project: &Project, renderer: &Renderer) -> tm_types::Result<
         let content = fs::read_to_string(&harness_path)
             .map_err(|e| tm_types::TmError::storage(format!("Failed to read harness.toml: {e}")))?;
         tm_harness::HarnessConfig::parse(&content)
-            .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e:?}")))?
+            .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e}")))?
     } else {
         tm_harness::HarnessConfig::default()
     };

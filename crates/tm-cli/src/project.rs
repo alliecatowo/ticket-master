@@ -935,7 +935,7 @@ pub fn init(args: &InitArgs, renderer: &Renderer) -> tm_types::Result<()> {
     if !providers_path.exists() {
         let defaults = tm_provider::RoleTable::default_table()
             .to_toml_string()
-            .map_err(|e| TmError::parse(format!("Failed to serialize provider defaults: {e:?}")))?;
+            .map_err(|e| TmError::parse(format!("Failed to serialize provider defaults: {e}")))?;
         std::fs::write(&providers_path, defaults)?;
     }
     let (json, human) = match &promotion {

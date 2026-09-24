@@ -34,8 +34,15 @@ CLI monochrome by design; workers execute in the launcher cwd instead of the pro
 4. **`/level fast|deep`** switches the chat role (`CoderFast`/`CoderDeep`), persisted in
    the session JSON (backward-compatible default). Reasoning-effort knobs are a non-goal:
    no provider exposes them uniformly.
-5. **One vocabulary**: `ready`/`not-configured`/`local (unprobed)` in chat and CLI alike;
-   `tm provider status` reads the same project table as `list`.
+5. **A shared status source, not yet one identical vocabulary**: `tm provider status` reads the
+   same project table as `list`. The CLI's `tm provider list`/`detect` render the full
+   `tm_provider::Availability` (`ready`/`not-configured`/`unreachable` — a local backend's probe
+   found nothing listening — and `unusable`, either a cloud backend whose credentials exist but
+   cannot yet construct a usable provider at all, e.g. Bedrock before SigV4 signing exists, or a
+   local backend that answered the probe with no model pulled yet). The chat's own
+   `/connect` picker is a simpler, non-probing three-way status (`local, not checked`/
+   `configured`/`not configured`) that never distinguishes `unusable` from `configured` — a known
+   gap, not parity with the CLI's fuller `Availability`.
 6. **`init` scaffolds, `set` explains**: `init` writes `harness.toml`
    (`HarnessConfig::default`) + `providers.toml` (serialized default table); `harness
    show` renders defaults with a note when missing; `set` scaffolds, validates, and persists a

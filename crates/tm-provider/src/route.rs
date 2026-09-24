@@ -322,10 +322,18 @@ mod tests {
             },
             now,
         );
+        // The unapproved fallback must not be silently used (that would be `Degrade`), but the
+        // primary is only *temporarily* over its concurrency limit, not permanently blocked — so
+        // the honest outcome is `Wait` for the primary to free up, not `Exhausted`. Per
+        // `docs/decisions/D-023-capacity-wait-is-not-a-failed-attempt.md`, a capacity wait is not
+        // a failure, so this must not be conflated with "no candidate can serve this role at
+        // all". Deriving the expected instant from `CONCURRENCY_RETRY_HINT` (rather than
+        // hardcoding the resulting timestamp) keeps this assertion tied to that constant.
         assert_eq!(
             route(&table, &state, Role::CoderFast, &need(Tolerance::Any), now),
-            RouteDecision::Exhausted,
-            "an unapproved fallback must not be silently used"
+            RouteDecision::Wait(now.plus_seconds(CONCURRENCY_RETRY_HINT.as_secs() as i64)),
+            "an unapproved fallback must not be silently used as a Degrade, but a merely-busy \
+             primary must still produce Wait, not Exhausted"
         );
     }
 

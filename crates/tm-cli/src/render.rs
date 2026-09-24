@@ -224,12 +224,12 @@ impl Table {
             } else {
                 format!("{header:<width$}", width = col_widths[i])
             };
-            let rendered = if color { format!("\x1b[34m{padded}\x1b[0m") } else { padded };
-            if i == last {
-                output.push_str(&rendered);
+            let rendered = if color {
+                format!("\x1b[34m{padded}\x1b[0m")
             } else {
-                output.push_str(&rendered);
-            }
+                padded
+            };
+            output.push_str(&rendered);
         }
         output.push('\n');
 

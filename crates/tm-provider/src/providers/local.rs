@@ -502,12 +502,10 @@ mod tests {
         }
 
         let empty = serve_once(r#"{"data":[]}"#).await;
-        assert!(
-            list_v1_models(&empty, None)
-                .await
-                .expect("empty list")
-                .is_empty()
-        );
+        assert!(list_v1_models(&empty, None)
+            .await
+            .expect("empty list")
+            .is_empty());
 
         let populated = serve_once(r#"{"data":[{"id":"actual-pulled-model"}]}"#).await;
         assert_eq!(

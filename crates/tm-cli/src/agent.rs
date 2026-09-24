@@ -1739,10 +1739,18 @@ fn first_registered_candidate(candidates: &[ModelId], registered: &[String]) -> 
         .cloned()
 }
 
-/// The model `table` already routes to `slug` under any role, if it names the slug at all.
+/// The model `table` already routes to `slug` under any *chat-routable* role, if it names the
+/// slug at all. Deliberately excludes [`tm_types::Role::Embedder`]: `default_table`'s embedder
+/// candidate names a provider (`openai`, since Anthropic has no embedding endpoint) purely for
+/// embedding calls, never for a chat turn, so a backend appearing only there must still be
+/// offered as an [`AGENT_ROLE`] fallback by this function's one caller — otherwise a project
+/// whose only configured backend is that embedder's provider (e.g. `OPENAI_API_KEY` alone) would
+/// never get it appended as a chat candidate at all, reproducing exactly the "primary has no
+/// credentials and nothing else is offered" failure D-022 exists to fix.
 fn table_model_for(table: &RoleTable, slug: &str) -> Option<String> {
     tm_types::Role::ALL
         .iter()
+        .filter(|role| **role != tm_types::Role::Embedder)
         .flat_map(|role| table.candidates_for(*role))
         .find(|c| c.provider == slug)
         .map(|c| c.model.clone())
@@ -2099,6 +2107,21 @@ mod tests {
             first_registered_candidate(&candidates, &[]),
             None,
             "nothing registered means no fallback"
+        );
+    }
+
+    /// `default_table`'s sole [`tm_types::Role::Embedder`] candidate names `openai` (Anthropic
+    /// has no embedding endpoint). Regression guard: `table_model_for` must not treat that as
+    /// "the table already routes chat traffic to openai", or `build_fabric_with_table`'s
+    /// auto-append loop would skip appending openai as an [`AGENT_ROLE`] fallback for a project
+    /// whose only configured backend is OpenAI — reproducing the "primary has no credentials and
+    /// nothing else is offered" failure D-022 exists to fix, just for a different provider.
+    #[test]
+    fn table_model_for_ignores_the_embedder_only_candidate() {
+        assert!(
+            table_model_for(&tm_provider::RoleTable::default_table(), "openai").is_none(),
+            "openai only appears as the embedder's candidate in the default table; it must not \
+             be reported as already routed for chat roles like AGENT_ROLE"
         );
     }
 

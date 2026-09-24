@@ -109,9 +109,10 @@ impl ProviderInfo {
     /// shaping or retry logic).
     ///
     /// This is env-var presence only, never a network reachability check — see [`Availability`]
-    /// for the three-state answer that also accounts for reachability where it matters (the
+    /// for the four-state answer that also accounts for reachability where it matters (the
     /// three [`local`] backends, whose env vars are all optional so this method alone is
-    /// vacuously `true` for them regardless of whether a server is actually listening).
+    /// vacuously `true` for them regardless of whether a server is actually listening) and for
+    /// backends that are configured but not yet constructible at all.
     pub fn is_configured(&self) -> bool {
         // GitHub Models supports a namespaced alias so an unrelated GitHub CLI token does not
         // shadow it. Keep discovery/status consistent with the provider constructor.
@@ -122,7 +123,8 @@ impl ProviderInfo {
         }
         // Gemini's constructor deliberately accepts a common alternate credential name too. Keep
         // detection in sync so a valid alias is not reported as missing configuration.
-        if self.id == "gemini" && std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty())
+        if self.id == "gemini"
+            && std::env::var("GOOGLE_API_KEY").is_ok_and(|v| !v.trim().is_empty())
         {
             return true;
         }
@@ -264,12 +266,10 @@ mod availability_tests {
     fn local_probe_reachable_is_true_for_anything_but_unreachable() {
         assert!(!LocalProbe::Unreachable.reachable());
         assert!(LocalProbe::ReachableNoModels.reachable());
-        assert!(
-            LocalProbe::Ready {
-                first_model: "llama3".to_string()
-            }
-            .reachable()
-        );
+        assert!(LocalProbe::Ready {
+            first_model: "llama3".to_string()
+        }
+        .reachable());
     }
 
     #[test]
