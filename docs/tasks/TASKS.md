@@ -75,7 +75,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `sed -n 896,904p crates/tm-cli/src/tickets.rs` -> `format!("Dependency graph (subgraph from {}):\n{:?}", ticket, view.graph)`; confirmed `tm dep graph T-2` still returns the unfiltered graph.
 
-- [ ] **s1-milestone-new-show** — Add tm milestone new/show and validate --milestone on ticket new
+- [x] **s1-milestone-new-show** (landed 047afea) — Add tm milestone new/show and validate --milestone on ticket new
   model: sonnet · severity: critical · builds Rust: yes · area: cli/milestones · deps: s1-display-labels
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/tickets.rs`, `CLAUDE.md`
   change: Add `MilestoneCommand::New { title, --ticket <T>... }` with `create` as a visible alias, calling the existing `Store::create_milestone` (store.rs:1694) and printing "Created M-1: <title>". Add `Show(MilestoneRefArgs)` printing title, state and member tickets with state labels plus a done/total count. When `milestone list` is empty: "No milestones yet. Create one: tm milestone new \"<title>\"". Make `tm ticket new --milestone M-9` fail with "no milestone M-9. Run `tm milestone list`..." when M-9 doesn't exist (today it's silently dropped). Add a CLAUDE.md line.
@@ -327,7 +327,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-cli`
   evidence: `tm run T-1` (mock failure) -> `error: agent turn failed: ticket T-1 attempt 1 did not finish: Other: model ended turn without submitting; it is ready again and will be retried`.
 
-- [ ] **p1-http-error-json-format** — HTTP API errors return plain text instead of JSON
+- [x] **p1-http-error-json-format** (landed 7e89c4e) — HTTP API errors return plain text instead of JSON
   model: sonnet · severity: critical · builds Rust: yes · area: server · deps: none
   files: `crates/tm-server/src/main.rs`, `crates/tm-server/src/routes.rs`
   change: Every HTTP error response (404s, malformed-body validation failures, axum/serde deserialization errors) currently renders as plain text (e.g. axum's default rejection body), while the transition endpoints already return structured JSON errors. Add a shared error-response type/middleware that wraps all error paths — including 404 (bad ticket ID), 400/422 (missing/invalid JSON fields) — as `{"error": "<snake_case_code>", "message": "<plain sentence>"}`. For a malformed `POST /tickets` body, collect and name every missing required field together in one message rather than failing on the first.
@@ -367,7 +367,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-cli`
   evidence: Right after `tm init` (mock provider, isolated tempdir), `tm search --mode semantic --json "where are tickets moved between states"` returned `[]` with no note; after `tm doctor` (which reported repaired incremental drift) the same query returned correctly ranked hits. The empty-index and real-empty-result cases render identically today.
 
-- [ ] **p1-cli-ticket-context-command** — Add `tm ticket context <ID>` to make a ticket's prefetched context pack and token cost observable
+- [x] **p1-cli-ticket-context-command** (landed c82dca4) — Add `tm ticket context <ID>` to make a ticket's prefetched context pack and token cost observable
   model: sonnet · severity: high · builds Rust: yes · area: cli/context · deps: none
   files: `crates/tm-cli/src/ticket.rs`, `crates/tm-context/src/lib.rs`, `crates/tm-agent/src/executor.rs`
   change: `tm-context::ContextPack` already carries sections (outlines/symbols/history/search hits) and a `rent_report`, and `tm-agent`'s executor/agent_loop builds one per attempt, but nothing surfaces it to a person — `tm run`'s output, `tm ticket show --json`, and the event log all omit it (a full ticket run's events, e.g. `UsageRecorded`, serialize as bare `{kind, seq, subject, ts}` with no payload). Add a `tm ticket context <ID>` subcommand rendering the last-compiled `ContextPack`'s sections and `rent_report` in plain words, plus a `--json` form serializing the real `ContextPack` fields. (This is a CLI-surfaced view of the same data the TUI's `s1-slash-context-todos` `/context` command shows; keep the rendering logic shared where practical rather than duplicated.)
@@ -375,7 +375,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-cli`
   evidence: `tm events show 13 --json` (a `UsageRecorded` event) returned `{"kind":"UsageRecorded","seq":13,"subject":"T-1","ts":"..."}` — no tokens, no context, no payload of any kind.
 
-- [ ] **p1-agent-run-progress-plain-language** — Live `tm run` progress prints raw dotted tool identifiers and raw error strings instead of plain-language actions
+- [x] **p1-agent-run-progress-plain-language** (landed 440595c) — Live `tm run` progress prints raw dotted tool identifiers and raw error strings instead of plain-language actions
   model: sonnet · severity: high · builds Rust: yes · area: cli/copy · deps: none
   files: `crates/tm-cli/src/agent.rs`
   change: `format_tool_call` (~lines 1826-1834) prints the raw dotted tool-kind string (`fs.list`, `fs.read`, `edit.apply_patch`, `shell.run`, `artifact.store`, `ticket.submit`) instead of a short plain-language phrase ("Read a file", "Ran a command", "Edited a file"), and surfaces internal error text verbatim (`io: stream did not contain valid UTF-8`, `parse: unknown variant \`test-output\`, expected one of ...`, `invariant violated: submission requires at least one evidence artifact`). Map tool names to plain phrases and either drop or plain-language raw error strings, matching this repo's voice rules.
@@ -439,7 +439,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-e2e`
   evidence: The `nav-fresh` probe confirmed indexing picks up new files/edits and `nav-semantic` confirmed correct top-1 hits, and `prefetch` confirmed a `ContextPack`/`rent_report` abstraction exists internally — all verified by hand via CLI probes, none by an automated regression test.
 
-- [ ] **d20-decider-trait-and-mock** — Add DecisionProvider trait, DecideRequest/Response types, MockDecisionProvider, and Role::Decider
+- [x] **d20-decider-trait-and-mock** (landed 6a2f786) — Add DecisionProvider trait, DecideRequest/Response types, MockDecisionProvider, and Role::Decider
   model: sonnet · severity: critical · builds Rust: yes · area: providers (D-020) · deps: none
   files: `crates/tm-provider/src/decide.rs`, `crates/tm-provider/src/lib.rs`, `crates/tm-provider/src/mock.rs`, `crates/tm-types/src/role.rs`
   change: Create `crates/tm-provider/src/decide.rs` with the `DecisionProvider` trait (id, limits, async decide) and `DecideRequest`/`DecideResponse`/`Question(Choice|Score|Noul)`/`DecideLimits` types per D-020 §Decision 1-2 (`docs/decisions/D-020-system-one-decision-providers.md`); add `MockDecisionProvider` (hash-keyed scripted responses, same pattern as `crates/tm-provider/src/mock.rs`'s `MockProvider` — no I/O ever) in the same file or a sibling `decide/mock.rs`; add `Role::Decider` to `crates/tm-types/src/role.rs`'s enum and its `pub const ALL: [Role; 12]` (becomes 13), updating every place that iterates `Role::ALL` and any hardcoded `12` in tests. This is a foundational task all other D-020 tasks below depend on.
@@ -463,7 +463,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-provider`
   evidence: `crates/tm-provider/src/role_config.rs:90-110` shows the existing `RoleConfigError` enum (InvalidToml, UnknownRole, EmptyRole, ZeroConcurrency) this task reuses rather than duplicating.
 
-- [ ] **d20-classify-decided-event-kind** — Add EventKind::ClassifyDecided ("classify.decided") with the D-020 payload shape
+- [x] **d20-classify-decided-event-kind** (landed 650cd77) — Add EventKind::ClassifyDecided ("classify.decided") with the D-020 payload shape
   model: sonnet · severity: high · builds Rust: yes · area: events (D-020) · deps: none
   files: `crates/tm-events/src/kind.rs`
   change: Add a `ClassifyDecided` variant to `EventKind` following the existing pattern at `kind.rs:79-80/430` (TicketCreated → "ticket.created") and `:225-226/476` (ApprovalRequested → "approval.requested"): `#[serde(rename = "classify.decided")]`, wire string "classify.decided", with fields `{site, backend, model, model_revision, input_hash, questions_hash, answers, calibrated_confidence, thresholds, disposition, latency_ms, cost_micros}` per D-020's cascade diagram (`docs/vision/system-one-decisions.md` §3). Use the `classify.*` namespace, not `decision.*` (already taken by the unrelated `DecisionId` ticket-decision domain in `crates/tm-core/src/decision.rs`).
@@ -511,7 +511,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run hygiene`
   evidence: `docs/backlog.md`'s "## Ask the owner later" section currently contains the D-020 deferral entry dated 2026-09-23, now superseded by the owner's direct Jev/Laya request in this same session.
 
-- [ ] **critic-b0-ci-green** — CI is red on main: fix the clippy lint and the Linux build before anything else lands
+- [x] **critic-b0-ci-green** (landed b01efda) — CI is red on main: fix the clippy lint and the Linux build before anything else lands
   model: sonnet · severity: critical · builds Rust: yes · area: ci · deps: none
   files: `crates/tm-codeintel/src/walk.rs`, `crates/tm-computer/src/linux.rs`, `rust-toolchain.toml`
   change: Two verified, independent CI failures block every other batch. (1) `clippy::for_kv_map` fails on both OSes (CI run 35917628490): `for (path, _hash) in previous_map.iter()` at walk.rs:279 iterates a map only for its keys; change it to `.keys()`. (2) `crates/tm-computer/src/linux.rs` does not compile against x11rb 0.14 on Linux (Release run 35883664234), which is also why the v0.1.0 release shipped only an aarch64 asset; fix the x11rb 0.14 API mismatch. (3) `rust-toolchain.toml` is `channel = "stable"` with no version pinned, while this machine has 1.95, so a local `mise run verify` pass is not proof CI will pass; pin an exact version matching what CI's dtolnay/rust-toolchain action resolves today. Run this before B1 starts, since every later batch's gate assumes CI is green.
@@ -551,7 +551,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-codeintel`
   evidence: workflow wf_87a85411-848's critic result, "missing" item 10: SPEC §10/§32.2's ask for a nav-quality measurement, and nav-potion-embedder's acceptance having only two hand-picked queries.
 
-- [ ] **critic-tool-schema-trim-prompt-caching** — Cut per-turn token burn: authority-scoped tool trimming and prompt caching
+- [x] **critic-tool-schema-trim-prompt-caching** (landed 7a7e13a) — Cut per-turn token burn: authority-scoped tool trimming and prompt caching
   model: sonnet · severity: high · builds Rust: yes · area: agent/providers · deps: none
   files: `crates/tm-agent/src/tools.rs`, `crates/tm-provider/src/fabric.rs`, `docs/decisions/D-0NN-tool-schema-trimming-and-caching.md`
   change: `docs/backlog.md:617-620` records roughly 175k tokens per small turn and about 18KB of tool schemas resent on every single step, which will dominate both benchmark cost/score and every real ticket run's budget. This is also the direct cause of the "4 agents burning 200k tokens each" pattern the owner explicitly flagged as unwanted: wide decomposition into many small, cheap turns only pays off if each turn's fixed overhead (full tool schema set, full context) is trimmed, not carried on every step. Add: (1) authority-scoped tool filtering (SPEC §30.1) so a ticket's `Authority` determines which tool schemas are even sent, instead of the full set on every request; (2) provider-side prompt caching for the stable prefix (system prompt + tool schemas) wherever the configured provider supports it (Anthropic's `cache_control`, or the gateway's equivalent), reusing `Fabric::execute`/`execute_priced`'s existing request path. Write a decision doc recording the before/after token measurement. This is in-flight work already noted as depending on the edit-hash fix agents; coordinate rather than duplicate.
