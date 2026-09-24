@@ -1,9 +1,11 @@
 //! [`McpServer`]: exposes one already-identified Ticketmaster project as a real MCP server over
-//! stdio — `ticket_list`/`ticket_show` (from [`tm_core::Store::view`]), `search_*` and `symbol_*`
-//! (from `tm_codeintel::CodeIntel`, the same facade `tm-cli`'s own `search`/`symbol` subcommands
-//! call — see `crates/tm-cli/src/search.rs`), and one write: `ticket_dispatch`, which creates a
-//! work ticket with `tm ticket new`'s defaults and activates it, so an MCP host (Claude Code, via
-//! `tm mcp`) can hand work to tm's workers.
+//! stdio — `ticket_list`/`ticket_show` (from [`tm_core::Store::view`]), `search_*`/`symbol_*`/
+//! `history_*` (from `tm_codeintel::CodeIntel`, the same facade `tm-cli`'s own `search`/`symbol`/
+//! `history` subcommands call — see `crates/tm-cli/src/search.rs`), and one write:
+//! `ticket_dispatch`, which creates a work ticket with `tm ticket new`'s defaults and activates
+//! it, so an MCP host (Claude Code, via `tm mcp`) can hand work to tm's workers.
+//! `rename_preview` is deliberately left out here, since it's write-shaped (an edit a host would
+//! need to apply), unlike every other read-only `symbol_*`/`search_*`/`history_*` tool.
 //!
 //! # Tool names
 //!
@@ -101,6 +103,30 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "search_regex",
+            "description": "Regex search over the project's tracked files.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "A regular expression."},
+                    "limit": {"type": "integer", "minimum": 1}
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
+            "name": "search_semantic",
+            "description": "Semantic (embedding) search over the project's code index for conceptually similar content, not just literal matches.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1}
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
             "name": "symbol_def",
             "description": "Resolve a symbol name to its definition site.",
             "inputSchema": {
@@ -122,6 +148,70 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "symbol_references",
+            "description": "Occurrences that reference the symbol with this id. Get an id from symbol_def first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "symbol_id": {"type": "integer", "minimum": 0} },
+                "required": ["symbol_id"]
+            }
+        }),
+        json!({
+            "name": "symbol_callers",
+            "description": "Symbols that call the symbol with this id. Get an id from symbol_def first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "symbol_id": {"type": "integer", "minimum": 0} },
+                "required": ["symbol_id"]
+            }
+        }),
+        json!({
+            "name": "symbol_callees",
+            "description": "Symbols called by the symbol with this id. Get an id from symbol_def first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "symbol_id": {"type": "integer", "minimum": 0} },
+                "required": ["symbol_id"]
+            }
+        }),
+        json!({
+            "name": "history_why",
+            "description": "Git commits that last touched a line range, most recent first.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "line_start": {"type": "integer", "minimum": 1},
+                    "line_end": {"type": "integer", "minimum": 1}
+                },
+                "required": ["path", "line_start", "line_end"]
+            }
+        }),
+        json!({
+            "name": "history_search",
+            "description": "Search git commit messages and diffs for a query.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1}
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
+            "name": "history_deleted",
+            "description": "Find implementations matching a query that were deleted and never reintroduced.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1}
+                },
+                "required": ["query"]
+            }
+        }),
+        json!({
             "name": "ticket_dispatch",
             "description": "Hand a task to tm's background workers: creates a work ticket for the objective (the same defaults as `tm ticket new`) and queues it. Returns the ticket id and state; follow it with ticket_show. A worker picks it up when a tm scheduler is running for this project (`tm mcp` runs one unless started with --no-workers). A finished ticket waits for a human to accept or reject it.",
             "inputSchema": {
@@ -140,8 +230,16 @@ const TOOL_NAMES: &[&str] = &[
     "ticket_show",
     "search_exact",
     "search_hybrid",
+    "search_regex",
+    "search_semantic",
     "symbol_def",
     "symbol_outline",
+    "symbol_references",
+    "symbol_callers",
+    "symbol_callees",
+    "history_why",
+    "history_search",
+    "history_deleted",
     "ticket_dispatch",
 ];
 
@@ -191,6 +289,30 @@ fn get_str<'a>(args: &'a Value, field: &str) -> Result<&'a str> {
     args.get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| TmError::parse(format!("`{field}` is required and must be a string")))
+}
+
+fn get_u64(args: &Value, field: &str) -> Result<u64> {
+    args.get(field).and_then(Value::as_u64).ok_or_else(|| {
+        TmError::parse(format!(
+            "`{field}` is required and must be a non-negative integer"
+        ))
+    })
+}
+
+fn get_u32(args: &Value, field: &str) -> Result<u32> {
+    let n = get_u64(args, field)?;
+    u32::try_from(n)
+        .map_err(|_| TmError::parse(format!("`{field}` is too large to be a line number")))
+}
+
+/// True if `root` or any ancestor has a `.git` entry (a directory for a normal repo, or a file
+/// for a linked worktree — `Path::exists` covers both). No `git2` dependency needed for this: a
+/// plain filesystem walk is enough to decide whether `update_incremental`'s git-history ingest
+/// has any chance of finding a `HEAD` to walk, matching `Project::code_intel()`'s
+/// `git2::Repository::open(&self.root).is_ok()` gate without pulling `git2` in as a normal
+/// dependency of this crate.
+fn is_inside_git_work_tree(root: &std::path::Path) -> bool {
+    root.ancestors().any(|dir| dir.join(".git").exists())
 }
 
 /// One opened Ticketmaster project, exposed as an MCP server.
@@ -248,8 +370,30 @@ impl McpServer {
         dispatch_actor(name.as_deref())
     }
 
+    /// Opens the code index, kept fresh the same way `Project::code_intel()` does
+    /// (`crates/tm-cli/src/project.rs`): every open also runs a best-effort
+    /// `update_incremental` pass, so a tool call sees a file edited since the index was last
+    /// written rather than silently stale data. Same policy as `Project::code_intel()`
+    /// (`nav-fix-project-codeintel-freshness`): skip the refresh entirely when `project_root`
+    /// isn't inside a real git work tree, so a global-scope project in an arbitrary directory
+    /// (e.g. `$HOME`) never gets walked; otherwise degrade, don't fail — a refresh error (e.g. a
+    /// git repo with zero commits, so `HEAD` doesn't resolve) just logs `tracing::warn!` and
+    /// returns the already-opened index, since that's still more useful to a caller than an
+    /// error here would be. This crate doesn't depend on `git2` for anything else, so the check
+    /// is a plain "does some ancestor have a `.git` entry" walk rather than an actual
+    /// `git2::Repository::open`.
     fn code_intel(&self) -> Result<tm_codeintel::CodeIntel> {
-        tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.project_root)
+        let ci = tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.project_root)?;
+        if is_inside_git_work_tree(&self.project_root) {
+            if let Err(e) = ci.update_incremental(&tm_types::SystemClock) {
+                tracing::warn!(
+                    error = %e,
+                    root = %self.project_root.display(),
+                    "could not refresh the code index; continuing with what's already indexed"
+                );
+            }
+        }
+        Ok(ci)
     }
 
     /// Format a SymbolKind as a lowercase string.
@@ -474,7 +618,14 @@ impl McpServer {
         let from = args.get("from").and_then(Value::as_str).unwrap_or(".");
         let code_intel = self.code_intel()?;
         match code_intel.definition(name, from)? {
+            // `id` is only stable for the lifetime of the `SymbolIndex` that produced it
+            // (`tm_codeintel::symbols::Symbol::id`'s own doc comment), which `code_intel()`'s
+            // fresh `symbol_index()` parse re-derives deterministically from the same file set
+            // each call — good enough to round-trip through symbol_references/symbol_callers/
+            // symbol_callees within one server session, as tool_definitions() for those tells
+            // the host to do.
             Some(sym) => Ok(json!({
+                "id": sym.id,
                 "name": sym.name,
                 "kind": Self::symbol_kind_str(sym.kind),
                 "path": sym.path,
@@ -496,6 +647,173 @@ impl McpServer {
         Ok(json!({ "entries": rendered }))
     }
 
+    fn search_regex(&self, args: &Value) -> Result<Value> {
+        let pattern = get_str(args, "query")?;
+        let limit = get_limit(args);
+        let code_intel = self.code_intel()?;
+        let result = code_intel.search_regex(pattern)?;
+        let hits: Vec<Value> = result
+            .hits
+            .iter()
+            .take(limit)
+            .map(|h| {
+                json!({
+                    "path": h.path,
+                    "line": h.line,
+                    "col": h.col,
+                    "line_text": h.line_text,
+                })
+            })
+            .collect();
+        Ok(json!({ "hits": hits, "truncated": result.truncated }))
+    }
+
+    fn search_semantic(&self, args: &Value) -> Result<Value> {
+        let query = get_str(args, "query")?;
+        let limit = get_limit(args);
+        let code_intel = self.code_intel()?;
+        let options = tm_codeintel::semantic::SemanticSearchOptions::default();
+        let chunks = code_intel.search_semantic(query, options)?;
+        let hits: Vec<Value> = chunks
+            .iter()
+            .take(limit)
+            .map(|c| {
+                json!({
+                    "path": c.path,
+                    "line_start": c.line_start,
+                    "line_end": c.line_end,
+                    "score": c.score,
+                    "text": c.text,
+                })
+            })
+            .collect();
+        Ok(json!({ "hits": hits }))
+    }
+
+    fn symbol_references(&self, args: &Value) -> Result<Value> {
+        let symbol_id = get_u64(args, "symbol_id")?;
+        let code_intel = self.code_intel()?;
+        let symbol_idx = code_intel.symbol_index()?;
+        let references: Vec<Value> = symbol_idx
+            .references(symbol_id)
+            .iter()
+            .map(|r| json!({ "path": r.path, "line": r.range.line_start }))
+            .collect();
+        Ok(json!({ "references": references }))
+    }
+
+    fn symbol_callers(&self, args: &Value) -> Result<Value> {
+        let symbol_id = get_u64(args, "symbol_id")?;
+        let code_intel = self.code_intel()?;
+        let symbol_idx = code_intel.symbol_index()?;
+        let callers: Vec<Value> = symbol_idx
+            .callers(symbol_id)
+            .iter()
+            .map(|s| {
+                json!({
+                    "id": s.id,
+                    "name": s.name,
+                    "kind": Self::symbol_kind_str(s.kind),
+                    "path": s.path,
+                    "line_start": s.range.line_start,
+                    "line_end": s.range.line_end,
+                })
+            })
+            .collect();
+        Ok(json!({ "callers": callers }))
+    }
+
+    fn symbol_callees(&self, args: &Value) -> Result<Value> {
+        let symbol_id = get_u64(args, "symbol_id")?;
+        let code_intel = self.code_intel()?;
+        let symbol_idx = code_intel.symbol_index()?;
+        let callees: Vec<Value> = symbol_idx
+            .callees(symbol_id)
+            .iter()
+            .map(|s| {
+                json!({
+                    "id": s.id,
+                    "name": s.name,
+                    "kind": Self::symbol_kind_str(s.kind),
+                    "path": s.path,
+                    "line_start": s.range.line_start,
+                    "line_end": s.range.line_end,
+                })
+            })
+            .collect();
+        Ok(json!({ "callees": callees }))
+    }
+
+    fn history_why(&self, args: &Value) -> Result<Value> {
+        let path = get_str(args, "path")?;
+        let line_start = get_u32(args, "line_start")?;
+        let line_end = get_u32(args, "line_end")?;
+        let code_intel = self.code_intel()?;
+        let answer = code_intel.history_why(path, line_start, line_end)?;
+        let commits: Vec<Value> = answer
+            .commits
+            .iter()
+            .map(|c| {
+                json!({
+                    "sha": c.sha,
+                    "author": c.author,
+                    "authored_at": c.authored_at,
+                    "message": c.message,
+                })
+            })
+            .collect();
+        Ok(json!({
+            "path": answer.path,
+            "line_start": answer.line_start,
+            "line_end": answer.line_end,
+            "commits": commits,
+        }))
+    }
+
+    fn history_search(&self, args: &Value) -> Result<Value> {
+        let query = get_str(args, "query")?;
+        let limit = get_limit(args);
+        let code_intel = self.code_intel()?;
+        let hits: Vec<Value> = code_intel
+            .history_search(query)?
+            .iter()
+            .take(limit)
+            .map(|h| {
+                json!({
+                    "sha": h.commit.sha,
+                    "author": h.commit.author,
+                    "authored_at": h.commit.authored_at,
+                    "message": h.commit.message,
+                    "path": h.path,
+                    "snippet": h.snippet,
+                })
+            })
+            .collect();
+        Ok(json!({ "hits": hits }))
+    }
+
+    fn history_deleted(&self, args: &Value) -> Result<Value> {
+        let query = get_str(args, "query")?;
+        let limit = get_limit(args);
+        let code_intel = self.code_intel()?;
+        let results: Vec<Value> = code_intel
+            .history_deleted(query)?
+            .iter()
+            .take(limit)
+            .map(|d| {
+                json!({
+                    "path": d.path,
+                    "sha": d.commit.sha,
+                    "author": d.commit.author,
+                    "authored_at": d.commit.authored_at,
+                    "message": d.commit.message,
+                    "removed_text": d.removed_text,
+                })
+            })
+            .collect();
+        Ok(json!({ "results": results }))
+    }
+
     fn execute_tool(&self, name: &str, args: &Value) -> Result<Value> {
         match name {
             "ticket_list" => self.ticket_list(args),
@@ -503,8 +821,16 @@ impl McpServer {
             "ticket_dispatch" => self.ticket_dispatch(args),
             "search_exact" => self.search_exact(args),
             "search_hybrid" => self.search_hybrid(args),
+            "search_regex" => self.search_regex(args),
+            "search_semantic" => self.search_semantic(args),
             "symbol_def" => self.symbol_def(args),
             "symbol_outline" => self.symbol_outline(args),
+            "symbol_references" => self.symbol_references(args),
+            "symbol_callers" => self.symbol_callers(args),
+            "symbol_callees" => self.symbol_callees(args),
+            "history_why" => self.history_why(args),
+            "history_search" => self.history_search(args),
+            "history_deleted" => self.history_deleted(args),
             other => Err(TmError::invariant(format!(
                 "internal error: tool `{other}` was dispatched without being validated first"
             ))),
@@ -658,6 +984,17 @@ mod tests {
         let server = McpServer::new(dir.path().to_path_buf(), dir.path().to_path_buf())
             .expect("opening a fresh tempdir project should not fail");
         (server, dir)
+    }
+
+    /// A non-git project root (`open_test_server`'s tempdir has no `.git` anywhere above it)
+    /// must skip `update_incremental` entirely rather than fail the tool call — the same
+    /// degrade-not-fail policy `Project::code_intel()` follows (`nav-fix-project-codeintel-
+    /// freshness`).
+    #[test]
+    fn a_codeintel_backed_tool_still_succeeds_in_a_non_git_project_root() {
+        let (server, _dir) = open_test_server();
+        let result = call(&server, "search_exact", json!({"query": "anything"}));
+        assert_eq!(result["isError"], false, "{result}");
     }
 
     #[test]
@@ -957,5 +1294,207 @@ mod tests {
         assert!(!msg.contains("parse:"));
         assert!(!msg.contains("TicketId"));
         assert!(msg.contains("ticket ID"));
+    }
+
+    /// A small git-backed fixture: `lib.rs` defining `old_fn`, committed, then rewritten to
+    /// drop `old_fn` and add `caller`, which calls `helper`, committed again. Exercises
+    /// search_regex/search_semantic/symbol_*/history_* against real content and real commits,
+    /// the same way `tm-codeintel`'s own `crates/tm-codeintel/src/api.rs` tests build fixtures.
+    ///
+    /// The workspace (walked/indexed) and the state dir (where `index.db` lives) are two
+    /// separate tempdirs, like `open_at_separates_index_dir_from_workspace_and_writes_only_
+    /// index_db_there` in `tm-codeintel/src/api.rs` — unlike `open_test_server` above, these
+    /// tests actually run `update_incremental` (via `McpServer::code_intel()`), and indexing
+    /// `index.db`/`-wal`/`-shm` as part of the workspace it walks would be a self-reference bug
+    /// (`nav-fix-codeintel-self-reference`), not a realistic fixture.
+    fn open_git_test_server() -> (McpServer, tempfile::TempDir, tempfile::TempDir) {
+        let workspace =
+            tempfile::tempdir().expect("tempdir creation should not fail in a test sandbox");
+        let state_dir =
+            tempfile::tempdir().expect("tempdir creation should not fail in a test sandbox");
+        let repo = git2::Repository::init(workspace.path()).expect("git init");
+        let sig = git2::Signature::new("Test", "test@example.com", &git2::Time::new(0, 0))
+            .expect("signature");
+
+        let lib_rs = workspace.path().join("lib.rs");
+        std::fs::write(&lib_rs, "fn old_fn() -> i32 {\n    1\n}\n").expect("write lib.rs");
+        commit_all(&repo, &sig, "add old_fn");
+
+        std::fs::write(
+            &lib_rs,
+            "fn helper() -> i32 {\n    42\n}\n\nfn caller() -> i32 {\n    helper()\n}\n",
+        )
+        .expect("rewrite lib.rs");
+        commit_all(&repo, &sig, "remove old_fn, add caller and helper");
+
+        let server = McpServer::new(
+            workspace.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
+        )
+        .expect("opening a fresh git fixture project should not fail");
+        (server, workspace, state_dir)
+    }
+
+    fn commit_all(repo: &git2::Repository, sig: &git2::Signature<'_>, message: &str) {
+        let mut index = repo.index().expect("repo index");
+        index
+            .add_all(["."], git2::IndexAddOption::DEFAULT, None)
+            .expect("stage all");
+        index.write().expect("write index");
+        let tree_id = index.write_tree().expect("write tree");
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        let parent = repo.head().ok().and_then(|h| h.peel_to_commit().ok());
+        let parents: Vec<&git2::Commit<'_>> = parent.iter().collect();
+        repo.commit(Some("HEAD"), sig, sig, message, &tree, &parents)
+            .expect("commit");
+    }
+
+    #[test]
+    fn search_regex_finds_a_pattern_in_a_tracked_file() {
+        let (server, _workspace, _state_dir) = open_git_test_server();
+        let result = call(&server, "search_regex", json!({"query": "fn helper"}));
+        assert_eq!(result["isError"], false, "{result}");
+        let out = payload(&result);
+        let hits = out["hits"].as_array().expect("hits array");
+        assert!(
+            hits.iter().any(|h| h["path"] == "lib.rs"),
+            "expected a match in lib.rs: {out}"
+        );
+    }
+
+    #[test]
+    fn search_semantic_returns_hits_for_indexed_content() {
+        let (server, _workspace, _state_dir) = open_git_test_server();
+        let result = call(&server, "search_semantic", json!({"query": "helper"}));
+        assert_eq!(result["isError"], false, "{result}");
+        let out = payload(&result);
+        let hits = out["hits"].as_array().expect("hits array");
+        assert!(!hits.is_empty(), "expected at least one hit: {out}");
+    }
+
+    #[test]
+    fn symbol_def_then_symbol_callers_and_callees_round_trip_a_real_symbol_id() {
+        let (server, _workspace, _state_dir) = open_git_test_server();
+
+        let helper_def = payload(&call(
+            &server,
+            "symbol_def",
+            json!({"name": "helper", "from": "lib.rs"}),
+        ));
+        let helper_id = helper_def["id"].as_u64().expect("helper has an id");
+        assert_eq!(helper_def["name"], "helper");
+        let helper_def_line = helper_def["line_start"].as_u64().expect("line_start");
+
+        let caller_def = payload(&call(
+            &server,
+            "symbol_def",
+            json!({"name": "caller", "from": "lib.rs"}),
+        ));
+        let caller_id = caller_def["id"].as_u64().expect("caller has an id");
+        assert_ne!(
+            caller_id, helper_id,
+            "caller and helper must resolve to distinct symbol ids"
+        );
+
+        // `helper` is called exactly once, from inside `caller` — nav-fix-codeintel-self-
+        // reference already landed, so a definition's own name token must not show up as a
+        // reference to itself, and there is no other call site to find.
+        let refs = payload(&call(
+            &server,
+            "symbol_references",
+            json!({"symbol_id": helper_id}),
+        ));
+        let references = refs["references"].as_array().expect("references array");
+        assert_eq!(
+            references.len(),
+            1,
+            "expected exactly one reference to helper, the call site inside caller: {refs}"
+        );
+        assert_eq!(references[0]["path"], "lib.rs");
+        assert_ne!(
+            references[0]["line"].as_u64(),
+            Some(helper_def_line),
+            "the reference must be the call site, not helper's own definition line: {refs}"
+        );
+
+        let callers = payload(&call(
+            &server,
+            "symbol_callers",
+            json!({"symbol_id": helper_id}),
+        ));
+        let caller_names: Vec<&str> = callers["callers"]
+            .as_array()
+            .expect("callers array")
+            .iter()
+            .map(|c| c["name"].as_str().expect("caller has a name"))
+            .collect();
+        assert_eq!(
+            caller_names,
+            vec!["caller"],
+            "helper's only caller must be caller(): {callers}"
+        );
+
+        let callees = payload(&call(
+            &server,
+            "symbol_callees",
+            json!({"symbol_id": caller_id}),
+        ));
+        let callee_names: Vec<&str> = callees["callees"]
+            .as_array()
+            .expect("callees array")
+            .iter()
+            .map(|c| c["name"].as_str().expect("callee has a name"))
+            .collect();
+        assert_eq!(
+            callee_names,
+            vec!["helper"],
+            "caller's only callee must be helper(): {callees}"
+        );
+    }
+
+    #[test]
+    fn symbol_references_on_an_unknown_symbol_id_is_an_empty_list_not_an_error() {
+        let (server, _workspace, _state_dir) = open_git_test_server();
+        let result = call(&server, "symbol_references", json!({"symbol_id": 999_999}));
+        assert_eq!(result["isError"], false, "{result}");
+        let out = payload(&result);
+        assert_eq!(out["references"].as_array().expect("array").len(), 0);
+    }
+
+    #[test]
+    fn history_search_finds_the_commit_that_added_caller() {
+        let (server, _workspace, _state_dir) = open_git_test_server();
+        let result = call(&server, "history_search", json!({"query": "caller"}));
+        assert_eq!(result["isError"], false, "{result}");
+        let out = payload(&result);
+        let hits = out["hits"].as_array().expect("hits array");
+        assert!(!hits.is_empty(), "expected the caller commit: {out}");
+    }
+
+    #[test]
+    fn history_deleted_finds_old_fn_removed_in_the_second_commit() {
+        let (server, _workspace, _state_dir) = open_git_test_server();
+        let result = call(&server, "history_deleted", json!({"query": "old_fn"}));
+        assert_eq!(result["isError"], false, "{result}");
+        let out = payload(&result);
+        let results = out["results"].as_array().expect("results array");
+        assert!(
+            results.iter().any(|r| r["path"] == "lib.rs"),
+            "expected old_fn's removal in lib.rs: {out}"
+        );
+    }
+
+    #[test]
+    fn history_why_reports_a_commit_for_a_current_line() {
+        let (server, _workspace, _state_dir) = open_git_test_server();
+        let result = call(
+            &server,
+            "history_why",
+            json!({"path": "lib.rs", "line_start": 1, "line_end": 1}),
+        );
+        assert_eq!(result["isError"], false, "{result}");
+        let out = payload(&result);
+        let commits = out["commits"].as_array().expect("commits array");
+        assert!(!commits.is_empty(), "expected at least one commit: {out}");
     }
 }

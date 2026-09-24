@@ -27,3 +27,6 @@ tempfile = { workspace = true }
 # like a built-in capability crate (`tests/capability_registers_like_builtin.rs`) — not a normal
 # dependency of this crate's own runtime behavior.
 tm-agent = { workspace = true }
+# Dev-only: builds a real git-backed fixture for search_regex/search_semantic/symbol_*/history_*
+# server.rs tests, the same way tm-codeintel's own api.rs tests do.
+git2 = { workspace = true }
