@@ -22,6 +22,7 @@ pub fn run_all(root: &Path) -> Vec<String> {
     out.extend(check_crate_descriptions(root));
     out.extend(check_dot_tm_literals(root));
     out.extend(check_decision_doc_references(root));
+    out.extend(check_cli_help_jargon(root));
     out
 }
 
@@ -728,6 +729,94 @@ pub fn check_decision_doc_references(root: &Path) -> Vec<String> {
     violations
 }
 
+/// True when `text` contains an identifier of the shape `tm_<lowercase-letters>::` (e.g.
+/// `tm_core::`, `tm_mirror::`) — a crate-internal module path, meaningless to a CLI user reading
+/// `--help`. Hand-rolled rather than pulling in `regex`. Unlike [`decision_id_tokens_in_line`]
+/// this compares byte slices (`bytes[i..i + 3] == b"tm_"`), not `&str` slices: `args.rs`'s prose
+/// help text is full of multi-byte characters (em dashes), and slicing a `&str` at a byte offset
+/// that isn't a char boundary panics, whereas slicing the underlying `&[u8]` never can — it's
+/// just bytes, so there is no boundary to violate.
+///
+/// Deliberately narrow to match this check's own spec (`tm_[a-z]+::`): a multi-segment identifier
+/// like `tm_agent_loop::` is not matched, since the underscore after `agent` breaks the run of
+/// `[a-z]` before the `::` this looks for immediately afterward. That mirrors every occurrence
+/// actually found in `args.rs` (`tm_core::`, `tm_mirror::`) rather than over-generalizing.
+fn contains_tm_module_path(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        if bytes[i..].starts_with(b"tm_") {
+            let mut j = i + 3;
+            while j < bytes.len() && bytes[j].is_ascii_lowercase() {
+                j += 1;
+            }
+            if j > i + 3 && bytes[j..].starts_with(b"::") {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// (g) `crates/tm-cli/src/args.rs`'s `///` doc comments (clap's source for `--help` text) must
+/// read like product copy, not implementation notes: no `D-NNN` decision reference, no
+/// `crates/`-rooted path, no `docs/decisions` path, and no `tm_<mod>::` module path. A CLI user
+/// asking `tm project --help` has no reason to know this project keeps decision docs, how its
+/// source tree is laid out, or what its internal crates are named — that context belongs in a
+/// plain `//` comment for maintainers instead, right above or in place of the `///` line.
+///
+/// Scoped to this one file, deliberately: every other crate's `///` doc comments feed `rustdoc`,
+/// not a terminal a human reads live, so the same jargon there is merely internal documentation,
+/// not user-facing copy. Widening this to every crate would flag legitimate rustdoc cross-references
+/// (`[crate::project::resolve_scope]`-shaped links are exactly the right tool in a doc comment
+/// that isn't clap-derived help text) as if they were the same mistake.
+pub fn check_cli_help_jargon(root: &Path) -> Vec<String> {
+    let path = root.join("crates/tm-cli/src/args.rs");
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut violations = Vec::new();
+    let mut tracker = TestRegionTracker::new(&path);
+    for (i, line) in contents.lines().enumerate() {
+        tracker.observe(line);
+        // A `///` doc comment inside `#[cfg(test)] mod tests` documents a test fixture, not
+        // something clap ever surfaces to a real `tm --help` caller.
+        if tracker.in_test() {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with("///") {
+            continue;
+        }
+        let text = &trimmed[3..];
+        let mut reasons = Vec::new();
+        if !decision_id_tokens_in_line(text).is_empty() {
+            reasons.push("a `D-NNN` decision reference");
+        }
+        if text.contains("crates/") {
+            reasons.push("a `crates/`-rooted path");
+        }
+        if text.contains("docs/decisions") {
+            reasons.push("a `docs/decisions` path");
+        }
+        if contains_tm_module_path(text) {
+            reasons.push("a `tm_*::` module path");
+        }
+        if !reasons.is_empty() {
+            violations.push(format!(
+                "{}:{}: user-facing help text contains {} — rewrite this `///` line in plain \
+                 language a CLI user would understand, and move any implementation rationale to \
+                 a plain `//` comment instead",
+                path.display(),
+                i + 1,
+                reasons.join(" and ")
+            ));
+        }
+    }
+    violations
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1117,5 +1206,88 @@ mod tests {
             decision_id_tokens_in_line("(D-014) and D-008."),
             vec!["D-014".to_string(), "D-008".to_string()]
         );
+    }
+
+    #[test]
+    fn cli_help_jargon_flags_decision_refs_crate_paths_and_module_paths() {
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-cli/src/args.rs"),
+            "/// Force a thing (D-002, \"Terminal surface quality bar\").\n\
+             /// See docs/decisions/D-012-run-worktree-isolation.md for details.\n\
+             /// The subset of `tm_core::ticket::TicketState` a user can filter on.\n\
+             /// Lives under crates/tm-core/src/foo.rs.\n\
+             pub struct Foo;\n",
+        );
+        let violations = check_cli_help_jargon(&root);
+        assert_eq!(violations.len(), 4, "{violations:?}");
+        assert!(violations[0].contains(":1:") && violations[0].contains("D-NNN"));
+        assert!(violations[1].contains(":2:") && violations[1].contains("docs/decisions"));
+        assert!(violations[2].contains(":3:") && violations[2].contains("tm_*::"));
+        assert!(violations[3].contains(":4:") && violations[3].contains("`crates/`-rooted"));
+    }
+
+    #[test]
+    fn cli_help_jargon_allows_plain_help_text() {
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-cli/src/args.rs"),
+            "/// Open the tickets view (or print tickets with --json).\n\
+             // Rationale: D-019 named this the claude-agents-parity view; not user-facing.\n\
+             pub struct Foo;\n",
+        );
+        assert!(check_cli_help_jargon(&root).is_empty());
+    }
+
+    #[test]
+    fn cli_help_jargon_only_scans_args_rs() {
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-cli/src/other.rs"),
+            "/// See docs/decisions/D-012-run-worktree-isolation.md for details.\n",
+        );
+        assert!(check_cli_help_jargon(&root).is_empty());
+    }
+
+    #[test]
+    fn cli_help_jargon_ignores_doc_comments_inside_the_test_module() {
+        // A `///` above a helper inside `#[cfg(test)] mod tests` never reaches a real `tm --help`
+        // caller — it documents a fixture, not a clap item.
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-cli/src/args.rs"),
+            "/// Open the tickets view (or print tickets with --json).\n\
+             pub struct Foo;\n\n\
+             #[cfg(test)]\n\
+             mod tests {\n\
+             \x20\x20\x20\x20/// See docs/decisions/D-012-run-worktree-isolation.md (D-012).\n\
+             \x20\x20\x20\x20fn helper() {}\n\
+             }\n",
+        );
+        assert!(check_cli_help_jargon(&root).is_empty());
+    }
+
+    #[test]
+    fn contains_tm_module_path_never_panics_on_multibyte_help_text() {
+        // `args.rs`'s real help text is full of em dashes; slicing a `&str` at a non-char-boundary
+        // byte offset panics, so this must compare `&[u8]`, not `&str`, to stay panic-free.
+        assert!(contains_tm_module_path(
+            "— matching `tm_mirror::CredentialEnv`'s contract —"
+        ));
+        assert!(!contains_tm_module_path("— nothing to see here —"));
+    }
+
+    #[test]
+    fn contains_tm_module_path_matches_single_segment_only() {
+        assert!(contains_tm_module_path(
+            "see `tm_core::ticket::TicketState`"
+        ));
+        assert!(contains_tm_module_path(
+            "matching `tm_mirror::CredentialEnv`"
+        ));
+        assert!(!contains_tm_module_path("no module path here"));
+        // Deliberately narrow: an underscore between segments breaks the match (see
+        // `contains_tm_module_path`'s own doc comment for why that's the intended scope).
+        assert!(!contains_tm_module_path("tm_agent_loop::Foo"));
     }
 }
