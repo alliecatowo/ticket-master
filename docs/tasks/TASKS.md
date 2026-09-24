@@ -139,7 +139,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
   evidence: `grep 'created_at|closed_at' crates/tm-core/src/ticket.rs` -> none; overview.rs:220 already folds events with timestamps.
 
-- [ ] **s1-tui-graph-tab-prune-dead-screens** — Wire the unused ticket_graph screen as the Graph tab; delete dead dashboard/command_palette
+- [x] **s1-tui-graph-tab-prune-dead-screens** — Wire the unused ticket_graph screen as the Graph tab; delete dead dashboard/command_palette (landed 7b1f642)
   model: sonnet · severity: medium · builds Rust: yes · area: tui · deps: s1-tui-hub-tabs
   files: `crates/tm-tui/src/screens/ticket_graph.rs`, `crates/tm-tui/src/screens/dashboard.rs`, `crates/tm-tui/src/screens/command_palette.rs`, `crates/tm-tui/src/screens/mod.rs`, `crates/tm-tui/src/screens/kanban.rs`, `crates/tm-tui/src/screens/ticket_detail.rs`, `crates/tm-cli/src/tui.rs`
   change: Feed `screens/ticket_graph.rs` from view.graph with labelled nodes and make it the Graph tab; Enter on a node opens ticket detail. Delete `dashboard.rs` and `command_palette.rs` (grep shows no users outside their own files besides doc links in kanban.rs:5,37 and ticket_detail.rs:121 — fix those doc references too). Re-grep `dashboard\|command_palette` across `crates` once more right before deleting.
@@ -223,7 +223,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: "Symbol not found" and "No outline entries found" both exit 0 in four separate trial runs across the symbol/init/attach groups.
 
-- [ ] **s1-decision-supersedes-and-list-copy** — Superseding decision loses the supersedes link; decision list shows the wrong column
+- [x] **s1-decision-supersedes-and-list-copy** — Superseding decision loses the supersedes link; decision list shows the wrong column (landed 666a113)
   model: sonnet · severity: high · builds Rust: yes · area: cli/decision · deps: none
   files: `crates/tm-events/src/payload.rs`, `crates/tm-core/src/store.rs`, `crates/tm-core/src/materialize.rs`, `crates/tm-cli/src/tickets.rs`
   change: Add `supersedes: Option<DecisionId>` to `DecisionCreatedPayload`; populate it in `store.supersede()` and INSERT the real value in materialize (instead of always NULL). Also fix `decision_list()`'s Summary column, which renders `d.subject` (the semantic class, e.g. "decision") instead of `d.decision` (the actual decision text) — use `d.decision`, truncated to 40 chars as before.
@@ -279,7 +279,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `tm bench compare report1.json report2.json` -> "Comparison: 0 vs 0" while the JSON shows `{"aggregate_gain": 0.0, "candidate_improved": false, "task_deltas": [["hello-world", 0.0]]}`.
 
-- [ ] **s1-browser-toml-error-message** — Missing browser.toml error teaches TOML syntax instead of pointing at docs
+- [x] **s1-browser-toml-error-message** — Missing browser.toml error teaches TOML syntax instead of pointing at docs (landed 3e7e17c)
   model: haiku · severity: medium · builds Rust: yes · area: cli/copy · deps: none
   files: `crates/tm-cli/src/drive.rs`
   change: Replace the current message ("add a [managed] table with `version` and `sha256`, or a [remote_cdp] table with `ws_url`, and list the ones you configure in `fallback_order`") with something that names the file and points at documentation instead of teaching TOML inline: "Create a browser.toml file with a provider configuration. See SPEC.md §19.1a for examples (managed: pinned Chrome download, remote-cdp: existing browser endpoint)."
@@ -335,7 +335,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-server`
   evidence: `curl -s http://localhost:17000/tickets/NOTFOUND` -> plain text `Invalid URL: parse: TicketId must look like T-<n>, V-<n> or A-<n>, got "NOTFOUND"`; `curl -s -X POST http://localhost:17000/tickets -d '{"bad":"request"}'` -> plain text `Failed to deserialize the JSON body into the target type: missing field \`kind\` at line 1 column 18`.
 
-- [ ] **p1-mcp-error-and-value-copy** — MCP tool responses leak internal type names, u64::MAX budgets, and silent nulls instead of errors
+- [x] **p1-mcp-error-and-value-copy** — MCP tool responses leak internal type names, u64::MAX budgets, and silent nulls instead of errors (landed 2d0c6d3)
   model: haiku · severity: medium · builds Rust: yes · area: mcp · deps: p1-http-error-json-format
   files: `crates/tm-mcp/src/server.rs`, `crates/tm-core/src/id.rs`, `crates/tm-types/src/lib.rs`
   change: Four related copy/shape bugs in the same server, worth fixing together since they're all in `crates/tm-mcp/src/server.rs`'s response-building code: (1) `ticket_show`/`ticket_dispatch` serialize an unlimited `Budget` as raw `18446744073709551615` (u64::MAX) instead of `null`/`"unlimited"` — add a custom serializer or map at the response-building call site. (2) `symbol_def` (~line 410) returns `Ok(Value::Null)` for an unknown symbol instead of an MCP error (`isError: true`); change the `None` arm to a proper error result so callers can distinguish "found, empty" from "not found". (3) `symbol_def` (~line 405) uses `format!("{:?}", sym.kind)` for the symbol kind, producing Rust Debug output; map to a clean lowercase string (`function`, `struct`, `module`, etc.). (4) Error messages surfaced through MCP (`crates/tm-core/src/id.rs`, `crates/tm-types/src/lib.rs`) carry internal prefixes and type names, e.g. `parse: TicketId must look like T-<n>...`; strip the `parse:` prefix and the `TicketId` type name so the message reads as plain English (`ticket ID must look like T-123 (T-999 is invalid)`), matching this repo's voice rules.
@@ -359,7 +359,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `cd /tmp/test && rm -rf repo .tm && git clone --depth 1 file:///Users/allie/Develop/ticket-master repo && cd repo && tm init && tm doctor > /dev/null && time tm symbol refs transition --plain | head -1`
   evidence: `symbol refs transition`: 48.4s user; `symbol callers transition`: 56.5s user (fresh clone, mock provider).
 
-- [ ] **p1-search-index-not-built-message** — `tm search --mode semantic` can't distinguish "index not built yet" from "no matches"
+- [x] **p1-search-index-not-built-message** — `tm search --mode semantic` can't distinguish "index not built yet" from "no matches" (landed 0614d69)
   model: sonnet · severity: medium · builds Rust: yes · area: code-navigation · deps: none
   files: `crates/tm-cli/src/search.rs`
   change: In the Semantic and Hybrid arms of `search()`, the `results.is_empty()` branch prints the same "No similar content found"/"No relevant content found" whether the index has never been built (right after `tm init`, before `tm doctor`) or a query genuinely has zero matches against a real index. Add a way to tell the two apart — e.g. a `CodeIntel::stats()`-style indexed-chunk count — and print a distinct message pointing at `tm doctor` when the index is empty, leaving the existing no-match text for a real empty result against a built index.
@@ -391,7 +391,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-tui`
   evidence: On an empty prompt, two consecutive ArrowLeft key sends left the screen on the chat welcome screen with no ticket view appearing; only `/tickets` + Enter opened it. `chat.rs:1317` handles `KeyCode::Left` as plain cursor movement with no double-press branch, while `chat.rs:1617` and CLAUDE.md both advertise the shortcut as working.
 
-- [ ] **p1-cli-prompt-flag-parsing-and-exit-codes** — `tm -p --json "<text>"` fails to parse, and a clap usage error is indistinguishable from a failed turn
+- [x] **p1-cli-prompt-flag-parsing-and-exit-codes** — `tm -p --json "<text>"` fails to parse, and a clap usage error is indistinguishable from a failed turn (landed 6d1fa7c)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/main.rs`
   change: Two related CLI-parsing bugs in the same one-shot-prompt path: (1) `-p`/`--prompt` (args.rs:39) is a value-taking `Option<String>`, so any flag placed between `-p` and its text (`tm -p --json "text"`, `tm -p --help`) is swallowed as an attempted value and clap errors instead of running. Change `-p`/`--prompt` to a boolean flag plus a trailing positional `TEXT` argument (mirroring `claude -p "text"`), so flag order stops mattering and `tm -p --help` shows help. Keep args.rs's existing tests (e.g. `bare_tm_with_prompt_is_the_scriptable_agent`, ~line 1176) passing under the new shape. (2) CLAUDE.md documents exit 2 for `tm -p` as "the agent failed the task" (`TmError::TurnFailed`), but main.rs's `Cli::parse()` also exits 2 on a plain clap usage error, so a caller scripting against the exit code can't tell a malformed invocation from a real turn failure. Switch to `Cli::try_parse()` and map a clap usage error to a distinct exit code (e.g. 64, matching sysexits `EX_USAGE`).
@@ -431,7 +431,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-e2e`
   evidence: `tm genesis --prompt 'a Python CLI todo app' --plain` under `TM_TEST_MOCK_PROVIDER=1` failed with `ANTHROPIC_API_KEY is not set ... and no local model provider is reachable` — the mock-provider check in `agent.rs`'s `build_fabric` was never added to `project.rs`'s `resolve_genesis_provider`, and no CLI-level test caught it.
 
-- [ ] **p1-e2e-navigation-freshness-search-prefetch** — Offline e2e test: index freshness after edits, search modes, and prefetched context-pack sections
+- [x] **p1-e2e-navigation-freshness-search-prefetch** — Offline e2e test: index freshness after edits, search modes, and prefetched context-pack sections (landed 4972b6b)
   model: sonnet · severity: medium · builds Rust: yes · area: testing · deps: nav-fix-project-codeintel-freshness
   files: `crates/tm-e2e/tests/navigation_e2e.rs`
   change: The `nav-fresh`, `nav-semantic` and `prefetch` probes each manually verified real behavior — the index picks up new/edited files, `tm doctor` repairs drift and reports counts, exact/semantic/hybrid search return correct top hits, and a `ContextPack` with sections and a `rent_report` is built per attempt — but none of it is asserted by an automated test. Add an offline e2e test (mock provider, tempdir project, no network) that: edits a file after initial indexing and asserts the next search reflects the edit (freshness); runs at least one exact and one semantic/hybrid query with a known expected top hit; and asserts a ticket run produces a non-empty `ContextPack` (via whatever surface `p1-cli-ticket-context-command` or the internal API exposes) with at least one section populated.
@@ -519,7 +519,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run verify`
   evidence: workflow wf_87a85411-848's critic result, "missing" item 1: CI run 35917628490 (clippy for_kv_map at walk.rs:279) and Release run 35883664234 (linux.rs vs x11rb 0.14); `rust-toolchain.toml` confirmed unpinned (`channel = "stable"`) against a local 1.95 toolchain.
 
-- [ ] **critic-merge-odw-integrate-before-b1** — Merge or rebase odw-integrate before B1 starts; it overlaps most of the plan's early files
+- [~] **critic-merge-odw-integrate-before-b1** — Merge or rebase odw-integrate before B1 starts; it overlaps most of the plan's early files (needs the owner: odw-integrate/main history is already merged, but the odw-integrate worktree still holds uncommitted, unowned changes to agent.rs/ops.rs/sched.rs — a `/level` chat-role-selection feature that neither applies nor reverse-applies against `integrate`'s current state — that only the main session can land or explicitly abandon before any batch touches those three files)
   model: sonnet · severity: critical · builds Rust: yes · area: repo/merge · deps: critic-b0-ci-green
   files: `crates/tm-cli/src/project.rs`, `crates/tm-cli/src/dispatch.rs`, `crates/tm-cli/src/sched.rs`, `crates/tm-cli/src/agent.rs`, `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs`, `crates/tm-cli/src/main.rs`, `crates/tm-provider/src/role_config.rs`
   change: The `odw-integrate` worktree (provider-overhaul work, untouched by this plan per CLAUDE.md) has uncommitted edits to project.rs, dispatch.rs, sched.rs, agent.rs, ops.rs, chat_ops.rs and tm-types budget.rs, plus odw-provider's edits to role_config.rs/route.rs/providers/*. B1 (project.rs, dispatch.rs), B2/B4/B6/B7 (ops.rs, args.rs), B3/B6/B8 (project.rs, agent.rs), B12/B13 (args/sched/dispatch/agent.rs) and d020-role-decider (role_config.rs) all collide with it, and main has moved past the `--ff-only` merge the odw README plans. This task is: get the odw owner to land (a normal merge, likely with conflicts) or explicitly abandon odw-integrate/odw-provider before any batch below B1 starts editing the same files — do not touch `.claude/worktrees/odw-*` directly. If the owner instead says to proceed in parallel, record that decision here and have each colliding task rebase onto odw's landed state instead of main.
