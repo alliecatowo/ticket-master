@@ -13,8 +13,8 @@ use crate::project::Project;
 
 pub mod overview;
 use crate::render::{
-    authority_label, budget_label, kind_label, milestone_state_label, state_label, Renderer, Table,
-    Tree,
+    authority_label, budget_label, dep_kind_label, kind_label, milestone_state_label, state_label,
+    Renderer, Table, Tree,
 };
 use std::collections::BTreeMap;
 use std::fs;
@@ -1094,24 +1094,88 @@ pub fn dep_graph(
 ) -> tm_types::Result<()> {
     let view = project.store.view()?;
 
-    let graph_view = GraphView::from(&view.graph);
-
-    if renderer.is_json() {
-        renderer.emit(&graph_view, "")?;
-    } else {
-        let text = if let Some(ticket_str) = &args.ticket {
-            let ticket = TicketId::new(ticket_str)?;
-            format!(
-                "Dependency graph (subgraph from {}):\n{:?}",
-                ticket, view.graph
-            )
-        } else {
-            format!("Dependency graph:\n{:?}", view.graph)
-        };
-        renderer.emit(&graph_view, &text)?;
+    let root = args.ticket.as_deref().map(TicketId::new).transpose()?;
+    if let Some(root) = &root {
+        if !view.tickets.contains_key(root) {
+            return Err(TmError::not_found("ticket", root));
+        }
     }
 
+    // With a `TICKET` root, both `--json` and the human list are scoped to just its transitive
+    // dependencies/dependents (the whole-project graph is still `tm dep graph` with no argument).
+    let rooted = root.as_ref().map(|r| rooted_subgraph(&view.graph, r));
+    let graph = rooted.as_ref().unwrap_or(&view.graph);
+
+    let graph_view = GraphView::from(graph);
+    if renderer.is_json() {
+        return renderer.emit(&graph_view, "");
+    }
+
+    let text = format_dep_graph_text(graph, &view.tickets, root.as_ref());
+
+    renderer.emit(&graph_view, &text)?;
+
     Ok(())
+}
+
+/// The subgraph of `graph` reachable from `root` by following dependency edges in either
+/// direction (its transitive dependencies plus its transitive dependents), including `root`
+/// itself. Used so `tm dep graph <ticket>` (both `--json` and the human list) only ever shows
+/// edges relevant to that ticket, not the whole project's graph.
+fn rooted_subgraph(
+    graph: &tm_core::graph::DependencyGraph,
+    root: &TicketId,
+) -> tm_core::graph::DependencyGraph {
+    let mut relevant: std::collections::BTreeSet<TicketId> = graph.ancestors(root);
+    relevant.extend(graph.descendants(root));
+    relevant.insert(root.clone());
+    let edges: Vec<tm_core::graph::DependencyEdge> = graph
+        .edges()
+        .iter()
+        .filter(|e| relevant.contains(&e.from) && relevant.contains(&e.to))
+        .cloned()
+        .collect();
+    tm_core::graph::DependencyGraph::build(relevant, edges, [])
+}
+
+/// Render `graph` as a human-readable, indented list of edges (each `T-A (objective) -> T-B
+/// (objective) (kind)`), instead of `DependencyGraph`'s `Debug` form. `graph` is expected to
+/// already be scoped to `root` (via [`rooted_subgraph`]) when `root` is `Some`; this only adds
+/// the header line and formats what it's given.
+fn format_dep_graph_text(
+    graph: &tm_core::graph::DependencyGraph,
+    tickets: &BTreeMap<TicketId, tm_core::ticket::Ticket>,
+    root: Option<&TicketId>,
+) -> String {
+    let edges = graph.edges();
+
+    let describe = |id: &TicketId| match tickets.get(id) {
+        Some(t) => format!("{} ({})", id, t.objective),
+        None => id.to_string(),
+    };
+
+    let mut text = if let Some(root) = root {
+        format!("Dependency graph (subgraph from {}):", root)
+    } else {
+        "Dependency graph:".to_string()
+    };
+
+    if edges.is_empty() {
+        text.push('\n');
+        text.push_str("No dependencies yet. Add one: tm dep add <ticket> <depends-on>");
+    } else {
+        for e in edges {
+            text.push('\n');
+            text.push_str(&format!(
+                "  {} -> {} ({})",
+                describe(&e.from),
+                describe(&e.to),
+                dep_kind_label(e.kind)
+            ));
+        }
+    }
+
+    text
 }
 
 /// Dispatch one [`MilestoneCommand`].
@@ -2060,5 +2124,139 @@ mod tests {
             !message.contains("so it can't be rejected"),
             "must not be rewritten with an unrelated state/command sentence: {message:?}"
         );
+    }
+
+    fn dep_test_ticket(id: TicketId, objective: &str) -> tm_core::ticket::Ticket {
+        tm_core::ticket::Ticket {
+            id: id.clone(),
+            objective: objective.to_string(),
+            kind: TicketKind::Work,
+            parent: None,
+            children: vec![],
+            dependencies: vec![],
+            milestone: None,
+            state: TicketState::Ready,
+            priority: 0,
+            authority: Authority::default(),
+            resources: vec![],
+            executor: default_executor_requirements(),
+            context_refs: vec![],
+            success: vec![],
+            verification: VerificationPolicy::Single,
+            budget: Budget::unlimited(),
+            retry: default_retry_policy(),
+            attempts: 0,
+            failures: vec![],
+            created: tm_types::Timestamp::parse_rfc3339("2024-01-01T00:00:00Z").unwrap(),
+            updated: tm_types::Timestamp::parse_rfc3339("2024-01-01T00:00:00Z").unwrap(),
+            cycle: None,
+        }
+    }
+
+    #[test]
+    fn format_dep_graph_text_lists_readable_edges_not_struct_debug() {
+        let t1 = TicketId::new("T-1").unwrap();
+        let t2 = TicketId::new("T-2").unwrap();
+        let graph = tm_core::graph::DependencyGraph::build(
+            [t1.clone(), t2.clone()],
+            [tm_core::graph::DependencyEdge {
+                from: t1.clone(),
+                to: t2.clone(),
+                kind: DependencyKind::Hard,
+            }],
+            [],
+        );
+        let mut tickets = BTreeMap::new();
+        tickets.insert(t1.clone(), dep_test_ticket(t1.clone(), "fix login"));
+        tickets.insert(t2.clone(), dep_test_ticket(t2.clone(), "add tests"));
+
+        let text = format_dep_graph_text(&graph, &tickets, None);
+
+        assert_eq!(
+            text,
+            "Dependency graph:\n  T-1 (fix login) -> T-2 (add tests) (blocks)"
+        );
+        assert!(
+            !text.contains("DependencyGraph"),
+            "must not fall back to Debug output: {text:?}"
+        );
+    }
+
+    #[test]
+    fn format_dep_graph_text_with_no_edges_says_no_dependencies_yet() {
+        let graph = tm_core::graph::DependencyGraph::default();
+        let text = format_dep_graph_text(&graph, &BTreeMap::new(), None);
+        assert_eq!(
+            text,
+            "Dependency graph:\nNo dependencies yet. Add one: tm dep add <ticket> <depends-on>"
+        );
+    }
+
+    #[test]
+    fn rooted_subgraph_keeps_only_the_roots_transitive_deps_and_dependents() {
+        // T-1 -> T-2 -> T-3 is T-2's subgraph; T-4 -> T-5 is unrelated and must be dropped.
+        let ids: Vec<TicketId> = (1..=5)
+            .map(|n| TicketId::new(format!("T-{n}")).unwrap())
+            .collect();
+        let edge = |from: usize, to: usize| tm_core::graph::DependencyEdge {
+            from: ids[from - 1].clone(),
+            to: ids[to - 1].clone(),
+            kind: DependencyKind::Hard,
+        };
+        let graph = tm_core::graph::DependencyGraph::build(
+            ids.clone(),
+            [edge(1, 2), edge(2, 3), edge(4, 5)],
+            [],
+        );
+
+        let sub = rooted_subgraph(&graph, &ids[1]);
+
+        assert_eq!(sub.edges().len(), 2, "edges: {:?}", sub.edges());
+        assert!(sub
+            .edges()
+            .iter()
+            .all(|e| e.from != ids[3] && e.to != ids[4]));
+        let nodes: std::collections::BTreeSet<_> = sub.nodes().cloned().collect();
+        assert!(nodes.contains(&ids[0]) && nodes.contains(&ids[1]) && nodes.contains(&ids[2]));
+        assert!(
+            !nodes.contains(&ids[3]) && !nodes.contains(&ids[4]),
+            "unrelated ticket must not appear in the subgraph's nodes: {nodes:?}"
+        );
+    }
+
+    #[test]
+    fn format_dep_graph_text_with_root_prints_the_subgraph_header() {
+        let t1 = TicketId::new("T-1").unwrap();
+        let t2 = TicketId::new("T-2").unwrap();
+        let graph = tm_core::graph::DependencyGraph::build(
+            [t1.clone(), t2.clone()],
+            [tm_core::graph::DependencyEdge {
+                from: t1.clone(),
+                to: t2.clone(),
+                kind: DependencyKind::Hard,
+            }],
+            [],
+        );
+        let mut tickets = BTreeMap::new();
+        tickets.insert(t1.clone(), dep_test_ticket(t1.clone(), "x"));
+        tickets.insert(t2.clone(), dep_test_ticket(t2.clone(), "y"));
+
+        let text = format_dep_graph_text(&graph, &tickets, Some(&t2));
+
+        assert!(text.starts_with("Dependency graph (subgraph from T-2):"));
+        assert!(text.contains("T-1 (x) -> T-2 (y) (blocks)"));
+    }
+
+    #[test]
+    fn dep_graph_errors_not_found_for_an_unknown_root_ticket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+
+        let args = DepGraphArgs {
+            ticket: Some("T-99".to_string()),
+        };
+        let err = dep_graph(&args, &project, &renderer).expect_err("unknown ticket must error");
+        assert_eq!(err.to_string(), "not found: ticket T-99");
     }
 }

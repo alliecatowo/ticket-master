@@ -59,7 +59,7 @@ use tokio::sync::{Mutex, Notify};
 use crate::agent::{self, AgentSession};
 use crate::args::GlobalOpts;
 use crate::project::{Project, Scope};
-use crate::render::Renderer;
+use crate::render::{state_label, Renderer};
 
 /// How close together two Ctrl+C presses must be to quit.
 const QUIT_WINDOW_MILLIS: i64 = 1_200;
@@ -345,7 +345,7 @@ fn build_kanban_columns(view: &tm_core::ProjectView) -> Vec<KanbanColumn> {
                 .filter(|ticket| &ticket.state == state)
                 .map(|ticket| KanbanCard::new(ticket.id.to_string(), ticket.objective.clone()))
                 .collect();
-            KanbanColumn::new(format!("{state:?}"), cards)
+            KanbanColumn::new(state_label(*state).to_string(), cards)
         })
         .collect()
 }
@@ -1410,8 +1410,24 @@ mod tests {
         let columns = build_kanban_columns(&view);
         assert_eq!(columns.len(), tm_core::TicketState::ALL.len());
         let titles: Vec<&str> = columns.iter().map(|c| c.title.as_str()).collect();
-        assert!(titles.contains(&"Running"));
-        assert!(titles.contains(&"Closed"));
+        assert!(titles.contains(&state_label(tm_core::TicketState::Running)));
+        assert!(titles.contains(&state_label(tm_core::TicketState::Closed)));
+    }
+
+    #[test]
+    fn build_kanban_columns_uses_plain_words_not_the_enum_variant_name() {
+        let view = tm_core::ProjectView::empty();
+        let columns = build_kanban_columns(&view);
+        let titles: Vec<&str> = columns.iter().map(|c| c.title.as_str()).collect();
+        assert!(
+            titles.contains(&state_label(tm_core::TicketState::Ready)),
+            "expected a {:?} column, got {titles:?}",
+            state_label(tm_core::TicketState::Ready)
+        );
+        assert!(
+            !titles.contains(&"Ready"),
+            "column title must not be the raw enum variant name: {titles:?}"
+        );
     }
 
     #[test]
@@ -1422,15 +1438,16 @@ mod tests {
 
         let view = store.view().expect("view");
         let columns = build_kanban_columns(&view);
+        let draft_title = state_label(tm_core::TicketState::Draft);
         let draft = columns
             .iter()
-            .find(|c| c.title == "Draft")
+            .find(|c| c.title == draft_title)
             .expect("a Draft column always exists");
         assert!(draft
             .cards
             .iter()
             .any(|c| c.title == "wire the kanban board"));
-        for other in columns.iter().filter(|c| c.title != "Draft") {
+        for other in columns.iter().filter(|c| c.title != draft_title) {
             assert!(
                 !other
                     .cards
