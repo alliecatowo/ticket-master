@@ -52,10 +52,16 @@ fn discover_names(project: &Project) -> tm_types::Result<Vec<String>> {
 fn load(project: &Project, name: &str) -> tm_types::Result<(String, tm_workflow::WorkflowDef)> {
     let path = workflows_dir(project).join(format!("{name}.toml"));
     let source = fs::read_to_string(&path).map_err(|e| {
-        TmError::storage(format!(
-            "Couldn't read workflow {name:?} at {}: {e}",
-            path.display()
-        ))
+        if e.kind() == std::io::ErrorKind::NotFound {
+            TmError::storage(format!(
+                "Workflow '{name}' not found. Define it in .tm/workflows/{name}.toml"
+            ))
+        } else {
+            TmError::storage(format!(
+                "Couldn't read workflow {name:?} at {}: {e}",
+                path.display()
+            ))
+        }
     })?;
     let def = tm_workflow::WorkflowDef::parse(&source)?;
     Ok((source, def))
@@ -408,5 +414,32 @@ mod tests {
     #[test]
     fn parse_params_empty_is_empty() {
         assert!(parse_params(&[]).expect("parses").is_empty());
+    }
+
+    #[test]
+    fn load_missing_workflow_gives_friendly_error() {
+        use std::sync::Arc;
+        use tm_core::Store;
+        use tm_types::{Clock, CounterIds, FixedClock, IdSource};
+
+        let tmpdir = tempfile::tempdir().expect("tempdir created");
+        let root = tmpdir.path();
+
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
+        let store =
+            Arc::new(Store::open_with(root, clock.clone(), ids.clone()).expect("open store"));
+        let project = Project::for_test(root, store, clock, ids);
+
+        let err = load(&project, "nonexistent").unwrap_err();
+        let err_msg = err.to_string();
+
+        // Error message should be friendly and not include filesystem path
+        assert!(err_msg.contains("Workflow 'nonexistent' not found"));
+        assert!(err_msg.contains(".tm/workflows/nonexistent.toml"));
+        // Should NOT contain filesystem path or os error details
+        assert!(!err_msg.contains("at "));
+        assert!(!err_msg.contains("os error"));
+        assert!(!err_msg.contains("No such file"));
     }
 }
