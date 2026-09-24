@@ -51,7 +51,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `grep -n '{:?}' crates/tm-cli/src/tickets.rs` -> 336/337/941 debug-format State/Kind/milestone state.
 
-- [ ] **s1-ticket-show-human** — tm ticket show prints Rust Debug structs; render a readable summary
+- [x] **s1-ticket-show-human** (landed 2eb53da) — tm ticket show prints Rust Debug structs; render a readable summary
   model: sonnet · severity: critical · builds Rust: yes · area: cli/tickets · deps: s1-display-labels
   files: `crates/tm-cli/src/tickets.rs`
   change: Rewrite the text branch of `ticket show` (tickets.rs:368-384). Show State, Kind, Objective, Milestone, Depends on, Children as `T-4, T-5` (or `none`), Budget via budget_label, Authority via authority_label. Collapse Resources, Executor, Verification and Retry Policy to one plain line each (e.g. "Verification: tests must pass", "Retries: up to 3 attempts"), or omit when default. JSON output unchanged except budget renders as null/"unlimited" in text only. Also fix the objective-truncation byte-slice at tickets.rs:327-328 to use `.chars().take(47)` instead of `&[..47]`, which panics on multi-byte UTF-8 (emoji/accents). Add a unit test asserting no `{`, `Some(` or `18446744073709551615` in the output, and a test that a multi-byte objective doesn't panic.
@@ -239,7 +239,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `tm workflow show nonexistent` -> `error: storage: Failed to read workflow "nonexistent" at /path/.../nonexistent.toml: No such file or directory (os error 2)`.
 
-- [ ] **s1-mirror-status-and-push-clarity** — mirror status hides configured adapters; push/pull give no reason for a zero count; link doesn't warn on unset credentials
+- [x] **s1-mirror-status-and-push-clarity** (landed d78bc0e) — mirror status hides configured adapters; push/pull give no reason for a zero count; link doesn't warn on unset credentials
   model: sonnet · severity: high · builds Rust: yes · area: cli/mirror · deps: none
   files: `crates/tm-cli/src/ops.rs`
   change: `tm mirror status` reports only ticket-level external-id links, so after `tm mirror link github` it still says "No active mirror links" even though `mirror.toml` has a real, enabled adapter — add an adapters section to status output (JSON too) showing each configured adapter and its enabled state, distinct from ticket sync status. Make `mirror push`/`mirror pull`'s "0 pushed, 0 degraded" output name the reason (no mirrors configured vs no tickets eligible vs all already synced) instead of a bare count. In `mirror link`, check whether the env vars referenced by `--credential field=ENV_VAR` are actually set, and if not, print a non-fatal warning ("credential field \"owner\" references env var TM_GITHUB_OWNER which is not set") so the misconfiguration surfaces at link time, not first at push time.
@@ -287,7 +287,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: manual: `S=$(mktemp -d); export TM_HOME=$(mktemp -d) TM_TEST_MOCK_PROVIDER=1; cd $S && git init -q && git config user.email t@t && git config user.name t && echo x>r && git add r && git commit -qm x && tm init -q && tm browser open https://example.com`
   evidence: current error: "not found: browser.toml /path/to/browser.toml; add a [managed] table with `version` and `sha256`, or a [remote_cdp] table with `ws_url`, and list the ones you configure in `fallback_order`".
 
-- [ ] **s1-mcp-exit-code-on-parse-error** — tm mcp exits 0 on a JSON-RPC parse error / EOF
+- [x] **s1-mcp-exit-code-on-parse-error** (landed ed2a8c9) — tm mcp exits 0 on a JSON-RPC parse error / EOF
   model: haiku · severity: high · builds Rust: yes · area: cli/mcp · deps: none
   files: `crates/tm-mcp/src/main.rs`
   change: When `tm mcp` hits EOF or invalid JSON on stdin before handling any successful JSON-RPC call, it prints an error but exits 0, breaking script error handling. Exit 1 in that case.
@@ -311,7 +311,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `tm attach /nonexistent/path` -> "error: io: No such file or directory (os error 2)"; `tm history why nonexistent.txt` -> "error: storage: git2: the path ... does not exist in the given tree; class=Tree (14); code=NotFound (-3)"; `tm ticket new ''` creates a ticket with an empty objective column.
 
-- [ ] **p1-mock-provider-scripted-tool-calls** — Mock provider must script real tool calls so `tm run` can reach `submitted`, not just text replies
+- [x] **p1-mock-provider-scripted-tool-calls** (landed e939a0a) — Mock provider must script real tool calls so `tm run` can reach `submitted`, not just text replies
   model: sonnet · severity: critical · builds Rust: yes · area: agent/testing · deps: none
   files: `crates/tm-cli/src/agent.rs`, `crates/tm-provider/src/mock.rs`
   change: `build_mock_fabric()` scripts a text-only `CompletionRequest` response (agent.rs ~line 244, `script_default_response(...text: "mock provider: this is a scripted reply...")`), so a worker ticket run under `TM_TEST_MOCK_PROVIDER=1` never calls a tool and the ticket stays `ready` forever instead of reaching `submitted`. Change the default script to a short, deterministic scripted turn that actually calls tools: an edit (`edit.apply_patch` or `make_edit` against a trivial, always-present file/change) followed by `ticket.submit` with at least one evidence artifact (satisfying the submission invariant already enforced elsewhere — see `s1-transition-error-copy`'s evidence note). This is the load-bearing fix that every offline ticket-lifecycle test below depends on; without it, no scripted-provider e2e test can reach `submitted`/`closed`.
@@ -319,7 +319,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `cd /tmp/test-tm && TM_TEST_MOCK_PROVIDER=1 /tmp/tm-wide/tm run T-1 && /tmp/tm-wide/tm tickets --json | jq '.[0].state'`
   evidence: Ran `tm run T-1` (exit 0), but ticket stayed in `ready` state instead of transitioning to `submitted`; no git changes made. Mock provider scripted with a text-only response at `crates/tm-cli/src/agent.rs` line 244.
 
-- [ ] **p1-sched-run-failure-message-copy** — `tm run`'s failure message debug-prints `FailureClass` and falsely claims auto-retry
+- [x] **p1-sched-run-failure-message-copy** (landed c3e2ca7) — `tm run`'s failure message debug-prints `FailureClass` and falsely claims auto-retry
   model: haiku · severity: high · builds Rust: yes · area: cli/copy · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: `run_outcome()` in sched.rs formats failures with `.map(|f| format!("{:?}: {}", f.class, f.detail))` and wraps them as `error: agent turn failed: ticket T-N attempt K did not finish: <Debug>: <detail>; it is Ready again and will be retried` (lines ~597-608). This stacks a generic `error: agent turn failed:` prefix, Debug-prints the `FailureClass` enum (e.g. bare `Other:`), and claims `tm run` auto-retries when it does not — the user must run it again by hand. Add a plain-English `Display`/match for `FailureClass`, drop the `did not finish:`/debug-format wrapping, and replace the false "will be retried" claim with the actual next step: for `Ready`/`Blocked`, "Run `tm run T-N` again to retry."; for `Escalated`, "Run `tm ticket retry T-N --guidance \"...\"` to try again."
@@ -383,7 +383,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-cli`
   evidence: `tm run T-1` printed lines like `* fs.read -> error: io: stream did not contain valid UTF-8`, `* artifact.store -> error: parse: unknown variant \`test-output\`, expected one of \`command_output\`, \`patch\`, ...`, and `* ticket.submit -> error: invariant violated: submission requires at least one evidence artifact` directly in the run's live output.
 
-- [ ] **p1-tui-double-left-tickets-shortcut** — Implement (or remove) the documented "press ← twice for tickets" shortcut
+- [x] **p1-tui-double-left-tickets-shortcut** (already satisfied) — Implement (or remove) the documented "press ← twice for tickets" shortcut
   model: sonnet · severity: high · builds Rust: yes · area: tui · deps: none
   files: `crates/tm-tui/src/screens/chat.rs`
   change: The chat screen's tip text (chat.rs:1617) says "Press ← twice for tickets: work tm does in the background", and CLAUDE.md documents the same shortcut, but chat.rs's key handler treats `KeyCode::Left` unconditionally as cursor-left (chat.rs:1317, `self.input.left()`) with no double-press tracking analogous to the existing double-Esc pattern (chat.rs ~1124-1127, built on the timing threshold at chat.rs:130). Either wire a real double-Left detector that switches to the tickets screen on an empty prompt (mirroring double-Esc), or remove the false claim from the tip text and CLAUDE.md.
@@ -447,7 +447,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-provider`
   evidence: `grep -rn 'DecisionProvider\|Role::Decider\|classify\.decided' crates --include='*.rs'` (worktrees excluded) → no output, exit 1: nothing exists yet. `crates/tm-types/src/role.rs:39` `pub const ALL: [Role; 12] = [...]` confirms the enum and cardinality to extend.
 
-- [ ] **d20-decider-http-systemone-client** — Add an HTTP DecisionProvider for the /v1/systemone wire contract (Jev gateway, TypeSafe direct, jevmlx local)
+- [x] **d20-decider-http-systemone-client** (landed 32b3607) — Add an HTTP DecisionProvider for the /v1/systemone wire contract (Jev gateway, TypeSafe direct, jevmlx local)
   model: sonnet · severity: critical · builds Rust: yes · area: providers (D-020) · deps: d20-decider-trait-and-mock
   files: `crates/tm-provider/src/providers/systemone.rs`, `crates/tm-provider/src/providers/mod.rs`, `crates/tm-provider/src/providers/registry.rs`
   change: Add `providers/systemone.rs` implementing `DecisionProvider` (from `d20-decider-trait-and-mock`) with a reqwest-based client (same shape as `providers/openai.rs`) against a configurable `base_url` + `/v1/systemone`, POSTing `{model, state, questions}` and parsing `{answers, usage, provider_metadata}` per Vercel's documented TypeSafe-compatible API (https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe). Auth: `Authorization: Bearer <token>` where token comes from `AI_GATEWAY_API_KEY`, `TYPESAFE_API_KEY`, or a caller-supplied token (never hardcode a header name assumption beyond Bearer). Do NOT build an OpenAI-chat-shaped client or target `mlx_lm.server` — Jev/TypeSafe never speak chat-completions and Laya is not a generative LM. Register it in `providers/registry.rs` so a config can select it for `Role::Decider`.
