@@ -278,6 +278,65 @@ fn default_presence_action() -> String {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Extractors
+//
+// Axum's built-in `Path<T>`/`Json<T>` extractors render a rejection (a bad path segment, a
+// malformed or type-mismatched request body) as plain text, not this crate's
+// `{"error", "message"}` JSON shape — every other error path in this module already goes through
+// [`ServerError`]'s `IntoResponse`, so a bad `GET /tickets/NOTFOUND` or a malformed `POST
+// /tickets` body was the one place a client saw an un-parseable body instead (`SPEC.md` §14,
+// `p1-http-error-json-format`). [`ApiPath`]/[`ApiJson`] wrap the real extractors and convert
+// their rejection into [`ServerError::BadRequest`] so they render the same way as everything
+// else.
+// ---------------------------------------------------------------------------------------------
+
+/// `Path<T>`, but a rejection (e.g. `/tickets/NOTFOUND` failing to parse as a `TicketId`) renders
+/// as this crate's JSON error shape instead of axum's plain-text `PathRejection` body.
+struct ApiPath<T>(T);
+
+impl<T, S> axum::extract::FromRequestParts<S> for ApiPath<T>
+where
+    T: serde::de::DeserializeOwned + Send,
+    S: Send + Sync,
+{
+    type Rejection = ServerError;
+
+    async fn from_request_parts(
+        parts: &mut axum::http::request::Parts,
+        state: &S,
+    ) -> Result<Self, Self::Rejection> {
+        match Path::<T>::from_request_parts(parts, state).await {
+            Ok(Path(value)) => Ok(ApiPath(value)),
+            Err(rejection) => Err(ServerError::BadRequest(rejection.body_text())),
+        }
+    }
+}
+
+/// `Json<T>`, but a rejection (malformed JSON, a field of the wrong type, a missing field with no
+/// default) renders as this crate's JSON error shape instead of axum's plain-text `JsonRejection`
+/// body. This still only names the first field serde chokes on for most bodies — serde's own
+/// error stops there — but that's still valid `{error, message}` JSON, which is the contract
+/// every other handler already promises. [`CreateTicketRequest`]'s own `FromRequest` impl below
+/// goes further and names every missing required field together, since that's the shape
+/// `p1-http-error-json-format`'s acceptance check exercises.
+struct ApiJson<T>(T);
+
+impl<T, S> axum::extract::FromRequest<S> for ApiJson<T>
+where
+    T: serde::de::DeserializeOwned,
+    S: Send + Sync,
+{
+    type Rejection = ServerError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(value)) => Ok(ApiJson(value)),
+            Err(rejection) => Err(ServerError::BadRequest(rejection.body_text())),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
 // Request bodies
 // ---------------------------------------------------------------------------------------------
 
@@ -310,6 +369,46 @@ struct CreateTicketRequest {
     #[serde(default)]
     priority: i32,
     actor: ParticipantId,
+}
+
+/// The fields a `POST /tickets` body has no default for; every other field gets what `tm ticket
+/// new` gives a ticket (see the field comment above).
+const CREATE_TICKET_REQUIRED_FIELDS: &[&str] = &["kind", "objective", "actor"];
+
+/// A dedicated extractor (rather than [`ApiJson`]) so a body missing more than one required field
+/// names all of them in one message, not just the first serde would have choked on — the shape
+/// `p1-http-error-json-format`'s acceptance check drives (`POST /tickets -d '{}'` must name
+/// `objective`, `kind` and `actor` together).
+impl<S> axum::extract::FromRequest<S> for CreateTicketRequest
+where
+    S: Send + Sync,
+{
+    type Rejection = ServerError;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        let bytes = axum::body::Bytes::from_request(req, state)
+            .await
+            .map_err(|rejection| ServerError::BadRequest(rejection.body_text()))?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|e| {
+            ServerError::BadRequest(format!("This request body isn't valid JSON: {e}."))
+        })?;
+        if let Value::Object(obj) = &value {
+            let missing: Vec<&str> = CREATE_TICKET_REQUIRED_FIELDS
+                .iter()
+                .filter(|field| !obj.contains_key(**field))
+                .copied()
+                .collect();
+            if !missing.is_empty() {
+                return Err(ServerError::BadRequest(format!(
+                    "This ticket is missing required field(s): {}.",
+                    missing.join(", ")
+                )));
+            }
+        }
+        serde_json::from_value(value).map_err(|e| {
+            ServerError::BadRequest(format!("This ticket's request body is invalid: {e}."))
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -666,7 +765,7 @@ async fn list_tickets(State(state): State<AppState>) -> Result<Json<Vec<Ticket>>
 
 async fn create_ticket(
     State(state): State<AppState>,
-    Json(body): Json<CreateTicketRequest>,
+    body: CreateTicketRequest,
 ) -> Result<(StatusCode, Json<Value>), ServerError> {
     let events = state.store.create_ticket(
         body.kind,
@@ -698,7 +797,7 @@ async fn create_ticket(
 
 async fn get_ticket(
     State(state): State<AppState>,
-    Path(id): Path<TicketId>,
+    ApiPath(id): ApiPath<TicketId>,
 ) -> Result<Json<Ticket>, ServerError> {
     let view = state.store.view()?;
     let ticket = view
@@ -711,8 +810,8 @@ async fn get_ticket(
 
 async fn update_ticket(
     State(state): State<AppState>,
-    Path(id): Path<TicketId>,
-    Json(body): Json<UpdateTicketRequest>,
+    ApiPath(id): ApiPath<TicketId>,
+    ApiJson(body): ApiJson<UpdateTicketRequest>,
 ) -> Result<Json<Ticket>, ServerError> {
     state.store.update_ticket(&id, body.fields, body.actor)?;
     let view = state.store.view()?;
@@ -726,8 +825,8 @@ async fn update_ticket(
 
 async fn transition_ticket(
     State(state): State<AppState>,
-    Path(id): Path<TicketId>,
-    Json(body): Json<TransitionRequest>,
+    ApiPath(id): ApiPath<TicketId>,
+    ApiJson(body): ApiJson<TransitionRequest>,
 ) -> Result<Json<Value>, ServerError> {
     let events = match body {
         TransitionRequest::Activate { actor } => state.store.activate(&id, actor)?,
@@ -791,7 +890,7 @@ struct TicketEventsQuery {
 /// the cursor for the following page, or `null` once this page reached the end.
 async fn ticket_events(
     State(state): State<AppState>,
-    Path(id): Path<TicketId>,
+    ApiPath(id): ApiPath<TicketId>,
     axum::extract::Query(query): axum::extract::Query<TicketEventsQuery>,
 ) -> Result<Json<Value>, ServerError> {
     if !state.store.view()?.tickets.contains_key(&id) {
@@ -812,8 +911,8 @@ async fn ticket_events(
 
 async fn acquire_lease(
     State(state): State<AppState>,
-    Path(id): Path<TicketId>,
-    Json(body): Json<AcquireLeaseRequest>,
+    ApiPath(id): ApiPath<TicketId>,
+    ApiJson(body): ApiJson<AcquireLeaseRequest>,
 ) -> Result<(StatusCode, Json<Value>), ServerError> {
     let events = state.store.acquire_lease(
         &id,
@@ -837,8 +936,8 @@ async fn acquire_lease(
 
 async fn heartbeat_lease(
     State(state): State<AppState>,
-    Path(id): Path<LeaseId>,
-    Json(body): Json<ActorOnlyRequest>,
+    ApiPath(id): ApiPath<LeaseId>,
+    ApiJson(body): ApiJson<ActorOnlyRequest>,
 ) -> Result<Json<Value>, ServerError> {
     let events = state.store.heartbeat(&id, body.actor)?;
     Ok(Json(json!({"events": events_json(&events)?})))
@@ -846,8 +945,8 @@ async fn heartbeat_lease(
 
 async fn release_lease(
     State(state): State<AppState>,
-    Path(id): Path<LeaseId>,
-    Json(body): Json<ActorOnlyRequest>,
+    ApiPath(id): ApiPath<LeaseId>,
+    ApiJson(body): ApiJson<ActorOnlyRequest>,
 ) -> Result<Json<Value>, ServerError> {
     let events = state.store.release(&id, body.actor)?;
     Ok(Json(json!({"events": events_json(&events)?})))
@@ -855,8 +954,8 @@ async fn release_lease(
 
 async fn attach_evidence(
     State(state): State<AppState>,
-    Path(id): Path<TicketId>,
-    Json(body): Json<AttachEvidenceRequest>,
+    ApiPath(id): ApiPath<TicketId>,
+    ApiJson(body): ApiJson<AttachEvidenceRequest>,
 ) -> Result<Json<Value>, ServerError> {
     let events =
         state
@@ -878,7 +977,7 @@ async fn list_decisions(State(state): State<AppState>) -> Result<Json<Value>, Se
 
 async fn create_decision(
     State(state): State<AppState>,
-    Json(body): Json<DecisionRequest>,
+    ApiJson(body): ApiJson<DecisionRequest>,
 ) -> Result<(StatusCode, Json<Value>), ServerError> {
     let events = state.store.record_decision(
         body.subject,
@@ -903,8 +1002,8 @@ async fn create_decision(
 
 async fn supersede_decision(
     State(state): State<AppState>,
-    Path(id): Path<DecisionId>,
-    Json(body): Json<DecisionRequest>,
+    ApiPath(id): ApiPath<DecisionId>,
+    ApiJson(body): ApiJson<DecisionRequest>,
 ) -> Result<(StatusCode, Json<Value>), ServerError> {
     let events = state.store.supersede(
         &id,
@@ -942,7 +1041,7 @@ async fn list_milestones(State(state): State<AppState>) -> Result<Json<Value>, S
 
 async fn create_milestone(
     State(state): State<AppState>,
-    Json(body): Json<CreateMilestoneRequest>,
+    ApiJson(body): ApiJson<CreateMilestoneRequest>,
 ) -> Result<(StatusCode, Json<Value>), ServerError> {
     let events =
         state
@@ -962,8 +1061,8 @@ async fn create_milestone(
 
 async fn close_milestone(
     State(state): State<AppState>,
-    Path(id): Path<MilestoneId>,
-    Json(body): Json<ActorOnlyRequest>,
+    ApiPath(id): ApiPath<MilestoneId>,
+    ApiJson(body): ApiJson<ActorOnlyRequest>,
 ) -> Result<Json<Value>, ServerError> {
     let events = state.store.close_milestone(&id, body.actor)?;
     Ok(Json(json!({"events": events_json(&events)?})))
@@ -971,8 +1070,8 @@ async fn close_milestone(
 
 async fn reopen_milestone(
     State(state): State<AppState>,
-    Path(id): Path<MilestoneId>,
-    Json(body): Json<ActorOnlyRequest>,
+    ApiPath(id): ApiPath<MilestoneId>,
+    ApiJson(body): ApiJson<ActorOnlyRequest>,
 ) -> Result<Json<Value>, ServerError> {
     let events = state.store.reopen_milestone(&id, body.actor)?;
     Ok(Json(json!({"events": events_json(&events)?})))
@@ -986,7 +1085,7 @@ async fn list_artifacts(State(state): State<AppState>) -> Result<Json<Value>, Se
 
 async fn get_artifact(
     State(state): State<AppState>,
-    Path(id): Path<ArtifactId>,
+    ApiPath(id): ApiPath<ArtifactId>,
 ) -> Result<Json<Value>, ServerError> {
     let view = state.store.view()?;
     let artifact = view
@@ -998,7 +1097,7 @@ async fn get_artifact(
 
 async fn create_artifact(
     State(state): State<AppState>,
-    Json(body): Json<CreateArtifactRequest>,
+    ApiJson(body): ApiJson<CreateArtifactRequest>,
 ) -> Result<(StatusCode, Json<Value>), ServerError> {
     let events = state.store.store_artifact(
         body.kind,
@@ -1049,7 +1148,7 @@ async fn list_approvals(State(state): State<AppState>) -> Json<Value> {
 /// decision lands.
 async fn create_approval(
     State(state): State<AppState>,
-    Json(body): Json<CreateApprovalRequest>,
+    ApiJson(body): ApiJson<CreateApprovalRequest>,
 ) -> Result<Json<Value>, ServerError> {
     let id = format!("AP-{}", state.ids.random_hex(12));
     let request = ApprovalRequest {
@@ -1084,7 +1183,7 @@ async fn get_approval(
 async fn decide_approval(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(body): Json<DecideApprovalRequest>,
+    ApiJson(body): ApiJson<DecideApprovalRequest>,
 ) -> Result<Json<Value>, ServerError> {
     let decided_at = state.clock.now();
     let pending_request = state
@@ -1128,7 +1227,7 @@ async fn decide_approval(
 /// this just mints a fresh id for the caller to tag its own events/presence with.
 async fn create_session(
     State(state): State<AppState>,
-    Json(body): Json<CreateSessionRequest>,
+    ApiJson(body): ApiJson<CreateSessionRequest>,
 ) -> (StatusCode, Json<Value>) {
     let id = state.ids.next(IdKind::Session);
     (
@@ -1138,14 +1237,14 @@ async fn create_session(
 }
 
 /// No durable session record exists to delete (see [`create_session`]); always succeeds.
-async fn delete_session(Path(_id): Path<SessionId>) -> StatusCode {
+async fn delete_session(_id: ApiPath<SessionId>) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
 async fn update_presence(
     State(state): State<AppState>,
-    Path(_session): Path<SessionId>,
-    Json(body): Json<PresenceUpdateRequest>,
+    ApiPath(_session): ApiPath<SessionId>,
+    ApiJson(body): ApiJson<PresenceUpdateRequest>,
 ) -> Json<Value> {
     let participant = body.participant.clone();
     let ttl_seconds = body
@@ -1289,7 +1388,7 @@ mod tests {
     }
 
     async fn make_ticket(state: &AppState) -> TicketId {
-        let (_, Json(body)) = create_ticket(State(state.clone()), Json(create_ticket_body()))
+        let (_, Json(body)) = create_ticket(State(state.clone()), create_ticket_body())
             .await
             .expect("create ticket");
         let id = body["ticket"]["id"]
@@ -1351,9 +1450,10 @@ mod tests {
                 json!({"reject": {"reason": reason, "actor": "human:owner"}}),
             )
             .expect("wire shape");
-            let err = transition_ticket(State(state.clone()), Path(id.clone()), Json(request))
-                .await
-                .expect_err("a blank reason is refused");
+            let err =
+                transition_ticket(State(state.clone()), ApiPath(id.clone()), ApiJson(request))
+                    .await
+                    .expect_err("a blank reason is refused");
             assert_eq!(status_of(err), StatusCode::BAD_REQUEST, "{reason:?}");
         }
         let view = state.store.view().expect("view");
@@ -1393,7 +1493,7 @@ mod tests {
             };
             let Json(page) = ticket_events(
                 State(state.clone()),
-                Path(first.clone()),
+                ApiPath(first.clone()),
                 axum::extract::Query(query),
             )
             .await
@@ -1416,7 +1516,7 @@ mod tests {
             let query: axum::extract::Query<TicketEventsQuery> =
                 axum::extract::Query::try_from_uri(&format!("/x?{q}").parse().expect("uri"))
                     .expect("query parses");
-            ticket_events(State(state.clone()), Path(first.clone()), query)
+            ticket_events(State(state.clone()), ApiPath(first.clone()), query)
         };
         let Json(by_from) = page(&format!("from={}&limit=2", all_first[0]))
             .await
@@ -1429,7 +1529,7 @@ mod tests {
 
         let err = ticket_events(
             State(state.clone()),
-            Path(TicketId::new("T-999").expect("id")),
+            ApiPath(TicketId::new("T-999").expect("id")),
             axum::extract::Query(TicketEventsQuery::default()),
         )
         .await
@@ -1441,7 +1541,7 @@ mod tests {
     async fn create_ticket_then_fetch_it() {
         let (_dir, state) = test_state();
         let id = make_ticket(&state).await;
-        let Json(ticket) = get_ticket(State(state), Path(id.clone()))
+        let Json(ticket) = get_ticket(State(state), ApiPath(id.clone()))
             .await
             .expect("get ticket");
         assert_eq!(ticket.id, id);
@@ -1458,11 +1558,11 @@ mod tests {
             "actor": actor(),
         }))
         .expect("kind, objective and actor are enough");
-        let (_, Json(created)) = create_ticket(State(state.clone()), Json(body))
+        let (_, Json(created)) = create_ticket(State(state.clone()), body)
             .await
             .expect("create ticket");
         let id = TicketId::new(created["ticket"]["id"].as_str().expect("id")).expect("valid id");
-        let Json(ticket) = get_ticket(State(state), Path(id))
+        let Json(ticket) = get_ticket(State(state), ApiPath(id))
             .await
             .expect("get ticket");
         assert_eq!(ticket.authority, Authority::worker());
@@ -1475,8 +1575,74 @@ mod tests {
     async fn get_missing_ticket_is_not_found() {
         let (_dir, state) = test_state();
         let missing = TicketId::new("T-999").expect("valid shape");
-        let err = get_ticket(State(state), Path(missing)).await.unwrap_err();
+        let err = get_ticket(State(state), ApiPath(missing))
+            .await
+            .unwrap_err();
         assert_eq!(status_of(err), StatusCode::NOT_FOUND);
+    }
+
+    /// Spins up the full [`router`] on a loopback port so these two tests exercise the exact
+    /// path a real client takes — `Path`/`Json` extractor rejections included — rather than
+    /// calling handler functions directly, which would bypass axum's own extraction and
+    /// therefore never observe the plain-text-vs-JSON bug `p1-http-error-json-format` fixes.
+    async fn spawn_router(state: AppState) -> std::net::SocketAddr {
+        let app = router(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        addr
+    }
+
+    /// `p1-http-error-json-format` acceptance: `GET /tickets/NOTFOUND` (not a valid `T-<n>`/
+    /// `V-<n>`/`A-<n>` shape) must return JSON with non-empty `error`/`message` fields, not
+    /// axum's default plain-text `PathRejection` body — the message must still name the
+    /// expected ID shape.
+    #[tokio::test]
+    async fn a_malformed_ticket_id_in_the_url_renders_as_json() {
+        let (_dir, state) = test_state();
+        let addr = spawn_router(state).await;
+        let resp = reqwest::Client::new()
+            .get(format!("http://{addr}/tickets/NOTFOUND"))
+            .send()
+            .await
+            .expect("request");
+        assert!(resp.status().is_client_error(), "{}", resp.status());
+        let body: Value = resp.json().await.expect("JSON body, not plain text");
+        let error = body["error"].as_str().expect("non-empty error field");
+        let message = body["message"].as_str().expect("non-empty message field");
+        assert!(!error.is_empty());
+        assert!(
+            message.contains("T-<n>"),
+            "message should name the expected ID shape: {message}"
+        );
+    }
+
+    /// `p1-http-error-json-format` acceptance: `POST /tickets` with `{}` must name every missing
+    /// required field (`objective`, `kind`, `actor`) together in one JSON message, not just the
+    /// first one serde would have chosen to choke on.
+    #[tokio::test]
+    async fn create_ticket_with_no_fields_names_every_missing_one() {
+        let (_dir, state) = test_state();
+        let addr = spawn_router(state).await;
+        let resp = reqwest::Client::new()
+            .post(format!("http://{addr}/tickets"))
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("request");
+        assert!(resp.status().is_client_error(), "{}", resp.status());
+        let body: Value = resp.json().await.expect("JSON body, not plain text");
+        let message = body["message"].as_str().expect("non-empty message field");
+        for field in ["objective", "kind", "actor"] {
+            assert!(
+                message.contains(field),
+                "message should name {field}: {message}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1536,7 +1702,7 @@ mod tests {
             fields: json!({"priority": 5}),
             actor: actor(),
         };
-        let Json(ticket) = update_ticket(State(state), Path(id), Json(body))
+        let Json(ticket) = update_ticket(State(state), ApiPath(id), ApiJson(body))
             .await
             .expect("update ticket");
         assert_eq!(ticket.priority, 5);
@@ -1550,7 +1716,7 @@ mod tests {
             fields: json!({}),
             actor: actor(),
         };
-        let err = update_ticket(State(state), Path(missing), Json(body))
+        let err = update_ticket(State(state), ApiPath(missing), ApiJson(body))
             .await
             .unwrap_err();
         assert_eq!(status_of(err), StatusCode::NOT_FOUND);
@@ -1562,12 +1728,12 @@ mod tests {
         let id = make_ticket(&state).await;
         let _ = transition_ticket(
             State(state.clone()),
-            Path(id.clone()),
-            Json(TransitionRequest::Activate { actor: actor() }),
+            ApiPath(id.clone()),
+            ApiJson(TransitionRequest::Activate { actor: actor() }),
         )
         .await
         .expect("activate");
-        let Json(ticket) = get_ticket(State(state), Path(id))
+        let Json(ticket) = get_ticket(State(state), ApiPath(id))
             .await
             .expect("get ticket");
         assert_ne!(ticket.state, TicketState::Draft);
@@ -1583,9 +1749,10 @@ mod tests {
             json!({"retry": {"guidance": "try again", "actor": "system"}}),
         ] {
             let request: TransitionRequest = serde_json::from_value(body).expect("wire shape");
-            let err = transition_ticket(State(state.clone()), Path(id.clone()), Json(request))
-                .await
-                .expect_err("the system is not a human");
+            let err =
+                transition_ticket(State(state.clone()), ApiPath(id.clone()), ApiJson(request))
+                    .await
+                    .expect_err("the system is not a human");
             assert_ne!(status_of(err), StatusCode::NOT_FOUND);
         }
     }
@@ -1596,8 +1763,8 @@ mod tests {
         let missing = TicketId::new("T-999").expect("valid shape");
         let err = transition_ticket(
             State(state),
-            Path(missing),
-            Json(TransitionRequest::Activate { actor: actor() }),
+            ApiPath(missing),
+            ApiJson(TransitionRequest::Activate { actor: actor() }),
         )
         .await
         .unwrap_err();
@@ -1611,8 +1778,8 @@ mod tests {
         // A Draft ticket cannot receive LeaseAcquired directly.
         let err = transition_ticket(
             State(state),
-            Path(id),
-            Json(TransitionRequest::Trigger {
+            ApiPath(id),
+            ApiJson(TransitionRequest::Trigger {
                 trigger: Trigger::LeaseAcquired,
                 actor: actor(),
             }),
@@ -1626,8 +1793,8 @@ mod tests {
         let id = make_ticket(state).await;
         let _ = transition_ticket(
             State(state.clone()),
-            Path(id.clone()),
-            Json(TransitionRequest::Activate { actor: actor() }),
+            ApiPath(id.clone()),
+            ApiJson(TransitionRequest::Activate { actor: actor() }),
         )
         .await
         .expect("activate");
@@ -1640,8 +1807,8 @@ mod tests {
         let id = make_ready_ticket(&state).await;
         let (status, Json(body)) = acquire_lease(
             State(state.clone()),
-            Path(id.clone()),
-            Json(AcquireLeaseRequest {
+            ApiPath(id.clone()),
+            ApiJson(AcquireLeaseRequest {
                 holder: actor(),
                 authority: Authority::none(),
                 resources: Vec::new(),
@@ -1657,8 +1824,8 @@ mod tests {
 
         let Json(hb) = heartbeat_lease(
             State(state.clone()),
-            Path(lease_id.clone()),
-            Json(ActorOnlyRequest { actor: actor() }),
+            ApiPath(lease_id.clone()),
+            ApiJson(ActorOnlyRequest { actor: actor() }),
         )
         .await
         .expect("heartbeat");
@@ -1666,8 +1833,8 @@ mod tests {
 
         let Json(rel) = release_lease(
             State(state),
-            Path(lease_id),
-            Json(ActorOnlyRequest { actor: actor() }),
+            ApiPath(lease_id),
+            ApiJson(ActorOnlyRequest { actor: actor() }),
         )
         .await
         .expect("release");
@@ -1680,8 +1847,8 @@ mod tests {
         let missing = LeaseId::new("L-000000000000").expect("valid shape");
         let err = heartbeat_lease(
             State(state),
-            Path(missing),
-            Json(ActorOnlyRequest { actor: actor() }),
+            ApiPath(missing),
+            ApiJson(ActorOnlyRequest { actor: actor() }),
         )
         .await
         .unwrap_err();
@@ -1694,7 +1861,7 @@ mod tests {
         let id = make_ticket(&state).await;
         let (_, Json(artifact_body)) = create_artifact(
             State(state.clone()),
-            Json(CreateArtifactRequest {
+            ApiJson(CreateArtifactRequest {
                 kind: ArtifactKind::Report,
                 media_type: "text/plain".to_string(),
                 bytes: b"ok".to_vec(),
@@ -1713,8 +1880,8 @@ mod tests {
 
         let Json(evidence_body) = attach_evidence(
             State(state),
-            Path(id),
-            Json(AttachEvidenceRequest {
+            ApiPath(id),
+            ApiJson(AttachEvidenceRequest {
                 kind: EvidenceKind::Review,
                 artifact: artifact_id,
                 summary: "looks fine".to_string(),
@@ -1750,7 +1917,7 @@ mod tests {
         let (_dir, state) = test_state();
         let (status, Json(body)) = create_decision(
             State(state.clone()),
-            Json(DecisionRequest {
+            ApiJson(DecisionRequest {
                 subject: "use sqlite".to_string(),
                 decision: "yes".to_string(),
                 reason: "simplicity".to_string(),
@@ -1779,7 +1946,7 @@ mod tests {
         let (_dir, state) = test_state();
         let (_, Json(first)) = create_decision(
             State(state.clone()),
-            Json(DecisionRequest {
+            ApiJson(DecisionRequest {
                 subject: "use sqlite".to_string(),
                 decision: "yes".to_string(),
                 reason: "simplicity".to_string(),
@@ -1796,8 +1963,8 @@ mod tests {
 
         let (_, Json(second)) = supersede_decision(
             State(state),
-            Path(first_id.clone()),
-            Json(DecisionRequest {
+            ApiPath(first_id.clone()),
+            ApiJson(DecisionRequest {
                 subject: "use sqlite".to_string(),
                 decision: "no, postgres".to_string(),
                 reason: "scale".to_string(),
@@ -1819,7 +1986,7 @@ mod tests {
         // Milestone membership requires the ticket to exist; close requires it terminal.
         let (_, Json(created)) = create_milestone(
             State(state.clone()),
-            Json(CreateMilestoneRequest {
+            ApiJson(CreateMilestoneRequest {
                 title: "v1".to_string(),
                 tickets: vec![id.clone()],
                 assumptions: Vec::new(),
@@ -1839,8 +2006,8 @@ mod tests {
         // Member ticket is still Draft, so close must fail with a conflict/invariant error.
         let close_err = close_milestone(
             State(state.clone()),
-            Path(milestone_id.clone()),
-            Json(ActorOnlyRequest { actor: actor() }),
+            ApiPath(milestone_id.clone()),
+            ApiJson(ActorOnlyRequest { actor: actor() }),
         )
         .await
         .unwrap_err();
@@ -1857,7 +2024,7 @@ mod tests {
         let (_dir, state) = test_state();
         let (status, Json(body)) = create_artifact(
             State(state.clone()),
-            Json(CreateArtifactRequest {
+            ApiJson(CreateArtifactRequest {
                 kind: ArtifactKind::CommandOutput,
                 media_type: "text/plain".to_string(),
                 bytes: b"hello".to_vec(),
@@ -1872,7 +2039,7 @@ mod tests {
         let id = ArtifactId::new(body["artifact"]["id"].as_str().expect("id").to_string())
             .expect("valid artifact id");
 
-        let Json(fetched) = get_artifact(State(state), Path(id))
+        let Json(fetched) = get_artifact(State(state), ApiPath(id))
             .await
             .expect("get artifact");
         assert_eq!(fetched["media_type"], "text/plain");
@@ -1883,7 +2050,9 @@ mod tests {
     async fn get_missing_artifact_is_not_found() {
         let (_dir, state) = test_state();
         let missing = ArtifactId::new("ART-000000000000").expect("valid shape");
-        let err = get_artifact(State(state), Path(missing)).await.unwrap_err();
+        let err = get_artifact(State(state), ApiPath(missing))
+            .await
+            .unwrap_err();
         assert_eq!(status_of(err), StatusCode::NOT_FOUND);
     }
 
@@ -1902,7 +2071,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             create_approval(
                 State(opener_state),
-                Json(CreateApprovalRequest {
+                ApiJson(CreateApprovalRequest {
                     ticket: None,
                     requested_by: actor(),
                     subject: "force-push to main".to_string(),
@@ -1929,7 +2098,7 @@ mod tests {
         let Json(decided) = decide_approval(
             State(state),
             Path(approval_id),
-            Json(DecideApprovalRequest {
+            ApiJson(DecideApprovalRequest {
                 decision: ApprovalDecisionBody::Approve {
                     note: Some("looks safe".to_string()),
                 },
@@ -1958,11 +2127,11 @@ mod tests {
     async fn create_session_then_delete_it() {
         let (_dir, state) = test_state();
         let (status, Json(body)) =
-            create_session(State(state), Json(CreateSessionRequest { label: None })).await;
+            create_session(State(state), ApiJson(CreateSessionRequest { label: None })).await;
         assert_eq!(status, StatusCode::CREATED);
         let id = SessionId::new(body["session"].as_str().expect("session id").to_string())
             .expect("valid session id");
-        let delete_status = delete_session(Path(id)).await;
+        let delete_status = delete_session(ApiPath(id)).await;
         assert_eq!(delete_status, StatusCode::NO_CONTENT);
     }
 
@@ -1973,8 +2142,8 @@ mod tests {
         let participant = ParticipantId::new("human:alice").expect("valid participant");
         let _ = update_presence(
             State(state.clone()),
-            Path(session),
-            Json(PresenceUpdateRequest {
+            ApiPath(session),
+            ApiJson(PresenceUpdateRequest {
                 participant: participant.clone(),
                 ticket: None,
                 file: Some("src/main.rs".to_string()),
