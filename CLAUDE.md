@@ -81,6 +81,9 @@ never drift between sessions:
   `AGENTS.md` in `$EDITOR`), `/export [path]` (saves the conversation as markdown), `/doctor`
   (runs `tm doctor`'s checks inline), `/permissions [mode]` (shows or sets auto/plan/ask, same
   as Shift+Tab), `/workflow [name]` (lists workflows, or starts one as a background ticket);
+  `/board`, `/milestones`, `/timeline`, `/deps` (jump straight to that tab of the tickets hub;
+  Esc returns to the chat), `/ticket <T>` (prints the ticket's summary inline), `/run <T>`
+  (activates and queues it);
   quit is Ctrl+C twice, Ctrl+D on an
   empty prompt, or `/exit`. The
   tickets screen is Claude Code's `claude agents` view with tickets as rows
@@ -165,7 +168,13 @@ never drift between sessions:
   ticket count and milestone, says to run `tm sched run` (or `tm run <T>`) then re-run `tm
   genesis`, and exits 0. Re-running today starts a fresh run rather than resuming the stopped
   one — `GenesisDriver::resume` exists but `genesis()` doesn't call it yet (separate task:
-  `genesis-cli-resume-flag`). See `docs/decisions/D-027-genesis-cli-stops-for-work.md`.
+  `genesis-cli-resume-flag`). See `docs/decisions/D-027-genesis-cli-stops-for-work.md`. Under
+  `TM_TEST_MOCK_PROVIDER=1` (the same offline test hook `tm run` and chat turns honor via
+  `crate::agent::TEST_MOCK_PROVIDER_ENV`), `tm genesis` skips provider resolution entirely:
+  `resolve_genesis_provider` returns a `MockProvider` scripted with
+  `tm_genesis::fixtures::offline_sequence()`, so it runs in a scratch tempdir with no credential
+  or local model, and still stops per D-027 at the first unclosed milestone or failed maturity
+  gate.
 - `mise run docs:wiki` — regenerate `docs/wiki/` (`tm wiki generate`); pass `-- --dry-run` to
   preview without writing (see "Navigation" below).
 
