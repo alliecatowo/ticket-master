@@ -99,7 +99,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: current CLI has 31 top-level verbs, all visible; finding: "Search command UX: --mode flag less discoverable than subcommand style."
 
-- [ ] **s1-tickets-json-shape** — tm tickets --json and tm ticket list --json disagree on fields
+- [x] **s1-tickets-json-shape** — tm tickets --json and tm ticket list --json disagree on fields (landed 1b55c83)
   model: haiku · severity: medium · builds Rust: yes · area: cli · deps: s1-display-labels
   files: `crates/tm-cli/src/tickets/overview.rs`, `crates/tm-cli/src/tickets.rs`
   change: Make `tm tickets --json` serialize the same view struct as `tm ticket list --json`, including `title` (short_title of the objective, overview.rs:531) and state_label strings. Extend whichever struct is missing fields rather than creating a third one. Add a test deserializing both outputs into one struct.
@@ -271,7 +271,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: all three commands currently return `error: storage: Failed to read harness.toml: No such file or directory (os error 2)` on a freshly-initialized project.
 
-- [ ] **s1-bench-compare-human-output** — tm bench compare's human output omits the actual comparison
+- [x] **s1-bench-compare-human-output** — tm bench compare's human output omits the actual comparison (landed 20d2733)
   model: haiku · severity: high · builds Rust: yes · area: cli/bench · deps: none
   files: `crates/tm-cli/src/ops.rs`
   change: `bench_compare` (ops.rs:1672-1694) computes a `PromotionReport` with `aggregate_gain`, `candidate_improved` and per-task deltas, but the human-readable branch (~1688-1691) only prints epoch numbers ("Comparison: X vs Y"). Render whether the candidate improved (yes/no), the aggregate gain as a signed delta, and a brief per-task summary (or at least an improved/regressed count) when `task_deltas` is non-empty. The JSON output already has everything; just expose it in text.
@@ -479,7 +479,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-core`
   evidence: `grep -rln '"ticket.created"' crates --include='*.rs'` (worktrees excluded) → `crates/tm-cli/tests/tui_tickets.rs`, `crates/tm-cli/tests/ticket_fork.rs`, `crates/tm-events/src/kind.rs` — the real append site in tm-core's own src needs its own grep at implementation time since this search only turned up test/event-kind references.
 
-- [ ] **d20-redact-decide-request** — Add redact_decide_request through SessionRedactor before any remote DecisionProvider call
+- [~] **d20-redact-decide-request** — Add redact_decide_request through SessionRedactor before any remote DecisionProvider call (needs the owner: `redact_decide_request` landed in tm-auth, but wiring it into `crates/tm-provider/src/providers/systemone.rs`'s outbound POST body — the acceptance criterion — is still undone, deliberately left out of this task's owned files)
   model: sonnet · severity: medium · builds Rust: yes · area: auth (D-020) · deps: d20-decider-trait-and-mock, d20-decider-http-systemone-client
   files: `crates/tm-auth/src/redact.rs`
   change: Per D-020 decision 7 ("Redaction before anything leaves the machine"), add a `redact_decide_request(&DecideRequest) -> DecideRequest` function alongside `SessionRedactor`'s existing redaction entry points in `crates/tm-auth/src/redact.rs`, applying the same secret-pattern scrubbing `SessionRedactor` already does to session/turn content, to the `DecideRequest`'s state and question text. Wire the HTTP decider provider (`d20-decider-http-systemone-client`) to call it before every outbound request; the mock/local backends don't need it (nothing leaves the machine).
@@ -487,7 +487,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-auth`
   evidence: `grep -rln 'SessionRedactor' crates --include='*.rs'` (worktrees excluded) → `crates/tm-auth/src/lib.rs`, `crates/tm-auth/src/redact.rs`, `crates/tm-provider/src/fabric.rs`, `crates/tm-core/src/store.rs` — the redaction entry point this task extends.
 
-- [ ] **d20-bench-decision-eval** — Add a small offline decision-eval task to tm-harness's bench
+- [x] **d20-bench-decision-eval** — Add a small offline decision-eval task to tm-harness's bench (landed 9ff9a5f)
   model: sonnet · severity: medium · builds Rust: yes · area: bench (D-020) · deps: d20-decider-trait-and-mock
   files: `crates/tm-harness/src/bench.rs`
   change: Extend `crates/tm-harness/src/bench.rs` with a decision-eval task type that replays `classify.decided(shadow)` events against known outcomes (`Session.promote`, `StepRecord`, ticket end-states per D-020's "Why" section) and reports accuracy/ECE, using the `MockDecisionProvider` for a fully offline, hermetic fixture so the eval itself needs no network or real decider.
@@ -543,7 +543,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: workflow wf_87a85411-848's critic result, "missing" item 6: dispatch.rs:281 and :322-326 build/open CodeIntel from `project.root`, while :305-307 execute tools at `exec_root`.
 
-- [ ] **critic-nav-quality-eval** — A repeatable search-quality eval (query -> expected file in top-k), not two hand-picked queries
+- [~] **critic-nav-quality-eval** — A repeatable search-quality eval (query -> expected file in top-k), not two hand-picked queries (needs the owner: the fixture/test's own hit-rate@3 floor of 8/12 failed a real run at 6/12 against the hash embedder — reverted, no prior CI run existed to calibrate the floor against)
   model: sonnet · severity: medium · builds Rust: yes · area: code-navigation · deps: nav-potion-embedder
   files: `crates/tm-codeintel/tests/nav_quality_eval.rs`, `crates/tm-codeintel/fixtures/nav_eval.toml`
   change: SPEC §10 asks for "searches before first relevant hit" and §32.2 asks `tm doctor` to surface rg-fallback counts as a measurement, but nothing computes either, and `nav-potion-embedder`'s acceptance only hand-picks two queries. Add a small fixture set of (query, expected top-k file) pairs against this repo (or a frozen snapshot of it), and a test/binary that runs each query through hybrid search and reports hit rate at k=1/3/5, so the embedder switch (and future retrieval changes) can be scored against a fixed baseline instead of eyeballed.
@@ -559,7 +559,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-agent && mise run test:crate -- tm-provider`
   evidence: workflow wf_87a85411-848's critic result, "missing" item 13: `docs/backlog.md:617-620`'s ~175k-tokens/~18KB-schema measurement; owner's own framing in this session ("not 4 agents each taking 200k tokens").
 
-- [ ] **critic-ci-client-coverage** — CI only runs Rust; add the pnpm (ts/vscode/web) and swift suites the plan's own gates already assume
+- [x] **critic-ci-client-coverage** — CI only runs Rust; add the pnpm (ts/vscode/web) and swift suites the plan's own gates already assume (landed 03daad1)
   model: haiku · severity: medium · builds Rust: no · area: ci · deps: none
   files: `.github/workflows/ci.yml`
   change: `ci.yml` runs only the Rust workspace, but `docs/tasks/README.md:12-13` requires the `clients/web` suite, and this plan's own B1/B2 gates already run `pnpm -C clients/ts`/`pnpm -C clients/vscode` and `swift test --package-path clients/macos` locally. Add jobs (or steps) running `pnpm -C clients/ts install && pnpm -C clients/ts test && pnpm -C clients/ts build`, the same for `clients/vscode`, `clients/web`'s test/build, and `swift test --package-path clients/macos` on macOS runners, so a client-only regression is caught in CI instead of only when a batch gate happens to run locally.
@@ -626,14 +626,14 @@ Gate: `mise run verify && pnpm -C clients/ts install && pnpm -C clients/ts test 
   acceptance: actionlint passes on release.yml, `mise tasks` lists install, and the README gives all three install paths plus the quarantine note. No Rust code changes.
   test: `mise x aqua:rhysd/actionlint@latest -- actionlint .github/workflows/release.yml && mise tasks | grep -qw install`
 
-- [ ] **ts-sdk-add-accept-reject-retry** — Add accept/reject/retry variants to clients/ts TransitionCommand
+- [x] **ts-sdk-add-accept-reject-retry** — Add accept/reject/retry variants to clients/ts TransitionCommand (landed 176e9cc)
   model: haiku · size: XS · builds Rust: no · area: clients/ts · deps: none
   files: `clients/ts/src/domain.ts`, `clients/ts/test/client.test.ts`
   change: Add three variants to the TransitionCommand union (domain.ts:460-469) matching tm-server's TransitionRequest::Accept/Reject/Retry (routes.rs:388-404): `{ accept: { note?: string | null; actor: ParticipantId } }`, `{ reject: { reason: string; actor: ParticipantId } }`, `{ retry: { guidance?: string | null; actor: ParticipantId } }`.
   acceptance: New client.test.ts cases call transition() with each of the three variants and assert the exact JSON body posted to the mock fetch. pnpm test and build pass.
   test: `pnpm -C clients/ts install && pnpm -C clients/ts test && pnpm -C clients/ts build`
 
-- [ ] **vscode-bundle-and-link-shared-sdk** — Bundle the VS Code extension with esbuild and link @ticketmaster/client
+- [x] **vscode-bundle-and-link-shared-sdk** — Bundle the VS Code extension with esbuild and link @ticketmaster/client (landed ec24e03)
   model: sonnet · size: S · builds Rust: no · area: clients/vscode · deps: none
   files: `clients/vscode/package.json`, `clients/vscode/pnpm-lock.yaml`, `clients/vscode/tsconfig.json`, `clients/vscode/esbuild.mjs`
   change: @ticketmaster/client is ESM-only ("type":"module", exports with import only), while the extension compiles to CommonJS (tsconfig module commonjs, main ./out/extension.js). A plain dependency therefore cannot be require()d on VS Code 1.85's Node. Add "@ticketmaster/client": "link:../ts". Each client has its own pnpm-workspace.yaml, so workspace:* will not resolve. Add an esbuild devDependency and a small esbuild.mjs that bundles src/extension.ts to out/extension.js with format cjs, platform node and `vscode` external. Change the compile script to `tsc --noEmit -p ./ && node esbuild.mjs`. Adjust tsconfig (for example module esnext + moduleResolution bundler, with noEmit) so imports from @ticketmaster/client typecheck. Make no source changes in this task.
