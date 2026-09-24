@@ -84,3 +84,16 @@ vt100 = "0.15"
 # well-maintained CommonMark parser (no unsafe, no unbounded recursion by default), chosen over
 # hand-rolling a parser in a server handler.
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+
+# Disk pressure on this 8GB/228GB-disk machine (see CLAUDE.md's disk:guard section): a dev build's
+# debuginfo is most of target/'s size, and almost none of it is ours. Third-party crates never get
+# breakpointed here, so they don't need debuginfo at all; our own crates keep line-table-only info,
+# which is enough for a backtrace's file:line but not full lldb locals -- shrink further only if a
+# specific debugging session needs it back, not as a standing default. This invalidates existing
+# build caches once (fingerprints include profile settings), which is expected the first time this
+# lands, not a bug.
+[profile.dev.package."*"]
+debug = false
+
+[profile.dev]
+debug = "line-tables-only"
