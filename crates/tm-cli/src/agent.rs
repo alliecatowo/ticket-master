@@ -15,11 +15,11 @@ use tm_agent::outcome::{
     AgentOutcome, AgentTask, BudgetDimension, PendingApproval, StepRecord, ToolCallRecord,
     ToolCallResolution,
 };
-use tm_agent::{AgentLoop, ToolRegistry};
+use tm_agent::{render_system_prompt, AgentLoop, ToolRegistry};
 use tm_codeintel::SignalWeights;
 use tm_context::{
-    compile, compile_session, CommandCache, CommandExecutor, CommandResult, CommandSpec,
-    ExecutionOutcome, TokenBudget,
+    compile, compile_session, estimate_tokens_prose, CommandCache, CommandExecutor, CommandResult,
+    CommandSpec, ContextPack, ExecutionOutcome, TokenBudget, ToolSurfaceCost,
 };
 use tm_core::Ticket;
 use tm_provider::{AnthropicProvider, DevPassProvider, Fabric, ModelId, RoleTable};
@@ -348,8 +348,36 @@ conversation doesn't say.";
 const COMPACTED_MARKER: &str =
     "[This conversation was compacted. A summary of everything before this point:]";
 
-/// Once a turn's context reaches this many tokens, the next turn compacts the conversation first.
-const AUTO_COMPACT_TOKENS: u64 = 150_000;
+/// Once a turn's context reaches this many tokens, the next turn compacts the conversation first
+/// — the closest thing this codebase has to a "context window" for an interactive chat session
+/// (`crate::tui::chat_ops::slash_views`'s `/context` table reuses this exact constant rather than
+/// a separately-maintained copy; an integrator should move that module to `crate::tui::
+/// slash_views` alongside its sibling `config_cmd`/`tickets_view` — see `chat_ops.rs`'s `#[path]`
+/// workaround for why it isn't already there).
+pub(crate) const AUTO_COMPACT_TOKENS: u64 = 150_000;
+
+/// The token counts the most recent turn's request was built from, kept for `/context`
+/// (`crates/tm-cli/src/tui/chat_ops.rs`) to display: each field is `tm_context`'s own
+/// character-count estimate (`estimate_tokens_prose`/`Section::tokens`) over exactly the text and
+/// schemas that turn sent — not re-derived or invented for display, but still an estimate, the
+/// same one every other token count in this codebase (`ContextPack::tokens`, `Section::tokens`)
+/// already is (`tm_context::tokens`'s module doc: "not for exact provider billing").
+#[derive(Debug, Clone)]
+pub struct ContextReport {
+    /// Tokens in the rendered system prompt (`tm_agent::render_system_prompt`).
+    pub system_tokens: u64,
+    /// Tokens across every admitted tool's schema (`ToolRegistry::tool_surface_cost_for`), the
+    /// authority-scoped set actually sent on this turn.
+    pub tools_tokens: u64,
+    /// The ticket this turn's context pack was compiled for, if any — so a later `/context` can
+    /// tell a stale report (from a turn before `/attach`, or from a ticketless turn) apart from a
+    /// fresh one instead of mislabeling whichever pack happens to be cached.
+    pub ticket: Option<TicketId>,
+    /// The compiled context pack this turn sent as the task/context prompt: its sections are the
+    /// ticket's prefetched material (outlines, symbols, history, search hits), each with its own
+    /// token cost (`tm_context::Section::tokens`).
+    pub context_pack: ContextPack,
+}
 
 /// What [`AgentSession::compact`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -488,6 +516,10 @@ pub struct AgentSession {
     started: Timestamp,
     /// The model the human picked with `/model`; `None` follows the role table.
     model: Option<ModelId>,
+    /// The token breakdown the most recent turn's request was built from, for `/context`. `None` before the
+    /// first turn of a session (a fresh `--resume` doesn't recompute one from the saved
+    /// transcript rather than inventing numbers for turns it didn't just run).
+    last_context: Option<ContextReport>,
 }
 
 impl AgentSession {
@@ -513,6 +545,7 @@ impl AgentSession {
             approved_for_session: std::collections::BTreeSet::new(),
             interrupter: TurnInterrupter::default(),
             model: None,
+            last_context: None,
         }
     }
 
@@ -721,6 +754,12 @@ impl AgentSession {
     /// The ticket the conversation is attached to, if any.
     pub fn attached_ticket(&self) -> Option<&TicketId> {
         self.attached_ticket.as_ref()
+    }
+
+    /// The token breakdown the most recent turn's request was built from (`/context`); `None` until a turn
+    /// has actually run in this session.
+    pub fn last_context_report(&self) -> Option<&ContextReport> {
+        self.last_context.as_ref()
     }
 
     /// Stop working against the attached ticket; the conversation continues ticketless.
@@ -1212,6 +1251,38 @@ impl AgentSession {
         )
         .with_hooks(hooks.clone());
 
+        // Computed ahead of `AgentLoop::new` (which consumes `tools`) so the exact authority-
+        // scoped tool surface this turn sends can be sized before it's moved, and the exact
+        // system prompt before it's moved into `with_prompt_fragments` — sizes taken from this
+        // turn's actual inputs rather than re-derived after the fact, per `/context`'s
+        // `ContextReport` below.
+        let (authority, budget) = match &ticket {
+            Some(ticket) => (ticket.authority.clone(), ticket.budget),
+            None => (Authority::root(), session_turn_budget()),
+        };
+        let authority = match self.mode {
+            PermissionMode::Plan => authority.intersect(&plan_mode_authority()),
+            PermissionMode::Auto | PermissionMode::Ask => authority,
+        };
+        let tools_tokens: u64 = tools
+            .tool_surface_cost_for(&authority)
+            .iter()
+            .map(|cost: &ToolSurfaceCost| cost.tokens as u64)
+            .sum();
+
+        let mut fragments = tm_agent::chat_fragments(&self.chat_environment(ticket.as_ref()));
+        if self.mode == PermissionMode::Plan {
+            fragments.closing_reminder = PLAN_MODE_NOTE.to_string();
+        }
+        let system_tokens = estimate_tokens_prose(&render_system_prompt(&fragments)) as u64;
+
+        self.last_context = Some(ContextReport {
+            system_tokens,
+            tools_tokens,
+            ticket: ticket.as_ref().map(|t| t.id.clone()),
+            context_pack: context_pack.clone(),
+        });
+
         let mut oversight = crate::dispatch::load_oversight(&self.project)?;
         if self.mode == PermissionMode::Ask {
             oversight
@@ -1238,23 +1309,9 @@ impl AgentSession {
         // directory (and `!` shell mode runs in), not the process's cwd, which differs whenever
         // `tm` was started from a subdirectory of the project.
         .with_root(self.project.root.clone())
-        .with_prompt_fragments({
-            let mut fragments = tm_agent::chat_fragments(&self.chat_environment(ticket.as_ref()));
-            if self.mode == PermissionMode::Plan {
-                fragments.closing_reminder = PLAN_MODE_NOTE.to_string();
-            }
-            fragments
-        })
+        .with_prompt_fragments(fragments)
         .with_step_sender(step_tx);
 
-        let (authority, budget) = match &ticket {
-            Some(ticket) => (ticket.authority.clone(), ticket.budget),
-            None => (Authority::root(), session_turn_budget()),
-        };
-        let authority = match self.mode {
-            PermissionMode::Plan => authority.intersect(&plan_mode_authority()),
-            PermissionMode::Auto | PermissionMode::Ask => authority,
-        };
         let task = AgentTask {
             ticket: ticket.as_ref().map(|t| t.id.clone()),
             context_pack,

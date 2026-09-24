@@ -23,6 +23,13 @@ use tm_types::{SessionId, TicketId, Timestamp};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+// Every sibling module under `tui/` (`config_cmd`, `steps`, `tickets_view`) is declared with
+// `mod <name>;` in `tui.rs` instead. `slash_views` is declared here with an explicit `#[path]`
+// instead, so this file's only consumer of it works without a `tui.rs` edit; an integrator should
+// fold this into a plain `mod slash_views;` in `tui.rs` and drop this attribute.
+#[path = "slash_views.rs"]
+mod slash_views;
+
 use super::{config_cmd, steps, App};
 use crate::agent::{self, AgentSession, ApprovalAnswer, Approver, PermissionMode, TurnInterrupter};
 use crate::auth::{env_setup_rows, format_auth_instructions};
@@ -348,6 +355,35 @@ impl App {
         self.chat.show_tasks(items);
     }
 
+    /// `/context`: a table of token use by section (system prompt, instructions, tools,
+    /// conversation, free space) from the last turn's own request, plus the attached ticket's
+    /// prefetched context-pack sections when the last turn ran for that same ticket.
+    fn show_context(&mut self) {
+        let Ok(session) = self.agent_session.try_lock() else {
+            return self.chat.push_notice(
+                NoticeLevel::Warning,
+                "A turn is running; check /context once it finishes.",
+            );
+        };
+        let text = slash_views::context_table(
+            session.last_context_report(),
+            session.context_tokens(),
+            self.attached.as_ref().map(TicketId::as_str),
+        );
+        drop(session);
+        self.chat.push_notice(NoticeLevel::Info, text);
+    }
+
+    /// `/todos`: the same toggle Ctrl+T does (`ChatScreen::show_tasks`/`close_tasks`), so the two
+    /// stay interchangeable ways to open or close the checklist.
+    fn toggle_todos(&mut self) {
+        if self.chat.is_tasks_open() {
+            self.chat.close_tasks();
+        } else {
+            self.show_tasks();
+        }
+    }
+
     fn answer_approval(&mut self, choice: ApprovalChoice, _now: Timestamp) {
         let pending = self
             .chat_ext
@@ -620,6 +656,8 @@ impl App {
             CommandId::Connect => self.connect_provider(&arg),
             CommandId::Provider => self.show_provider(),
             CommandId::Config => self.config_cmd(&arg),
+            CommandId::Context => self.show_context(),
+            CommandId::Todos => self.toggle_todos(),
             // The chat screen answers these itself; handled anyway so the match stays exhaustive.
             CommandId::Status | CommandId::Cost => {}
             CommandId::Tickets => return self.open_tickets(now),

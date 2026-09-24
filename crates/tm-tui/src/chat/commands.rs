@@ -39,6 +39,10 @@ pub enum CommandId {
     Detach,
     /// Record a project decision.
     Decide,
+    /// Token use by section, and the attached ticket's prefetched context pack.
+    Context,
+    /// Toggle the Ctrl+T task checklist.
+    Todos,
     /// Quit tm.
     Exit,
 }
@@ -182,6 +186,20 @@ pub const COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         arg: Arg::Required("<text>"),
         description: "Record a project decision",
+    },
+    SlashCommand {
+        id: CommandId::Context,
+        name: "context",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Token use by section, and the ticket's prefetched context pack",
+    },
+    SlashCommand {
+        id: CommandId::Todos,
+        name: "todos",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Toggle the task checklist",
     },
     SlashCommand {
         id: CommandId::Exit,
@@ -401,10 +419,20 @@ mod tests {
         );
         for name in [
             "help", "clear", "resume", "compact", "model", "status", "cost", "connect", "provider",
-            "config", "init", "bg", "exit",
+            "config", "init", "bg", "context", "todos", "exit",
         ] {
             assert!(lookup(name).is_some(), "/{name} is a command");
         }
+    }
+
+    #[test]
+    fn context_and_todos_are_in_the_table() {
+        assert!(
+            matches!(parse("/context"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Context)
+        );
+        assert!(
+            matches!(parse("/todos"), Some(Parsed::Known { command, .. }) if command.id == CommandId::Todos)
+        );
     }
 
     #[test]

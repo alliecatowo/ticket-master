@@ -369,6 +369,12 @@ impl ChatScreen {
         self.tasks.is_some()
     }
 
+    /// Close the task checklist, if open (the other half of the Ctrl+T toggle at
+    /// [`ChatScreen::handle_key`], reused by `/todos` so the two stay in sync).
+    pub fn close_tasks(&mut self) {
+        self.tasks = None;
+    }
+
     /// Whether `←` should go to tickets: the prompt is empty and nothing is open over it (a
     /// dialog, a popup, the shortcuts panel, shell mode, history search), so the key is not
     /// someone else's.
