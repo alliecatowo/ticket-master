@@ -1,13 +1,17 @@
 name: Release
 
 # Cut a release by pushing a tag: `git tag v0.1.0 && git push origin v0.1.0`.
-# Each OS job builds the `tm` binary and attaches `tm-<target>.tar.gz` to the
-# GitHub Release for that tag (created if missing, with generated notes).
+# Each OS job runs `scripts/release.sh` -- the exact same script `mise run release` runs locally
+# -- so the tag-triggered asset and a locally-built one are produced by one code path, not two
+# that can drift (dist/tm-<host-triple>.tar.gz + share/tm/web/ + README-INSTALL.md + .sha256,
+# refusing to ship a `.env`/`.tm/` path) and are then attached to the GitHub Release for that tag
+# (created if missing, with generated notes).
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -29,15 +33,23 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p tm-cli --target ${{ matrix.target }}
-      - name: Package the binary
-        run: |
-          STAGE="tm-${{ matrix.target }}"
-          mkdir "$STAGE"
-          cp "target/${{ matrix.target }}/release/tm" "$STAGE/"
-          tar -czf "$STAGE.tar.gz" "$STAGE"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "pnpm"
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+      # The runner's host triple always equals this job's `matrix.target` (each job runs on the
+      # OS/arch it's cross-checking out for), so `scripts/release.sh`'s own `rustc -vV`-derived
+      # triple lands on the same name this step's upload/asset naming expects.
+      - name: Build and package via scripts/release.sh
+        run: bash scripts/release.sh
       - name: Publish to the GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: tm-${{ matrix.target }}.tar.gz
+          files: |
+            dist/tm-${{ matrix.target }}.tar.gz
+            dist/tm-${{ matrix.target }}.tar.gz.sha256
           generate_release_notes: true

@@ -147,29 +147,49 @@ fn parse_bind_addr(addr: Option<&str>) -> tm_types::Result<SocketAddr> {
     }
 }
 
-/// The built web client to serve: `explicit` (`--web-dir`), else `TM_WEB_DIR`, else
+/// The built web client to serve: `explicit` (`--web-dir`), else `TM_WEB_DIR`, else the
+/// *installed* layout next to the running executable (`scripts/install.sh` and `mise run
+/// release`'s tarball both lay out `<prefix>/bin/tm` + `<prefix>/share/tm/web/`), else
 /// `clients/web/dist` in the source checkout this binary was built from. Only a directory with an
 /// `index.html` counts. The project being served is never searched: its own `web/dist` is its
 /// app, not tm's.
 fn find_web_client_dir(explicit: Option<&Path>) -> Option<PathBuf> {
     let built_from = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../clients/web/dist");
+    // `current_exe()` can hand back a symlink (e.g. a `$PREFIX/bin/tm` that is itself a symlink
+    // into a version-pinned install dir); canonicalize so the `../share/tm/web` walk resolves
+    // against the real install layout rather than the symlink's own parent.
+    let installed = std::env::current_exe()
+        .and_then(|exe| exe.canonicalize())
+        .ok()
+        .and_then(|exe| installed_web_dir(&exe));
     web_client_dir_from(
         explicit,
         std::env::var_os("TM_WEB_DIR").map(PathBuf::from),
+        installed.as_deref(),
         &built_from,
     )
 }
 
-/// [`find_web_client_dir`]'s choice, given its three sources.
+/// The installed layout's web-client dir for a running executable at `exe`:
+/// `<dir of exe>/../share/tm/web`. Pure path math, no filesystem or environment access — whether
+/// that directory actually has a build lives in [`web_client_dir_from`], alongside the other
+/// three sources, so all four are judged by the same `index.html` check.
+fn installed_web_dir(exe: &Path) -> Option<PathBuf> {
+    Some(exe.parent()?.parent()?.join("share/tm/web"))
+}
+
+/// [`find_web_client_dir`]'s choice, given its four sources, in priority order.
 fn web_client_dir_from(
     explicit: Option<&Path>,
     env: Option<PathBuf>,
+    installed: Option<&Path>,
     built_from: &Path,
 ) -> Option<PathBuf> {
     explicit
         .map(Path::to_path_buf)
         .into_iter()
         .chain(env)
+        .chain(installed.map(Path::to_path_buf))
         .chain(std::iter::once(built_from.to_path_buf()))
         .find(|dir| dir.join("index.html").is_file())
 }
@@ -211,30 +231,59 @@ mod tests {
     }
 
     #[test]
-    fn the_web_client_is_found_by_flag_then_env_then_the_build_checkout() {
+    fn the_web_client_is_found_by_flag_then_env_then_installed_then_the_build_checkout() {
         let root = tempfile::TempDir::new().expect("temp dir");
         let flag = built(&root.path().join("flag"));
         let env = built(&root.path().join("env"));
+        let installed = built(&root.path().join("installed"));
         let checkout = built(&root.path().join("checkout"));
         assert_eq!(
-            web_client_dir_from(Some(&flag), Some(env.clone()), &checkout),
-            Some(flag)
+            web_client_dir_from(Some(&flag), Some(env.clone()), Some(&installed), &checkout),
+            Some(flag),
+            "--web-dir wins over everything else"
         );
         assert_eq!(
-            web_client_dir_from(None, Some(env.clone()), &checkout),
-            Some(env)
+            web_client_dir_from(None, Some(env.clone()), Some(&installed), &checkout),
+            Some(env),
+            "TM_WEB_DIR wins over the installed layout and the build checkout"
         );
         assert_eq!(
-            web_client_dir_from(None, None, &checkout),
-            Some(checkout.clone())
+            web_client_dir_from(None, None, Some(&installed), &checkout),
+            Some(installed.clone()),
+            "the installed layout wins over the build checkout"
+        );
+        assert_eq!(
+            web_client_dir_from(None, None, None, &checkout),
+            Some(checkout.clone()),
+            "the build checkout is the last resort"
         );
         let unbuilt = root.path().join("unbuilt");
         std::fs::create_dir_all(&unbuilt).expect("create dir");
         assert_eq!(
-            web_client_dir_from(Some(&unbuilt), None, &checkout),
-            Some(checkout),
+            web_client_dir_from(Some(&unbuilt), None, None, &checkout),
+            Some(checkout.clone()),
             "a directory without index.html isn't a build"
         );
-        assert_eq!(web_client_dir_from(None, None, &unbuilt), None);
+        assert_eq!(
+            web_client_dir_from(None, None, Some(&unbuilt), &checkout),
+            Some(checkout),
+            "an installed dir without index.html falls through to the build checkout too"
+        );
+        assert_eq!(web_client_dir_from(None, None, None, &unbuilt), None);
+    }
+
+    #[test]
+    fn installed_web_dir_is_share_tm_web_next_to_the_exe() {
+        assert_eq!(
+            installed_web_dir(Path::new("/opt/tm/bin/tm")),
+            Some(PathBuf::from("/opt/tm/share/tm/web"))
+        );
+        assert_eq!(
+            installed_web_dir(Path::new("/home/allie/.local/bin/tm")),
+            Some(PathBuf::from("/home/allie/.local/share/tm/web"))
+        );
+        // No grandparent to walk up to: stays None rather than panicking.
+        assert_eq!(installed_web_dir(Path::new("tm")), None);
+        assert_eq!(installed_web_dir(Path::new("/tm")), None);
     }
 }

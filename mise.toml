@@ -110,3 +110,7 @@ for wt in .claude/worktrees/*/; do
 done
 git worktree prune
 """
+
+[tasks.release]
+description = "Build a release tarball: cargo build --release -p tm-cli + the web client, packaged as dist/tm-<target-triple>.tar.gz (bin/tm + share/tm/web/ + README-INSTALL.md) with a .sha256 alongside -- the same layout .github/workflows/release.yml's CI job produces. Pass -- --publish to also `gh release create` -- see docs/install.md; don't run --publish yourself, only the orchestrator publishes from main."
+run = "bash scripts/release.sh"
