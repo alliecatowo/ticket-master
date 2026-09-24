@@ -2377,6 +2377,46 @@ impl Store {
         Ok(SchedulerView::from(&view))
     }
 
+    /// Compute this project's [`ProjectView`] exactly as it stood after replaying the event log
+    /// through `seq` (inclusive) — the whole-project generalization of the scratch-replay
+    /// technique [`Store::ticket_and_goal_as_of`] uses for a single ticket's fork snapshot, and
+    /// what `tm events replay` (`tm-cli`'s `ops::events_replay`) is built on.
+    ///
+    /// Replays `[1, seq]` into a throwaway, file-backed scratch schema via
+    /// [`crate::materialize::replay`] — the identical function both the live append path and
+    /// [`Store::rebuild`]'s full-log replay go through — so "view as of seq" is derived by the
+    /// same mechanism as "current view," just bounded. Never touches this project's own
+    /// `project.db`; the scratch file is discarded when this call returns.
+    ///
+    /// Must be called *before* opening any [`Store::transaction`]/[`Store::run_command`] on
+    /// `self`, never from inside one — see [`Store::ticket_and_goal_as_of`]'s own note on why.
+    ///
+    /// # Errors
+    /// `TmError::invariant` if `seq` is `0` or exceeds the log's current head — a caller asking
+    /// to replay to a point that cannot exist, rather than being silently clamped.
+    pub fn view_as_of(&self, seq: u64) -> tm_types::Result<ProjectView> {
+        let head = self.log.head()?;
+        if seq == 0 || seq > head {
+            return Err(TmError::invariant(format!(
+                "Can't replay to step {seq}: this project's history only has {head} steps so far"
+            )));
+        }
+        let events = self.log.read_range(1, seq)?;
+
+        let scratch_file =
+            tempfile::NamedTempFile::new().map_err(|e| TmError::storage(e.to_string()))?;
+        let scratch_log = EventLog::open_with_clock(scratch_file.path(), Arc::clone(&self.clock))?;
+        let tx = scratch_log.begin()?;
+        crate::schema::create_views(tx.raw())?;
+        crate::materialize::replay(&tx, &events)?;
+        let view = Self::read_view(tx.raw())?;
+        // Nothing written here was ever meant to be durable; the scratch file is deleted with
+        // `scratch_file` regardless, but rolling back (rather than committing) says so plainly.
+        tx.rollback()?;
+
+        Ok(view)
+    }
+
     /// Drop every materialized table and replay the entire event log from `seq` 0 through
     /// [`crate::materialize::replay`], reproducing byte-identical materialized state by
     /// construction (both this path and the live per-event path call the same `apply`).
@@ -5036,6 +5076,56 @@ mod tests {
             view.tickets.get(&ticket_id).unwrap().state,
             TicketState::Cancelled
         );
+    }
+
+    #[test]
+    fn view_as_of_replays_to_a_bounded_seq_not_head() {
+        let (_dir, store) = open_store();
+        let first = create_root_ticket(&store);
+
+        // Capture the seq right after creating `first` (still `Draft` at this point), then
+        // activate it and create a second, unrelated ticket after that. If `view_as_of`
+        // accidentally replayed through HEAD instead of the given seq, both of those later
+        // events would leak into the snapshot.
+        let seq_before_activate = store.log.head().expect("head");
+        store.activate(&first, actor()).expect("activate first");
+        let second = create_root_ticket(&store);
+        store.activate(&second, actor()).expect("activate second");
+
+        let view = store
+            .view_as_of(seq_before_activate)
+            .expect("view_as_of before the transition");
+        assert_eq!(
+            view.tickets.get(&first).unwrap().state,
+            TicketState::Draft,
+            "must reflect state as of seq, not HEAD"
+        );
+        assert!(
+            !view.tickets.contains_key(&second),
+            "a ticket created after seq must not appear in the snapshot"
+        );
+
+        // The live store is untouched: `first` and `second` are both materialized post-activate.
+        let live = store.view().expect("live view");
+        assert_eq!(live.tickets.get(&first).unwrap().state, TicketState::Ready);
+        assert_eq!(live.tickets.get(&second).unwrap().state, TicketState::Ready);
+    }
+
+    #[test]
+    fn view_as_of_rejects_seq_zero_and_seq_past_head() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        store.activate(&ticket, actor()).expect("activate");
+        let head = store.log.head().expect("head");
+
+        assert!(matches!(
+            store.view_as_of(0).unwrap_err(),
+            TmError::Invariant(_)
+        ));
+        assert!(matches!(
+            store.view_as_of(head + 1).unwrap_err(),
+            TmError::Invariant(_)
+        ));
     }
 
     #[test]

@@ -2613,10 +2613,13 @@ fn event_show_json(event: &tm_events::Event) -> serde_json::Value {
 /// `tm events replay`
 ///
 /// # IMPL
-/// Read `[args.from, args.to.unwrap_or(head)]` via `EventLog::read_range`, replay them through
-/// `tm_core::materialize::replay` against a scratch in-memory view (never the live project's
-/// store — this command inspects, it does not mutate), rendering the resulting `ProjectView`
-/// diff summary or the full view as JSON.
+/// Delegate to [`tm_core::Store::view_as_of`], which replays `[1, to]` through
+/// `tm_core::materialize::replay` against a throwaway scratch schema (never the live project's
+/// own `project.db` — this command inspects, it does not mutate), then render the resulting
+/// `ProjectView`'s ticket counts and states in human mode, or every replayed ticket in `--json`.
+/// `args.from` is not itself a replay bound (materializing a ticket's state always requires
+/// replaying from the log's start); it is carried through into the rendered output as context on
+/// what range the caller asked about.
 pub fn events_replay(
     args: &EventsReplayArgs,
     project: &Project,
@@ -2627,25 +2630,54 @@ pub fn events_replay(
     let head = log.head()?;
     let to = args.to.unwrap_or(head);
 
-    let events = log.read_range(args.from, to)?;
+    if to == 0 {
+        if renderer.is_json() {
+            renderer.emit(
+                &serde_json::json!({"from": args.from, "to": to, "tickets": {}}),
+                "",
+            )?;
+        } else {
+            renderer.emit(
+                &(),
+                "Nothing to replay yet: this project has no events at step 1 or later.",
+            )?;
+        }
+        return Ok(());
+    }
+
+    let view = project.store.view_as_of(to)?;
 
     if renderer.is_json() {
         let json = serde_json::json!({
-            "events_replayed": events.len(),
             "from": args.from,
             "to": to,
+            "tickets": view.tickets,
         });
         renderer.emit(&json, "")?;
     } else {
-        let summary = format!(
-            "Would replay {} events from seq {} to {}",
-            events.len(),
-            args.from,
-            to
-        );
-        renderer.emit(&(), &summary)?;
+        renderer.emit(&(), &events_replay_human(&view, to))?;
     }
     Ok(())
+}
+
+/// Pure formatter for `tm events replay`'s human output, kept separate from [`events_replay`] so
+/// the rendered ticket counts and states are unit-testable without a live `Store` write path or
+/// a renderer — mirrors [`event_show_human`]'s split for the same reason.
+fn events_replay_human(view: &tm_core::ProjectView, to: u64) -> String {
+    let mut by_state: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for ticket in view.tickets.values() {
+        *by_state
+            .entry(crate::render::state_label(ticket.state))
+            .or_insert(0) += 1;
+    }
+    let mut lines = vec![format!(
+        "Replayed to step {to}: {} ticket(s)",
+        view.tickets.len()
+    )];
+    for (label, count) in &by_state {
+        lines.push(format!("  {label}: {count}"));
+    }
+    lines.join("\n")
 }
 
 /// `tm events verify`
@@ -3484,7 +3516,51 @@ mod tests {
 
     #[test]
     fn events_replay_empty_range() {
-        // Replaying empty range should result in empty view
+        // `to` at or before the log's very first step (nothing durable yet) renders an empty,
+        // not a panicking, view.
+        let view = tm_core::ProjectView::empty();
+        let rendered = events_replay_human(&view, 0);
+        assert_eq!(rendered, "Replayed to step 0: 0 ticket(s)");
+    }
+
+    #[test]
+    fn events_replay_renders_ticket_states_not_an_event_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let ticket_id = mirrorable_ticket(&project);
+
+        // Capture the seq right before activating, then activate. `to` at that earlier seq must
+        // still show `draft`, proving replay is bounded by seq rather than replaying to HEAD.
+        let db_path = project.state_dir.join("project.db");
+        let log = tm_events::EventLog::open(&db_path).unwrap();
+        let seq_before_activate = log.head().unwrap();
+        project
+            .store
+            .activate(&ticket_id, project.actor.clone())
+            .expect("activate");
+
+        let view_before = project
+            .store
+            .view_as_of(seq_before_activate)
+            .expect("view_as_of");
+        let rendered_before = events_replay_human(&view_before, seq_before_activate);
+        assert!(
+            rendered_before.contains("draft: 1"),
+            "expected the pre-activation state, got: {rendered_before}"
+        );
+        assert!(
+            !rendered_before.contains("ready:"),
+            "must not show the post-activation state, got: {rendered_before}"
+        );
+
+        let head = log.head().unwrap();
+        let view_after = project.store.view_as_of(head).expect("view_as_of head");
+        let rendered_after = events_replay_human(&view_after, head);
+        assert!(
+            rendered_after.contains("ready: 1"),
+            "expected the post-activation state at HEAD, got: {rendered_after}"
+        );
     }
 
     #[test]
