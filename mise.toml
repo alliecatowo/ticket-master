@@ -172,6 +172,16 @@ while [ "$i" -lt 3 ]; do
   sleep 1
 done
 echo "installed: $PLIST -> $SCRIPT (every 30m, log: $LOG_DIR/tm-disk-guard.log)"
+# SCCACHE_CACHE_SIZE only takes effect on the next sccache server start, and sccache is a
+# long-lived daemon that normally stays up across sessions -- so a machine that already had one
+# running before this bound landed would otherwise keep the old, larger cache size indefinitely.
+# Installing the guard is a natural, infrequent point to force that pickup; best-effort since no
+# server running at all is also a fine outcome (the next `sccache` invocation starts one fresh
+# with the current env either way).
+if command -v sccache >/dev/null 2>&1; then
+  sccache --stop-server >/dev/null 2>&1 || true
+  echo "sccache server stopped so SCCACHE_CACHE_SIZE=6G (mise.toml) is picked up on next use"
+fi
 """
 
 [tasks."disk:guard:uninstall"]

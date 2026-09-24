@@ -149,27 +149,41 @@ first.
   (it's not installed as a side effect of anything else). `mise run disk:guard:uninstall` reverses
   it.
 - What it removes, every run: an idle `target/` dir (build output only — never anything else in a
-  checkout) in the primary checkout or any worktree, once idle past its threshold and not busy (a
-  cargo/rustc/rust-analyzer process cwd'd inside it specifically — not just any process, since an
-  editor, MCP daemon or shell routinely sits in the primary checkout and in `tm-integrate` without
-  that meaning a build is in flight; a `.cargo-lock` held open; or recent `.fingerprint`/`deps`
-  activity); a worktree under `.claude/worktrees/` once it's unlocked, has no uncommitted/untracked
-  changes, its HEAD is contained in `main` or `integrate`, and no process at all has its cwd inside
-  it; and tm scratch dirs (`$TMPDIR/tmp.*`, `/tmp/tm-trials`, `/tmp/tm-wide`,
-  `/tmp/tm-accidental-*`) older than 6 hours that look like tm's own (a `.tm` dir, a `projects/`
-  dir, a `tm` binary, or a git repo whose only commits are from the last day).
-- What it never removes: the worktree itself for anything named `odw-*` or `tm-integrate` (owner
-  decision — those stay until their work lands; their `target/` dirs are still fair game and do
-  get cleaned on the normal idle schedule), a locked worktree, a worktree with local changes or an
-  unmerged HEAD, or anything a live process has its cwd inside.
+  checkout) in the primary checkout or any non-`odw-*` worktree, once idle past its threshold and
+  not busy (a
+  cargo/rustc process cwd'd inside it specifically — not just any process, since an editor, MCP
+  daemon, or shell (including `rust-analyzer` itself) routinely sits in the primary checkout and in
+  `tm-integrate` without that meaning a build is in flight; a `.cargo-lock` held open; or recent
+  `.fingerprint`/`deps` activity); a worktree under `.claude/worktrees/` once it's unlocked, at
+  least 90 minutes old (its own git admin dir's HEAD/index/logs/HEAD show no activity more recent
+  than that — protects a just-branched worktree an agent hasn't committed to yet, since lock status
+  alone doesn't reliably signal "still working here" for this harness's workflow worktrees), has no
+  uncommitted/untracked/non-allow-listed-ignored changes (checked with `git status --ignored`, not
+  plain `--porcelain` — a gitignored-but-stateful file like a real `.tm/` dir, a sqlite `*.db*`, or
+  a symlinked `.env` blocks removal same as a tracked change would; only `target/` and
+  `node_modules/` are allow-listed to still count as clean), its HEAD is contained in `main` or
+  `integrate`, and no process at all has its cwd inside it; and tm scratch dirs
+  (`$TMPDIR/tmp.*`, `/tmp/tm-*`) older than 6 hours that look like tm's own (a `.tm` dir, a
+  `projects/` dir, a `tm` binary, a `project.db`/`index.db` directly at its own root, a bare cargo
+  `target/`-shaped dir at its own root, or a git repo
+  whose only commits are from the last day).
+- What it never removes: anything under a worktree named `odw-*` — the worktree itself, and its
+  `target/` too (owner decision — ODW's own in-progress state stays fully untouched, not just the
+  worktree directory, until that work lands) — or the `tm-integrate` worktree itself (its `target/`
+  is still fair game and does get cleaned on the normal idle schedule), a locked worktree, a
+  worktree younger than 90 minutes, a worktree with local changes (tracked or a non-allow-listed
+  ignored file) or an unmerged HEAD, or anything a live process has its cwd inside.
 - Every run appends one line to `~/Library/Logs/tm-disk-guard.log`: timestamp, free space before
   and after, and what was removed (or `(nothing removed)`).
-- The primary checkout's `target/` specifically stays pinned as long as an open Claude Code
-  session has `rust-analyzer-lsp` active there (see "Code intelligence" below) — `rust-analyzer`
-  itself counts as a busy build process by design (spec 1a), and this repo enables that plugin
-  project-wide, so a live session's own language server is usually why the primary's `target/`
-  never ages out on its own. `mise run clean` by hand is the way to reclaim it anyway while a
-  session is still open.
+- The primary checkout's `target/` deliberately does *not* stay pinned just because an open Claude
+  Code session has `rust-analyzer-lsp` active there (see "Code intelligence" below):
+  `rust-analyzer` itself is excluded from the busy-process check on purpose, since this repo
+  enables that plugin project-wide and a live session's own language server has its cwd in the
+  primary checkout essentially all the time — counting it as busy would have pinned the primary's
+  `target/` permanently, defeating "target clears periodically". `rust-analyzer`'s actual writes to
+  `target/` go through a `cargo` child process (still caught by the cwd check) and touch
+  `.fingerprint`/`deps` (caught by the mtime check), so a target mid-flycheck is still protected;
+  it just isn't pinned forever by the editor session alone.
 
 ## Codebase search: zvec-grep is indexed for this repo
 

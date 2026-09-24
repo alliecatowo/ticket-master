@@ -199,7 +199,7 @@ safe_rm() {
             _parent_resolved="$(dirname "$_resolved")"
             _base_resolved="$(basename "$_resolved")"
             case "$_base_resolved" in
-                tmp.* | tm-trials | tm-wide | tm-accidental-*) : ;;
+                tmp.* | tm-*) : ;;
                 *)
                     echo "disk-guard.sh: refusing scratch path with an unrecognized name: '$_resolved'" >&2
                     return 1
@@ -251,11 +251,23 @@ safe_rm() {
 # the paths, for the "any process at all" checks.
 # ---------------------------------------------------------------------------
 
-LSOF_CWD_LINES="$("$LSOF" -nP -d cwd +c 0 -Fcn 2>/dev/null | /usr/bin/awk '
-    /^c/ { cmd = substr($0, 2) }
-    /^n/ { print cmd "\t" substr($0, 2) }
-')"
-LSOF_CWDS="$(printf '%s\n' "$LSOF_CWD_LINES" | /usr/bin/awk -F'\t' '{print $2}')"
+# capture_lsof_snapshot -- (re)populate LSOF_CWD_LINES/LSOF_CWDS. Called once up front, and again
+# right before the worktree-removal and scratch-removal passes below: this run scans the primary
+# checkout, every worktree's target, every worktree's removal eligibility, and every scratch-dir
+# candidate (100+ in a real run) sequentially, so a single snapshot taken only at the very start
+# could already be stale by the time a later pass evaluates something that became busy in the
+# meantime. Re-snapshotting immediately before each deletion pass narrows, without eliminating,
+# that window -- a real fix would mean a fresh lsof call per item, which is the cost this caching
+# exists to avoid.
+capture_lsof_snapshot() {
+    LSOF_CWD_LINES="$("$LSOF" -nP -d cwd +c 0 -Fcn 2>/dev/null | /usr/bin/awk '
+        /^c/ { cmd = substr($0, 2) }
+        /^n/ { print cmd "\t" substr($0, 2) }
+    ')"
+    LSOF_CWDS="$(printf '%s\n' "$LSOF_CWD_LINES" | /usr/bin/awk -F'\t' '{print $2}')"
+}
+
+capture_lsof_snapshot
 
 # Every busy/cwd check below depends entirely on this one snapshot. lsof can't legitimately come
 # back empty -- this script's own shell process always has a cwd, so lsof would report at least
@@ -283,9 +295,19 @@ any_process_cwd_under() {
     done | /usr/bin/grep -q hit
 }
 
-# is_build_process COMMAND_NAME -- true for cargo/rustc/rust-analyzer* (matches spec 1a's "busy"
-# definition for a target dir specifically -- an editor, shell or unrelated tool sitting in the
-# checkout does not itself count). Deliberately a plain top-level function, not an inline `case`:
+# is_build_process COMMAND_NAME -- true for cargo/rustc (matches spec 1a's "busy" definition for
+# a target dir specifically -- an editor, shell or unrelated tool sitting in the checkout does not
+# itself count). Deliberately excludes rust-analyzer*: this repo enables the rust-analyzer-lsp
+# plugin project-wide, so a live Claude Code session's own language server has its cwd in the
+# primary checkout (and in tm-integrate) essentially all the time -- confirmed on this machine, a
+# session left open over a day still has rust-analyzer sitting there. Counting that as "busy"
+# would pin the primary checkout's target/ -- the exact 31GB directory that caused the original
+# incident -- permanently, defeating "target clears periodically". rust-analyzer's actual target/
+# writes go through a `cargo check` child process, which the cwd match on "cargo" below already
+# catches, and target/*/.cargo-lock / target/*/.fingerprint,deps mtime checks (2 and 3 in
+# target_is_busy) catch its flychecks too -- that's enough to avoid deleting a target mid-flycheck
+# without pinning it forever just because an editor session exists.
+# Deliberately a plain top-level function, not an inline `case`:
 # macOS ships bash 3.2 as both /bin/bash and /bin/sh, and 3.2 has a real, confirmed parser bug
 # where a `case ... esac` written directly inside a `$( ... )` command substitution fails with
 # "syntax error near unexpected token `newline'" even for entirely valid syntax; calling a
@@ -294,14 +316,14 @@ any_process_cwd_under() {
 # `case` this script needs inside a `$( ... )` goes through a named function like this one.
 is_build_process() {
     case "$1" in
-        cargo | rustc | rust-analyzer*) return 0 ;;
+        cargo | rustc) return 0 ;;
         *) return 1 ;;
     esac
 }
 
 # ---------------------------------------------------------------------------
-# target_is_busy CHECKOUT_ROOT IDLE_MINUTES -- true (busy) if a cargo/rustc/rust-analyzer*
-# process's cwd is under CHECKOUT_ROOT (excluding, for the primary checkout, any such cwd that is
+# target_is_busy CHECKOUT_ROOT IDLE_MINUTES -- true (busy) if a cargo/rustc process's cwd is
+# under CHECKOUT_ROOT (excluding, for the primary checkout, any such cwd that is
 # itself under WORKTREES_DIR -- the primary's path is a prefix of every worktree's path, so
 # without this exclusion a build running in any worktree would pin the primary's target forever),
 # or if target/*/.cargo-lock is held open, or if target/*/.fingerprint or target/*/deps changed
@@ -320,7 +342,7 @@ target_is_busy() {
 
     [ -d "$_target" ] || return 1
 
-    # 1. A cargo/rustc/rust-analyzer* process with its cwd inside this checkout (not just inside
+    # 1. A cargo/rustc process with its cwd inside this checkout (not just inside
     #    target/) -- a build about to write to target/ is reason enough to leave it alone. `$(...)`
     #    around the pipeline captures the matching command's own stdout line even though the
     #    `while` body is the pipeline's last (subshelled) stage -- command substitution reads the
@@ -420,6 +442,12 @@ WT_PORCELAIN="$("$GIT" -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null)"
 printf '%s\n' "$WT_PORCELAIN" | /usr/bin/awk '/^worktree /{print substr($0,10)}' | while IFS= read -r _wt; do
     [ "$_wt" = "$REPO_ROOT" ] && continue
     is_under "$_wt" "$WORKTREES_DIR" || continue
+    # odw-* worktrees are read-only from this guard's perspective, same as worktree removal
+    # below (owner decision -- ODW's own work-in-progress state, target/ included, stays untouched
+    # until it lands; not just the worktree directory itself).
+    case "$(basename "$_wt")" in
+        odw-*) continue ;;
+    esac
     clean_target_for "$_wt" "$(basename "$_wt")" "$WT_IDLE_MIN"
 done
 
@@ -428,6 +456,45 @@ done
 # ---------------------------------------------------------------------------
 
 vlog "== worktrees =="
+
+# Re-snapshot right before this pass (see capture_lsof_snapshot's own comment) -- if this refresh
+# comes back empty (a transient lsof hiccup), keep the previous, already-validated-non-empty
+# snapshot rather than switching every busy check into "nothing is busy" for the rest of this run.
+_LSOF_CWD_LINES_PREV="$LSOF_CWD_LINES"
+_LSOF_CWDS_PREV="$LSOF_CWDS"
+capture_lsof_snapshot
+if [ -z "$LSOF_CWDS" ]; then
+    vlog "  note: lsof refresh before worktree pass came back empty, keeping prior snapshot"
+    LSOF_CWD_LINES="$_LSOF_CWD_LINES_PREV"
+    LSOF_CWDS="$_LSOF_CWDS_PREV"
+fi
+
+# Minimum age, in minutes, a workflow-dispatched worktree gets before it's even eligible for
+# removal, regardless of lock/clean/merged status. Lock status alone doesn't reliably signal "an
+# agent is still working here" for this harness's own workflow worktrees (only session-owned
+# worktrees created via EnterWorktree/agent sessions show a `locked` line at all), and a worktree
+# freshly branched from main/integrate's tip is, by construction, HEAD-contained with an empty
+# `git status` for as long as its agent hasn't made its first commit yet -- ordinary orientation
+# time (reading files, planning) well under this guard's 30-minute cadence. This gate protects
+# exactly that window.
+WT_MIN_AGE_MIN=90
+
+# worktree_too_young WORKTREE -- true if the worktree's own git admin dir (HEAD/index/logs/HEAD,
+# under the common repo's `worktrees/<name>/`, per `git rev-parse --git-dir`) shows any activity
+# within WT_MIN_AGE_MIN: creation, a commit, a checkout, or any other git operation. A worktree
+# with no such recent activity is old enough that "unlocked + clean + merged" is trustworthy;
+# one that's merely quiet because its agent is only reading/planning still counts as young.
+worktree_too_young() {
+    _wt="$1"
+    _admin_dir="$("$GIT" -C "$_wt" rev-parse --git-dir 2>/dev/null)"
+    [ -z "$_admin_dir" ] && return 1
+    for _f in "$_admin_dir/HEAD" "$_admin_dir/index" "$_admin_dir/logs/HEAD"; do
+        [ -e "$_f" ] || continue
+        _hit="$("$FIND" "$_f" -mindepth 0 -maxdepth 0 -mmin -"$WT_MIN_AGE_MIN" -print -quit 2>/dev/null)"
+        [ -n "$_hit" ] && return 0
+    done
+    return 1
+}
 
 process_worktree_entry() {
     _wt="$1"
@@ -467,6 +534,11 @@ process_worktree_entry() {
         return
     fi
 
+    if worktree_too_young "$_wt"; then
+        vlog "  keep worktree $_name: created or active within ${WT_MIN_AGE_MIN}m (age gate)"
+        return
+    fi
+
     # Not busy: no process cwd anywhere under it (covers an agent still running there even
     # without a lock file, and covers a build in progress via the target-busy check).
     if any_process_cwd_under "$_wt"; then
@@ -478,12 +550,36 @@ process_worktree_entry() {
         return
     fi
 
-    # Clean: no uncommitted or untracked changes, ignoring target/ and node_modules/ (already
-    # covered by the repo's own .gitignore in the normal case; --ignored=no plus explicit
-    # status is used so a generated-but-gitignored dir never counts as "dirty").
-    _status="$("$GIT" -C "$_wt" status --porcelain --ignore-submodules 2>/dev/null)"
-    if [ -n "$_status" ]; then
-        vlog "  keep worktree $_name: has uncommitted or untracked changes"
+    # Clean: no uncommitted or untracked changes. `--ignored` is passed explicitly (not the
+    # default) so a gitignored-but-stateful file -- a real ticket-state `.tm/` dir, a
+    # `*.db`/`*.db-wal`/`*.db-shm` sqlite file, a symlinked `.env`, `.claude/settings.local.json`,
+    # a `.zvec-grep/` index -- is still visible here and still blocks removal, even though it
+    # would never show up in a plain `git status --porcelain`; without `--ignored`, `git worktree
+    # remove` deletes those along with the worktree even though the status check reported nothing
+    # (verified empirically: a gitignored `.env.local` is invisible to plain `--porcelain`, and a
+    # subsequent `git worktree remove` without --force deletes it anyway). Only `target/` and
+    # `node_modules/` -- this repo's own known, regenerable build-output dirs -- are allow-listed
+    # to keep counting as clean; every other ignored path keeps the worktree instead.
+    _status="$("$GIT" -C "$_wt" status --porcelain --ignore-submodules --ignored 2>/dev/null)"
+    _dirty=0
+    while IFS= read -r _sline; do
+        [ -z "$_sline" ] && continue
+        case "$_sline" in
+            "!! "*)
+                _ipath="${_sline#\!\! }"
+                case "$_ipath" in
+                    target/ | target | */target/ | */target) : ;;
+                    node_modules/ | node_modules | */node_modules/ | */node_modules) : ;;
+                    *) _dirty=1 ;;
+                esac
+                ;;
+            *) _dirty=1 ;;
+        esac
+    done <<EOF
+$_status
+EOF
+    if [ "$_dirty" -eq 1 ]; then
+        vlog "  keep worktree $_name: has uncommitted, untracked, or non-allow-listed ignored changes"
         return
     fi
 
@@ -576,6 +672,16 @@ fi
 
 vlog "== scratch dirs =="
 
+# Re-snapshot again right before this pass, same reasoning as the worktree pass above.
+_LSOF_CWD_LINES_PREV="$LSOF_CWD_LINES"
+_LSOF_CWDS_PREV="$LSOF_CWDS"
+capture_lsof_snapshot
+if [ -z "$LSOF_CWDS" ]; then
+    vlog "  note: lsof refresh before scratch pass came back empty, keeping prior snapshot"
+    LSOF_CWD_LINES="$_LSOF_CWD_LINES_PREV"
+    LSOF_CWDS="$_LSOF_CWDS_PREV"
+fi
+
 resolve_root() {
     _p="$1"
     [ -d "$_p" ] || return 1
@@ -596,13 +702,23 @@ for _r in "$TMPDIR_RESOLVED" "$DARWIN_TMP_RESOLVED" "$SLASH_TMP_RESOLVED"; do
     esac
 done
 
-# looks_like_tm_scratch DIR -- true if DIR contains a .tm dir, a projects/ dir, a `tm` binary,
-# or a git repo whose only commits are from the last day.
+# looks_like_tm_scratch DIR -- true if DIR contains a .tm dir, a projects/ dir, a `tm` binary, is
+# itself directly shaped like a `.tm` state dir (project.db/index.db at its own root, not nested
+# under .tm/ -- a real, confirmed shape: a stray dotm-rooted scratch dir from a past accidental-run
+# incident), is itself a bare cargo `target/`-shaped dir (CACHEDIR.TAG plus .rustc_info.json at its
+# own root -- a real, confirmed shape: a probe's own `cargo build` pointed straight at a
+# tm-<name>-* scratch dir under /tmp rather than at a checkout's target/, so this guard's
+# checkout-target cleanup above never sees it; it's still pure, regenerable build output, and the
+# usual 6h-idle and cwd-busy gates below still apply before anything here is removed), or a git
+# repo whose only commits are from the last day.
 looks_like_tm_scratch() {
     _d="$1"
     [ -d "$_d/.tm" ] && return 0
     [ -d "$_d/projects" ] && return 0
     [ -f "$_d/tm" ] && [ -x "$_d/tm" ] && return 0
+    [ -f "$_d/project.db" ] && return 0
+    [ -f "$_d/index.db" ] && return 0
+    [ -f "$_d/CACHEDIR.TAG" ] && [ -f "$_d/.rustc_info.json" ] && return 0
     if [ -d "$_d/.git" ]; then
         _first_ct="$("$GIT" --git-dir="$_d/.git" log --reverse --format=%ct 2>/dev/null | /usr/bin/head -1)"
         if [ -n "$_first_ct" ]; then
@@ -655,9 +771,16 @@ scan_scratch_root_glob() {
 }
 
 # tmp.* is scoped to $TMPDIR (and DARWIN_USER_TEMP_DIR, when it resolves to something else) --
-# that's where `mktemp -d` actually creates them; the named tm-* dirs are scoped to /tmp, per the
-# spec's own paths (/tmp/tm-trials, /tmp/tm-wide, /tmp/tm-accidental-*). This also keeps the two
-# glob families from being run redundantly against roots they were never seen under.
+# that's where `mktemp -d` actually creates them; tm-* is scoped to /tmp, per the spec's own paths
+# (/tmp/tm-trials, /tmp/tm-wide, /tmp/tm-accidental-*) and every other ad hoc `tm-*`-prefixed
+# scratch dir this workspace's own probes actually create there (tm-target-*, tm-live-*,
+# tm-home-*, tm-audit-*, tm-provider-*, etc. -- a fixed three-name allowlist here left every one
+# of those permanently invisible to this guard, confirmed on this machine: a 6.9GB
+# /tmp/tm-target-* cargo target dir, over 30 hours idle, that a fixed-name scan never even visited).
+# A generic glob is safe here because looks_like_tm_scratch's own signature check (not the name)
+# is what actually gates removal -- broadening the name match doesn't broaden what gets deleted,
+# just what gets looked at. This also keeps the two glob families from being run redundantly
+# against roots they were never seen under.
 _tmp_roots_seen=""
 for _root in "$TMPDIR_RESOLVED" "$DARWIN_TMP_RESOLVED"; do
     [ -z "$_root" ] && continue
@@ -668,9 +791,7 @@ for _root in "$TMPDIR_RESOLVED" "$DARWIN_TMP_RESOLVED"; do
     scan_scratch_root_glob "$_root" "tmp.*"
 done
 if [ -n "$SLASH_TMP_RESOLVED" ]; then
-    scan_scratch_root_glob "$SLASH_TMP_RESOLVED" "tm-trials"
-    scan_scratch_root_glob "$SLASH_TMP_RESOLVED" "tm-wide"
-    scan_scratch_root_glob "$SLASH_TMP_RESOLVED" "tm-accidental-*"
+    scan_scratch_root_glob "$SLASH_TMP_RESOLVED" "tm-*"
 fi
 
 # ---------------------------------------------------------------------------
