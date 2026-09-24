@@ -18,6 +18,27 @@ fn init_project() -> tempfile::TempDir {
     tmp
 }
 
+/// `git init` a repository at `root` with one real commit — `tm-codeintel`'s own test project
+/// helper (`new_project` in `crates/tm-codeintel/src/api.rs`) always does this too, and
+/// `search_exact` finds nothing in a directory that isn't a real git repository. Mirrors
+/// `tests/promotion.rs`'s identical helper.
+fn init_git_repo_with_a_commit(root: &std::path::Path) {
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("git should run in test environment");
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    run(&["init", "--quiet", "--initial-branch=main"]);
+    run(&["config", "user.email", "test@example.com"]);
+    run(&["config", "user.name", "Test"]);
+    std::fs::write(root.join("needle.txt"), "foo bar\n").expect("write needle.txt");
+    run(&["add", "needle.txt"]);
+    run(&["commit", "--quiet", "-m", "init"]);
+}
+
 #[test]
 fn bare_tm_on_a_real_tty_launches_the_chat_not_the_plain_loop() {
     let project = init_project();
@@ -114,6 +135,220 @@ fn bare_tm_with_piped_stdout_uses_the_plain_loop_not_the_tui() {
         "the plain loop must exit 0 on stdin EOF, got status {:?} stderr {:?}",
         output.status,
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Run the real `tm` binary non-interactively (piped stdio, `TM_HOME` isolated to a tempdir) and
+/// wait for it to exit. Mirrors `tests/promotion.rs`'s `run_tm_in` convention; these three tests
+/// don't need a pty, only a spawned process and its captured output.
+fn run_tm(dir: &std::path::Path, tm_home: &std::path::Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_tm"))
+        .args(args)
+        .current_dir(dir)
+        .env("TM_HOME", tm_home)
+        .env("TM_NOTIFY", "0")
+        .env("TM_TEST_MOCK_PROVIDER", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn `tm`")
+        .wait_with_output()
+        .expect("`tm` must run to completion")
+}
+
+/// s1-cli-tree-regroup: `tm --help` groups daily verbs first, then planning, then serving, folds
+/// everything else (the explicit plumbing verbs plus the rest of the top-level tree) out of the
+/// listing into an `after_help` "More commands" note, and still runs every hidden verb (see the
+/// next two tests). Only the `Commands:` section is checked for the grouping/hiding assertions
+/// (not the whole `--help` text, so the "More commands" note naming a hidden verb in prose
+/// doesn't make this test see it as listed there).
+#[test]
+fn tm_help_groups_daily_commands_and_hides_plumbing_verbs() {
+    let tm_home = tempfile::tempdir().expect("tempdir");
+    let output = Command::new(env!("CARGO_BIN_EXE_tm"))
+        .arg("--help")
+        .env("TM_HOME", tm_home.path())
+        .output()
+        .expect("`tm --help` must run");
+    assert!(output.status.success(), "`tm --help` must exit 0");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let commands_start = stdout
+        .find("Commands:")
+        .unwrap_or_else(|| panic!("`tm --help` must have a `Commands:` section, got: {stdout}"));
+    let commands_section = match stdout[commands_start..].find("\nOptions:") {
+        Some(options_offset) => &stdout[commands_start..commands_start + options_offset],
+        None => &stdout[commands_start..],
+    };
+
+    // Daily verbs (`search`/`run`/`doctor`) must precede planning verbs (`milestone`) must
+    // precede serving verbs (`serve`) — today's declaration order puts `milestone` first, so
+    // this only passes once the regroup lands.
+    let pos = |needle: &str| {
+        commands_section.find(needle).unwrap_or_else(|| {
+            panic!("`tm --help`'s Commands: section must list {needle:?}, got: {commands_section}")
+        })
+    };
+    let search_pos = pos("\n  search");
+    let run_pos = pos("\n  run");
+    let doctor_pos = pos("\n  doctor");
+    let milestone_pos = pos("\n  milestone");
+    let serve_pos = pos("\n  serve");
+    assert!(
+        search_pos < milestone_pos && run_pos < milestone_pos && doctor_pos < milestone_pos,
+        "daily verbs (search/run/doctor) must be listed before planning verbs (milestone), \
+         got: {commands_section}"
+    );
+    assert!(
+        milestone_pos < serve_pos,
+        "planning verbs (milestone) must be listed before serving verbs (serve), \
+         got: {commands_section}"
+    );
+
+    // Plumbing verbs — the explicit hide list plus the "more" group folded into `after_help`
+    // (`attach`, `genesis`, `sched`, `history`, `docs`, `workflow`, `mirror`, `templates`,
+    // `events`, `project`, `wiki`) — are hidden from the listing itself.
+    for hidden in [
+        "lease",
+        "harness",
+        "bench",
+        "browser",
+        "computer",
+        "attach",
+        "genesis",
+        "sched",
+        "history",
+        "docs",
+        "workflow",
+        "mirror",
+        "templates",
+        "events",
+        "project",
+        "wiki",
+    ] {
+        let line_prefix = format!("\n  {hidden} ");
+        assert!(
+            !commands_section.contains(&line_prefix),
+            "`{hidden}` must be hidden from `tm --help`'s Commands: section, \
+             got: {commands_section}"
+        );
+    }
+
+    // ~16 commands, grouped: 8 daily + 3 planning + 2 serving + `provider` + `auth` (left
+    // untouched per the task) + the auto-generated `help` entry.
+    let listed = commands_section
+        .lines()
+        .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
+        .count();
+    assert!(
+        listed <= 17,
+        "the regrouped listing should be about 16 commands, got {listed} lines: \
+         {commands_section}"
+    );
+
+    // The verbs folded out of the listing above must still be discoverable somewhere in
+    // `--help`, via the `after_help` "More commands" note.
+    assert!(
+        stdout.contains("More commands"),
+        "hidden verbs must still be named in a `More commands` note, got: {stdout}"
+    );
+}
+
+/// s1-cli-tree-regroup acceptance: hidden plumbing subcommands must still run.
+#[test]
+fn hidden_plumbing_subcommands_still_run() {
+    let project = init_project();
+    let tm_home = tempfile::tempdir().expect("tempdir");
+
+    let lease_list = run_tm(
+        project.path(),
+        tm_home.path(),
+        &[
+            "--project",
+            project.path().to_str().expect("utf8 path"),
+            "lease",
+            "list",
+            "--json",
+        ],
+    );
+    assert!(
+        lease_list.status.success(),
+        "`tm lease list` must still work though hidden from --help, stderr: {}",
+        String::from_utf8_lossy(&lease_list.stderr)
+    );
+
+    let sched_tick = run_tm(
+        project.path(),
+        tm_home.path(),
+        &[
+            "--project",
+            project.path().to_str().expect("utf8 path"),
+            "sched",
+            "tick",
+            "--json",
+        ],
+    );
+    assert!(
+        sched_tick.status.success(),
+        "`tm sched tick` must still work though hidden from --help, stderr: {}",
+        String::from_utf8_lossy(&sched_tick.stderr)
+    );
+}
+
+/// s1-cli-tree-regroup acceptance: `tm search --exact foo` must behave exactly like
+/// `tm search --mode exact foo` (`--mode` stays a working, now-hidden alias).
+#[test]
+fn search_exact_flag_matches_mode_exact_flag() {
+    let project = init_project();
+    // `search_exact` doesn't need a prebuilt index (see `tm-codeintel/src/api.rs`'s
+    // `search_exact_finds_a_literal_substring_without_indexing_first`), but it does need a real
+    // git repository to scan (`CodeIntel`'s own tests always set one up); a real hit — not just
+    // matching-empty-output on both sides — is what actually proves `--exact` and `--mode exact`
+    // take the same code path.
+    init_git_repo_with_a_commit(project.path());
+    let tm_home = tempfile::tempdir().expect("tempdir");
+    let project_arg = project.path().to_str().expect("utf8 path").to_string();
+
+    let via_flag = run_tm(
+        project.path(),
+        tm_home.path(),
+        &[
+            "--project",
+            &project_arg,
+            "search",
+            "--exact",
+            "foo",
+            "--json",
+        ],
+    );
+    let via_mode = run_tm(
+        project.path(),
+        tm_home.path(),
+        &[
+            "--project",
+            &project_arg,
+            "search",
+            "--mode",
+            "exact",
+            "foo",
+            "--json",
+        ],
+    );
+
+    assert!(
+        via_flag.status.success() && via_mode.status.success(),
+        "both `--exact` and `--mode exact` must succeed, stderr: {} / {}",
+        String::from_utf8_lossy(&via_flag.stderr),
+        String::from_utf8_lossy(&via_mode.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&via_flag.stdout);
+    assert!(
+        stdout.contains("needle.txt"),
+        "`tm search --exact foo` must actually find the literal match, got: {stdout}"
+    );
+    assert_eq!(
+        via_flag.stdout, via_mode.stdout,
+        "`tm search --exact foo` must produce the same output as `tm search --mode exact foo`"
     );
 }
 
