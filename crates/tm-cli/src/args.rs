@@ -305,7 +305,7 @@ pub struct GenesisArgs {
 pub struct StatusArgs {
     /// Only report activity since this many hours ago; defaults to since the caller's last
     /// recorded presence.
-    #[arg(long, value_name = "HOURS")]
+    #[arg(long, value_name = "HOURS", value_parser = parse_positive_hours)]
     pub since_hours: Option<u64>,
 }
 
@@ -1238,6 +1238,14 @@ pub struct ComputerKeyArgs {
     pub headless: bool,
 }
 
+/// Parses `--since-hours`: a whole number of hours greater than zero.
+fn parse_positive_hours(s: &str) -> Result<u64, String> {
+    match s.parse::<u64>() {
+        Ok(n) if n > 0 => Ok(n),
+        _ => Err("Expected a positive integer (hours)".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1246,6 +1254,43 @@ mod tests {
     #[test]
     fn command_tree_is_well_formed() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn status_since_hours_parses_positive_integers() {
+        let cli = Cli::parse_from(["tm", "status", "--since-hours", "24"]);
+        match cli.command {
+            Some(Command::Status(args)) => {
+                assert_eq!(args.since_hours, Some(24));
+            }
+            other => panic!("unexpected parse: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn status_since_hours_rejects_invalid_input() {
+        let result = Cli::try_parse_from(["tm", "status", "--since-hours", "invalid"]);
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("Expected a positive integer (hours)"),
+            "error message should contain expected text, got: {error}"
+        );
+        assert!(
+            !error.contains("invalid digit found in string"),
+            "error message should not contain raw parse error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn status_since_hours_rejects_zero() {
+        let result = Cli::try_parse_from(["tm", "status", "--since-hours", "0"]);
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("Expected a positive integer (hours)"),
+            "error message should contain expected text, got: {error}"
+        );
     }
 
     #[test]
