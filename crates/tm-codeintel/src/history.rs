@@ -85,6 +85,45 @@ fn git_err(e: git2::Error) -> TmError {
     TmError::storage(format!("git2: {e}"))
 }
 
+/// Map a git2 error from [`HistoryIndex::why`]'s `blame_file` call — the one call whose
+/// `NotFound` genuinely means "this path isn't (or never was) in the tree" — to a plain-English
+/// message: a missing path reads as "File does not exist in repository history." rather than
+/// git2's NotFound class/code numbers, and anything else (a corrupt object, a pack failure) as a
+/// generic "repository may be corrupted" message rather than git2's own `Debug`/`Display` text.
+/// The raw error (with its real class and code) is logged via `tracing` for debugging, never
+/// shown to the user. Not used for `Repository::open`'s own `NotFound` (that means "no repository
+/// here", not "no such path" — see [`why_open_err`]) or for the per-commit lookups inside the
+/// blame loop (a `NotFound` there means a missing commit object, i.e. corruption, not a missing
+/// file — see [`why_corrupt_err`]).
+fn why_blame_err(e: git2::Error) -> TmError {
+    if e.code() == git2::ErrorCode::NotFound {
+        tracing::debug!(error = %e, "tm history why: path not found in repository history");
+        TmError::storage("File does not exist in repository history.".to_string())
+    } else {
+        tracing::warn!(error = %e, "tm history why: git2 error");
+        TmError::storage("Unable to read file history — repository may be corrupted.".to_string())
+    }
+}
+
+/// Map a `git2::Repository::open` failure inside [`HistoryIndex::why`] to a plain-English
+/// message. Unlike [`why_blame_err`], `NotFound` here means "there is no git repository at this
+/// project root at all" (a bare/non-repo project), not "this path is missing" — telling the user
+/// their queried *file* doesn't exist would be wrong. The raw error is logged via `tracing`.
+fn why_open_err(e: git2::Error) -> TmError {
+    tracing::warn!(error = %e, "tm history why: failed to open the git repository");
+    TmError::storage("This project isn't a git repository, so it has no file history.".to_string())
+}
+
+/// Map a git2 error from a per-commit lookup inside [`HistoryIndex::why`]'s blame loop (an
+/// `Oid` parse or `find_commit`) to a plain-English message. A `NotFound` here means a commit
+/// object referenced by blame is missing from the repository's object store — corruption, not a
+/// missing file — so it always gets the generic "may be corrupted" message, never the
+/// missing-path one. The raw error is logged via `tracing`.
+fn why_corrupt_err(e: git2::Error) -> TmError {
+    tracing::warn!(error = %e, "tm history why: git2 error resolving a blamed commit");
+    TmError::storage("Unable to read file history — repository may be corrupted.".to_string())
+}
+
 fn row_to_commit(row: &rusqlite::Row<'_>) -> rusqlite::Result<CommitSummary> {
     Ok(CommitSummary {
         sha: row.get("sha")?,
@@ -218,13 +257,13 @@ impl HistoryIndex {
             )));
         }
 
-        let repo = git2::Repository::open(&self.repo_root).map_err(git_err)?;
+        let repo = git2::Repository::open(&self.repo_root).map_err(why_open_err)?;
         let mut opts = git2::BlameOptions::new();
         opts.min_line(line_start as usize)
             .max_line(line_end as usize);
         let blame = repo
             .blame_file(std::path::Path::new(path), Some(&mut opts))
-            .map_err(git_err)?;
+            .map_err(why_blame_err)?;
 
         let mut shas: HashSet<String> = HashSet::new();
         for hunk in blame.iter() {
@@ -246,8 +285,8 @@ impl HistoryIndex {
                 // Not in the commits table yet (e.g. made after the last
                 // ingest_incremental) — don't silently drop it, build the summary
                 // straight from git2 instead.
-                let oid = git2::Oid::from_str(sha).map_err(git_err)?;
-                let commit = repo.find_commit(oid).map_err(git_err)?;
+                let oid = git2::Oid::from_str(sha).map_err(why_corrupt_err)?;
+                let commit = repo.find_commit(oid).map_err(why_corrupt_err)?;
                 commits.push(CommitSummary {
                     sha: commit.id().to_string(),
                     author: commit.author().name().unwrap_or("").to_string(),
@@ -587,6 +626,30 @@ mod tests {
         let history = open_index(dir.path());
         assert!(history.why("a.txt", 0, 1).is_err());
         assert!(history.why("a.txt", 5, 2).is_err());
+    }
+
+    #[test]
+    fn why_on_a_path_missing_from_history_gives_a_plain_english_message() {
+        // A path that was never committed (blame_file's real NotFound case) reports as plain
+        // English, not git2's class/code numbers (e.g. "class=Tree (14); code=NotFound (-3)").
+        let (dir, repo) = init_repo();
+        write_file(dir.path(), "a.txt", "line one\n");
+        commit_all(&repo, "add a.txt", 1_000);
+
+        let history = open_index(dir.path());
+        let clock = FixedClock::epoch();
+        history.ingest_incremental(&clock).unwrap();
+
+        let err = history.why("nonexistent.txt", 1, 1).unwrap_err();
+        let message = err.to_string();
+        assert_eq!(
+            message,
+            "storage: File does not exist in repository history."
+        );
+        assert!(
+            !message.to_lowercase().contains("class=") && !message.to_lowercase().contains("code="),
+            "message leaked git2 internals: {message}"
+        );
     }
 
     #[test]

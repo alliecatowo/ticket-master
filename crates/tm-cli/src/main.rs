@@ -4,6 +4,7 @@
 //! decision beyond "which function do I call and how do I print what it returned" belongs in
 //! `tm-cli`'s library modules, not here, so this file stays easy to read end to end.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
@@ -94,6 +95,32 @@ fn load_dotenv() {
     let _ = dotenvy::dotenv();
 }
 
+/// Rewrite a bare filesystem [`TmError::Io`] from [`project::attach`] into a plain-English
+/// message naming the path that was tried, instead of the raw OS errno text (e.g. "No such
+/// file or directory (os error 2)"). `attempted_path` is the argument the user actually typed
+/// (or `.` if none), which `attach`'s own `std::io::Error` never carries.
+///
+/// Only rewrites when `attempted_path` itself doesn't exist on disk: `attach` does plenty of
+/// I/O *after* the path resolves (canonicalizing a subdirectory, creating `.tm/`, promoting a
+/// global session, indexing the repo), and a failure there — permission denied, disk full, a
+/// half-written project after `.tm/` was already created — would be actively misleading if
+/// reported as "the path does not exist" when it plainly does. `From<std::io::Error>` has
+/// already collapsed the original error into a string by the time it reaches here, so the
+/// path's own existence is the only signal left to gate on; any other `TmError::Io`, and every
+/// other variant, passes through unchanged.
+fn wrap_attach_io_error(
+    err: tm_types::TmError,
+    attempted_path: &std::path::Path,
+) -> tm_types::TmError {
+    match err {
+        tm_types::TmError::Io(_) if !attempted_path.exists() => tm_types::TmError::Io(format!(
+            "The path {} does not exist. Check the path and try again.",
+            attempted_path.display()
+        )),
+        other => other,
+    }
+}
+
 /// Install the process-wide tracing subscriber.
 ///
 /// Routes logs to stderr so stdout stays clean for piped/JSON output and respects `RUST_LOG`.
@@ -177,7 +204,11 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
             }
         }
         Some(Command::Init(args)) => project::init(&args, renderer),
-        Some(Command::Attach(args)) => project::attach(&args, renderer),
+        Some(Command::Attach(args)) => {
+            let attempted_path = args.path.clone().unwrap_or_else(|| PathBuf::from("."));
+            project::attach(&args, renderer)
+                .map_err(|err| wrap_attach_io_error(err, &attempted_path))
+        }
         Some(Command::Genesis(args)) => project::genesis(&args, renderer),
         Some(Command::Status(args)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
@@ -347,6 +378,75 @@ mod tests {
     fn tracing_idempotent() {
         install_tracing();
         install_tracing();
+    }
+
+    #[test]
+    fn wrap_attach_io_error_names_the_path_in_plain_english() {
+        let raw = tm_types::TmError::Io("No such file or directory (os error 2)".to_string());
+        let wrapped = wrap_attach_io_error(raw, std::path::Path::new("/nonexistent/path"));
+        let message = wrapped.to_string();
+        assert!(
+            message.contains("The path /nonexistent/path does not exist"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            !message.contains("os error"),
+            "raw errno text leaked into the message: {message}"
+        );
+    }
+
+    #[test]
+    fn wrap_attach_io_error_leaves_an_existing_path_untouched() {
+        // A raw `Io` error surfaced after the path itself resolved (permission denied mid-
+        // indexing, for example) must not be reported as "the path does not exist" when it
+        // plainly does.
+        let tmp = tempfile::tempdir().unwrap();
+        let raw = tm_types::TmError::Io("permission denied (os error 13)".to_string());
+        let wrapped = wrap_attach_io_error(raw, tmp.path());
+        assert!(
+            wrapped.to_string().contains("permission denied"),
+            "an existing path's Io error should pass through unchanged: {wrapped}"
+        );
+    }
+
+    #[test]
+    fn wrap_attach_io_error_leaves_non_io_errors_untouched() {
+        let original = tm_types::TmError::not_found("project", "P-1");
+        let message_before = original.to_string();
+        let wrapped = wrap_attach_io_error(original, std::path::Path::new("/wherever"));
+        assert_eq!(wrapped.to_string(), message_before);
+    }
+
+    #[tokio::test]
+    async fn dispatch_attach_on_a_nonexistent_path_gives_a_plain_english_error() {
+        let renderer = Renderer::from_flags(false, false, true);
+        let cli = Cli {
+            global: tm_cli::args::GlobalOpts {
+                json: false,
+                quiet: false,
+                no_color: true,
+                plain: false,
+                project: None,
+            },
+            prompt: false,
+            prompt_text: None,
+            continue_session: false,
+            resume: None,
+            command: Some(Command::Attach(tm_cli::args::AttachArgs {
+                path: Some(PathBuf::from("/nonexistent/path/that/does/not/exist")),
+            })),
+        };
+
+        let err = dispatch(cli, &renderer).await.unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("does not exist"),
+            "unexpected message: {message}"
+        );
+        assert!(
+            !message.contains("os error"),
+            "raw errno text leaked into the message: {message}"
+        );
     }
 
     #[tokio::test]

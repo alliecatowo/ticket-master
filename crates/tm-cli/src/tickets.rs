@@ -554,6 +554,12 @@ pub fn ticket_new(
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
+    if args.objective.trim().is_empty() {
+        return Err(TmError::parse(
+            "Objective cannot be empty — describe what the ticket should accomplish.",
+        ));
+    }
+
     let kind = parse_ticket_kind(&args.kind)?;
     let resources = parse_resource_claims(&args.resources)?;
 
@@ -2070,6 +2076,69 @@ mod tests {
         // Confirm no ticket was silently created with the milestone dropped.
         let view = project.store.view().expect("view");
         assert!(view.tickets.is_empty());
+    }
+
+    fn new_args_with_objective(objective: &str) -> TicketNewArgs {
+        TicketNewArgs {
+            objective: objective.to_string(),
+            kind: "task".to_string(),
+            parent: None,
+            milestone: None,
+            due: None,
+            priority: 0,
+            resources: vec![],
+        }
+    }
+
+    #[test]
+    fn ticket_new_rejects_an_empty_objective() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+
+        let err = ticket_new(&new_args_with_objective(""), &project, &renderer)
+            .expect_err("empty objective must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("Objective cannot be empty"),
+            "unexpected error message: {message}"
+        );
+
+        let view = project.store.view().expect("view");
+        assert!(
+            view.tickets.is_empty(),
+            "no ticket should have been created"
+        );
+    }
+
+    #[test]
+    fn ticket_new_rejects_a_whitespace_only_objective() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+
+        let err = ticket_new(&new_args_with_objective("   "), &project, &renderer)
+            .expect_err("whitespace-only objective must be rejected");
+        assert!(err.to_string().contains("Objective cannot be empty"));
+
+        let view = project.store.view().expect("view");
+        assert!(
+            view.tickets.is_empty(),
+            "no ticket should have been created"
+        );
+    }
+
+    #[test]
+    fn ticket_new_accepts_a_valid_objective() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+
+        ticket_new(&new_args_with_objective("Valid"), &project, &renderer)
+            .expect("a non-empty objective should succeed");
+
+        let view = project.store.view().expect("view");
+        assert_eq!(view.tickets.len(), 1);
     }
 
     #[test]
