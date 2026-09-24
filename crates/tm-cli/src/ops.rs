@@ -691,7 +691,7 @@ pub async fn provider_list(project: Option<&Project>, renderer: &Renderer) -> tm
             }
         }
         renderer.emit(&roles, "")?;
-    } else {
+    } else if !renderer.is_quiet() {
         let mut rows = Vec::new();
         for role in Role::ALL {
             for candidate in role_table.candidates_for(role) {
@@ -767,7 +767,7 @@ pub async fn provider_detect(renderer: &Renderer) -> tm_types::Result<()> {
             })
             .collect();
         renderer.emit(&rows, "")?;
-    } else {
+    } else if !renderer.is_quiet() {
         let mut rows = Vec::new();
         for (info, availability) in &with_availability {
             rows.push(vec![
@@ -887,50 +887,52 @@ pub async fn provider_status(
         return Ok(());
     }
 
-    let table_rows = rows
-        .iter()
-        .map(|row| {
-            let roles = row["roles"]
-                .as_array()
-                .map(|r| {
-                    r.iter()
-                        .filter_map(|v| v.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
+    if !renderer.is_quiet() {
+        let table_rows = rows
+            .iter()
+            .map(|row| {
+                let roles = row["roles"]
+                    .as_array()
+                    .map(|r| {
+                        r.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    })
+                    .unwrap_or_default();
+                vec![
+                    row["id"].as_str().unwrap_or_default().to_string(),
+                    row["availability"].as_str().unwrap_or_default().to_string(),
+                    if row["in_turn_fabric"].as_bool() == Some(true) {
+                        "yes".to_string()
+                    } else {
+                        "no".to_string()
+                    },
+                    if roles.is_empty() {
+                        "-".to_string()
+                    } else {
+                        roles
+                    },
+                ]
+            })
+            .collect();
+        let rendered = Table::new(
             vec![
-                row["id"].as_str().unwrap_or_default().to_string(),
-                row["availability"].as_str().unwrap_or_default().to_string(),
-                if row["in_turn_fabric"].as_bool() == Some(true) {
-                    "yes".to_string()
-                } else {
-                    "no".to_string()
-                },
-                if roles.is_empty() {
-                    "-".to_string()
-                } else {
-                    roles
-                },
-            ]
-        })
-        .collect();
-    let rendered = Table::new(
-        vec![
-            "Id".to_string(),
-            "Availability".to_string(),
-            "In turn fabric".to_string(),
-            "Default-table roles".to_string(),
-        ],
-        table_rows,
-    )
-    .render();
-    let mut human = rendered;
-    if let Some(e) = &fabric_error {
-        human.push_str(&format!("\nturn-path fabric could not be built: {e}"));
+                "Id".to_string(),
+                "Availability".to_string(),
+                "In turn fabric".to_string(),
+                "Default-table roles".to_string(),
+            ],
+            table_rows,
+        )
+        .render();
+        let mut human = rendered;
+        if let Some(e) = &fabric_error {
+            human.push_str(&format!("\nturn-path fabric could not be built: {e}"));
+        }
+        human.push_str(&format!("\nnote: {PROVIDER_LIVE_STATE_NOTE}"));
+        renderer.emit(&(), &human)?;
     }
-    human.push_str(&format!("\nnote: {PROVIDER_LIVE_STATE_NOTE}"));
-    renderer.emit(&(), &human)?;
     Ok(())
 }
 
@@ -1192,13 +1194,35 @@ pub async fn provider_test(
 
     let outcomes =
         run_provider_tests(&fabric, args.provider.as_deref(), &known, clock.as_ref()).await?;
-    let human = outcomes
-        .iter()
-        .map(ProviderTestOutcome::human_line)
-        .collect::<Vec<_>>()
-        .join("\n");
-    renderer.emit(&outcomes, &human)?;
+    let human = provider_test_human(&outcomes, renderer.is_quiet());
+    if renderer.is_json() || human.is_some() {
+        renderer.emit(&outcomes, human.as_deref().unwrap_or(""))?;
+    }
     provider_test_verdict(&outcomes)
+}
+
+/// Format human-readable output for `provider test`, filtering "ok" lines in quiet mode.
+/// Returns `None` if there's nothing to show (all "ok" in quiet mode).
+fn provider_test_human(outcomes: &[ProviderTestOutcome], quiet: bool) -> Option<String> {
+    let lines: Vec<String> = if quiet {
+        // In quiet mode, suppress "ok" lines but keep errors.
+        outcomes
+            .iter()
+            .filter(|o| !o.is_ok())
+            .map(ProviderTestOutcome::human_line)
+            .collect()
+    } else {
+        outcomes
+            .iter()
+            .map(ProviderTestOutcome::human_line)
+            .collect()
+    };
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
 }
 
 /// Dispatch one [`HarnessCommand`].
@@ -2977,6 +3001,86 @@ mod tests {
             bad.human_line(),
             "anthropic: error after 5 ms: authentication failed: nope"
         );
+    }
+
+    #[test]
+    fn provider_test_human_non_quiet_shows_all_lines() {
+        let ok = ProviderTestOutcome {
+            provider: "devpass".to_string(),
+            status: "ok",
+            latency_ms: 812,
+            model: Some("m".to_string()),
+            stop_reason: Some(tm_provider::StopReason::MaxTokens),
+            reply: Some(String::new()),
+            error: None,
+        };
+        let bad = ProviderTestOutcome {
+            provider: "anthropic".to_string(),
+            status: "error",
+            latency_ms: 5,
+            model: None,
+            stop_reason: None,
+            reply: None,
+            error: Some("auth failed".to_string()),
+        };
+        let outcomes = vec![ok, bad];
+
+        let human = provider_test_human(&outcomes, false).expect("non-quiet has output");
+        assert!(human.contains("devpass: ok"));
+        assert!(human.contains("anthropic: error"));
+    }
+
+    #[test]
+    fn provider_test_human_quiet_suppresses_ok_lines() {
+        let ok = ProviderTestOutcome {
+            provider: "devpass".to_string(),
+            status: "ok",
+            latency_ms: 812,
+            model: Some("m".to_string()),
+            stop_reason: Some(tm_provider::StopReason::MaxTokens),
+            reply: Some(String::new()),
+            error: None,
+        };
+        let bad = ProviderTestOutcome {
+            provider: "anthropic".to_string(),
+            status: "error",
+            latency_ms: 5,
+            model: None,
+            stop_reason: None,
+            reply: None,
+            error: Some("auth failed".to_string()),
+        };
+        let outcomes = vec![ok, bad];
+
+        let human = provider_test_human(&outcomes, true).expect("quiet has errors");
+        assert!(!human.contains("devpass: ok"));
+        assert!(human.contains("anthropic: error"));
+    }
+
+    #[test]
+    fn provider_test_human_quiet_all_ok_returns_none() {
+        let ok1 = ProviderTestOutcome {
+            provider: "devpass".to_string(),
+            status: "ok",
+            latency_ms: 812,
+            model: Some("m".to_string()),
+            stop_reason: Some(tm_provider::StopReason::MaxTokens),
+            reply: Some(String::new()),
+            error: None,
+        };
+        let ok2 = ProviderTestOutcome {
+            provider: "anthropic".to_string(),
+            status: "ok",
+            latency_ms: 5,
+            model: Some("m".to_string()),
+            stop_reason: Some(tm_provider::StopReason::EndTurn),
+            reply: Some("OK".to_string()),
+            error: None,
+        };
+        let outcomes = vec![ok1, ok2];
+
+        let human = provider_test_human(&outcomes, true);
+        assert_eq!(human, None, "all-ok quiet returns None");
     }
 
     #[test]
