@@ -1,5 +1,5 @@
+import type { Lease } from "@ticketmaster/client";
 import { describe, expect, it } from "vitest";
-import type { Lease } from "../ticketmaster/types";
 import {
   computeLeaseDecoration,
   findLeasesForPath,
@@ -10,10 +10,11 @@ function lease(overrides: Partial<Lease> & { id: string }): Lease {
   return {
     ticket: "T-1",
     holder: "agent:claude/a81",
-    resources: [{ patterns: ["src/auth/**"], exclusive: true }],
+    authority: null,
+    resources: [{ paths: ["src/auth/**"], mode: "exclusive" }],
     acquired: "2026-01-01T00:00:00Z",
     heartbeat: "2026-01-01T00:00:01Z",
-    ttlSeconds: 60,
+    ttl_seconds: 60,
     epoch: 1,
     ...overrides,
   };

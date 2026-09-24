@@ -1,7 +1,6 @@
+import type { Lease, TicketmasterClient } from "@ticketmaster/client";
 import * as path from "path";
 import * as vscode from "vscode";
-import type { TicketmasterClient } from "../ticketmaster/client";
-import type { Lease } from "../ticketmaster/types";
 import { computeLeaseDecoration } from "./leaseDecorations";
 
 /** Adapts `computeLeaseDecoration` onto a live `TextEditorDecorationType`,

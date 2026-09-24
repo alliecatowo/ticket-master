@@ -1,5 +1,5 @@
+import type { Decision } from "@ticketmaster/client";
 import { describe, expect, it } from "vitest";
-import type { Decision } from "../ticketmaster/types";
 import {
   computeDecisionCodeLenses,
   decisionsAffectingFile,
@@ -11,29 +11,29 @@ function decision(overrides: Partial<Decision> & { id: string }): Decision {
     decision: "use OAuth device flow",
     reason: "no browser available headless",
     evidence: [],
-    affectedTickets: ["T-1"],
-    affectedDocs: ["src/auth/**"],
+    affected_tickets: ["T-1"],
+    affected_paths: ["src/auth/**"],
     author: "human:allie",
     ts: "2026-01-01T00:00:00Z",
     supersedes: null,
-    supersededBy: null,
+    superseded_by: null,
     ...overrides,
   };
 }
 
 describe("decisionsAffectingFile", () => {
-  it("includes a decision whose affectedDocs glob matches the file", () => {
+  it("includes a decision whose affected_paths glob matches the file", () => {
     const d = decision({ id: "D-1" });
     expect(decisionsAffectingFile([d], "src/auth/login.rs")).toEqual([d]);
   });
 
-  it("excludes a decision whose affectedDocs glob does not match", () => {
+  it("excludes a decision whose affected_paths glob does not match", () => {
     const d = decision({ id: "D-1" });
     expect(decisionsAffectingFile([d], "src/web/index.ts")).toEqual([]);
   });
 
   it("excludes a superseded decision", () => {
-    const d = decision({ id: "D-1", supersededBy: "D-2" });
+    const d = decision({ id: "D-1", superseded_by: "D-2" });
     expect(decisionsAffectingFile([d], "src/auth/login.rs")).toEqual([]);
   });
 

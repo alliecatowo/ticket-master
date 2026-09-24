@@ -1,16 +1,27 @@
+import type { Milestone, Ticket } from "@ticketmaster/client";
 import { describe, expect, it } from "vitest";
-import type { Milestone, Ticket } from "../ticketmaster/types";
 import { buildMilestoneTree, stateBadge, type TicketNode } from "./treeModel";
 
 function ticket(overrides: Partial<Ticket> & { id: string }): Ticket {
   return {
-    kind: "Work",
+    kind: "work",
     objective: "do the thing",
-    state: "Ready",
+    state: "ready",
     parent: null,
     children: [],
     dependencies: [],
     milestone: null,
+    authority: null,
+    resources: [],
+    executor: { role: "coder_fast", human_required: false, min_capability: "any" },
+    context_refs: [],
+    success: [],
+    verification: "none",
+    budget: null,
+    retry: { max_attempts: 3, base_delay_seconds: 1, backoff_multiplier: 2, max_delay_seconds: 60 },
+    cycle: null,
+    attempts: 0,
+    failures: [],
     priority: 0,
     created: "2026-01-01T00:00:00Z",
     updated: "2026-01-01T00:00:00Z",
@@ -22,8 +33,8 @@ function milestone(overrides: Partial<Milestone> & { id: string }): Milestone {
   return {
     title: overrides.id,
     tickets: [],
-    state: "Open",
-    closedBy: null,
+    state: "open",
+    closed_by: null,
     assumptions: [],
     ...overrides,
   };
@@ -109,8 +120,8 @@ describe("buildMilestoneTree", () => {
 
 describe("stateBadge", () => {
   it("returns a distinct badge per ticket state", () => {
-    const ready = stateBadge("Ready");
-    const blocked = stateBadge("Blocked");
+    const ready = stateBadge("ready");
+    const blocked = stateBadge("blocked");
     expect(ready.text).toBe("READY");
     expect(blocked.text).toBe("BLOCKED");
     expect(ready.icon).not.toBe(blocked.icon);

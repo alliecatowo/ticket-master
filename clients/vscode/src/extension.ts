@@ -1,8 +1,8 @@
+import { TicketmasterClient } from "@ticketmaster/client";
 import * as vscode from "vscode";
 import { DecisionCodeLensProvider } from "./codelens/decisionCodeLensProvider";
 import { registerCommands } from "./commands/commands";
 import { LeaseDecorationProvider } from "./leases/leaseDecorationProvider";
-import { TicketmasterClient } from "./ticketmaster/client";
 import { TicketTreeProvider } from "./tree/ticketTreeProvider";
 
 export function activate(context: vscode.ExtensionContext): void {

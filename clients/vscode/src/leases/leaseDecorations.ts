@@ -4,7 +4,7 @@
  * leased by T-184" before editing it. No `vscode` import here; see
  * `./leaseDecorationProvider.ts` for the host wiring.
  */
-import type { Lease } from "../ticketmaster/types";
+import type { Lease } from "@ticketmaster/client";
 import { matchesAny } from "../shared/glob";
 
 /** A `vscode.Range`-shaped value, expressed without importing `vscode` so
@@ -31,7 +31,7 @@ export interface FileLeaseDecoration {
 export function findLeasesForPath(leases: Lease[], filePath: string): Lease[] {
   return leases
     .filter((lease) =>
-      lease.resources.some((claim) => matchesAny(claim.patterns, filePath)),
+      lease.resources.some((claim) => matchesAny(claim.paths, filePath)),
     )
     .sort((a, b) => (a.acquired < b.acquired ? 1 : -1));
 }

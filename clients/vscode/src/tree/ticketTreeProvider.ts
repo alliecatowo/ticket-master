@@ -1,6 +1,5 @@
+import type { Milestone, Ticket, TicketmasterClient } from "@ticketmaster/client";
 import * as vscode from "vscode";
-import type { TicketmasterClient } from "../ticketmaster/client";
-import type { Milestone, Ticket } from "../ticketmaster/types";
 import { buildMilestoneTree, type TmTreeNode } from "./treeModel";
 
 export class TmTreeItem extends vscode.TreeItem {
@@ -19,7 +18,7 @@ export class TmTreeItem extends vscode.TreeItem {
     } else if (node.kind === "milestone") {
       this.description = node.state;
       this.iconPath = new vscode.ThemeIcon(
-        node.state === "Closed" ? "check-all" : "milestone",
+        node.state === "closed" ? "check-all" : "milestone",
       );
       this.contextValue = "milestone";
     } else {

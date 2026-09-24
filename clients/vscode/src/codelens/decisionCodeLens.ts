@@ -4,13 +4,13 @@
  * `vscode` import here; see `./decisionCodeLensProvider.ts` for the host
  * wiring.
  */
-import type { Decision } from "../ticketmaster/types";
+import type { Decision } from "@ticketmaster/client";
 import { matchesAny } from "../shared/glob";
 
 export interface DecisionCodeLensItem {
   /** 0-based line the lens should be anchored to. Always 0 for now: a
    * decision affects a whole file, not a specific line, per SPEC.md 4.6
-   * (`affected_docs: Vec<PathPattern>` has no line granularity). */
+   * (`affected_paths: Vec<PathPattern>` has no line granularity). */
   line: number;
   title: string;
   decisionId: string;
@@ -20,14 +20,14 @@ export interface DecisionCodeLensItem {
 /** Decisions affecting `filePath`, superseded ones excluded (a superseded
  * decision is no longer the operative rationale; SPEC.md 4.6 says
  * "the old decision is never mutated in the log" but a reader should follow
- * `supersededBy` rather than resurface the stale one). Most recent first. */
+ * `superseded_by` rather than resurface the stale one). Most recent first. */
 export function decisionsAffectingFile(
   decisions: Decision[],
   filePath: string,
 ): Decision[] {
   return decisions
-    .filter((d) => d.supersededBy === null)
-    .filter((d) => matchesAny(d.affectedDocs, filePath))
+    .filter((d) => d.superseded_by === null)
+    .filter((d) => matchesAny(d.affected_paths, filePath))
     .sort((a, b) => (a.ts < b.ts ? 1 : -1));
 }
 

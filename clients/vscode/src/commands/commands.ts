@@ -1,5 +1,5 @@
+import type { TicketmasterClient } from "@ticketmaster/client";
 import * as vscode from "vscode";
-import type { TicketmasterClient } from "../ticketmaster/client";
 import type { DecisionCodeLensProvider } from "../codelens/decisionCodeLensProvider";
 import type { LeaseDecorationProvider } from "../leases/leaseDecorationProvider";
 import type { TicketTreeProvider } from "../tree/ticketTreeProvider";
@@ -65,7 +65,11 @@ export function registerCommands(
           return;
         }
         const holder = `human:${process.env.USER ?? "unknown"}`;
-        await deps.client.leaseTicket(id, { holder, ttlSeconds: 600 });
+        await deps.client.acquireLease(id, {
+          holder,
+          ttl_seconds: 600,
+          actor: holder,
+        });
         await refreshAll(deps);
         void vscode.window.showInformationMessage(`Claimed ${id} as ${holder}`);
       },
@@ -84,9 +88,23 @@ export function registerCommands(
         if (!summary) {
           return;
         }
-        await deps.client.submit(id, [
-          { kind: "HumanAttestation", summary },
-        ]);
+        const actor = `human:${process.env.USER ?? "unknown"}`;
+        const { artifact } = await deps.client.createArtifact({
+          kind: "report",
+          media_type: "text/plain",
+          bytes: Array.from(Buffer.from(summary, "utf8")),
+          ticket: id,
+          actor,
+        });
+        await deps.client.attachEvidence(id, {
+          kind: "human_attestation",
+          artifact: artifact.id,
+          summary,
+          actor,
+        });
+        await deps.client.transition(id, {
+          submit: { summary, evidence: [artifact.id], actor },
+        });
         await refreshAll(deps);
         void vscode.window.showInformationMessage(`Submitted ${id}`);
       },
@@ -119,17 +137,19 @@ export function registerCommands(
         }
         const editor = vscode.window.activeTextEditor;
         const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-        const affectedDocs =
+        const affectedPaths =
           editor && workspaceRoot
             ? [
                 vscode.workspace.asRelativePath(editor.document.uri, false),
               ]
             : [];
-        await deps.client.recordDecision({
+        const actor = `human:${process.env.USER ?? "unknown"}`;
+        await deps.client.createDecision({
           subject,
           decision,
           reason,
-          affectedDocs,
+          affected_paths: affectedPaths,
+          actor,
         });
         await refreshAll(deps);
       },

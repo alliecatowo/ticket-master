@@ -1,7 +1,6 @@
+import type { Decision, TicketmasterClient } from "@ticketmaster/client";
 import * as path from "path";
 import * as vscode from "vscode";
-import type { TicketmasterClient } from "../ticketmaster/client";
-import type { Decision } from "../ticketmaster/types";
 import { computeDecisionCodeLenses } from "./decisionCodeLens";
 
 /** Adapts `computeDecisionCodeLenses` onto `vscode.CodeLensProvider`. */

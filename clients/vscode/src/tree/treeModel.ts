@@ -4,7 +4,7 @@
  * is unit-testable without a host; `./ticketTreeProvider.ts` adapts this
  * into `vscode.TreeDataProvider`.
  */
-import type { Milestone, Ticket, TicketState } from "../ticketmaster/types";
+import type { Milestone, Ticket, TicketState } from "@ticketmaster/client";
 
 export type TmTreeNode = MilestoneNode | TicketNode | UnassignedGroupNode;
 
@@ -45,20 +45,20 @@ export interface StateBadge {
 }
 
 const BADGES: Record<TicketState, StateBadge> = {
-  Draft: { text: "DRAFT", icon: "circle-outline" },
-  Blocked: { text: "BLOCKED", icon: "circle-slash" },
-  Ready: { text: "READY", icon: "play-circle" },
-  Leased: { text: "LEASED", icon: "lock" },
-  Running: { text: "RUNNING", icon: "sync~spin" },
-  Submitted: { text: "SUBMITTED", icon: "cloud-upload" },
-  Verifying: { text: "VERIFYING", icon: "beaker" },
-  Auditing: { text: "AUDITING", icon: "eye" },
-  Rework: { text: "REWORK", icon: "history" },
-  Replan: { text: "REPLAN", icon: "issue-reopened" },
-  Recovery: { text: "RECOVERY", icon: "debug-restart" },
-  Escalated: { text: "ESCALATED", icon: "warning" },
-  Closed: { text: "CLOSED", icon: "check" },
-  Cancelled: { text: "CANCELLED", icon: "circle-slash" },
+  draft: { text: "DRAFT", icon: "circle-outline" },
+  blocked: { text: "BLOCKED", icon: "circle-slash" },
+  ready: { text: "READY", icon: "play-circle" },
+  leased: { text: "LEASED", icon: "lock" },
+  running: { text: "RUNNING", icon: "sync~spin" },
+  submitted: { text: "SUBMITTED", icon: "cloud-upload" },
+  verifying: { text: "VERIFYING", icon: "beaker" },
+  auditing: { text: "AUDITING", icon: "eye" },
+  rework: { text: "REWORK", icon: "history" },
+  replan: { text: "REPLAN", icon: "issue-reopened" },
+  recovery: { text: "RECOVERY", icon: "debug-restart" },
+  escalated: { text: "ESCALATED", icon: "warning" },
+  closed: { text: "CLOSED", icon: "check" },
+  cancelled: { text: "CANCELLED", icon: "circle-slash" },
 };
 
 export function stateBadge(state: TicketState): StateBadge {
