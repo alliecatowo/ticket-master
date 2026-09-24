@@ -144,6 +144,25 @@ struct WhyInfo {
     commits: Vec<CommitInfo>,
 }
 
+/// Count of chunks in `<state_dir>/index.db`, read directly rather than through
+/// [`tm_codeintel::CodeIntel`] (which doesn't expose one) so the Semantic/Hybrid arms of
+/// [`search`] can tell "index never built" apart from "built, genuinely no matches" — both
+/// render as an empty result set otherwise. `0` (rather than an error) when the file doesn't
+/// exist yet, since that's just an earlier point on the same "not built" spectrum.
+fn indexed_chunk_count(project: &Project) -> tm_types::Result<i64> {
+    let index_db = project.state_dir.join("index.db");
+    if !index_db.is_file() {
+        return Ok(0);
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &index_db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|e| tm_types::TmError::storage(format!("could not open the code index: {e}")))?;
+    conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+        .map_err(|e| tm_types::TmError::storage(format!("could not read the code index: {e}")))
+}
+
 /// `tm search <query> [--exact|--regex|--semantic|--hybrid]`
 pub fn search(args: &SearchArgs, project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let code_intel = project.code_intel()?;
@@ -235,7 +254,12 @@ pub fn search(args: &SearchArgs, project: &Project, renderer: &Renderer) -> tm_t
                 .collect();
 
             let human = if results.is_empty() {
-                "No similar content found".to_string()
+                if indexed_chunk_count(project)? == 0 {
+                    "The code index hasn't been built yet. Run `tm doctor` to build it, then search again."
+                        .to_string()
+                } else {
+                    "No similar content found".to_string()
+                }
             } else {
                 let rows: Vec<Vec<String>> = results
                     .iter()
@@ -296,7 +320,12 @@ pub fn search(args: &SearchArgs, project: &Project, renderer: &Renderer) -> tm_t
                 .collect();
 
             let human = if results.is_empty() {
-                "No relevant content found".to_string()
+                if indexed_chunk_count(project)? == 0 {
+                    "The code index hasn't been built yet. Run `tm doctor` to build it, then search again."
+                        .to_string()
+                } else {
+                    "No relevant content found".to_string()
+                }
             } else {
                 let rows: Vec<Vec<String>> = results
                     .iter()
@@ -1079,5 +1108,90 @@ mod tests {
             msg.contains(file_path),
             "Error should include the file path"
         );
+    }
+
+    /// Minimal real `Project` for `indexed_chunk_count`, no git repo underneath it, mirroring
+    /// `project.rs`'s own `open_test_project`/`init_git_repo` test helpers (private to that
+    /// module's test mod, so duplicated here rather than made `pub(crate)` just for this).
+    fn test_project_no_git(root: &std::path::Path) -> Project {
+        std::fs::create_dir_all(root.join(".tm")).unwrap();
+        let clock: std::sync::Arc<dyn tm_types::Clock> = std::sync::Arc::new(
+            tm_types::FixedClock::new(tm_types::Timestamp::from_unix_seconds(1_000_000)),
+        );
+        let ids: std::sync::Arc<dyn tm_types::IdSource> =
+            std::sync::Arc::new(tm_types::CounterIds::seeded(1));
+        let store = std::sync::Arc::new(
+            tm_core::Store::open_with(root, clock.clone(), ids.clone()).unwrap(),
+        );
+        Project::for_test(root, store, clock, ids)
+    }
+
+    /// Same, with a real git repo (one empty commit) underneath, so `Project::code_intel()`'s
+    /// open-refresh actually runs instead of being skipped.
+    fn test_project(root: &std::path::Path) -> Project {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status()
+                .expect("git should run in test environment");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        let project = test_project_no_git(root);
+        run(&["init", "--quiet", "--initial-branch=main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["commit", "--quiet", "--allow-empty", "-m", "init"]);
+        project
+    }
+
+    #[test]
+    fn indexed_chunk_count_is_zero_before_the_index_has_ever_been_built() {
+        // p1-search-index-not-built-message: right after `tm init` (no `code_intel()` call has
+        // run yet, so `<state_dir>/index.db` doesn't exist), the count must read as 0 rather
+        // than erroring, so `search()`'s Semantic/Hybrid arms can point at `tm doctor` instead
+        // of claiming "no matches" against an index that was never built.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = test_project(tmp.path());
+        assert_eq!(indexed_chunk_count(&project).unwrap(), 0);
+    }
+
+    #[test]
+    fn indexed_chunk_count_is_zero_after_search_opens_a_non_git_index() {
+        // The case `search()` actually hits in practice: `Project::code_intel()` (which
+        // `search()` calls before ever reaching `indexed_chunk_count`) creates `index.db` on
+        // open but only runs its refresh pass for a root inside a git work tree, so a
+        // global-scope project (no git repo) has a real-but-empty `index.db` on the very first
+        // search. `indexed_chunk_count` must still read 0 here, not error, so the "not built"
+        // message fires for this case too and not just the pre-`index.db` one above.
+        let tmp = tempfile::tempdir().unwrap();
+        let project = test_project_no_git(tmp.path());
+        project
+            .code_intel()
+            .expect("code_intel should open cleanly even without a git repo");
+        assert_eq!(indexed_chunk_count(&project).unwrap(), 0);
+    }
+
+    #[test]
+    fn indexed_chunk_count_is_nonzero_once_a_file_has_been_indexed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        std::fs::write(root.join("lib.rs"), "fn hello() -> i32 { 1 }\n").unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status()
+                .expect("git should run in test environment");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["add", "lib.rs"]);
+        run(&["commit", "--quiet", "-m", "add lib.rs"]);
+
+        // `Project::code_intel()` refreshes the index on open (see its own doc comment), the
+        // same path `search()` takes; never an explicit `tm doctor` in this test.
+        project.code_intel().expect("code_intel should refresh");
+        assert!(indexed_chunk_count(&project).unwrap() > 0);
     }
 }
