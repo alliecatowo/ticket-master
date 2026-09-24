@@ -601,7 +601,23 @@ impl CodeIntel {
         ];
 
         let store = Arc::clone(&self.store);
+        let project_root = self.project_root.clone();
         let snippet_lookup = move |path: &str, line_start: Option<u32>| -> (String, Option<u32>) {
+            // Try to read the line from the source file first, like exact search does.
+            if let Some(line_num) = line_start {
+                let full_path = project_root.join(path);
+                if let Ok(contents) = fs::read_to_string(&full_path) {
+                    let lines: Vec<&str> = contents.lines().collect();
+                    // line_num is 1-based
+                    if let Some(line_idx) = line_num.checked_sub(1) {
+                        if let Some(line_text) = lines.get(line_idx as usize) {
+                            return (line_text.to_string(), Some(line_num));
+                        }
+                    }
+                }
+            }
+
+            // Fall back to reading from the database chunks if file read fails or no line_start.
             let conn = match store.reader() {
                 Ok(conn) => conn,
                 Err(_) => return (String::new(), None),
@@ -1061,6 +1077,46 @@ mod tests {
             .search_hybrid(&query, &ctx, SignalWeights::default())
             .expect("search_hybrid");
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn search_hybrid_populates_snippet_from_source_file() {
+        let dir = new_project();
+        fs::write(
+            dir.path().join("math.rs"),
+            "fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+        )
+        .expect("write math.rs");
+
+        let intel = CodeIntel::open(dir.path()).expect("open");
+        let clock = FixedClock::epoch();
+        intel.update_incremental(&clock).expect("update");
+
+        let query = Query {
+            text: "add".to_string(),
+            seed_symbols: vec![],
+            seed_paths: vec![],
+        };
+        let ctx = RetrievalContext::default();
+        let hits = intel
+            .search_hybrid(&query, &ctx, SignalWeights::default())
+            .expect("search_hybrid");
+
+        // Verify we found results with non-empty snippets
+        assert!(!hits.is_empty(), "should find 'add' in the file");
+        for hit in &hits {
+            if hit.path == "math.rs" && hit.line_start == Some(1) {
+                // The function definition line should have a non-empty snippet
+                assert!(
+                    !hit.snippet.is_empty(),
+                    "snippet should not be empty for line with code"
+                );
+                assert!(
+                    hit.snippet.contains("fn add"),
+                    "snippet should contain the matched function"
+                );
+            }
+        }
     }
 
     #[test]

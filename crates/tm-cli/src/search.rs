@@ -307,11 +307,7 @@ pub fn search(args: &SearchArgs, project: &Project, renderer: &Renderer) -> tm_t
                             Some(line) => format!("{}:{}", r.path, line),
                             None => r.path.clone(),
                         };
-                        vec![
-                            loc,
-                            format!("{:.3}", r.fused_score),
-                            r.snippet.lines().next().unwrap_or("").to_string(),
-                        ]
+                        vec![loc, format!("{:.3}", r.fused_score), r.snippet.clone()]
                     })
                     .collect();
                 let table = Table::new(
@@ -896,5 +892,29 @@ mod tests {
         };
         let json = serde_json::to_string(&result).expect("should serialize");
         assert!(json.contains("\"fused_score\":0.92"));
+        // Verify snippet is included and non-empty in JSON
+        assert!(json.contains("\"snippet\":\"let x = important();\""));
+    }
+
+    #[test]
+    fn test_hybrid_search_result_snippet_non_empty() {
+        // Test that hybrid search results properly include non-empty snippets
+        let result = HybridSearchResult {
+            path: "src/example.rs".to_string(),
+            line_start: Some(10),
+            line_end: Some(10),
+            snippet: "fn calculate() -> i32 { 42 }".to_string(),
+            fused_score: 0.85,
+            explain: vec![SignalBreakdown {
+                signal: "Semantic".to_string(),
+                rank: Some(1),
+                weighted_score: 0.85,
+            }],
+        };
+
+        // Verify snippet is non-empty and serializable
+        assert!(!result.snippet.is_empty());
+        let json = serde_json::to_string(&result).expect("should serialize");
+        assert!(json.contains("\"snippet\":\"fn calculate() -> i32 { 42 }\""));
     }
 }
