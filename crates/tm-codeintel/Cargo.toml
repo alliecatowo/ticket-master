@@ -25,6 +25,13 @@ tree-sitter-go = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.25"
 tree-sitter-python = "0.25"
+dirs = { workspace = true }
+# Pure-Rust, CPU-only static-embedding inference (MinishLab's `model2vec-rs`, D-025). Default
+# features off: the crate's default `onig` feature pulls in Oniguruma, a C regex engine, which
+# would break this crate's "pure Rust" embedder story; `fancy-regex` is model2vec-rs's
+# pure-Rust alternative to it. `hf-hub` is kept for loading from (and, when explicitly
+# requested, downloading into) the local HuggingFace cache -- see `crate::potion`.
+model2vec-rs = { version = "0.3", default-features = false, features = ["hf-hub", "fancy-regex"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

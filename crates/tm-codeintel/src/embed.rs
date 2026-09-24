@@ -1,8 +1,10 @@
-//! Owns text embedding: the [`Embedder`] trait, the default no-network
-//! [`LocalHashEmbedder`], a content-hash keyed cache so re-embedding unchanged text is free,
-//! and cosine similarity. An API-backed embedder (e.g. `Fabric::embed` on role `embedder`) is
-//! pluggable behind the same trait but is not implemented in this crate; higher layers supply
-//! it.
+//! Owns text embedding: the [`Embedder`] trait, the no-network [`LocalHashEmbedder`], a
+//! content-hash keyed cache so re-embedding unchanged text is free, and cosine similarity.
+//! [`crate::potion::PotionEmbedder`] (real static-embedding semantic search over
+//! `model2vec-rs`, see D-025) lives in [`crate::potion`] rather than here, since it pulls in
+//! its own dependency tree; [`build_default_embedder`] is what picks between the two. An
+//! API-backed embedder (e.g. `Fabric::embed` on role `embedder`) is pluggable behind the same
+//! trait but is not implemented in this crate; higher layers supply it.
 //!
 //! [`LocalHashEmbedder`] must be deterministic (same input text always yields the same
 //! vector, on any machine, any run) and every output vector must be L2-normalized (norm 1,
@@ -10,6 +12,7 @@
 //! properties are what this module's tests check.
 
 use std::collections::HashMap;
+use std::env;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -201,6 +204,55 @@ impl<T: Embedder + ?Sized> Embedder for Arc<T> {
     }
 }
 
+/// Env var choosing which embedder [`build_default_embedder`] picks: `"potion"` requires
+/// [`crate::potion::PotionEmbedder`] (falling back to [`LocalHashEmbedder`] with a logged
+/// warning if it can't load, never erroring); `"hash"` forces [`LocalHashEmbedder`] and skips
+/// even trying to load Potion; unset or any other value tries Potion from the local
+/// HuggingFace cache first and falls back to `LocalHashEmbedder` if it isn't cached.
+/// `config_override` (typically a project's `index.embedder` config key, once a caller wires
+/// it up — see D-025) takes precedence over this env var when both are given.
+pub const TM_EMBEDDER_ENV: &str = "TM_EMBEDDER";
+
+/// Build the embedder [`crate::api::CodeIntel`] should use by default, per [`TM_EMBEDDER_ENV`]
+/// / `config_override`.
+///
+/// This never downloads the Potion model: it only picks Potion when it is already present in
+/// the local HuggingFace cache (`crate::potion::PotionEmbedder::try_load_offline`), even when
+/// explicitly requested via `"potion"`. Deliberately conservative, not just cautious: this
+/// function backs `CodeIntel::open_auto`/`open_at_auto`, which real command paths use, but it
+/// must stay safe to call from anywhere, including a future test that forgets this — a caller
+/// that wants to *download* the model when missing should call
+/// `crate::potion::PotionEmbedder::try_load()` directly (e.g. from `tm doctor` or an explicit
+/// `tm index --embedder potion` verb) and pass the result to `CodeIntel::open_with_embedder`.
+pub fn build_default_embedder(config_override: Option<&str>) -> Arc<dyn Embedder> {
+    let choice = config_override
+        .map(str::to_string)
+        .or_else(|| env::var(TM_EMBEDDER_ENV).ok());
+
+    select_embedder(choice.as_deref(), || {
+        crate::potion::PotionEmbedder::try_load_offline()
+            .map(|embedder| Arc::new(embedder) as Arc<dyn Embedder>)
+    })
+}
+
+/// Pure core of [`build_default_embedder`]: `choice` is the already-resolved
+/// `config_override`/[`TM_EMBEDDER_ENV`] string (trimmed and lowercased before matching, so
+/// `"HASH"`/`" hash "` behave like `"hash"`), and `load_potion` is called at most once, only
+/// when `choice` isn't `"hash"`. Split out specifically so tests can exercise every branch
+/// with a stub loader instead of depending on this machine's HuggingFace cache state (which
+/// would otherwise make the "Potion available" and "falls back to hash" branches
+/// indistinguishable, and non-deterministic across machines, in a test that calls the real
+/// [`crate::potion::PotionEmbedder::try_load_offline`]).
+fn select_embedder(
+    choice: Option<&str>,
+    load_potion: impl FnOnce() -> Option<Arc<dyn Embedder>>,
+) -> Arc<dyn Embedder> {
+    match choice.map(|s| s.trim().to_lowercase()).as_deref() {
+        Some("hash") => Arc::new(LocalHashEmbedder::new()),
+        _ => load_potion().unwrap_or_else(|| Arc::new(LocalHashEmbedder::new())),
+    }
+}
+
 /// Cosine similarity between two vectors of equal length. Returns 0.0 for length mismatch or
 /// either vector having zero norm, rather than panicking or returning NaN.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -339,5 +391,65 @@ mod tests {
     fn identifier_is_stable() {
         let embedder = LocalHashEmbedder::new();
         assert_eq!(embedder.identifier(), "local-hash-512");
+    }
+
+    #[test]
+    fn build_default_embedder_honors_hash_override_without_touching_potion() {
+        // "hash" must short-circuit before even trying to load Potion (offline-only or not),
+        // so this is deterministic on every machine regardless of what's cached locally.
+        let embedder = build_default_embedder(Some("hash"));
+        assert_eq!(embedder.identifier(), "local-hash-512");
+    }
+
+    /// A stub embedder purely for asserting [`select_embedder`] passes a loader's result
+    /// through unchanged, without depending on Potion or the real HuggingFace cache.
+    struct StubEmbedder;
+    impl Embedder for StubEmbedder {
+        fn dims(&self) -> usize {
+            1
+        }
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.0]).collect())
+        }
+        fn identifier(&self) -> &str {
+            "stub-embedder"
+        }
+    }
+
+    #[test]
+    fn select_embedder_hash_choice_never_calls_the_loader() {
+        let embedder = select_embedder(Some("hash"), || {
+            panic!("the loader must not be called when \"hash\" is explicitly chosen")
+        });
+        assert_eq!(embedder.identifier(), "local-hash-512");
+    }
+
+    #[test]
+    fn select_embedder_hash_choice_is_case_and_whitespace_insensitive() {
+        let embedder = select_embedder(Some(" HASH \n"), || {
+            panic!("the loader must not be called when \"hash\" is explicitly chosen")
+        });
+        assert_eq!(embedder.identifier(), "local-hash-512");
+    }
+
+    #[test]
+    fn select_embedder_falls_back_to_hash_when_the_loader_returns_none() {
+        let embedder = select_embedder(None, || None);
+        assert_eq!(embedder.identifier(), "local-hash-512");
+    }
+
+    #[test]
+    fn select_embedder_uses_whatever_the_loader_returns_when_not_hash() {
+        let embedder: Arc<dyn Embedder> =
+            select_embedder(None, || Some(Arc::new(StubEmbedder) as Arc<dyn Embedder>));
+        assert_eq!(embedder.identifier(), "stub-embedder");
+    }
+
+    #[test]
+    fn select_embedder_treats_potion_choice_the_same_as_unset() {
+        let embedder: Arc<dyn Embedder> = select_embedder(Some("potion"), || {
+            Some(Arc::new(StubEmbedder) as Arc<dyn Embedder>)
+        });
+        assert_eq!(embedder.identifier(), "stub-embedder");
     }
 }

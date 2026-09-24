@@ -7,7 +7,11 @@
 //!
 //! - **exact** ([`exact`]) — literal and regex search over the walked file set.
 //! - **semantic** ([`semantic`]) — embedding-vector search prefiltered by an inverted token
-//!   index, using the deterministic, no-network [`embed::LocalHashEmbedder`] by default.
+//!   index. [`api::CodeIntel::open`]/[`api::CodeIntel::open_at`] keep the deterministic,
+//!   no-network [`embed::LocalHashEmbedder`] as their default so existing tests stay
+//!   network-free; [`api::CodeIntel::open_auto`]/[`api::CodeIntel::open_at_auto`] instead pick
+//!   [`potion::PotionEmbedder`] (real static embeddings) when it's already cached locally —
+//!   see [`embed::build_default_embedder`] and D-025.
 //! - **symbols** ([`symbols`]) — tree-sitter-derived definitions, references, and resolution.
 //! - **history** ([`history`]) — git commits, blame, and message/diff search via `git2`.
 //!
@@ -31,6 +35,9 @@ pub mod store;
 
 /// The [`embed::Embedder`] trait, the default local hash embedder, and embedding cache.
 pub mod embed;
+
+/// A real static-embedding [`embed::Embedder`] over MinishLab's `model2vec-rs` (D-025).
+pub mod potion;
 
 /// Syntax-aware and sliding-window chunking of file contents.
 pub mod chunk;

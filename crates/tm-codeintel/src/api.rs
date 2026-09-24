@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use tm_types::{Clock, Result};
 
 use crate::chunk::Chunker;
@@ -18,8 +18,8 @@ use crate::embed::{Embedder, LocalHashEmbedder};
 use crate::exact::{ExactSearch, ExactSearchResult};
 use crate::history::HistoryIndex;
 use crate::hybrid::{
-    hybrid, lexical_ranking, semantic_ranking, Query, RankedHit, RetrievalContext, Signal,
-    SignalRanking, SignalWeights,
+    hybrid, semantic_ranking, Query, RankedHit, RetrievalContext, Signal, SignalRanking,
+    SignalWeights,
 };
 use crate::semantic::{ScoredChunk, SemanticSearch, SemanticSearchOptions};
 use crate::store::{IndexDelta, Store};
@@ -154,6 +154,35 @@ impl CodeIntel {
         Self::open_at_with_embedder(&project_root.join(".tm"), project_root, embedder)
     }
 
+    /// Open using [`crate::embed::build_default_embedder`]'s choice: the real semantic
+    /// [`crate::potion::PotionEmbedder`] when `minishlab/potion-code-16M-v2` is already
+    /// cached locally, [`LocalHashEmbedder`] otherwise (never downloads; see D-025) — or
+    /// whatever `TM_EMBEDDER`/`config_override` force. This is the entry point real command
+    /// paths should prefer over [`CodeIntel::open`] going forward; `open`/`open_at` keep
+    /// defaulting to [`LocalHashEmbedder`] unconditionally so the many existing `#[test]`s
+    /// across this workspace that call them stay exactly as deterministic and network-free as
+    /// they are today.
+    pub fn open_auto(project_root: &Path, config_override: Option<&str>) -> Result<CodeIntel> {
+        Self::open_at_with_embedder(
+            &project_root.join(".tm"),
+            project_root,
+            crate::embed::build_default_embedder(config_override),
+        )
+    }
+
+    /// [`CodeIntel::open_auto`], at an explicit index directory (see [`CodeIntel::open_at`]).
+    pub fn open_at_auto(
+        index_dir: &Path,
+        workspace_root: &Path,
+        config_override: Option<&str>,
+    ) -> Result<CodeIntel> {
+        Self::open_at_with_embedder(
+            index_dir,
+            workspace_root,
+            crate::embed::build_default_embedder(config_override),
+        )
+    }
+
     /// Open (creating if absent) the code-intelligence index at `<index_dir>/index.db`, indexing
     /// the workspace at `workspace_root`, using the default no-network [`LocalHashEmbedder`].
     /// `index_dir` and `workspace_root` are independent: `index_dir` is where `index.db` lives
@@ -217,7 +246,34 @@ impl CodeIntel {
                 mtime: f.mtime,
             })
             .collect();
-        let changes: ChangeSet = RepoWalker::diff(&current, &previous_records);
+        let mut changes: ChangeSet = RepoWalker::diff(&current, &previous_records);
+
+        // The vectors table is keyed by `embedder.identifier()`. If the configured embedder
+        // has changed since the last `update_incremental` (e.g. Potion just became available,
+        // or the project's `index.embedder` config flipped), a blake3-unchanged file's vector
+        // was still produced by the *old* embedder and would otherwise never get re-embedded
+        // (that's the whole point of the blake3 skip), silently mixing vector spaces in one
+        // corpus. Detect the mismatch via a single meta row and, when it fires, promote every
+        // currently-walked file not already in `added`/`modified` into `modified` so it goes
+        // through `write_file_content` (and therefore gets re-embedded) this run.
+        const EMBEDDER_META_KEY: &str = "embedder_identifier";
+        let stored_embedder_id = self.store.get_meta(EMBEDDER_META_KEY)?;
+        let embedder_changed = stored_embedder_id.as_deref() != Some(self.embedder.identifier());
+        if embedder_changed {
+            let already_covered: HashSet<&str> = changes
+                .added
+                .iter()
+                .chain(changes.modified.iter())
+                .map(|r| r.path.as_str())
+                .collect();
+            let promoted: Vec<FileRecord> = current
+                .iter()
+                .filter(|record| !already_covered.contains(record.path.as_str()))
+                .cloned()
+                .collect();
+            drop(already_covered);
+            changes.modified.extend(promoted);
+        }
 
         let mut delta = IndexDelta::default();
 
@@ -276,6 +332,8 @@ impl CodeIntel {
                 delta.files_removed += 1;
             }
 
+            Store::set_meta(&conn, EMBEDDER_META_KEY, self.embedder.identifier())?;
+
             conn.execute_batch("COMMIT").map_err(|e| {
                 tm_types::TmError::storage(format!("Failed to commit index update: {e}"))
             })?;
@@ -309,6 +367,143 @@ impl CodeIntel {
             .search(query_text, options)
     }
 
+    /// BM25-ranked lexical search over the `tokens` inverted index populated by
+    /// `write_file_content`, used as the [`Signal::Lexical`] input to
+    /// [`CodeIntel::search_hybrid`].
+    ///
+    /// Unlike [`CodeIntel::search_exact`] (a literal substring match on the *whole* query
+    /// string, which is effectively dead for a multi-word natural-language query like "where
+    /// are tickets moved between states" -- no file contains that exact substring), this
+    /// tokenizes the query the same way chunk text is tokenized at index time and scores
+    /// every chunk sharing at least one token, using the standard Okapi BM25 formula
+    /// (`k1 = 1.2`, `b = 0.75`) over each token's term frequency, document frequency and the
+    /// corpus's average chunk length. Ties broken by chunk id for determinism.
+    fn search_lexical_bm25(&self, query_text: &str) -> Result<SignalRanking> {
+        let empty = || SignalRanking {
+            signal: Signal::Lexical,
+            ranked: Vec::new(),
+        };
+
+        let query_tokens: Vec<String> = tokenize_for_index(query_text).into_keys().collect();
+        if query_tokens.is_empty() {
+            return Ok(empty());
+        }
+
+        let conn = self.store.reader()?;
+
+        let chunk_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM chunks", [], |row| row.get(0))
+            .map_err(|e| tm_types::TmError::storage(format!("Failed to count chunks: {e}")))?;
+        if chunk_count == 0 {
+            return Ok(empty());
+        }
+
+        // Chunk lengths (in indexed tokens), computed once for the whole corpus rather than
+        // per query token, since BM25's length-normalization term needs every candidate
+        // chunk's length and the corpus average regardless of how many tokens the query has.
+        let mut doc_len: HashMap<i64, i64> = HashMap::new();
+        {
+            let mut stmt = conn
+                .prepare("SELECT chunk_id, SUM(term_frequency) FROM tokens GROUP BY chunk_id")
+                .map_err(|e| {
+                    tm_types::TmError::storage(format!("Failed to prepare doc-length query: {e}"))
+                })?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))
+                .map_err(|e| {
+                    tm_types::TmError::storage(format!("Failed to query doc lengths: {e}"))
+                })?;
+            for row in rows {
+                let (chunk_id, len) = row.map_err(|e| {
+                    tm_types::TmError::storage(format!("Failed to read doc-length row: {e}"))
+                })?;
+                doc_len.insert(chunk_id, len);
+            }
+        }
+        let avg_doc_len = if doc_len.is_empty() {
+            1.0
+        } else {
+            doc_len.values().sum::<i64>() as f64 / doc_len.len() as f64
+        }
+        .max(1.0);
+
+        const K1: f64 = 1.2;
+        const B: f64 = 0.75;
+
+        let mut scores: HashMap<i64, f64> = HashMap::new();
+        for token in &query_tokens {
+            let df: i64 = conn
+                .query_row(
+                    "SELECT COUNT(DISTINCT chunk_id) FROM tokens WHERE token = ?1",
+                    params![token],
+                    |row| row.get(0),
+                )
+                .map_err(|e| tm_types::TmError::storage(format!("Failed to read token df: {e}")))?;
+            if df == 0 {
+                continue;
+            }
+            let idf = ((chunk_count as f64 - df as f64 + 0.5) / (df as f64 + 0.5) + 1.0).ln();
+
+            let mut stmt = conn
+                .prepare("SELECT chunk_id, term_frequency FROM tokens WHERE token = ?1")
+                .map_err(|e| {
+                    tm_types::TmError::storage(format!("Failed to prepare token query: {e}"))
+                })?;
+            let rows = stmt
+                .query_map(params![token], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+                })
+                .map_err(|e| tm_types::TmError::storage(format!("Failed to query tokens: {e}")))?;
+            for row in rows {
+                let (chunk_id, tf) = row.map_err(|e| {
+                    tm_types::TmError::storage(format!("Failed to read token row: {e}"))
+                })?;
+                let tf = tf as f64;
+                let len = doc_len.get(&chunk_id).copied().unwrap_or(0) as f64;
+                let denom = tf + K1 * (1.0 - B + B * len / avg_doc_len);
+                if denom <= 0.0 {
+                    continue;
+                }
+                let score = idf * (tf * (K1 + 1.0)) / denom;
+                *scores.entry(chunk_id).or_insert(0.0) += score;
+            }
+        }
+
+        if scores.is_empty() {
+            return Ok(empty());
+        }
+
+        let mut ranked: Vec<(i64, f64)> = scores.into_iter().collect();
+        ranked.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        let mut out = Vec::with_capacity(ranked.len());
+        for (chunk_id, _score) in ranked {
+            let hit: Option<(String, u32)> = conn
+                .query_row(
+                    "SELECT f.path, c.line_start FROM chunks c JOIN files f ON f.id = c.file_id \
+                     WHERE c.id = ?1",
+                    params![chunk_id],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)),
+                )
+                .optional()
+                .map_err(|e| {
+                    tm_types::TmError::storage(format!("Failed to resolve chunk path: {e}"))
+                })?;
+            if let Some((path, line_start)) = hit {
+                out.push((path, Some(line_start)));
+            }
+        }
+
+        Ok(SignalRanking {
+            signal: Signal::Lexical,
+            ranked: out,
+        })
+    }
+
     /// Fused hybrid search across all signals. Gathers per-signal rankings (semantic, lexical,
     /// symbol-proximity, path-affinity, edit-recency, co-change) and calls
     /// [`crate::hybrid::hybrid`].
@@ -330,8 +525,7 @@ impl CodeIntel {
         let semantic_hits = self.search_semantic(&query.text, SemanticSearchOptions::default())?;
         let semantic_sig = semantic_ranking(&semantic_hits);
 
-        let exact_result = self.search_exact(&query.text)?;
-        let lexical_sig = lexical_ranking(&exact_result.hits);
+        let lexical_sig = self.search_lexical_bm25(&query.text)?;
 
         let symbol_idx = self.symbol_index()?;
         let mut symbol_proximity_ranked: Vec<(String, Option<u32>)> = Vec::new();
@@ -645,6 +839,101 @@ mod tests {
         assert_eq!(delta.files_removed, 0);
         assert_eq!(delta.chunks_written, 0);
         assert_eq!(delta.commits_ingested, 0);
+    }
+
+    /// A second, distinctly-identified no-network embedder purely for testing the
+    /// embedder-mismatch re-embed path without depending on Potion or the network.
+    struct OtherTestEmbedder;
+    impl Embedder for OtherTestEmbedder {
+        fn dims(&self) -> usize {
+            crate::embed::LOCAL_HASH_DIMS
+        }
+        fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            LocalHashEmbedder::new().embed(texts)
+        }
+        fn identifier(&self) -> &str {
+            "test-other-embedder"
+        }
+    }
+
+    #[test]
+    fn update_incremental_re_embeds_unchanged_files_when_the_embedder_identifier_changes() {
+        let dir = new_project();
+        fs::write(dir.path().join("hello.py"), "print('hi')\n").expect("write");
+
+        let clock = FixedClock::epoch();
+        let hash_embedder: Arc<dyn Embedder> = Arc::new(LocalHashEmbedder::new());
+        let intel =
+            CodeIntel::open_with_embedder(dir.path(), Arc::clone(&hash_embedder)).expect("open");
+        let first = intel.update_incremental(&clock).expect("first update");
+        assert_eq!(first.files_added, 1);
+
+        // Reopen the same index with a different-identified embedder; the file on disk is
+        // completely unchanged (same blake3), so a plain walker diff would report no changes
+        // at all -- but the stored vector space no longer matches this embedder's identifier,
+        // so this must still re-embed it.
+        let other_embedder: Arc<dyn Embedder> = Arc::new(OtherTestEmbedder);
+        let intel_other =
+            CodeIntel::open_with_embedder(dir.path(), Arc::clone(&other_embedder)).expect("open");
+        let second = intel_other
+            .update_incremental(&clock)
+            .expect("second update, embedder changed");
+
+        assert_eq!(
+            second.files_added, 0,
+            "the file itself is not new to the file-tracking table"
+        );
+        assert_eq!(
+            second.files_modified, 1,
+            "an embedder-identifier mismatch must force a re-embed even though blake3 is unchanged"
+        );
+        assert!(second.chunks_written >= 1);
+
+        // A third, unchanged open with the same (new) embedder must now be a true no-op again.
+        let intel_other_again =
+            CodeIntel::open_with_embedder(dir.path(), Arc::clone(&other_embedder)).expect("open");
+        let third = intel_other_again
+            .update_incremental(&clock)
+            .expect("third update, embedder unchanged");
+        assert_eq!(third.files_added, 0);
+        assert_eq!(third.files_modified, 0);
+    }
+
+    #[test]
+    fn search_lexical_bm25_ranks_a_multi_word_query_no_file_contains_as_a_literal_substring() {
+        let dir = new_project();
+        fs::write(
+            dir.path().join("machine.py"),
+            "def move_ticket_between_states(ticket, new_state):\n    ticket.state = new_state\n",
+        )
+        .expect("write");
+        fs::write(
+            dir.path().join("unrelated.py"),
+            "def totally_unrelated():\n    return 42\n",
+        )
+        .expect("write");
+
+        let intel = CodeIntel::open(dir.path()).expect("open");
+        let clock = FixedClock::epoch();
+        intel.update_incremental(&clock).expect("update");
+
+        // No file contains this exact phrase as a literal substring, so `search_exact` would
+        // report zero hits; the tokenized BM25 ranking must still surface the relevant file.
+        let ranking = intel
+            .search_lexical_bm25("moving tickets between states")
+            .expect("lexical search");
+        assert!(!ranking.ranked.is_empty());
+        assert_eq!(ranking.ranked[0].0, "machine.py");
+    }
+
+    #[test]
+    fn search_lexical_bm25_returns_no_hits_over_an_empty_index() {
+        let dir = new_project();
+        let intel = CodeIntel::open(dir.path()).expect("open");
+        let ranking = intel
+            .search_lexical_bm25("anything at all")
+            .expect("lexical search");
+        assert!(ranking.ranked.is_empty());
     }
 
     #[test]
