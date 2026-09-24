@@ -142,7 +142,7 @@ fn chat_to_tickets_to_board_to_detail_and_back_one_level_at_a_time() {
         "ctrl+b on tickets opens the board, got: {screen:?}"
     );
     assert!(
-        has(&screen, "Draft"),
+        has(&screen, "draft"),
         "the board names the real states, got: {screen:?}"
     );
 

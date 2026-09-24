@@ -67,7 +67,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli && mise run test:crate -- tm-core`
   evidence: `grep -n 'invalid transition' crates/tm-types/src/error.rs` -> 25: `#[error("invalid transition: {0}")]`; five independent trial agents hit the same "no transition from Draft on VerificationStarted"/"Ready on Activate" text.
 
-- [ ] **s1-dep-graph-human** — tm dep graph prints DependencyGraph Debug and ignores its root argument
+- [x] **s1-dep-graph-human** — tm dep graph prints DependencyGraph Debug and ignores its root argument (landed 00d41cf)
   model: sonnet · severity: high · builds Rust: yes · area: cli/tickets · deps: s1-display-labels, s1-dep-rm-emit-removed-event
   files: `crates/tm-cli/src/tickets.rs`, `crates/tm-cli/src/tui.rs`
   change: In `dep_graph` (tickets.rs ~884-905), replace `{:?}` of view.graph with an indented, human list: each edge as `T-A (objective) -> T-B (objective)` using dep_kind_label, sourced from view.tickets. When a TICKET argument is given, filter to only its transitive dependencies/dependents (today the code computes a subgraph label but still returns the full graph). Validate the root ticket exists (TmError::not_found otherwise). With no edges: "No dependencies yet. Add one: tm dep add <ticket> <depends-on>". Fix the Kanban column title at tui.rs:337 (`format!("{state:?}")`) to use state_label.
@@ -175,7 +175,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: probe nav-semantic: "Distinguish 'index not built yet' from 'no matches' in tm search output"; the chat has no search command today.
 
-- [ ] **s1-slash-memory-export-doctor-perms-workflow** — /memory, /export, /doctor, /permissions, /workflow
+- [x] **s1-slash-memory-export-doctor-perms-workflow** — /memory, /export, /doctor, /permissions, /workflow (landed 75bc2dd)
   model: sonnet · severity: medium · builds Rust: yes · area: tui/chat · deps: s1-slash-search-review, s1-surfaces-decision-doc
   files: `crates/tm-tui/src/chat/commands.rs`, `crates/tm-cli/src/tui/slash_views.rs`, `crates/tm-cli/src/tui/chat_ops.rs`, `CLAUDE.md`, `docs/decisions/D-0NN-command-surfaces.md`
   change: `/memory` opens the project's AGENTS.md in $EDITOR through the existing Ctrl+G editor path (creating it if absent). `/export [path]` writes the transcript as markdown (default `tm-session-<id>.md` in cwd) and replies with the path. `/doctor` runs the same checks as `tm doctor`, printed pass/fail. `/permissions` shows the current auto/plan/ask mode and what each allows; `/permissions <mode>` sets it, same as Shift+Tab. `/workflow [name]` with no name lists workflows like `tm workflow list`; with a name, starts it as a background ticket. Mark the command-surfaces decision doc "Implemented" for the slash table.
@@ -215,7 +215,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `tm search --mode hybrid "println"` -> Location/Score/Snippet with an empty Snippet column, while `tm search --mode exact "println"` shows the code.
 
-- [ ] **s1-symbol-error-exit-codes** — Symbol lookups fail silently: "Symbol not found" exits 0
+- [x] **s1-symbol-error-exit-codes** — Symbol lookups fail silently: "Symbol not found" exits 0 (landed 3ae3537)
   model: haiku · severity: medium · builds Rust: yes · area: cli/symbol · deps: none
   files: `crates/tm-cli/src/search.rs`
   change: In symbol_def/refs/callers/callees (search.rs ~384/429/473/519), replace "Symbol not found"/"No outline entries found" with "No symbol named `{name}` in this project", and exit 1 instead of 0. In symbol_outline (~545), distinguish "File {path} not found" from "File {path} contains no top-level definitions" and exit 1 in both cases. --json output keeps the same exit-1 behavior with an empty array/null.
@@ -263,7 +263,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-cli`
   evidence: `tm provider list --quiet` still prints the full table; `tm project list --quiet` still prints "no global projects yet"; `tm project show --quiet` still prints the full path.
 
-- [ ] **s1-harness-missing-file-errors** — tm harness show/set/promote crash on a raw OS error when harness.toml doesn't exist
+- [x] **s1-harness-missing-file-errors** — tm harness show/set/promote crash on a raw OS error when harness.toml doesn't exist (landed c0a52cd)
   model: haiku · severity: high · builds Rust: yes · area: cli/copy · deps: none
   files: `crates/tm-cli/src/ops.rs`
   change: `harness_show` (~line 1130), `harness_set` (~1162) and `harness_promote` (~1325) all propagate "storage: Failed to read harness.toml: No such file or directory (os error 2)" instead of handling the missing-file case, unlike `config_cmd.rs::load_harness_config` (~line 200) which already checks `!path.is_file()` and returns `HarnessConfig::default()`. Make `harness_show` follow that same pattern (display defaults). Make `harness_set` use `HarnessConfig::default()` as its base when the file is missing, so it can bootstrap a fresh harness.toml with one key set. Make `harness_promote` give a clear message instead ("No harness configuration found. Use `tm harness set <key> <value>` to create one before promoting an epoch."), since promote has no sensible default to act on.
@@ -351,7 +351,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-cli`
   evidence: With `DEVPASS_API_KEY` set (`tm provider list` shows `coder.fast devpass ... ready`) and no Anthropic key/local runner, `tm genesis --plain --prompt "..."` errored: `ANTHROPIC_API_KEY is not set (needed by anthropic, Genesis's configured provider) and no local model provider is reachable (ollama: not running; lm-studio: not running; llama-cpp: not running)`.
 
-- [ ] **p1-symbol-refs-callers-perf** — `symbol refs`/`symbol callers` take 48-56s, making interactive navigation unusable
+- [x] **p1-symbol-refs-callers-perf** — `symbol refs`/`symbol callers` take 48-56s, making interactive navigation unusable (landed 0e21feb)
   model: sonnet · severity: critical · builds Rust: yes · area: code-navigation · deps: nav-fix-cli-symbol-output-bugs
   files: `crates/tm-codeintel/src/lib.rs`
   change: `tm symbol refs <name>` and `tm symbol callers <name>` take 48-56 seconds on this repo's own codebase — an order of magnitude too slow for interactive use, and separate from the correctness bugs `nav-fix-cli-symbol-output-bugs` already fixes (including the redundant double-parse it removes, which this task should build on rather than duplicate). Profile the reference/caller analysis path (tree-sitter parse + resolution) to find the actual hot loop — likely re-parsing every file per candidate reference rather than once per file with a cached index — and fix it so it scales with files-containing-matches, not files-in-repo times candidates.
@@ -407,7 +407,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-e2e`
   evidence: No test in `crates/tm-e2e/tests/` or `crates/tm-cli/tests/` currently drives a ticket to `closed`; the `lifecycle-accept` probe found the mock provider stalls the ticket at `ready`.
 
-- [ ] **p1-e2e-reject-retry-dependencies** — Offline e2e test: reject/retry cycle and dependency-gated scheduling
+- [x] **p1-e2e-reject-retry-dependencies** — Offline e2e test: reject/retry cycle and dependency-gated scheduling (landed aa31a4c)
   model: sonnet · severity: high · builds Rust: yes · area: testing · deps: p1-mock-provider-scripted-tool-calls
   files: `crates/tm-e2e/tests/ticket_lifecycle_e2e.rs`
   change: Add offline coverage (same new test file as `p1-e2e-ticket-lifecycle-scripted-provider`, or a sibling in the same crate) for two flows the `lifecycle-reject-retry` and `deps-sched` probes exercised manually but no automated test asserts: (1) a ticket escalated after `max_attempts` failed attempts, retried via `tm ticket retry <T> --guidance "..."`, with guidance appended to the objective and attempts reset; (2) a `Hard` dependency edge that blocks a dependent ticket from being scheduled/leased until its dependency is closed, verified against the scheduler directly (not just CLI text output).
@@ -471,7 +471,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-events`
   evidence: `crates/tm-events/src/kind.rs:79-80` `#[serde(rename = "ticket.created")]` and `:225-226` `#[serde(rename = "approval.requested")]` are the two existing precedents this task follows; grep confirmed no `classify.*` or decision-provider event kind exists yet.
 
-- [ ] **d20-shadow-triage-new-tickets** — Shadow-classify new tickets at creation: call the decider, record classify.decided(shadow), never act on it
+- [x] **d20-shadow-triage-new-tickets** — Shadow-classify new tickets at creation: call the decider, record classify.decided(shadow), never act on it (landed 7b363a8)
   model: sonnet · severity: high · builds Rust: yes · area: core (D-020) · deps: d20-decider-trait-and-mock, d20-decider-config-selection, d20-classify-decided-event-kind
   files: `crates/tm-core/src/store.rs`
   change: At the ticket-creation append site in tm-core (grep `'"ticket.created"'` in `crates/tm-core/src` for the exact function), after appending `ticket.created`, call the configured `Role::Decider` candidate (from `d20-decider-config-selection`) with a triage-shaped `DecideRequest` (kind/routing questions over the ticket objective), and append `classify.decided` with `disposition:"shadow"` via `d20-classify-decided-event-kind`'s new `EventKind`. On any decider error or missing candidate, log and continue — ticket creation must never fail or block on this.
@@ -604,7 +604,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
 
 Gate: `mise run verify && pnpm -C clients/ts install && pnpm -C clients/ts test && pnpm -C clients/ts build && pnpm -C clients/vscode install && pnpm -C clients/vscode run compile && pnpm -C clients/vscode test && mise x aqua:rhysd/actionlint@latest -- actionlint .github/workflows/release.yml`
 
-- [ ] **nav-fix-project-codeintel-freshness** — Refresh the code index in Project::code_intel() and in the dispatch context-pack source
+- [x] **nav-fix-project-codeintel-freshness** — Refresh the code index in Project::code_intel() and in the dispatch context-pack source (landed 703d197)
   model: sonnet · size: S · builds Rust: yes · area: code-navigation · deps: none
   files: `crates/tm-cli/src/project.rs`, `crates/tm-cli/src/dispatch.rs`
   change: Project::code_intel() (project.rs:79-81) only calls CodeIntel::open_at and never calls update_incremental. ProjectContextPackSource::compile (dispatch.rs:28-52, used by tm run/tm sched run) opens its own CodeIntel and does not refresh either. Change: (1) in code_intel(), call update_incremental(self.clock.as_ref()) after open_at. (2) Add a clock: Arc<dyn Clock> field to ProjectContextPackSource, pass project.clock.clone() at its construction in build_dispatcher, and call update_incremental in compile() before building the pack. Also refresh the long-lived Arc<CodeIntel> built at dispatch.rs:267 once when it is constructed. Degrade, never fail: update_incremental's history ingest needs a git HEAD, so on Err log tracing::warn! and return the opened index. If the root is not inside a git work tree, skip the refresh entirely, so a global-scope project in an arbitrary directory never walks something like $HOME. Leave tm doctor's own explicit update_incremental call (project.rs:1920) as it is. This task absorbs nav-fix-dispatch-context-pack-freshness.
