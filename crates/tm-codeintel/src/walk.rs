@@ -276,7 +276,7 @@ impl RepoWalker {
 
         // Find removed paths: in previous_map but not in current.
         let mut removed = Vec::new();
-        for (path, _hash) in previous_map.iter() {
+        for path in previous_map.keys() {
             if !seen_paths.contains(path) {
                 removed.push(path.to_string());
             }

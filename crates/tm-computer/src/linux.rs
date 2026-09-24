@@ -17,7 +17,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use tm_types::{IdSource, Result as TmResult};
-use x11rb::connection::Connection;
+use x11rb::connection::{Connection, RequestConnection as _};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, CreateWindowAux,
     EventMask, ImageFormat, PropMode, SelectionNotifyEvent, Window, WindowClass,
@@ -26,6 +26,7 @@ use x11rb::protocol::xproto::{
 use x11rb::protocol::xtest::ConnectionExt as _;
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
 
 use crate::backend::{
     Backend, BackendKind, Capabilities, DisplayInfo, ElementNode, Screenshot, WindowInfo,
@@ -489,17 +490,19 @@ impl Backend for X11Backend {
         let root = conn.setup().roots[screen_num].root;
         let atom = intern_atom(&conn, "_NET_ACTIVE_WINDOW")?;
         let event = ClientMessageEvent::new(32, win, atom, [1, 0, 0, 0, 0]);
-        conn.send_event(
-            false,
-            root,
-            EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
-            event,
-        )
-        .map_err(|e| ComputerError::Operation(format!("_NET_ACTIVE_WINDOW send failed: {e}")))?
-        .check()
-        .map_err(|e| {
-            ComputerError::NotFound(format!("window {window_id} rejected focus: {e}")).into()
-        })
+        let result = conn
+            .send_event(
+                false,
+                root,
+                EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+                event,
+            )
+            .map_err(|e| ComputerError::Operation(format!("_NET_ACTIVE_WINDOW send failed: {e}")))?
+            .check()
+            .map_err(|e| {
+                ComputerError::NotFound(format!("window {window_id} rejected focus: {e}")).into()
+            });
+        result
     }
 
     async fn move_window(&self, window_id: &str, to: Point) -> TmResult<()> {
@@ -508,13 +511,15 @@ impl Backend for X11Backend {
         let aux = ConfigureWindowAux::new()
             .x(to.x.round() as i32)
             .y(to.y.round() as i32);
-        conn.configure_window(win, &aux)
+        let result = conn
+            .configure_window(win, &aux)
             .map_err(|e| ComputerError::Operation(format!("ConfigureWindow failed: {e}")))?
             .check()
             .map_err(|e| {
                 ComputerError::NotFound(format!("window {window_id} could not be moved: {e}"))
                     .into()
-            })
+            });
+        result
     }
 
     async fn resize_window(&self, window_id: &str, width: f64, height: f64) -> TmResult<()> {
@@ -523,13 +528,15 @@ impl Backend for X11Backend {
         let aux = ConfigureWindowAux::new()
             .width(width.round() as u32)
             .height(height.round() as u32);
-        conn.configure_window(win, &aux)
+        let result = conn
+            .configure_window(win, &aux)
             .map_err(|e| ComputerError::Operation(format!("ConfigureWindow failed: {e}")))?
             .check()
             .map_err(|e| {
                 ComputerError::NotFound(format!("window {window_id} could not be resized: {e}"))
                     .into()
-            })
+            });
+        result
     }
 
     async fn clipboard_get(&self) -> TmResult<Option<String>> {
@@ -566,11 +573,12 @@ impl Backend for X11Backend {
         for _ in 0..50 {
             if let Ok(Some(Event::SelectionNotify(ev))) = conn.poll_for_event() {
                 if ev.property != x11rb::NONE {
-                    if let Ok(reply) = conn
-                        .get_property(false, win, prop, utf8_string, 0, u32::MAX)
-                        .and_then(|c| c.reply())
+                    if let Ok(cookie) =
+                        conn.get_property(false, win, prop, utf8_string, 0, u32::MAX)
                     {
-                        text = Some(String::from_utf8_lossy(&reply.value).into_owned());
+                        if let Ok(reply) = cookie.reply() {
+                            text = Some(String::from_utf8_lossy(&reply.value).into_owned());
+                        }
                     }
                 }
                 break;
