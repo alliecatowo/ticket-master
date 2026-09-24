@@ -16,10 +16,11 @@
 //! `tm_tui::screens::tickets::TicketsScreen`, Claude Code's agent view with tickets as rows;
 //! `docs/decisions/D-019-claude-code-parity-shell.md` §2); `tm tickets` opens straight onto it.
 //! From there Enter attaches the chat to a ticket, and Ctrl+B opens the Kanban board. Tab/
-//! Shift+Tab cycle the hub's tab strip (Tickets, Board, Milestones, Timeline, Graph — Timeline is
-//! still a placeholder until its own screen lands; Milestones lists progress per milestone and
-//! Enter there filters Tickets to it; Graph shows the dependency graph and Enter there opens the
-//! selected ticket's detail); tab-cycling moves `App::current`
+//! Shift+Tab cycle the hub's tab strip (Tickets, Board, Milestones, Timeline, Graph; Milestones
+//! lists progress per milestone and Enter there filters Tickets to it; Timeline draws one bar
+//! per ticket against the event log, `+`/`-` zoom day/week/month, Enter opens a ticket's detail;
+//! Graph shows the dependency graph and Enter there opens the selected ticket's detail);
+//! tab-cycling moves `App::current`
 //! directly rather than growing `App::back_stack`, so Esc from a tab reached only by Tab/
 //! Shift+Tab goes straight back to Chat. Esc walks back one level at a time (`App::back_stack`)
 //! everywhere else; Ctrl+T from anywhere else returns straight to the chat.
@@ -52,6 +53,7 @@ use tm_tui::screens::milestones::{MilestoneRow, MilestonesScreen};
 use tm_tui::screens::ticket_detail::TicketDetailScreen;
 use tm_tui::screens::ticket_graph::TicketGraphScreen;
 use tm_tui::screens::tickets::{FlashTone, TicketsAction, TicketsScreen};
+use tm_tui::screens::timeline::{TimelineRow, TimelineScreen};
 use tm_tui::theme::Theme;
 use tm_tui::widgets_data::form::{Field, Form};
 use tm_tui::widgets_data::list::List;
@@ -186,6 +188,10 @@ async fn run_on(
         ComponentId::new("tm.milestones"),
         build_milestone_rows(&view),
     );
+    let timeline = TimelineScreen::new(
+        ComponentId::new("tm.timeline"),
+        build_timeline_rows(&view, &activity, now),
+    );
     let mut graph = TicketGraphScreen::new(
         ComponentId::new("tm.graph"),
         Graph::new(ComponentId::new("tm.graph.graph")),
@@ -208,6 +214,7 @@ async fn run_on(
         milestones,
         graph,
         milestone_filter: None,
+        timeline,
         detail: None,
         current: ScreenId::Chat,
         back_stack: Vec::new(),
@@ -393,6 +400,67 @@ fn build_milestone_rows(view: &tm_core::ProjectView) -> Vec<MilestoneRow> {
         .collect()
 }
 
+/// A `Ticket::due` date as a [`Timestamp`] at midnight UTC, for the Timeline tab's axis
+/// (`tm_tui::screens::timeline::TimelineRow::due`, which is a `Timestamp` like every other bound
+/// on that axis rather than a bare `time::Date`).
+fn due_timestamp(date: time::Date) -> Timestamp {
+    Timestamp::from_unix_seconds(date.midnight().assume_utc().unix_timestamp())
+}
+
+/// One [`TimelineRow`] per `view.tickets` entry, sorted by milestone title (unlabeled tickets
+/// last) then by creation time, spanning `Ticket::created` to `activity`'s folded `closed_at`
+/// (`tickets/overview.rs::ActivityIndex`) or `now` while still open, with `Ticket::due`
+/// (`s1-ticket-due-date`) converted to midnight UTC.
+fn build_timeline_rows(
+    view: &tm_core::ProjectView,
+    activity: &crate::tickets::overview::ActivityIndex,
+    now: Timestamp,
+) -> Vec<TimelineRow> {
+    let mut rows: Vec<TimelineRow> = view
+        .tickets
+        .values()
+        .map(|ticket| {
+            let milestone = ticket
+                .milestone
+                .as_ref()
+                .and_then(|id| view.milestones.get(id))
+                .map(|m| m.title.clone());
+            // A closed/cancelled ticket whose `closed_at` never got folded (e.g. the event
+            // predates this index reading `ticket.closed`) still stops at its last real change
+            // (`Ticket::updated`) rather than growing forever toward `now`.
+            let end = activity.get(&ticket.id).closed_at.unwrap_or(
+                if matches!(
+                    ticket.state,
+                    tm_core::TicketState::Closed | tm_core::TicketState::Cancelled
+                ) {
+                    ticket.updated
+                } else {
+                    now
+                },
+            );
+            let title = tm_tui::screens::tickets::short_title(&crate::tickets::overview::one_line(
+                &ticket.objective,
+            ));
+            TimelineRow::new(
+                ticket.id.to_string(),
+                title,
+                milestone,
+                ticket.created,
+                end,
+                ticket.due.map(due_timestamp),
+            )
+        })
+        .collect();
+    // `Option<String>`'s derived `Ord` sorts `None` first; key on `is_none()` instead so
+    // unlabeled tickets sort last, after every real milestone group, matching the doc above.
+    rows.sort_by(|a, b| {
+        (a.milestone.is_none(), &a.milestone)
+            .cmp(&(b.milestone.is_none(), &b.milestone))
+            .then_with(|| a.created.cmp(&b.created))
+    });
+    rows
+}
+
 /// The [`NodeState`] a ticket's real `TicketState` maps to for the graph's shape/glyph/colour —
 /// coarser than the full state machine (14 states down to 5), grouped by what a person looking at
 /// the graph actually wants to know: still to do, actively moving, done, stuck on something, or
@@ -511,8 +579,8 @@ enum ScreenId {
     /// Progress per milestone (`tm_tui::screens::milestones::MilestonesScreen`), opened from
     /// `Tickets` or reached by Tab/Shift+Tab; Enter filters `Tickets` to the selected milestone.
     Milestones,
-    /// Ticket bars against the event log (`s1-tui-timeline-view`). A placeholder until that
-    /// screen lands.
+    /// Ticket bars against the event log (`s1-tui-timeline-view`,
+    /// `tm_tui::screens::timeline::TimelineScreen`).
     Timeline,
     /// The dependency graph (`s1-tui-graph-tab-prune-dead-screens`): labelled ticket nodes and
     /// their dependency edges, with Enter on a node opening that ticket's detail screen.
@@ -601,6 +669,8 @@ struct App {
     /// which one without re-reading the store), set by [`App::open_tickets_filtered_by_milestone`]
     /// and cleared by an Esc on the Tickets screen while it is set (`handle_tickets_actions`).
     milestone_filter: Option<(MilestoneId, String)>,
+    /// The Timeline tab: one bar per ticket against the event log (`s1-tui-timeline-view`).
+    timeline: TimelineScreen,
     /// Rebuilt fresh on every open, so it never shows stale ticket data.
     detail: Option<TicketDetailScreen>,
     current: ScreenId,
@@ -753,6 +823,8 @@ impl App {
         self.tickets.set_data(data);
         self.kanban.set_columns(build_kanban_columns(&view));
         self.milestones.set_rows(build_milestone_rows(&view));
+        self.timeline
+            .set_rows(build_timeline_rows(&view, &self.activity, now));
         let (graph_nodes, graph_edges) = build_graph(&view);
         self.graph.set_graph(graph_nodes, graph_edges);
         if let Some(open) = self.detail.as_ref().map(|d| d.ticket().clone()) {
@@ -953,35 +1025,6 @@ impl App {
                 .bg(ctx.theme.warning),
         );
     }
-
-    /// The Timeline tab, until its own screen lands (`s1-tui-timeline-view`).
-    fn render_tab_placeholder(
-        &self,
-        area: ratatui_core::layout::Rect,
-        buf: &mut ratatui_core::buffer::Buffer,
-        ctx: &FrameContext<'_>,
-        name: &str,
-    ) {
-        if area.width < 4 || area.height < 2 {
-            return;
-        }
-        buf.set_stringn(
-            area.x + 1,
-            area.y + 1,
-            format!("{name}: coming next"),
-            (area.width - 2) as usize,
-            Style::default().fg(ctx.theme.muted),
-        );
-        if area.height > 2 {
-            buf.set_stringn(
-                area.x + 1,
-                area.y + area.height - 1,
-                "tab next   shift+tab previous   esc back   ctrl+t chat   ctrl+c twice quit",
-                (area.width - 2) as usize,
-                Style::default().fg(ctx.theme.muted),
-            );
-        }
-    }
 }
 
 impl Component for App {
@@ -1000,7 +1043,7 @@ impl Component for App {
             ScreenId::Tickets => self.tickets.render(area, buf, ctx),
             ScreenId::Kanban => self.kanban.render(area, buf, ctx),
             ScreenId::Milestones => self.milestones.render(area, buf, ctx),
-            ScreenId::Timeline => self.render_tab_placeholder(area, buf, ctx, "Timeline"),
+            ScreenId::Timeline => self.timeline.render(area, buf, ctx),
             ScreenId::Graph => self.graph.render(area, buf, ctx),
             ScreenId::Detail => {
                 if let Some(detail) = &self.detail {
@@ -1165,7 +1208,11 @@ impl Component for App {
                         return Propagation::Consumed;
                     }
                 }
-                Propagation::Consumed
+                let propagation = self.timeline.handle_event(event, ctx);
+                if let Some(ticket_id) = self.timeline.take_activation() {
+                    self.open_detail(&ticket_id);
+                }
+                propagation
             }
             ScreenId::Graph => {
                 if let Event::Input(InputEvent::Key(key)) = event {
@@ -1246,6 +1293,7 @@ impl Component for App {
                     KeyChord::plain(KeyCode::BackTab),
                     "previous tab",
                 ));
+                bindings.extend(self.timeline.keybindings(ctx));
             }
             ScreenId::Graph => {
                 bindings.push(KeyBinding::new(KeyChord::plain(KeyCode::Esc), "back"));
@@ -1275,9 +1323,10 @@ impl Component for App {
         // The chat and tickets screens take input straight from `App::handle_event`, not through
         // the focus tree; the board, milestones and detail screens still use it.
         match self.current {
-            ScreenId::Chat | ScreenId::Tickets | ScreenId::Timeline => Vec::new(),
+            ScreenId::Chat | ScreenId::Tickets => Vec::new(),
             ScreenId::Kanban => vec![self.kanban.id()],
             ScreenId::Milestones => vec![self.milestones.id()],
+            ScreenId::Timeline => vec![self.timeline.id()],
             // `TicketGraphScreen` forwards focus straight through to the [`Graph`] widget it
             // wraps rather than taking focus itself (its own `focusable_children` already names
             // that widget's id) — list that directly rather than the screen's own id, or the
@@ -1310,7 +1359,9 @@ impl ComponentParent for App {
                 (id == self.milestones.id()).then_some(&self.milestones as &dyn Component)
             }
             ScreenId::Graph => (id == self.graph.id()).then_some(&self.graph as &dyn Component),
-            ScreenId::Timeline => None,
+            ScreenId::Timeline => {
+                (id == self.timeline.id()).then_some(&self.timeline as &dyn Component)
+            }
             ScreenId::Detail => self.detail.as_ref().and_then(|detail| detail.resolve(id)),
         }
     }
@@ -1331,6 +1382,9 @@ impl ComponentParent for App {
                 Some(&mut self.milestones as &mut dyn Component)
             }
             ScreenId::Graph if id == self.graph.id() => Some(&mut self.graph as &mut dyn Component),
+            ScreenId::Timeline if id == self.timeline.id() => {
+                Some(&mut self.timeline as &mut dyn Component)
+            }
             ScreenId::Detail => self
                 .detail
                 .as_mut()
@@ -1631,6 +1685,66 @@ mod tests {
             .find(|r| r.title == "Launch")
             .expect("Launch milestone row");
         assert_eq!((launch.done, launch.total), (0, 0));
+    }
+
+    #[test]
+    fn build_timeline_rows_reads_real_tickets_in_a_tempdir_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).expect("open store");
+        let actor = ParticipantId::new("human:tester").unwrap();
+        let t1 = create_real_ticket(&store, "ship the beta");
+        let t2 = create_real_ticket(&store, "write the release notes");
+        store
+            .create_milestone(
+                "Beta".to_string(),
+                vec![t1.clone()],
+                Vec::new(),
+                actor.clone(),
+            )
+            .expect("create_milestone");
+        store
+            .update_ticket(&t1, serde_json::json!({"due": "2026-10-01"}), actor.clone())
+            .expect("update_ticket due");
+        store
+            .cancel(&t2, Some("no longer needed".to_string()), actor)
+            .expect("cancel t2");
+
+        let view = store.view().expect("view");
+        let mut activity = crate::tickets::overview::ActivityIndex::new();
+        activity.refresh(store.state_dir()).expect("refresh");
+        let now = Timestamp::from_unix_seconds(1_800_000_000);
+        let rows = build_timeline_rows(&view, &activity, now);
+        assert_eq!(rows.len(), 2, "both tickets must show up: {rows:?}");
+
+        let beta = rows
+            .iter()
+            .find(|r| r.id == t1.to_string())
+            .expect("t1 row");
+        assert_eq!(beta.milestone.as_deref(), Some("Beta"));
+        assert_eq!(
+            beta.due,
+            Some(due_timestamp(
+                tm_core::ticket::parse_due_date("2026-10-01").unwrap()
+            )),
+            "t1's due date must survive the Date -> Timestamp conversion: {beta:?}"
+        );
+        assert_eq!(beta.end, now, "an open ticket's bar runs to now: {beta:?}");
+
+        let cancelled = rows
+            .iter()
+            .find(|r| r.id == t2.to_string())
+            .expect("t2 row");
+        assert!(cancelled.milestone.is_none());
+        assert!(
+            cancelled.end < now,
+            "a cancelled ticket's bar must stop at its closed_at, not keep growing to now: {cancelled:?}"
+        );
+
+        // The milestone-labelled row sorts before the unlabelled one (t2 was cancelled, so it
+        // sorts last regardless of creation order).
+        let beta_index = rows.iter().position(|r| r.id == t1.to_string()).unwrap();
+        let t2_index = rows.iter().position(|r| r.id == t2.to_string()).unwrap();
+        assert!(beta_index < t2_index);
     }
 
     #[test]

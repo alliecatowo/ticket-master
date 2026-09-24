@@ -32,5 +32,7 @@ pub mod ticket_graph;
 /// The tickets screen, `←` `←` away from the chat and what `tm tickets` opens: Claude Code's agent
 /// view (`claude agents`) with Ticketmaster tickets as its rows (D-019 §2).
 pub mod tickets;
+/// The Timeline tab: one bar per ticket against the event log, day/week/month zoom.
+pub mod timeline;
 /// The verification ladder: a ticket's ordered verification steps and their status.
 pub mod verification_ladder;

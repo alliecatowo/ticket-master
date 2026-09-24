@@ -127,6 +127,10 @@ pub struct TicketActivity {
     pub pending_approval: Option<(String, Timestamp)>,
     /// When the latest scheduled retry may start.
     pub retry_at: Option<Timestamp>,
+    /// When the ticket closed or was cancelled (`s1-tui-timeline-view`'s Timeline tab needs this
+    /// to draw a bar's end; `Ticket` itself only carries `created`/`updated`, not a terminal
+    /// timestamp, so this folds it from the log instead).
+    pub closed_at: Option<Timestamp>,
 }
 
 /// The event kinds [`ActivityIndex`] reads; everything else is irrelevant to the view.
@@ -136,6 +140,7 @@ const ACTIVITY_KINDS: &[&str] = &[
     "ticket.submitted",
     "ticket.escalated",
     "ticket.cancelled",
+    "ticket.closed",
     "ticket.retry_scheduled",
     "ticket.leased",
     "approval.requested",
@@ -244,7 +249,11 @@ impl ActivityIndex {
             "ticket.escalated" => {
                 entry.escalation = Some((text("reason").unwrap_or_default(), ts));
             }
-            "ticket.cancelled" => entry.cancel_reason = text("reason"),
+            "ticket.cancelled" => {
+                entry.cancel_reason = text("reason");
+                entry.closed_at = Some(ts);
+            }
+            "ticket.closed" => entry.closed_at = Some(ts),
             "ticket.retry_scheduled" => {
                 entry.retry_at = text("not_before").and_then(|t| Timestamp::parse_rfc3339(&t).ok());
             }
@@ -829,6 +838,32 @@ mod tests {
             &serde_json::json!({"command": "ls", "ticket": null}),
         );
         assert_eq!(index.tickets.len(), 1);
+    }
+
+    #[test]
+    fn closed_and_cancelled_events_record_closed_at_for_the_timeline_tab() {
+        let mut index = ActivityIndex::new();
+        let closed_at = Timestamp::from_unix_seconds(500);
+        index.apply(
+            "ticket.closed",
+            "T-1",
+            closed_at,
+            &serde_json::json!({"ticket": "T-1", "reason": "All tests pass"}),
+        );
+        let t1 = TicketId::new("T-1").unwrap();
+        assert_eq!(index.get(&t1).closed_at, Some(closed_at));
+
+        let mut index = ActivityIndex::new();
+        let cancelled_at = Timestamp::from_unix_seconds(600);
+        index.apply(
+            "ticket.cancelled",
+            "T-2",
+            cancelled_at,
+            &serde_json::json!({"ticket": "T-2", "reason": "not needed"}),
+        );
+        let t2 = TicketId::new("T-2").unwrap();
+        assert_eq!(index.get(&t2).closed_at, Some(cancelled_at));
+        assert_eq!(index.get(&t2).cancel_reason, Some("not needed".to_string()));
     }
 
     #[test]
