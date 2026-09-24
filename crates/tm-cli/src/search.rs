@@ -87,8 +87,6 @@ struct ReferenceInfo {
     path: String,
     /// Line number.
     line: u32,
-    /// Column offset.
-    col: u32,
 }
 
 /// Wrapper for JSON serialization of an outline entry.
@@ -393,10 +391,22 @@ pub fn symbol_refs(
     let code_intel = project.code_intel()?;
     let from_path = args.from.as_ref().and_then(|p| p.to_str()).unwrap_or(".");
 
-    let resolution = code_intel.resolve_symbol(&args.name, from_path)?;
+    // Resolve against one loaded index instead of code_intel.resolve_symbol(), which would
+    // build a second full tree-sitter parse just to resolve the name.
+    let symbol_idx = code_intel.symbol_index()?;
+    let reference = tm_codeintel::Reference {
+        symbol_hint: args.name.clone(),
+        path: from_path.to_string(),
+        range: tm_codeintel::symbols::Range {
+            byte_start: 0,
+            byte_end: 0,
+            line_start: 0,
+            line_end: 0,
+        },
+    };
+    let resolution = symbol_idx.resolve(&reference);
 
     if let Some(sym_id) = resolution.symbol_id {
-        let symbol_idx = code_intel.symbol_index()?;
         let references = symbol_idx.references(sym_id);
 
         let refs: Vec<ReferenceInfo> = references
@@ -404,7 +414,6 @@ pub fn symbol_refs(
             .map(|r| ReferenceInfo {
                 path: r.path.clone(),
                 line: r.range.line_start,
-                col: r.range.byte_start as u32,
             })
             .collect();
 
@@ -437,18 +446,34 @@ pub fn symbol_callers(
     let code_intel = project.code_intel()?;
     let from_path = args.from.as_ref().and_then(|p| p.to_str()).unwrap_or(".");
 
-    let resolution = code_intel.resolve_symbol(&args.name, from_path)?;
+    // Resolve against one loaded index instead of code_intel.resolve_symbol(), which would
+    // build a second full tree-sitter parse just to resolve the name.
+    let symbol_idx = code_intel.symbol_index()?;
+    let reference = tm_codeintel::Reference {
+        symbol_hint: args.name.clone(),
+        path: from_path.to_string(),
+        range: tm_codeintel::symbols::Range {
+            byte_start: 0,
+            byte_end: 0,
+            line_start: 0,
+            line_end: 0,
+        },
+    };
+    let resolution = symbol_idx.resolve(&reference);
 
     if let Some(sym_id) = resolution.symbol_id {
-        let symbol_idx = code_intel.symbol_index()?;
         let callers = symbol_idx.callers(sym_id);
 
-        let caller_info: Vec<ReferenceInfo> = callers
+        // Build full SymbolInfo (name + kind), same as symbol_callees, instead of the bare
+        // ReferenceInfo this used to throw the caller's name and kind away into.
+        let caller_info: Vec<SymbolInfo> = callers
             .iter()
-            .map(|s| ReferenceInfo {
+            .map(|s| SymbolInfo {
+                name: s.name.clone(),
+                kind: format!("{:?}", s.kind),
                 path: s.path.clone(),
-                line: s.range.line_start,
-                col: s.range.byte_start as u32,
+                line_start: s.range.line_start,
+                line_end: s.range.line_end,
             })
             .collect();
 
@@ -457,9 +482,9 @@ pub fn symbol_callers(
         } else {
             let rows: Vec<Vec<String>> = caller_info
                 .iter()
-                .map(|c| vec![format!("{}:{}", c.path, c.line)])
+                .map(|c| vec![format!("{}:{} ({})", c.name, c.line_start, c.kind)])
                 .collect();
-            let table = Table::new(vec!["Location".to_string()], rows);
+            let table = Table::new(vec!["Caller".to_string()], rows);
             table.render()
         };
 
@@ -481,10 +506,22 @@ pub fn symbol_callees(
     let code_intel = project.code_intel()?;
     let from_path = args.from.as_ref().and_then(|p| p.to_str()).unwrap_or(".");
 
-    let resolution = code_intel.resolve_symbol(&args.name, from_path)?;
+    // Resolve against one loaded index instead of code_intel.resolve_symbol(), which would
+    // build a second full tree-sitter parse just to resolve the name.
+    let symbol_idx = code_intel.symbol_index()?;
+    let reference = tm_codeintel::Reference {
+        symbol_hint: args.name.clone(),
+        path: from_path.to_string(),
+        range: tm_codeintel::symbols::Range {
+            byte_start: 0,
+            byte_end: 0,
+            line_start: 0,
+            line_end: 0,
+        },
+    };
+    let resolution = symbol_idx.resolve(&reference);
 
     if let Some(sym_id) = resolution.symbol_id {
-        let symbol_idx = code_intel.symbol_index()?;
         let callees = symbol_idx.callees(sym_id);
 
         let info: Vec<SymbolInfo> = callees
@@ -577,7 +614,11 @@ pub fn history_why(
 ) -> tm_types::Result<()> {
     let code_intel = project.code_intel()?;
 
-    let (path, line) = if let Some(idx) = args.locator.rfind(':') {
+    // With no :line, this used to silently default to line 1 regardless of the file's real
+    // size. Use the file's full line range instead, so "why does this file look the way it
+    // does" surfaces commits that touched any line, not just the first — falling back to line 1
+    // only if the file genuinely can't be read, and saying so.
+    let (path, line_start, line_end, fallback_note) = if let Some(idx) = args.locator.rfind(':') {
         let (p, l_str) = args.locator.split_at(idx);
         let line_num: u32 = l_str[1..].parse().map_err(|_| {
             tm_types::TmError::parse(format!(
@@ -585,12 +626,28 @@ pub fn history_why(
                 args.locator
             ))
         })?;
-        (p, line_num)
+        (p, line_num, line_num, None)
     } else {
-        (&args.locator[..], 1)
+        let path = &args.locator[..];
+        let full_path = code_intel.project_root().join(path);
+        match std::fs::read_to_string(&full_path) {
+            Ok(text) => {
+                let line_count = text.lines().count().max(1) as u32;
+                (path, 1, line_count, None)
+            }
+            Err(_) => (
+                path,
+                1,
+                1,
+                Some(format!(
+                    "Couldn't read {} to find its full line range, so only line 1 was checked.",
+                    path
+                )),
+            ),
+        }
     };
 
-    let answer = code_intel.history_why(path, line, line)?;
+    let answer = code_intel.history_why(path, line_start, line_end)?;
 
     let commits: Vec<CommitInfo> = answer
         .commits
@@ -609,10 +666,16 @@ pub fn history_why(
         commits: commits.clone(),
     };
 
-    let human = if commits.is_empty() {
-        format!("No history found for {}:{}", path, line)
+    let range_label = if line_start == line_end {
+        format!("{}:{}", path, line_start)
     } else {
-        let mut text = format!("{}:{}\n\n", path, line);
+        format!("{}:{}-{}", path, line_start, line_end)
+    };
+
+    let mut human = if commits.is_empty() {
+        format!("No history found for {}", range_label)
+    } else {
+        let mut text = format!("{}\n\n", range_label);
         for commit in commits {
             text.push_str(&format!(
                 "{} by {} - {}\n",
@@ -623,6 +686,10 @@ pub fn history_why(
         }
         text
     };
+
+    if let Some(note) = fallback_note {
+        human.push_str(&format!("\n{}\n", note));
+    }
 
     renderer.emit(&info, &human)?;
 
@@ -790,10 +857,41 @@ mod tests {
         let ref_info = ReferenceInfo {
             path: "src/lib.rs".to_string(),
             line: 20,
-            col: 5,
         };
         let json = serde_json::to_string(&ref_info).expect("should serialize");
         assert!(json.contains("\"line\":20"));
+    }
+
+    #[test]
+    fn test_reference_info_has_no_col_field() {
+        // ReferenceInfo used to carry `col` as a raw byte offset mislabeled as a column; it's
+        // dropped rather than fixed in place, since a real line-relative column would need a
+        // second file read per reference. Guard against it silently coming back as a
+        // byte-offset-shaped value.
+        let ref_info = ReferenceInfo {
+            path: "src/lib.rs".to_string(),
+            line: 20,
+        };
+        let json = serde_json::to_string(&ref_info).expect("should serialize");
+        assert!(!json.contains("\"col\""));
+    }
+
+    #[test]
+    fn test_symbol_callers_json_includes_name_and_kind() {
+        // symbol_callers now builds SymbolInfo (name + kind), the same shape symbol_callees
+        // always used, instead of the bare ReferenceInfo it used to throw the caller's name and
+        // kind away into.
+        let caller = SymbolInfo {
+            name: "handle_request".to_string(),
+            kind: "Function".to_string(),
+            path: "src/server.rs".to_string(),
+            line_start: 12,
+            line_end: 30,
+        };
+        let json = serde_json::to_string(&caller).expect("should serialize");
+        assert!(json.contains("\"name\":\"handle_request\""));
+        assert!(json.contains("\"kind\":\"Function\""));
+        assert!(!json.contains("\"col\""));
     }
 
     #[test]
