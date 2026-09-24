@@ -19,6 +19,34 @@ public protocol TicketmasterAPI: Sendable {
     /// The one wired mutation for this slice: `POST /tickets/:id/transition` with an
     /// `{"activate": {"actor": ...}}` body, moving a `Draft` ticket to `Blocked`/`Ready`.
     func activateTicket(id: String, actor: String) async throws
+    /// `POST /tickets/:id/transition` with `{"submit": {"summary": ..., "evidence": [...],
+    /// "actor": ...}}`, matching `tm-server`'s `TransitionRequest::Submit`
+    /// (`crates/tm-server/src/routes.rs:353-358`).
+    func submitTicket(id: String, summary: String, evidence: [String], actor: String) async throws
+    /// `POST /tickets/:id/transition` with `{"accept": {"note": ..., "actor": ...}}`, matching
+    /// `tm-server`'s `TransitionRequest::Accept` (`crates/tm-server/src/routes.rs`).
+    func acceptTicket(id: String, note: String?, actor: String) async throws
+    /// `POST /tickets/:id/transition` with `{"reject": {"reason": ..., "actor": ...}}`, matching
+    /// `tm-server`'s `TransitionRequest::Reject` (`crates/tm-server/src/routes.rs`).
+    func rejectTicket(id: String, reason: String, actor: String) async throws
+}
+
+/// Default implementations for the transition methods added alongside `activateTicket`, so an
+/// existing `TicketmasterAPI` conformer (an in-memory test fake, say) that predates them keeps
+/// compiling without having to grow three new stub methods of its own. `APIClient` below
+/// overrides all three with the real `tm-server` calls.
+extension TicketmasterAPI {
+    public func submitTicket(id: String, summary: String, evidence: [String], actor: String) async throws {
+        throw APIError.transport("submitTicket not implemented")
+    }
+
+    public func acceptTicket(id: String, note: String?, actor: String) async throws {
+        throw APIError.transport("acceptTicket not implemented")
+    }
+
+    public func rejectTicket(id: String, reason: String, actor: String) async throws {
+        throw APIError.transport("rejectTicket not implemented")
+    }
 }
 
 /// A real `tm-server` client over `URLSession`.
@@ -94,6 +122,34 @@ public struct APIClient: TicketmasterAPI {
 
     public func activateTicket(id: String, actor: String) async throws {
         let body = try JSONEncoder().encode(["activate": ["actor": actor]])
+        _ = try await send(request("tickets/\(id)/transition", method: "POST", body: body))
+    }
+
+    public func submitTicket(id: String, summary: String, evidence: [String], actor: String) async throws {
+        struct SubmitBody: Encodable {
+            let summary: String
+            let evidence: [String]
+            let actor: String
+        }
+        let body = try JSONEncoder().encode(["submit": SubmitBody(summary: summary, evidence: evidence, actor: actor)])
+        _ = try await send(request("tickets/\(id)/transition", method: "POST", body: body))
+    }
+
+    public func acceptTicket(id: String, note: String?, actor: String) async throws {
+        struct AcceptBody: Encodable {
+            let note: String?
+            let actor: String
+        }
+        let body = try JSONEncoder().encode(["accept": AcceptBody(note: note, actor: actor)])
+        _ = try await send(request("tickets/\(id)/transition", method: "POST", body: body))
+    }
+
+    public func rejectTicket(id: String, reason: String, actor: String) async throws {
+        struct RejectBody: Encodable {
+            let reason: String
+            let actor: String
+        }
+        let body = try JSONEncoder().encode(["reject": RejectBody(reason: reason, actor: actor)])
         _ = try await send(request("tickets/\(id)/transition", method: "POST", body: body))
     }
 }

@@ -80,3 +80,99 @@ struct ModelDecodingTests {
         #expect(milestone.closedBy == "human:allie")
     }
 }
+
+/// Captures the last request body `APIClient` sent, instead of hitting a real server.
+///
+/// Registered as a `URLProtocol` on an ephemeral `URLSessionConfiguration`, so `APIClient`'s
+/// `URLSession.data(for:)` call is intercepted before it ever reaches the network; it always
+/// answers with an empty `200 {}` response, which is all `submitTicket`/`acceptTicket`/
+/// `rejectTicket` need since they discard the response body.
+final class CapturingURLProtocol: URLProtocol, @unchecked Sendable {
+    static var capturedBody: Data?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        if let stream = request.httpBodyStream {
+            stream.open()
+            defer { stream.close() }
+            var data = Data()
+            let bufferSize = 4096
+            var buffer = [UInt8](repeating: 0, count: bufferSize)
+            while stream.hasBytesAvailable {
+                let read = stream.read(&buffer, maxLength: bufferSize)
+                guard read > 0 else { break }
+                data.append(buffer, count: read)
+            }
+            Self.capturedBody = data
+        } else {
+            Self.capturedBody = request.httpBody
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data("{}".utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
+/// `.serialized` because these tests share `CapturingURLProtocol.capturedBody` as their only way
+/// to observe what `APIClient` sent; running them concurrently would let one test's request
+/// clobber another's before it gets read.
+@Suite("APIClient transition request bodies", .serialized)
+struct TransitionRequestBodyTests {
+    private func makeClient() -> APIClient {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [CapturingURLProtocol.self]
+        CapturingURLProtocol.capturedBody = nil
+        return APIClient(baseURL: URL(string: "https://tm.test")!, session: URLSession(configuration: config))
+    }
+
+    @Test("submitTicket POSTs a submit-tagged body matching TransitionRequest::Submit")
+    func submitBodyShape() async throws {
+        let client = makeClient()
+        try await client.submitTicket(id: "T-1", summary: "Shipped it", evidence: ["A-1", "A-2"], actor: "human:allie")
+        let body = try #require(CapturingURLProtocol.capturedBody)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let submit = try #require(json["submit"] as? [String: Any])
+        #expect(submit["summary"] as? String == "Shipped it")
+        #expect(submit["evidence"] as? [String] == ["A-1", "A-2"])
+        #expect(submit["actor"] as? String == "human:allie")
+    }
+
+    @Test("acceptTicket POSTs an accept-tagged body matching TransitionRequest::Accept")
+    func acceptBodyShape() async throws {
+        let client = makeClient()
+        try await client.acceptTicket(id: "T-1", note: "Looks good", actor: "human:allie")
+        let body = try #require(CapturingURLProtocol.capturedBody)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let accept = try #require(json["accept"] as? [String: Any])
+        #expect(accept["note"] as? String == "Looks good")
+        #expect(accept["actor"] as? String == "human:allie")
+    }
+
+    @Test("acceptTicket with no note encodes a null note, not a missing key")
+    func acceptBodyShapeNoNote() async throws {
+        let client = makeClient()
+        try await client.acceptTicket(id: "T-1", note: nil, actor: "human:allie")
+        let body = try #require(CapturingURLProtocol.capturedBody)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let accept = try #require(json["accept"] as? [String: Any])
+        #expect(accept.keys.contains("note"))
+        #expect(accept["note"] as? String == nil)
+        #expect(accept["actor"] as? String == "human:allie")
+    }
+
+    @Test("rejectTicket POSTs a reject-tagged body matching TransitionRequest::Reject")
+    func rejectBodyShape() async throws {
+        let client = makeClient()
+        try await client.rejectTicket(id: "T-1", reason: "no tests", actor: "human:allie")
+        let body = try #require(CapturingURLProtocol.capturedBody)
+        let json = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let reject = try #require(json["reject"] as? [String: Any])
+        #expect(reject["reason"] as? String == "no tests")
+        #expect(reject["actor"] as? String == "human:allie")
+    }
+}
