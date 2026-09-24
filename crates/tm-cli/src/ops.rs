@@ -2360,21 +2360,30 @@ pub fn events_show(
 
     let event = &events[0];
     if renderer.is_json() {
-        let json = serde_json::json!({
-            "seq": event.seq,
-            "kind": format!("{:?}", event.kind),
-            "subject": event.subject.to_string(),
-            "ts": event.ts.to_string(),
-        });
-        renderer.emit(&json, "")?;
+        renderer.emit(&event_show_json(event), "")?;
     } else {
-        let output = format!(
-            "Seq: {}\nKind: {:?}\nSubject: {}\nTimestamp: {}",
-            event.seq, event.kind, event.subject, event.ts
-        );
-        renderer.emit(&(), &output)?;
+        renderer.emit(&(), &event_show_human(event))?;
     }
     Ok(())
+}
+
+/// Pure formatter for `tm events show`'s human output, kept separate from [`events_show`] so the
+/// wording (field labels, event-kind Display vs. debug) is unit-testable without a renderer.
+fn event_show_human(event: &tm_events::Event) -> String {
+    format!(
+        "Sequence: {}\nType: {}\nRelated to: {}\nWhen: {}",
+        event.seq, event.kind, event.subject, event.ts
+    )
+}
+
+/// Pure formatter for `tm events show --json`'s payload.
+fn event_show_json(event: &tm_events::Event) -> serde_json::Value {
+    serde_json::json!({
+        "seq": event.seq,
+        "kind": event.kind.to_string(),
+        "subject": event.subject.to_string(),
+        "ts": event.ts.to_string(),
+    })
 }
 
 /// `tm events replay`
@@ -2852,6 +2861,44 @@ mod tests {
     #[test]
     fn events_show_event_not_found() {
         // Requesting non-existent seq should error
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+
+        let err = events_show(&EventsShowArgs { seq: 999 }, &project, &renderer)
+            .expect_err("no event at seq 999");
+        assert!(matches!(err, tm_types::TmError::NotFound { .. }));
+    }
+
+    #[test]
+    fn events_show_uses_dotted_kind_and_humanized_labels() {
+        // s1-events-sched-copy-and-quiet: `tm events show` must render the event kind via its
+        // `Display` (dotted, e.g. "ticket.created"), not `{:?}` debug (e.g. "TicketCreated"), and
+        // must use humanized field labels rather than internal shorthand.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        mirrorable_ticket(&project);
+
+        let log =
+            tm_events::EventLog::open(&root.join(".tm").join("project.db")).expect("open log");
+        let events = log.read_range(1, 1).expect("read seq 1");
+        let event = &events[0];
+        assert_eq!(event.kind, tm_events::EventKind::TicketCreated);
+
+        let human = event_show_human(event);
+        assert!(
+            human.contains("Type: ticket.created"),
+            "expected dotted event kind in output, got: {human}"
+        );
+        assert!(!human.contains("TicketCreated"), "got: {human}");
+        assert!(human.starts_with("Sequence: "), "got: {human}");
+        assert!(human.contains("Related to: "), "got: {human}");
+        assert!(human.contains("When: "), "got: {human}");
+
+        let json = event_show_json(event);
+        assert_eq!(json["kind"], "ticket.created");
     }
 
     #[test]

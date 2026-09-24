@@ -92,7 +92,10 @@ pub fn sched_plan(project: &Project, renderer: &Renderer) -> tm_types::Result<()
         human
     };
 
-    renderer.emit(&summaries, &human)
+    if !renderer.is_quiet() {
+        renderer.emit(&summaries, &human)?;
+    }
+    Ok(())
 }
 
 /// Who the scheduler acts as: the leases it grants, the attempts it starts, the retries and
@@ -119,7 +122,10 @@ pub fn sched_tick(project: &Project, renderer: &Renderer) -> tm_types::Result<()
         .collect::<Vec<_>>()
         .join("\n");
 
-    renderer.emit(&summaries, &human)
+    if !renderer.is_quiet() {
+        renderer.emit(&summaries, &human)?;
+    }
+    Ok(())
 }
 
 /// Start the desktop-notification watcher for `project`'s event log unless `TM_NOTIFY` opts out
@@ -738,9 +744,13 @@ fn action_to_summary(action: &tm_scheduler::SchedulerAction) -> ActionSummary {
 fn event_to_summary(event: &tm_scheduler::SchedulerLoopEvent) -> EventSummary {
     use tm_scheduler::SchedulerLoopEvent;
     match event {
-        SchedulerLoopEvent::Ticked { at, planned } => EventSummary {
-            kind: "Ticked".to_string(),
-            detail: format!("{} actions planned at {}", planned, at),
+        SchedulerLoopEvent::Ticked { at: _, planned } => EventSummary {
+            kind: "Scheduler ticked".to_string(),
+            detail: match planned {
+                0 => "No work to do right now".to_string(),
+                1 => "1 action queued".to_string(),
+                n => format!("{n} actions queued"),
+            },
         },
         SchedulerLoopEvent::Applied { action, events } => {
             let summary = action_to_summary(action);
@@ -808,8 +818,31 @@ mod tests {
         let at = tm_types::Timestamp::EPOCH;
         let event = tm_scheduler::SchedulerLoopEvent::Ticked { at, planned: 3 };
         let summary = event_to_summary(&event);
-        assert_eq!(summary.kind, "Ticked");
-        assert!(summary.detail.contains("3 actions"));
+        assert_eq!(summary.kind, "Scheduler ticked");
+        assert_eq!(summary.detail, "3 actions queued");
+    }
+
+    #[test]
+    fn event_summary_ticked_no_work() {
+        // s1-events-sched-copy-and-quiet: 0 planned actions reads as plain prose, not
+        // "0 actions planned at <ISO timestamp>".
+        let at = tm_types::Timestamp::EPOCH;
+        let event = tm_scheduler::SchedulerLoopEvent::Ticked { at, planned: 0 };
+        let summary = event_to_summary(&event);
+        assert_eq!(summary.kind, "Scheduler ticked");
+        assert_eq!(summary.detail, "No work to do right now");
+        assert_eq!(
+            format!("{}: {}", summary.kind, summary.detail),
+            "Scheduler ticked: No work to do right now"
+        );
+    }
+
+    #[test]
+    fn event_summary_ticked_one_action() {
+        let at = tm_types::Timestamp::EPOCH;
+        let event = tm_scheduler::SchedulerLoopEvent::Ticked { at, planned: 1 };
+        let summary = event_to_summary(&event);
+        assert_eq!(summary.detail, "1 action queued");
     }
 
     #[test]
@@ -1095,5 +1128,28 @@ mod tests {
         let json = serde_json::to_string(&lease).expect("should serialize");
         assert!(json.contains("L-1"));
         assert!(json.contains("T-1"));
+    }
+
+    // s1-events-sched-copy-and-quiet: `sched_plan`/`sched_tick` must not emit under `--quiet`,
+    // matching `sched_run`'s existing `if !renderer.is_quiet()` guard. These don't capture
+    // stdout (no capture seam exists in `Renderer`, and `render.rs` is out of scope for this
+    // change) — they instead prove the underlying success path still completes cleanly with a
+    // quiet renderer, which is what the `if !renderer.is_quiet()` guard added around each
+    // `renderer.emit()` call gates.
+
+    #[test]
+    fn sched_plan_succeeds_quietly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+        sched_plan(&project, &renderer).expect("quiet sched plan should still succeed");
+    }
+
+    #[test]
+    fn sched_tick_succeeds_quietly() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+        sched_tick(&project, &renderer).expect("quiet sched tick should still succeed");
     }
 }
