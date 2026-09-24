@@ -29,6 +29,11 @@ struct ProjectContextPackSource {
     store: Arc<Store>,
     root: PathBuf,
     state_dir: PathBuf,
+    /// Used to refresh the index in [`ContextPackSource::compile`] before every pack, the same
+    /// way [`Project::code_intel`](crate::project::Project::code_intel) refreshes on open — this
+    /// source opens its own `CodeIntel` rather than sharing `Project`'s, so it needs its own
+    /// clock to do that (see this struct's own doc comment for why it can't just hold `&Project`).
+    clock: Arc<dyn tm_types::Clock>,
 }
 
 impl ContextPackSource for ProjectContextPackSource {
@@ -39,6 +44,15 @@ impl ContextPackSource for ProjectContextPackSource {
             .get(ticket)
             .ok_or_else(|| tm_types::TmError::not_found("ticket", ticket))?;
         let ci = tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.root)?;
+        if git2::Repository::open(&self.root).is_ok() {
+            if let Err(e) = ci.update_incremental(self.clock.as_ref()) {
+                tracing::warn!(
+                    error = %e,
+                    root = %self.root.display(),
+                    "could not refresh the code index; continuing with what's already indexed"
+                );
+            }
+        }
         let pack = tm_context::pack::compile(
             ticket_state,
             &view,
@@ -319,6 +333,7 @@ pub(crate) fn build_dispatcher_with_fabric(
         store: project.store.clone(),
         root: project.root.clone(),
         state_dir: project.state_dir.clone(),
+        clock: project.clock.clone(),
     });
 
     Ok(Arc::new(ExecutorDispatcher::new(
@@ -553,5 +568,88 @@ mod tests {
                 "role {role:?} must be untouched by the acp override"
             );
         }
+    }
+
+    /// `nav-fix-project-codeintel-freshness`, acceptance (b): `ProjectContextPackSource::compile`
+    /// over a project that never ran `tm doctor` must still see a committed file's content —
+    /// `build_retrieval`'s `ci.search_hybrid` reads from the `chunks`/`tokens` tables, which stay
+    /// empty until some `update_incremental` call has run, so this only passes once `compile`
+    /// refreshes the index itself before compiling.
+    #[test]
+    fn compile_over_a_never_doctored_project_includes_a_committed_files_content() {
+        use tm_core::{ExecutorRequirements, RetryPolicy, TicketKind, VerificationPolicy};
+        use tm_types::{Authority, Budget, ParticipantId, Tolerance};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status()
+                .expect("git should run in test environment");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["init", "--quiet", "--initial-branch=main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        std::fs::write(
+            root.join("widget.rs"),
+            "fn compute_widget_total(count: i32) -> i32 { count * 2 }\n",
+        )
+        .expect("write widget.rs");
+        run(&["add", "widget.rs"]);
+        run(&["commit", "--quiet", "-m", "add compute_widget_total"]);
+
+        let project = test_project(root);
+        let events = project
+            .store
+            .create_ticket(
+                TicketKind::Investigation,
+                "find compute_widget_total".to_string(),
+                None,
+                None,
+                Authority::root(),
+                Vec::new(),
+                ExecutorRequirements {
+                    role: Role::CoderFast,
+                    human_required: false,
+                    min_capability: Tolerance::Preferred,
+                },
+                Vec::new(),
+                Vec::new(),
+                VerificationPolicy::None,
+                Budget::unlimited(),
+                RetryPolicy {
+                    max_attempts: 1,
+                    base_delay_seconds: 0,
+                    backoff_multiplier: 1.0,
+                    max_delay_seconds: 0,
+                },
+                0,
+                ParticipantId::new("human:tester").expect("valid participant id"),
+            )
+            .expect("create ticket");
+        let ticket_id = events
+            .iter()
+            .find_map(|e| e.payload.as_ticket_created().map(|p| p.ticket.clone()))
+            .expect("ticket.created event");
+
+        // Never called `code_intel()`/`tm doctor` on this project before this.
+        let source = ProjectContextPackSource {
+            store: project.store.clone(),
+            root: project.root.clone(),
+            state_dir: project.state_dir.clone(),
+            clock: project.clock.clone(),
+        };
+        let rendered = source
+            .compile(&ticket_id)
+            .expect("compile should refresh and succeed");
+        assert!(
+            rendered.contains("widget.rs"),
+            "expected the never-doctored project's committed widget.rs to show up in the \
+             compiled context pack via a freshly refreshed index, got:\n{rendered}"
+        );
     }
 }

@@ -75,9 +75,29 @@ pub struct Project {
 
 impl Project {
     /// The code index for this project (`<state_dir>/index.db`), opened on demand by commands
-    /// that need it (`search`, `symbol`, `history`, `doctor`) rather than eagerly here.
+    /// that need it (`search`, `symbol`, `history`, `doctor`, rather than eagerly here) and kept
+    /// fresh for whoever opens it: every open here also runs a best-effort
+    /// [`tm_codeintel::CodeIntel::update_incremental`] pass, so a caller that never ran `tm
+    /// doctor`/`tm run` first still sees a symbol/search result for a file edited since the
+    /// index was last written, rather than silently stale data. Skipped entirely when `root`
+    /// isn't inside a git work tree (a global-scope project can point anywhere, including
+    /// `$HOME`, and `update_incremental`'s history ingest needs a real `HEAD` to walk); degrades
+    /// to a `tracing::warn!` rather than failing when the refresh itself errors (e.g. a repo
+    /// with no commits yet) — the opened-but-possibly-stale index is still more useful to a
+    /// caller than an error here would be. `tm doctor`'s own explicit
+    /// `update_incremental` call stays as its own, separately reported check.
     pub fn code_intel(&self) -> tm_types::Result<tm_codeintel::CodeIntel> {
-        tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.root)
+        let ci = tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.root)?;
+        if git2::Repository::open(&self.root).is_ok() {
+            if let Err(e) = ci.update_incremental(self.clock.as_ref()) {
+                tracing::warn!(
+                    error = %e,
+                    root = %self.root.display(),
+                    "could not refresh the code index; continuing with what's already indexed"
+                );
+            }
+        }
+        Ok(ci)
     }
 
     /// One line describing where this project's state lives, for a human to see up front rather
@@ -1976,8 +1996,12 @@ pub fn doctor(
         },
     });
 
-    let index_check = match project
-        .code_intel()
+    // Deliberately not `project.code_intel()`: that now refreshes on open too
+    // (`Project::code_intel`'s own doc comment), which would make this check's own
+    // `update_incremental` a guaranteed no-op reporting zero drift every time. Open the index
+    // directly instead, so this remains the one real, explicit refresh whose counts this check
+    // reports.
+    let index_check = match tm_codeintel::CodeIntel::open_at(&project.state_dir, &project.root)
         .and_then(|ci| ci.update_incremental(project.clock.as_ref()))
     {
         Ok(delta) => DoctorCheck {
@@ -3030,5 +3054,92 @@ mod tests {
         let quiet = true;
         let should_emit = !quiet;
         assert!(!should_emit, "quiet mode should suppress output");
+    }
+
+    /// `nav-fix-project-codeintel-freshness`, acceptance (a): a git tempdir with one commit
+    /// containing a Rust fn, opened without ever running `tm doctor`, still resolves `symbol
+    /// def` for that fn — `Project::code_intel()` must refresh the index on open, since
+    /// `SymbolIndex::definition` reads from `store.list_files()`, which stays empty until some
+    /// `update_incremental` call has run.
+    #[test]
+    fn code_intel_refreshes_on_open_so_symbol_def_works_without_doctor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".tm")).unwrap();
+        init_git_repo(root);
+        std::fs::write(root.join("lib.rs"), "fn helper() -> i32 { 42 }\n").unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status()
+                .expect("git should run in test environment");
+            assert!(status.success(), "git {:?} failed", args);
+        };
+        run(&["add", "lib.rs"]);
+        run(&["commit", "--quiet", "-m", "add helper"]);
+
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::new(
+            Timestamp::from_unix_seconds(1_000_000),
+        ));
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::seeded(1));
+        let store = Arc::new(tm_core::Store::open_with(root, clock.clone(), ids.clone()).unwrap());
+        let project = Project::for_test(root, store, clock, ids);
+
+        // Never called `tm doctor` (no explicit `update_incremental`) before this.
+        let ci = project
+            .code_intel()
+            .expect("code_intel should refresh cleanly");
+        let symbols = ci
+            .symbol_index()
+            .expect("symbol_index should read the refreshed files");
+        assert!(
+            symbols.definition("helper", "lib.rs").is_some(),
+            "expected code_intel() to have refreshed the index so `helper`'s definition resolves \
+             without a prior `tm doctor` run"
+        );
+    }
+
+    /// `nav-fix-project-codeintel-freshness`, acceptance (c): `code_intel()` degrades rather than
+    /// failing when the refresh itself can't run cleanly — a non-git tempdir (refresh skipped
+    /// entirely) and a git repo with zero commits (refresh attempted, `update_incremental`
+    /// errors on ingest, `code_intel()` still returns the opened index). Neither case can panic
+    /// or bubble an `Err` out of `code_intel()` itself.
+    #[test]
+    fn code_intel_degrades_instead_of_failing_when_refresh_cannot_run() {
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::new(
+            Timestamp::from_unix_seconds(1_000_000),
+        ));
+
+        // Non-git tempdir: refresh must be skipped entirely, never even attempted.
+        let non_git = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(non_git.path().join(".tm")).unwrap();
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::seeded(1));
+        let store = Arc::new(
+            tm_core::Store::open_with(non_git.path(), clock.clone(), ids.clone()).unwrap(),
+        );
+        let project = Project::for_test(non_git.path(), store, clock.clone(), ids);
+        assert!(
+            project.code_intel().is_ok(),
+            "a non-git project root must still open cleanly, refresh skipped"
+        );
+
+        // Git repo with zero commits: `HEAD` doesn't resolve yet, so the history-ingest half of
+        // `update_incremental` errors; `code_intel()` must still return `Ok`.
+        let unborn = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(unborn.path().join(".tm")).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--quiet", "--initial-branch=main"])
+            .current_dir(unborn.path())
+            .status()
+            .expect("git should run in test environment");
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::seeded(1));
+        let store =
+            Arc::new(tm_core::Store::open_with(unborn.path(), clock.clone(), ids.clone()).unwrap());
+        let project = Project::for_test(unborn.path(), store, clock, ids);
+        assert!(
+            project.code_intel().is_ok(),
+            "a git repo with no commits yet must still open cleanly, refresh degraded to a warning"
+        );
     }
 }
