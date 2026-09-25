@@ -13,6 +13,7 @@ use crate::args::{
 };
 use crate::project::Project;
 use crate::render::{Renderer, Table};
+use crate::replay_diff;
 use tm_types::Role;
 
 /// Dispatch one [`DocsCommand`].
@@ -1332,6 +1333,7 @@ pub fn dispatch_harness(
         HarnessCommand::Set(args) => harness_set(args, project, renderer),
         HarnessCommand::Epochs => harness_epochs(project, renderer),
         HarnessCommand::Promote(args) => harness_promote(args, project, renderer),
+        HarnessCommand::ReplayDiff(args) => replay_diff::run_replay_diff(args, renderer),
     }
 }
 

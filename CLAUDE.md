@@ -382,6 +382,16 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   registered, so no network call is reachable. Once the run finishes it reports how many served
   calls diverged from the recording and how many ran past its end, as JSON under `--json`;
   `--strict-replay` turns either into a hard error.
+- `tm harness replay-diff <a> <b>` runs inside a project like every other `tm harness` verb, and
+  structurally diffs two session transcript JSON files (the `<state_dir>/sessions/<id>.json` shape
+  `tm -r`/`tm -c` already save, or any hand-built/future file with the same `turns` field, plus an
+  optional `harness_epoch`): assistant-text mismatches, tool-call name, input, or result
+  mismatches, spend deltas, and step- or turn-count differences, one line per finding, or the
+  whole result under `--json`. It warns separately when both files carry a harness epoch and they
+  differ — today's saved sessions don't stamp one, so that check is proven by unit tests against
+  hand-built fixtures rather than by a real file yet. The comparison itself
+  (`crates/tm-cli/src/replay_diff.rs`) is a pure function of the two parsed transcripts, with no
+  provider or model call involved.
 - `tm stats [--by ticket|day|model|tool] [--ticket T]` rolls up local usage from the project's own
   event log: tokens, cost, and tool calls per ticket (default), per UTC calendar day, per
   provider/model pair (`unattributed` when a call predates cost/model attribution), or per tool

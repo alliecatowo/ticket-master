@@ -49,6 +49,7 @@ pub mod mcp;
 pub mod ops;
 pub mod project;
 pub mod render;
+pub mod replay_diff;
 pub mod sched;
 pub mod search;
 pub mod serve;

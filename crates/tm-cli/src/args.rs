@@ -1027,6 +1027,8 @@ pub enum HarnessCommand {
     Epochs,
     /// Promote a pending epoch to current.
     Promote(HarnessPromoteArgs),
+    /// Structurally diff two session transcripts.
+    ReplayDiff(HarnessReplayDiffArgs),
 }
 
 /// `tm harness set`
@@ -1060,6 +1062,17 @@ pub struct HarnessPromoteArgs {
     /// one is supplied here; without it (and without `--force`), the gate rejects.
     #[arg(long, value_name = "PATH")]
     pub baseline: Option<PathBuf>,
+}
+
+/// `tm harness replay-diff`
+#[derive(Debug, Args)]
+pub struct HarnessReplayDiffArgs {
+    /// Path to the first session transcript JSON.
+    #[arg(value_name = "A")]
+    pub a: PathBuf,
+    /// Path to the second session transcript JSON.
+    #[arg(value_name = "B")]
+    pub b: PathBuf,
 }
 
 /// `tm bench ...`
