@@ -1,0 +1,42 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "fix_pr": 2356,
+  "test_files": ["completions_test.go"],
+  "verification_command": "go test ./...",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 924.01,
+      "tokens": 4625656,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 3,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 2
+      },
+      "better": "The agent found the precise append aliasing bug and implemented the correct fix, but its tm experience was costly and ended in a misleading failure: after 64 steps and repeated reads/searches, it had changed the implementation, created regression tests, and reported that `go test ./...` passed, yet `ticket.submit` errored and `tm run T-2` told the user only that something went wrong and to retry. A user would reasonably be confused why a complete, verified patch was marked failed and what retrying would do. Reduce repeated context/tool cycles and make the final-step submit path robust; when a run reaches its step limit or submit fails, report the concrete cause, preserve/show the completed work and test evidence, and give an actionable recovery rather than the generic internal-error message. Independent hidden-test verification passed after replacing the agent's tests with PR #2356's `completions_test.go`."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 67.079,
+      "tokens": 26285,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped plan, located the single problematic append quickly, copied the slice before appending, and added a regression test. It noticed that its Go test command could not run because the configured mise Go version was unavailable and said so accurately; the independent full test suite passed after hidden tests were restored. It could be better by reporting its blocked test attempt in a concise final verification summary while ensuring formatting and tests run when a usable Go toolchain is present."
+    }
+  ]
+}

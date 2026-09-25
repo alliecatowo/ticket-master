@@ -1,0 +1,42 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": [
+    "tests/test_requests.py"
+  ],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 1063.43,
+      "tokens": 3789478,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm created T-1 and clearly reported that it was dispatched, but its 1,013-second recorded run spent most of the trial revisiting models.py, utils.py, and broad historical diffs (45 tool calls; about 3.79M reported input tokens) without reaching an implementation or test. The only final user-facing status was ‘model ended turn without submitting’ plus ‘Run `tm run T-1` again to retry’; it did not summarize that the worktree had no fix or provide a concise recovery status, and `tm events` only surfaced the retry_scheduled event. A compact, issue-focused plan and a final failure summary that distinguishes ‘no patch submitted’ from ‘patch failed tests’ would have made this substantially clearer and less costly."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 45.39,
+      "tokens": 18855,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode identified the regression gate in prepare_body(), stated a scoped plan before editing, changed the detection back to hasattr(data, '__iter__'), and added a delegated-wrapper rewind test. Its own pytest invocation failed because the repository's mise shim had no Python version configured, and it accurately reported that limitation rather than claiming tests passed. The independently checked-out merged PR regression test passed against its implementation. It would be better if the agent used the already-created .venv interpreter for verification, and if the added test asserted the redirect behavior directly instead of only the prepare/rewind operation."
+    }
+  ]
+}

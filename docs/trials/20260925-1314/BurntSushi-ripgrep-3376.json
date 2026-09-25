@@ -1,0 +1,42 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "fix_pr": 3420,
+  "test_files": ["crates/ignore/src/dir.rs"],
+  "verification_note": "The requested test-file checkout was applied, but this Rust unit-test file also contains production implementation code, so checkout imports both fix code and tests; the passing results are not a hidden-test-only assessment.",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 673,
+      "tokens": 4375051,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm did find the relevant ignore walker and matcher files, but it repeatedly reread crates/ignore/src/walk.rs and crates/ignore/src/dir.rs, then failed twice with ‘model ended turn without submitting’ after spending 673 seconds and over 4.3 million recorded input tokens. The retry simply repeated the same investigation, and the progress output did not give a user a concrete next action or tell them why the attempt had stopped; the command's ‘Run tm run T-1 again to retry’ suggestion led to the same failure. A scoped plan should have led quickly to the parent matcher cache in dir.rs and a focused regression reproduction, while a retry should preserve findings or switch strategy. Verification ended up being external to the run; tm did not report a test result. The post-run cargo test passed, but the checked-out test file also contains production code, so it imported the fix itself."
+    },
+    {
+      "tool": "OpenCode",
+      "passed": true,
+      "wall_seconds": 82,
+      "tokens": 30201,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 3,
+        "plan_quality": 3,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 2,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a short, relevant plan, quickly located the WalkBuilder path and parent matcher logic, and ran cargo test -p ignore. It reported clearly that all tests passed but the issue was not isolated and no files changed, rather than claiming a fix. It should have reproduced the reported two-root order dependency before concluding and continued from its finding that the matcher builder/root handling was implicated; using the issue's exact small reproduction could have converted the initial investigation into a targeted fix. zvec search was unavailable in this fresh clone, but it fell back to lexical search. The verification test passed after the prescribed checkout, with the same limitation that crates/ignore/src/dir.rs includes the implementation as well as inline tests."
+    }
+  ]
+}

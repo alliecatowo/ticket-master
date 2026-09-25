@@ -1,0 +1,43 @@
+{
+  "issue": {
+    "number": 878,
+    "title": "`onDownloadProgress` never emits `percent: 1` for empty response bodies",
+    "url": "https://github.com/sindresorhus/ky/issues/878"
+  },
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 8.635,
+      "tokens": 0,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 1,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run never reached code navigation or planning: `tm run T-1` failed in 8.6 seconds because `coder.fast` resolved to the unregistered `devpass` provider, so no implementation or agent tokens were produced. The CLI did give a concrete error but then advised `Run tm run T-1 again to retry`, which cannot correct a provider-registration/configuration problem and obscures the needed recovery. Detect provider-unavailable/configuration failures separately, explain that retrying unchanged settings will fail again, and give an actionable provider setup/check command. The fix PR's `test/stream.ts` regressions mechanically failed (2 failures, including empty response and upload bodies); the unrelated `test/browser.ts` suite could not run because Playwright browsers are not installed, and `pnpm test` was blocked because pnpm rejected ignored esbuild/unrs-resolver build scripts."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 71.147,
+      "tokens": 20508,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode found the exact flush guard, stated a scoped implementation-and-regression-test plan, and completed in 71 seconds. Its first regression fixture used `new Response(null)`, which bypasses the stream path; it noticed the failing assertion, replaced it with a closed empty `ReadableStream`, then got all 18 stream tests and XO/diff checks passing. It could be stronger by ensuring the fix-PR-added test cases are all covered before claiming the broader task is complete. After overwriting `test/stream.ts` and `test/browser.ts` with the official PR versions, `npx ava test/stream.ts` passed all 19 tests. The complete changed-test invocation failed because Playwright browser executables are absent (the browser tests cannot launch), and `pnpm test` was blocked before test execution by pnpm's ignored-build-script policy."
+    }
+  ]
+}

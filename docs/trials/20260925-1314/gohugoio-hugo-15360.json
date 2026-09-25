@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/gohugoio/hugo/issues/15360",
+  "base_sha": "1d87ee5b7005a38d83cb841471245b9ae7f914bd",
+  "merge_sha": "cb6a7072230920fb47ece28f67501a2c15934ade",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 889.426,
+      "tokens": 4570207,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 3,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 4,
+        "cost_time": 1
+      },
+      "better": "`tm run` got to the right decoder and produced a passing implementation, and it recovered after transient parse/state errors. It took 889 seconds and the recorded usage was 4,570,207 input tokens; it also traversed several unrelated files while investigating. The live messages “hit an unexpected internal problem” and “got a response it couldn't understand” did not tell a user what failed or how to help, even though the run later recovered. Make narrow bug-fix investigations more economical and include a concise, actionable diagnostic and recovery hint in tool-call errors."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 43.774,
+      "tokens": 21025,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly located `UnmarshalToMap`, updated the shared decoder, and added TOML, YAML, and JSON BOM regression cases. Its stated plan was scoped and its final report clearly disclosed that the focused check was blocked because mise had no Go version configured; `git diff --check` passed. It could improve verification by falling back to the direct package test when the repository wrapper cannot locate the toolchain, and by reporting that limitation alongside a clear next step."
+    }
+  ]
+}
