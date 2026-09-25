@@ -633,6 +633,7 @@ mod tests {
             end_to_end_artifact_exists: passed,
             v1_closed: passed,
             verification_pass_rate: 1.0,
+            verification_window_empty: false,
             spec_churn_rate: 0.0,
             open_structural_audits: 0,
             thresholds: MaturityThresholds::conservative(),

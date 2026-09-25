@@ -8,7 +8,9 @@
 //! doesn't just stop being checked.
 
 use serde::{Deserialize, Serialize};
-use tm_core::{ArtifactKind, FailureClass, ProjectView, Store, TicketKind, TicketState};
+use tm_core::{
+    ArtifactKind, EvidenceKind, FailureClass, ProjectView, Store, TicketKind, TicketState,
+};
 use tm_events::EventKind;
 use tm_types::{Clock, DecisionId, LeaseId, MilestoneId, ParticipantId, Result as TmResult, Role};
 
@@ -48,8 +50,15 @@ pub struct MaturityPredicate {
     pub end_to_end_artifact_exists: bool,
     /// The V1 milestone is closed.
     pub v1_closed: bool,
-    /// Verification pass rate over the trailing window, `0.0..=1.0`.
+    /// Verification pass rate over the trailing window, `0.0..=1.0`. Meaningless (always `0.0`)
+    /// when `verification_window_empty` is set — read that field first.
     pub verification_pass_rate: f64,
+    /// True when the trailing window found no verification evidence at all (no `Verification`-
+    /// kind tickets and no automatic-verification evidence on `Work` tickets) — distinct from a
+    /// window that found evidence and it all failed. An empty window is not evidence of
+    /// stability; it means nothing has been verified yet, so the predicate treats it as not
+    /// satisfied (see [`MaturityPredicate::verification_reason`]).
+    pub verification_window_empty: bool,
     /// Spec churn rate since the last evaluation, `0.0..=1.0`.
     pub spec_churn_rate: f64,
     /// Count of open (unresolved) structural audits (`ticket.audit_rejected` with a structural
@@ -66,9 +75,28 @@ impl MaturityPredicate {
     pub fn is_satisfied(&self) -> bool {
         self.end_to_end_artifact_exists
             && self.v1_closed
+            && !self.verification_window_empty
             && self.verification_pass_rate >= self.thresholds.verification_pass_rate
             && self.spec_churn_rate <= self.thresholds.spec_churn_rate
             && self.open_structural_audits == 0
+    }
+
+    /// A short, readable explanation for why `verification_pass_rate` alone falls short of
+    /// `thresholds.verification_pass_rate`, or `None` when it doesn't. Doesn't speak to the
+    /// predicate's other conditions (`v1_closed`, spec churn, open audits) — this is scoped to
+    /// the verification-pass-rate condition only.
+    pub fn verification_reason(&self) -> Option<String> {
+        if self.verification_window_empty {
+            Some("no verified work yet".to_string())
+        } else if self.verification_pass_rate < self.thresholds.verification_pass_rate {
+            Some(format!(
+                "verification pass rate {:.0}% is below the required {:.0}%",
+                self.verification_pass_rate * 100.0,
+                self.thresholds.verification_pass_rate * 100.0
+            ))
+        } else {
+            None
+        }
     }
 }
 
@@ -89,23 +117,52 @@ pub fn evaluate_predicate(
         .map(|m| m.state == tm_core::MilestoneState::Closed)
         .unwrap_or(false);
 
-    let mut verifications: Vec<_> = view
+    // `Verification`-kind tickets: nothing creates these yet (`u1-genesis-maturity-without-
+    // verification-tickets`'s own evidence note), but the predicate keeps counting them for when
+    // something does. Each contributes one outcome, timestamped by `updated`: `Closed` counts as
+    // a pass, anything else a fail.
+    let ticket_outcomes = view
         .tickets
         .values()
         .filter(|t| t.kind == TicketKind::Verification)
-        .collect();
-    verifications.sort_by_key(|t| std::cmp::Reverse(t.updated));
-    verifications.truncate(thresholds.verification_window);
-    let verification_pass_rate = if verifications.is_empty() {
-        // No verification attempts is not evidence of failure: the caller can still gate on
-        // `end_to_end_artifact_exists`/`v1_closed`.
-        1.0
+        .map(|t| (t.updated, t.state == TicketState::Closed));
+
+    // The verification evidence that actually exists today: automatic verification
+    // (`tm-scheduler`'s `run_automatic_verification`) attaches `EvidenceKind::CommandOutput`
+    // evidence to the `Work` ticket it checked, backed by an `ArtifactKind::CommandOutput`
+    // artifact whose `meta.passed` records the outcome. Count those, timestamped by the
+    // evidence's own `ts`. (`ticket.verified`/`ticket.verification_failed` events name the same
+    // fact but nothing emits them yet — see `crates/tm-events/src/kind.rs`; once something does,
+    // prefer them here instead of reaching through the artifact's `meta`.)
+    let evidence_outcomes = view
+        .evidence
+        .iter()
+        .filter(|e| e.kind == EvidenceKind::CommandOutput)
+        .filter(|e| {
+            view.tickets
+                .get(&e.ticket)
+                .is_some_and(|t| t.kind == TicketKind::Work)
+        })
+        .filter_map(|e| {
+            let artifact = view.artifacts.get(&e.artifact)?;
+            let passed = artifact.meta.get("passed")?.as_bool()?;
+            Some((e.ts, passed))
+        });
+
+    let mut outcomes: Vec<(tm_types::Timestamp, bool)> =
+        ticket_outcomes.chain(evidence_outcomes).collect();
+    outcomes.sort_by_key(|(ts, _)| std::cmp::Reverse(*ts));
+    outcomes.truncate(thresholds.verification_window);
+
+    let verification_window_empty = outcomes.is_empty();
+    let verification_pass_rate = if verification_window_empty {
+        // An empty window is not evidence of stability — nothing has been verified yet, so
+        // `MaturityPredicate::is_satisfied` treats this as unsatisfied rather than defaulting to
+        // a full pass rate.
+        0.0
     } else {
-        let closed = verifications
-            .iter()
-            .filter(|t| t.state == TicketState::Closed)
-            .count();
-        closed as f64 / verifications.len() as f64
+        let passed = outcomes.iter().filter(|(_, passed)| *passed).count();
+        passed as f64 / outcomes.len() as f64
     };
 
     // A structural audit is open when the latest failure recorded against an `Audit`-kind
@@ -162,6 +219,7 @@ pub fn evaluate_predicate(
         end_to_end_artifact_exists,
         v1_closed,
         verification_pass_rate,
+        verification_window_empty,
         spec_churn_rate,
         open_structural_audits,
         thresholds,
@@ -220,7 +278,7 @@ leave Genesis's Stabilization stage as of {now}.\n\n\
 The deterministic maturity predicate evaluated:\n\
 - end_to_end_artifact_exists: {artifact}\n\
 - v1_closed: {v1}\n\
-- verification_pass_rate: {vpr:.3} (threshold {vpr_t:.3})\n\
+- verification_pass_rate: {vpr:.3} (threshold {vpr_t:.3}{empty_note})\n\
 - spec_churn_rate: {churn:.3} (threshold {churn_t:.3})\n\
 - open_structural_audits: {audits}\n\n\
 Project summary:\n\
@@ -236,6 +294,11 @@ markdown formatting or code fences.",
         v1 = predicate.v1_closed,
         vpr = predicate.verification_pass_rate,
         vpr_t = predicate.thresholds.verification_pass_rate,
+        empty_note = if predicate.verification_window_empty {
+            ", but no verified work exists yet"
+        } else {
+            ""
+        },
         churn = predicate.spec_churn_rate,
         churn_t = predicate.thresholds.spec_churn_rate,
         audits = predicate.open_structural_audits,
@@ -475,6 +538,7 @@ mod tests {
             end_to_end_artifact_exists: true,
             v1_closed: true,
             verification_pass_rate: 1.0,
+            verification_window_empty: false,
             spec_churn_rate: 0.0,
             open_structural_audits: 0,
             thresholds: MaturityThresholds::conservative(),
@@ -522,12 +586,21 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_predicate_on_empty_view_has_no_verifications_but_full_pass_rate() {
+    fn evaluate_predicate_on_empty_view_has_an_empty_verification_window_and_fails() {
         let view = ProjectView::empty();
         let v1 = MilestoneId::new("M-1").unwrap();
         let predicate = evaluate_predicate(&view, &v1, MaturityThresholds::conservative());
         assert!(!predicate.v1_closed);
-        assert_eq!(predicate.verification_pass_rate, 1.0);
+        assert!(
+            predicate.verification_window_empty,
+            "no verification evidence at all is an empty window, not a full pass rate"
+        );
+        assert_eq!(predicate.verification_pass_rate, 0.0);
+        assert_eq!(
+            predicate.verification_reason(),
+            Some("no verified work yet".to_string())
+        );
+        assert!(!predicate.is_satisfied());
         assert_eq!(predicate.open_structural_audits, 0);
         assert!(!predicate.end_to_end_artifact_exists);
         assert_eq!(predicate.spec_churn_rate, 0.0);
@@ -604,6 +677,69 @@ mod tests {
         };
         let predicate = evaluate_predicate(&view, &v1, thresholds);
         assert!((predicate.verification_pass_rate - (2.0 / 3.0)).abs() < 1e-9);
+    }
+
+    /// Insert a `Work` ticket's automatic-verification evidence into `view`: a
+    /// `CommandOutput` artifact whose `meta.passed` is `passed`, plus the `EvidenceKind::
+    /// CommandOutput` evidence record linking it to `ticket`, timestamped `ts` — the same shape
+    /// `run_automatic_verification` (`tm-scheduler`) produces.
+    fn insert_verification_evidence(
+        view: &mut ProjectView,
+        ticket: &TicketId,
+        artifact_hex: &str,
+        passed: bool,
+        ts: Timestamp,
+    ) {
+        let artifact_id = tm_types::ArtifactId::new(format!("ART-{artifact_hex}")).unwrap();
+        view.artifacts.insert(
+            artifact_id.clone(),
+            tm_core::Artifact {
+                id: artifact_id.clone(),
+                kind: ArtifactKind::CommandOutput,
+                media_type: "text/plain".to_string(),
+                bytes_len: 0,
+                hash: artifact_hex.to_string(),
+                storage: tm_core::ArtifactStorage::Inline(Vec::new()),
+                meta: serde_json::json!({ "passed": passed }),
+            },
+        );
+        view.evidence.push(tm_core::Evidence {
+            ticket: ticket.clone(),
+            kind: EvidenceKind::CommandOutput,
+            artifact: artifact_id,
+            produced_by: actor(),
+            ts,
+            summary: if passed {
+                "automatic verification passed".to_string()
+            } else {
+                "automatic verification failed".to_string()
+            },
+        });
+    }
+
+    #[test]
+    fn evaluate_predicate_verification_pass_rate_counts_work_ticket_evidence() {
+        let mut view = ProjectView::empty();
+        for (i, passed) in [true, true, true, false].into_iter().enumerate() {
+            let id = TicketId::new(format!("T-{}", i + 1)).unwrap();
+            let t = test_ticket(id.clone(), TicketKind::Work, TicketState::Submitted);
+            view.tickets.insert(id.clone(), t);
+            insert_verification_evidence(
+                &mut view,
+                &id,
+                &format!("{i:012x}"),
+                passed,
+                Timestamp::from_unix_nanos((i as i128) * 1_000_000_000),
+            );
+        }
+        let v1 = MilestoneId::new("M-1").unwrap();
+        let thresholds = MaturityThresholds {
+            verification_window: 4,
+            ..MaturityThresholds::conservative()
+        };
+        let predicate = evaluate_predicate(&view, &v1, thresholds);
+        assert!(!predicate.verification_window_empty);
+        assert!((predicate.verification_pass_rate - 0.75).abs() < 1e-9);
     }
 
     fn test_ticket(id: TicketId, kind: TicketKind, state: TicketState) -> tm_core::Ticket {

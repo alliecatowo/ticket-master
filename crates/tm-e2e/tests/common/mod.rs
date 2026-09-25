@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use tm_core::{
-    ArtifactKind, ExecutorRequirements, ResourceClaim, RetryPolicy, Store, TicketKind,
-    VerificationPolicy,
+    ArtifactKind, EvidenceKind, ExecutorRequirements, ResourceClaim, RetryPolicy, Store,
+    TicketKind, VerificationPolicy,
 };
 use tm_types::{
     Authority, Budget, Clock, CounterIds, FixedClock, IdSource, ParticipantId, PatternSet, Role,
@@ -156,6 +156,32 @@ pub fn close_ticket(
     store
         .verify(ticket, ticket, true, None, system())
         .expect("verify");
+    // Record the same `EvidenceKind::CommandOutput`-shaped verification evidence
+    // `tm-scheduler`'s automatic verification would attach, so callers reading a `Work`
+    // ticket's verification pass rate (`tm_genesis::maturity::evaluate_predicate`) see this
+    // ticket's `store.verify(true)` above as a real, countable pass rather than an empty window.
+    let verification_artifact_events = store
+        .store_artifact(
+            ArtifactKind::CommandOutput,
+            "text/plain".to_string(),
+            b"$ verify\nexit code: 0\n".to_vec(),
+            serde_json::json!({ "passed": true }),
+            Some(ticket.clone()),
+            system(),
+        )
+        .expect("store_artifact for verification evidence");
+    let verification_artifact_id =
+        tm_types::ArtifactId::new(verification_artifact_events[0].subject.as_str())
+            .expect("artifact id");
+    store
+        .attach_evidence(
+            ticket,
+            EvidenceKind::CommandOutput,
+            &verification_artifact_id,
+            "verification passed".to_string(),
+            system(),
+        )
+        .expect("attach_evidence for verification");
     store
         .audit(
             ticket,
