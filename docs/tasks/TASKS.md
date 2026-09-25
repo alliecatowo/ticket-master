@@ -1223,7 +1223,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-provider`
   evidence: /tmp/tm-audit/dogfood3.log ends `TIMEOUT after 580s / EXIT 124`, and `ls /tmp/tm-audit/dog2.cassette` gives No such file.
 
-- [ ] **u1-run-sigterm-releases-lease** — On SIGINT/SIGTERM, `tm run` should release its lease and record an interrupted attempt instead of leaving the ticket `active`
+- [~] **u1-run-sigterm-releases-lease** — On SIGINT/SIGTERM, `tm run` should release its lease and record an interrupted attempt instead of leaving the ticket `active` (needs another pass: the worker made no changes)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: u1-run-progress-shows-args
   files: `crates/tm-cli/src/agent.rs`, `crates/tm-cli/src/sched.rs`
   change: After `tm run T-2` was killed with SIGTERM, `tm ticket list` still shows `T-2 work active`. Install a signal handler (tokio::signal) for the foreground run. On the first signal, cancel the agent loop, append an attempt failure (`interrupted by user`), release the lease (so the ticket returns to Ready through the existing retry path), and exit 130. On a second signal, exit immediately. Confirm first where the foreground run loop lives (grep `fn run_ticket` in crates/tm-cli/src) and adjust `files:` if it's elsewhere.
