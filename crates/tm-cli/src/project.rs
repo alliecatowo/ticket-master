@@ -37,6 +37,7 @@ use tm_types::{
 };
 
 use crate::args::{AttachArgs, DoctorArgs, GenesisArgs, InitArgs, ProjectCommand, StatusArgs};
+use crate::ops;
 use crate::render::{Renderer, Table};
 
 /// Where a project's durable state lives relative to its workspace root (D-003).
@@ -1008,7 +1009,7 @@ pub fn attach(args: &AttachArgs, renderer: &Renderer) -> tm_types::Result<()> {
         create_or_promote_project_dir(&dir, false)?.0
     };
     let (_project, report) = attach_project(&root)?;
-    let human = render_attach_report(&report);
+    let human = ops::format_attach_report(&report);
     renderer.emit(&report, &human)
 }
 
@@ -1027,68 +1028,6 @@ fn attach_project(root: &Path) -> tm_types::Result<(Project, tm_genesis::attach:
         project.actor.clone(),
     )?;
     Ok((project, report))
-}
-
-/// A short, human-readable label for a [`tm_genesis::attach::DocKind`], for `tm attach`'s
-/// discovered-docs table — plain words instead of the enum variant's `{:?}` debug form.
-fn doc_kind_label(kind: tm_genesis::attach::DocKind) -> &'static str {
-    match kind {
-        tm_genesis::attach::DocKind::Readme => "readme",
-        tm_genesis::attach::DocKind::Contributing => "contributing guide",
-        tm_genesis::attach::DocKind::Architecture => "architecture doc",
-        tm_genesis::attach::DocKind::Changelog => "changelog",
-        tm_genesis::attach::DocKind::Directory => "docs directory",
-    }
-}
-
-fn render_attach_report(report: &tm_genesis::attach::AttachReport) -> String {
-    let mut sections = vec![
-        format!("attached {}", report.project_root.display()),
-        format!("root ticket: {}", report.root_ticket),
-        format!(
-            "indexed {} files, {} chunks, {} commits ingested (symbol graph built: {})",
-            report.files_indexed,
-            report.chunks_indexed,
-            report.commits_ingested,
-            report.symbol_graph_built
-        ),
-    ];
-    if !report.docs.is_empty() {
-        let rows = report
-            .docs
-            .iter()
-            .map(|d| vec![d.path.clone(), doc_kind_label(d.kind).to_string()])
-            .collect();
-        sections.push(Table::new(vec!["doc".to_string(), "kind".to_string()], rows).render());
-    }
-    if !report.build_systems.is_empty() {
-        let rows = report
-            .build_systems
-            .iter()
-            .map(|b| vec![b.name.clone(), b.manifest_path.clone()])
-            .collect();
-        sections.push(
-            Table::new(
-                vec!["build system".to_string(), "manifest".to_string()],
-                rows,
-            )
-            .render(),
-        );
-    }
-    for t in &report.external_trackers {
-        sections.push(format!("external tracker: {} ({})", t.name, t.evidence));
-    }
-    for c in &report.conventions {
-        sections.push(format!("convention: {} ({})", c.text, c.evidence));
-    }
-    let blocking = report.blocking_open_questions();
-    if !blocking.is_empty() {
-        sections.push(format!(
-            "{} open question(s) need a human before proceeding",
-            blocking.len()
-        ));
-    }
-    sections.join("\n\n")
 }
 
 /// Whether the provider a Genesis [`tm_provider::RoleCandidate`] names can be used as-is.
