@@ -495,7 +495,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-harness`
   evidence: `crates/tm-harness/src/bench.rs` exists (`find crates -iname '*bench*.rs'` outside worktrees/target → only this file) and is the natural extension point named in D-020 consequence "Plus a `tm bench` decision task scored against `Session.promote` and `StepRecord`."
 
-- [~] **d20-flip-status-and-amend-spec** — Flip D-020 from proposed to accepted and amend SPEC.md §6.1 with the decider role, once the trait/mock lands (needs the owner: this batch's editor died without reporting; its partial, unverifiable SPEC.md/D-020 edits were reverted rather than landed since the precondition — the decision trait/mock actually landing in code, not just SPEC.md pseudocode — was not confirmed met)
+- [x] **d20-flip-status-and-amend-spec** — Flip D-020 from proposed to accepted and amend SPEC.md §6.1 with the decider role, once the trait/mock lands (landed b6037ec)
   model: haiku · severity: low · builds Rust: no · area: docs (D-020) · deps: d20-decider-trait-and-mock, d20-shadow-triage-new-tickets
   files: `docs/decisions/D-020-system-one-decision-providers.md`, `SPEC.md`
   change: Once `d20-decider-trait-and-mock` (and ideally `d20-shadow-triage-new-tickets`) merge, change D-020's "Status: proposed" line to "Status: accepted", and add the decider role / DecisionProvider trait to SPEC.md §6.1 per D-020's own closing line ("If accepted, SPEC.md ... gains the decider role and the DecisionProvider trait"), per this repo's "keep documentation honest as you change things" rule.
@@ -503,7 +503,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run hygiene`
   evidence: `docs/decisions/D-020-system-one-decision-providers.md` header line: "**Status:** proposed · **Date:** 2026-09-23" and its closing paragraph naming exactly this SPEC §6.1 amendment as conditional on acceptance.
 
-- [ ] **d20-backlog-status-accepted** — Move D-020 out of docs/backlog.md's "Ask the owner later" and record it as owner-accepted
+- [x] **d20-backlog-status-accepted** — Move D-020 out of docs/backlog.md's "Ask the owner later" and record it as owner-accepted (landed c261046)
   model: haiku · severity: low · builds Rust: no · area: docs (D-020) · deps: none
   files: `docs/backlog.md`
   change: The owner approved D-020 on 2026-09-23 (asked directly for Jev/Laya support). Remove the "D-020 (system-one decision providers, proposed): deferred by the owner on 2026-09-23 ('toss jev in backlog')..." entry from `docs/backlog.md`'s "## Ask the owner later" section and replace it with a short "## Accepted, 2026-09-23 (D-020 system-one decision providers)" entry noting the approval, pointing at `docs/tasks/TASKS.md`'s `d20-*` tasks for the shadow-mode slice, and folding in this session's Jev/Laya research findings (Laya is on Hugging Face as `convaiinnovations/laya*`, not Kaggle — Kaggle's role is the free fine-tune notebook; `laya-mlx` has no server mode; Jev's real contract is `POST https://ai-gateway.vercel.sh/typesafe/v1/systemone`, not OpenAI chat-completions, auth via `AI_GATEWAY_API_KEY` or Vercel OIDC, neither available in the research shell so no live call was made and no key was created).
@@ -745,7 +745,7 @@ Gate: `mise run verify`
   acceptance: A unit test shows the mock branch returns a provider that serves the fixture sequence. Running tm genesis in a scratch tempdir with TM_TEST_MOCK_PROVIDER=1 and no credentials no longer errors on the missing key, and it stops cleanly per [new decision: genesis termination].
   test: `mise run test:crate -- tm-cli`
 
-- [ ] **docs-persist-state-across-invocations** — Persist DocState (loaded state + Reconciling) and mark Review tickets human_required
+- [x] **docs-persist-state-across-invocations** — Persist DocState (loaded state + Reconciling) and mark Review tickets human_required (landed 2da693b)
   model: sonnet · size: M · builds Rust: yes · area: docs (SPEC §9) · deps: none
   files: `crates/tm-cli/src/ops.rs`, `crates/tm-docs/src/registry.rs`, `crates/tm-core/src/store.rs`, `crates/tm-cli/src/tickets.rs`
   change: (1) In load_and_sync_doc_registry (ops.rs:50), give each already-registered doc its persisted state and last_verified from project.store, extending Store's doc read path if needed. Only newly discovered docs get DocRecord::new's Unverified default (registry.rs:219-228). (2) In docs_reconcile (ops.rs:187-238), after opening each reconciliation ticket, persist the Reconciling transition through a new Store method that writes both an event and the materialized docs row. Today only the function-local registry is mutated (ops.rs:229-231). (3) For ReconciliationKind::Review (Maintained or Human docs), build ExecutorRequirements with human_required: true; Regeneration keeps default_executor_requirements(). Absorbs docs-persist-reconciling-transition and docs-differentiate-review-vs-regeneration-tickets.
@@ -774,7 +774,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **genesis-cli-resume-flag** — Let tm genesis resume an in-progress run instead of always starting fresh
+- [x] **genesis-cli-resume-flag** — Let tm genesis resume an in-progress run instead of always starting fresh (landed 49288ba)
   model: sonnet · size: S · builds Rust: yes · area: genesis · deps: genesis-stop-infinite-maturity-loop, genesis-cli-offline-integration-test
   files: `crates/tm-cli/src/project.rs`, `crates/tm-cli/src/args.rs`, `crates/tm-cli/tests/genesis_offline.rs`, `CLAUDE.md`
   change: genesis() always calls GenesisState::new (project.rs:1292). Add --resume to GenesisArgs (args.rs:266), and auto-detect a persisted snapshot when --prompt is omitted. Resume through the existing GenesisDriver::resume (stages.rs:520-550) and continue from the persisted stage. Update the next-steps message from [new decision: genesis termination] and CLAUDE.md to name the real flag.
@@ -846,14 +846,14 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **replay-cli-record-flag** — tm run <T> --record <path>: capture a cassette and store it as a Transcript artifact
+- [x] **replay-cli-record-flag** — tm run <T> --record <path>: capture a cassette and store it as a Transcript artifact (landed 42b49ab)
   model: sonnet · size: M · builds Rust: yes · area: replay · deps: replay-cassette-types, nav-fix-project-codeintel-freshness
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/sched.rs`, `crates/tm-cli/src/dispatch.rs`, `crates/tm-cli/src/agent.rs`, `docs/decisions/D-NNN-record-replay-harness.md`, `CLAUDE.md`
   change: Add --record <path> to RunArgs (args.rs:663). Thread an optional recording sink through build_dispatcher (dispatch.rs:~266) into build_fabric (agent.rs:1574), and wrap every registered provider, the TM_TEST_MOCK_PROVIDER mock included, in RecordingProvider. The header takes the dispatched AgentTask's harness_epoch. When the run finishes, store the cassette bytes as ArtifactKind::Transcript tied to the ticket through Store::store_artifact; this is the first use of that declared-but-unused kind. Amend [new decision: record/replay cassettes]'s Implemented section and add a CLAUDE.md line. Without the flag, behavior is unchanged. Absorbs replay-cassette-artifact-storage.
   acceptance: An integration test in a tempdir (TM_HOME tempdir, TM_TEST_MOCK_PROVIDER=1, TM_NOTIFY=0): `tm ticket new` then `tm run <T> --record <file>` produces a header plus at least one entry, and the ticket has a Transcript artifact whose bytes equal the file.
   test: `mise run test:crate -- tm-cli && mise run hygiene`
 
-- [ ] **tel-ticket-metrics-fold** — Derive TicketMetrics purely from the event log (no new metrics event)
+- [x] **tel-ticket-metrics-fold** — Derive TicketMetrics purely from the event log (no new metrics event) (landed d276f04)
   model: sonnet · size: S · builds Rust: yes · area: telemetry / bench · deps: tel-usage-payload-model-field, tel-tool-call-event-kind
   files: `crates/tm-harness/src/metrics.rs`
   change: Add `pub fn ticket_metrics_from_events(ticket: &TicketId, events: &[Event]) -> TicketMetrics`. It folds usage.recorded (tokens, dollars, wall time), tool_call.completed (tool_calls, failures) and command.completed (commands; commands_rerun counts repeated identical argv). Add a session-level fold if SessionMetrics fits. Fields that cannot be derived stay 0, with a doc comment saying so. This replaces the bench audit's proposed ticket.metrics_recorded event: that duplicated data already in the log, and its premise was wrong, because tm-harness depends on tm-core, not the reverse, so the payload would have created a dependency cycle.
@@ -950,7 +950,7 @@ Gate: `mise run verify`
   acceptance: With TM_TEST_MOCK_PROVIDER=1 and a scratch project, `tm bench run --live --filter live-smoke` produces a TaskResult whose passed value comes from actually running test_command, with nonzero tokens and a cassette file. The report includes cost and tool_calls. Without --live, output is byte-identical to today's.
   test: `mise run test:crate -- tm-cli && mise run hygiene`
 
-- [ ] **budget-affordability-menu-in-context-pack** — Dollar-aware pre-call affordability, tier-down, and an affordable-tiers menu (SPEC §31)
+- [x] **budget-affordability-menu-in-context-pack** — Dollar-aware pre-call affordability, tier-down, and an affordable-tiers menu (SPEC §31) (landed dfa9621)
   model: opus · size: M · builds Rust: yes · area: budget (SPEC §31) · deps: tel-completion-cost-field
   files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-context/src/sections.rs`, `crates/tm-provider/src/fabric.rs`
   change: The audit's claim that 'no refuse-to-start logic exists' is wrong. A token-only pre-call check already exists (agent_loop.rs:755-770, can_afford and first_unaffordable_dimension), but its estimate hardcodes dollars_micros: 0. Extend the estimate to dollars using candidate prices: prompt tokens times the input price plus MAX_TOKENS_PER_STEP times the output price, via tel-completion-cost-field's cost_micros. Add Fabric::affordable_candidates(role, remaining budget, estimated tokens). When the primary candidate is unaffordable but a cheaper one fits, tier down for that step instead of handing off. Render a compact 'Budget' section listing the affordable tiers with roughly how many steps each allows, as a context-pack section or a system-prompt addendum, whichever fits the compile path. Document the estimate formula in doc comments.
@@ -997,7 +997,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **genesis-explicit-v0-v1-milestone-marking** — Select V0/V1 milestones by explicit tag, not position
+- [x] **genesis-explicit-v0-v1-milestone-marking** — Select V0/V1 milestones by explicit tag, not position (landed 962b3a7)
   model: sonnet · size: M · builds Rust: yes · area: genesis · deps: genesis-emit-lifecycle-events, genesis-shared-offline-fixtures
   files: `crates/tm-genesis/src/compile.rs`, `crates/tm-genesis/src/spec.rs`, `crates/tm-genesis/src/stages.rs`, `crates/tm-genesis/src/fixtures.rs`
   change: Thread a release marker (v0 or v1) from Specification's ReleaseDefinitions through the graph-compilation prompt and its JSON schema onto the committed milestones. Make the marker optional in the schema so older fixtures keep working, and update fixtures.rs to include it. Change Stage::Ignition and Stage::MaturityGate (stages.rs:430-437, 459-467) to select by marker, falling back to the current positional heuristic only when no marker exists.
