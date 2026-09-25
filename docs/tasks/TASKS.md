@@ -1303,7 +1303,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- xtask`
   evidence: docs/audits/2026-09-25-bench-plan.md "Required fixes", item 0.
 
-- [ ] **u1-bench-cross-model-timeout-cost** — Cross-tool bench: pin one model per cohort across tools, a per-task timeout and a cost cap
+- [~] **u1-bench-cross-model-timeout-cost** — Cross-tool bench: pin one model per cohort across tools, a per-task timeout and a cost cap (needs another pass: the worker made no changes)
   model: sonnet · severity: high · builds Rust: yes · area: bench · deps: u1-bench-cross-permission-flags
   files: `crates/xtask/src/bench_cross.rs`
   change: Add `--model <provider/model>` passthrough (claude `--model`, codex `-m`, opencode `-m`, tm via a scratch `providers.toml` role candidate), `--task-timeout <secs>` (kill the process group; mark TIMEOUT) and `--max-cost-usd` (stop scheduling new tasks once reported spend reaches it). Record the tool versions (`--version`) in the report.
