@@ -1287,7 +1287,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: `tm run --help` / `tm ticket new --help` output in the audit: the global flags' 2-3 line paragraphs are mixed in with `--worktree`/`--record`.
 
-- [ ] **u1-fix-false-codeintel-docs** — Correct the doc comments and docs that claim Potion is used on real paths
+- [~] **u1-fix-false-codeintel-docs** — Correct the doc comments and docs that claim Potion is used on real paths (needs another pass: the worker made no changes)
   model: haiku · severity: low · builds Rust: yes · area: docs · deps: u1-wire-potion-embedder
   files: `crates/tm-codeintel/src/embed.rs`, `crates/tm-codeintel/src/lib.rs`, `docs/decisions/D-025-potion-semantic-embedder.md`
   change: After u1-wire-potion-embedder lands, reconcile embed.rs:222 ("which real command paths use"), lib.rs:12, and D-025's "What this costs" with the new call sites and the embedder-id re-embed behaviour.
