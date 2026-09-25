@@ -1436,7 +1436,7 @@ is based on.
   acceptance: A test for the `provider not registered: <name>` failure verifies the user receives a concrete provider-configuration recovery step and is not told to retry unchanged settings; transient provider failures retain retry guidance.
   test: `cargo test -p tm-cli run_outcome`
   evidence: `/tmp/tm-trials/20260925-1314/sindresorhus-ky-878/tm.log:7` — `provider was unavailable: provider: no candidate can serve role coder.fast: provider not registered: devpass. Run tm run T-1 again to retry.`; source: `crates/tm-cli/src/sched.rs:818-830` currently recommends the same retry for every `Ready`/`Blocked` failure.
-- [ ] **t20260925-1314-spf13-cobra-2257-step-limit-submit-recovery** — Recover cleanly when a completed run hits the step limit before submitting
+- [~] **t20260925-1314-spf13-cobra-2257-step-limit-submit-recovery** — Recover cleanly when a completed run hits the step limit before submitting (needs another pass: the worker made no changes)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: When the worker approaches `max_steps`, surface an explicit finalization/recovery path and preserve completion evidence if `ticket.submit` fails at the limit; replace generic retry guidance with the actual failure reason and safe next action.
