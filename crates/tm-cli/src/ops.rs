@@ -6,10 +6,10 @@ use std::fs;
 use std::sync::Arc;
 
 use crate::args::{
-    BenchCommand, BenchCompareArgs, BenchRunArgs, DocsCommand, EventsCommand, EventsReplayArgs,
-    EventsShowArgs, EventsTailArgs, HarnessCommand, HarnessPromoteArgs, HarnessSetArgs,
-    MirrorCommand, MirrorLinkArgs, ProviderCommand, ProviderDefaultArgs, ProviderTestArgs,
-    TemplatesCommand, TemplatesShowArgs,
+    BenchCommand, BenchCompareArgs, BenchRunArgs, DocsAttestArgs, DocsCommand, EventsCommand,
+    EventsReplayArgs, EventsShowArgs, EventsTailArgs, HarnessCommand, HarnessPromoteArgs,
+    HarnessSetArgs, MirrorCommand, MirrorLinkArgs, ProviderCommand, ProviderDefaultArgs,
+    ProviderTestArgs, TemplatesCommand, TemplatesShowArgs,
 };
 use crate::bench_report;
 use crate::project::Project;
@@ -30,6 +30,7 @@ pub fn dispatch_docs(
         DocsCommand::List => docs_list(project, renderer),
         DocsCommand::Check => docs_check(project, renderer),
         DocsCommand::Reconcile => docs_reconcile(project, renderer),
+        DocsCommand::Attest(args) => docs_attest(args, project, renderer),
     }
 }
 
@@ -420,6 +421,215 @@ pub fn docs_reconcile(project: &Project, renderer: &Renderer) -> tm_types::Resul
         renderer.note("No stale docs to reconcile");
     } else {
         renderer.note(&format!("Opened {} reconciliation ticket(s)", opened.len()));
+    }
+    Ok(())
+}
+
+/// Best-effort `HEAD` commit sha for the project's git repo, for the attestation artifact's
+/// `meta` (`docs_attest`'s "record the new last-verified commit" -- there is no persisted
+/// per-doc commit column in `tm-core`'s schema yet, the same gap `git_changeset`'s doc comment
+/// names, so this is the honest subset reachable from this task's owned files: the commit is
+/// recorded on the evidence artifact, not on `DocRow` itself). `None` for a non-git project or
+/// one with no commits yet, same as `git_changeset`.
+fn head_commit_sha(project: &Project) -> Option<String> {
+    let repo = git2::Repository::open(&project.root).ok()?;
+    let head = repo.head().ok()?;
+    let commit = head.peel_to_commit().ok()?;
+    Some(commit.id().to_string())
+}
+
+/// Drive `ticket` forward, as `actor`, until it is `Submitted` (or already is), reusing
+/// `evidence_artifact` as `Store::submit`'s required evidence. A review ticket
+/// `tm docs reconcile` just opened sits in `Draft`; this walks the same states a human actually
+/// doing the review would (`Draft` -> activate -> `Ready` -> acquire a lease -> `Leased` ->
+/// `WorkStarted` -> `Running` -> submit -> `Submitted`), so `tm docs attest` works against the
+/// state a fresh reconciliation ticket is actually in, not just one already hand-advanced by
+/// some other command.
+fn advance_review_ticket_to_submitted(
+    project: &Project,
+    ticket: &tm_types::TicketId,
+    evidence_artifact: tm_types::ArtifactId,
+) -> tm_types::Result<()> {
+    loop {
+        let state = project
+            .store
+            .view()?
+            .tickets
+            .get(ticket)
+            .ok_or_else(|| tm_types::TmError::not_found("ticket", ticket))?
+            .state;
+        match state {
+            tm_core::TicketState::Submitted => return Ok(()),
+            tm_core::TicketState::Draft => {
+                project.store.activate(ticket, project.actor.clone())?;
+            }
+            tm_core::TicketState::Blocked => {
+                project.store.transition(
+                    ticket,
+                    tm_core::Trigger::DependenciesSatisfied,
+                    project.actor.clone(),
+                )?;
+            }
+            tm_core::TicketState::Ready => {
+                project.store.acquire_lease(
+                    ticket,
+                    project.actor.clone(),
+                    tm_types::Authority::none(),
+                    vec![],
+                    60,
+                    project.actor.clone(),
+                )?;
+            }
+            tm_core::TicketState::Leased => {
+                project.store.transition(
+                    ticket,
+                    tm_core::Trigger::WorkStarted,
+                    project.actor.clone(),
+                )?;
+            }
+            tm_core::TicketState::Running => {
+                project.store.submit(
+                    ticket,
+                    "Human doc review".to_string(),
+                    vec![evidence_artifact.clone()],
+                    project.actor.clone(),
+                )?;
+            }
+            other => {
+                return Err(tm_types::TmError::invariant(format!(
+                    "ticket {ticket} isn't ready to attest (it's {other:?} already); resolve it through `tm ticket` first"
+                )));
+            }
+        }
+    }
+}
+
+/// `tm docs attest <doc> --note "..."`: a human closes a `Maintained`/`Human` doc's open review
+/// ticket with an [`tm_docs::reconcile::Attestation`], the only legal path back to `Fresh` for
+/// such a doc (`tm-docs::reconcile`'s own doc comment).
+///
+/// # IMPL
+/// Resolve `args.doc` against the synced registry (by `tm-docs` id or by path), then find the
+/// doc's open reconciliation ticket from `Store::docs`' `provenance_tickets` — `doc.reconciling`'s
+/// materializer arm records it there for exactly this lookup (see `materialize.rs`'s
+/// `EventKind::DocReconciling` arm comment). `tm_docs::reconcile::accept_attestation` is the
+/// pure check for "does the ticket match the doc's open one" before any store write happens
+/// (this function checks `doc.state == Reconciling` itself first, for a plainer error than that
+/// check's own `TicketMismatch` message). The note becomes an artifact
+/// (`store_artifact`, tagged with `HEAD`'s commit sha when the project is a git repo -- see
+/// [`head_commit_sha`]) that doubles as both the ticket's submission evidence
+/// ([`advance_review_ticket_to_submitted`]) and the durable `EvidenceKind::HumanAttestation`
+/// evidence this attestation itself is (`Store::attach_evidence`). The ticket is then closed via
+/// `Store::accept` (human-only, same rule this function's own doc comment states), and
+/// `Store::reconcile_doc` persists the doc's `Fresh` transition so a later `tm docs list` reads
+/// it back without recomputing `accept_attestation` again.
+pub fn docs_attest(
+    args: &DocsAttestArgs,
+    project: &Project,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let (registry, _) = load_and_sync_doc_registry(project)?;
+    let record = registry
+        .list()
+        .into_iter()
+        .find(|r| r.id == args.doc || r.path == args.doc)
+        .cloned()
+        .ok_or_else(|| tm_types::TmError::not_found("doc", &args.doc))?;
+
+    if record.state != tm_docs::registry::DocState::Reconciling {
+        return Err(tm_types::TmError::invariant(format!(
+            "Doc {} isn't under review. Run `tm docs reconcile` first.",
+            record.id
+        )));
+    }
+
+    let doc_path = record.path.clone();
+    let row = project
+        .store
+        .docs()?
+        .into_iter()
+        .find(|r| r.id == doc_path)
+        .ok_or_else(|| tm_types::TmError::not_found("doc", &args.doc))?;
+
+    // `doc_provenance` accumulates every reconciliation ticket ever opened for this doc, not just
+    // the current one; the highest ticket number is the most recently opened, matching ticket ids'
+    // monotonically increasing allocation.
+    let ticket = row
+        .provenance_tickets
+        .iter()
+        .max_by_key(|t| t.number().unwrap_or(0))
+        .cloned()
+        .ok_or_else(|| {
+            tm_types::TmError::invariant(format!(
+                "Doc {} has no open review ticket. Run `tm docs reconcile` first.",
+                record.id
+            ))
+        })?;
+
+    let mut doc_record = record;
+    let attestation = tm_docs::reconcile::Attestation {
+        doc_id: doc_record.id.clone(),
+        ticket: ticket.clone(),
+        attested_by: project.actor.clone(),
+        note: args.note.clone(),
+        evidence: None,
+        ts: project.clock.now(),
+    };
+    // Defense in depth: the check above already refused an out-of-review doc, so this only ever
+    // trips if `ticket` somehow doesn't match the doc's own open one.
+    tm_docs::reconcile::accept_attestation(&mut doc_record, &attestation)?;
+
+    let mut meta = serde_json::json!({"doc": doc_record.id, "kind": "human_attestation"});
+    if let Some(sha) = head_commit_sha(project) {
+        meta["last_verified_commit"] = serde_json::Value::String(sha);
+    }
+    let artifact_events = project.store.store_artifact(
+        tm_core::ArtifactKind::Report,
+        "text/plain".to_string(),
+        args.note.clone().into_bytes(),
+        meta,
+        Some(ticket.clone()),
+        project.actor.clone(),
+    )?;
+    let artifact_id = artifact_events
+        .first()
+        .and_then(|e| tm_types::ArtifactId::new(e.subject.as_str()).ok())
+        .ok_or_else(|| tm_types::TmError::storage("attestation artifact was not recorded"))?;
+
+    advance_review_ticket_to_submitted(project, &ticket, artifact_id.clone())?;
+
+    project.store.attach_evidence(
+        &ticket,
+        tm_core::EvidenceKind::HumanAttestation,
+        &artifact_id,
+        args.note.clone(),
+        project.actor.clone(),
+    )?;
+
+    // Human-only, same as `Store::accept`'s own rule: an agent never certifies its own doc
+    // review.
+    project
+        .store
+        .accept(&ticket, Some(args.note.clone()), project.actor.clone())?;
+
+    project
+        .store
+        .reconcile_doc(doc_path, project.actor.clone())?;
+
+    if renderer.is_json() {
+        renderer.emit(
+            &serde_json::json!({
+                "doc": doc_record.id,
+                "ticket": ticket.to_string(),
+                "state": doc_state_label(tm_docs::registry::DocState::Fresh),
+            }),
+            "",
+        )?;
+    } else {
+        renderer.note(&format!(
+            "Attested doc {} accurate; closed ticket {ticket}",
+            doc_record.id
+        ));
     }
     Ok(())
 }
@@ -3559,6 +3769,79 @@ mod tests {
             maintained_ticket.1,
             "a Maintained doc's review ticket must require a human"
         );
+    }
+
+    #[test]
+    fn docs_attest_closes_review_ticket_and_returns_doc_to_fresh() {
+        // Acceptance: "On a doc with an open Review ticket, attest closes the ticket, writes a
+        // HumanAttestation evidence row, and a following docs list shows Fresh."
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs").join(tm_docs::registry::TMDOCS_TOML),
+            "[[doc]]\npath = \"docs/maintained.md\"\nid = \"maintained\"\nmode = \"maintained\"\nderived_from = []\n",
+        )
+        .unwrap();
+        load_and_sync_doc_registry(&project).unwrap();
+        project
+            .store
+            .invalidate_doc(
+                "docs/maintained.md".into(),
+                "source changed".into(),
+                project.actor.clone(),
+            )
+            .unwrap();
+
+        let renderer = test_renderer();
+        docs_reconcile(&project, &renderer).unwrap();
+
+        let row = project
+            .store
+            .docs()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == "docs/maintained.md")
+            .expect("doc row");
+        assert_eq!(row.state, "reconciling");
+        let ticket = row
+            .provenance_tickets
+            .iter()
+            .max_by_key(|t| t.number().unwrap_or(0))
+            .cloned()
+            .expect("a reconciliation ticket was opened");
+
+        // Note: no manual state-machine driving here -- `docs_attest` itself walks a fresh
+        // `Draft` review ticket (exactly what `docs_reconcile` just left behind) through to
+        // `Submitted` before closing it (`advance_review_ticket_to_submitted`).
+        let attest_args = crate::args::DocsAttestArgs {
+            doc: "maintained".into(),
+            note: "Reviewed by hand; still accurate.".into(),
+        };
+        docs_attest(&attest_args, &project, &renderer).unwrap();
+
+        let view = project.store.view().unwrap();
+        let closed_ticket = view.tickets.get(&ticket).expect("ticket exists");
+        assert_eq!(closed_ticket.state, tm_core::TicketState::Closed);
+
+        let evidence_recorded = view
+            .evidence
+            .iter()
+            .any(|e| e.ticket == ticket && e.kind == tm_core::EvidenceKind::HumanAttestation);
+        assert!(
+            evidence_recorded,
+            "attest must record a HumanAttestation evidence row against the review ticket"
+        );
+
+        let row = project
+            .store
+            .docs()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.id == "docs/maintained.md")
+            .expect("doc row");
+        assert_eq!(row.state, "fresh", "a following docs list must show Fresh");
     }
 
     #[test]

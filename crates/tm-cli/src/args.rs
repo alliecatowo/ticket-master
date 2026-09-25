@@ -953,6 +953,20 @@ pub enum DocsCommand {
     /// Regenerate `Generated` docs and open review tickets for `Maintained`/`Human` docs whose
     /// basis changed.
     Reconcile,
+    /// Record a human's attestation that a doc under review is accurate, closing its open
+    /// review ticket and returning the doc to fresh.
+    Attest(DocsAttestArgs),
+}
+
+/// `tm docs attest`
+#[derive(Debug, Args)]
+pub struct DocsAttestArgs {
+    /// The doc's id or path, as shown by `tm docs list`.
+    #[arg(value_name = "DOC")]
+    pub doc: String,
+    /// Why the doc is considered accurate (or what was changed to make it so).
+    #[arg(long)]
+    pub note: String,
 }
 
 /// `tm templates ...`
