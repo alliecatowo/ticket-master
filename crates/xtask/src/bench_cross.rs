@@ -15,7 +15,7 @@
 //! hygiene` -- see `run`'s own doc comment.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
@@ -34,6 +34,12 @@ pub struct AdapterOutcome {
     pub tokens: Option<u64>,
     /// Spend in micro-dollars, when the tool reports it.
     pub cost_micros: Option<u64>,
+    /// The model the run actually served under, when the tool reports it (e.g. Claude's
+    /// `--output-format json` result object, or tm's own `tm stats`). Recorded so a reader of
+    /// the comparison report can tell "same task, unpinned/differing models" apart from a fair,
+    /// model-controlled comparison, per `docs/audits/2026-09-25-bench-plan.md`'s "Required
+    /// fixes" item 1.
+    pub model: Option<String>,
 }
 
 /// One coding tool under comparison. Implemented once per real tool (`TmAdapter` and friends,
@@ -62,6 +68,8 @@ pub struct CrossTaskResult {
     pub wall_seconds: u32,
     /// `None` when no adapter run for this (tool, task) pair reported a token count.
     pub tokens: Option<u64>,
+    /// `None` when no adapter run for this (tool, task) pair reported which model served it.
+    pub model: Option<String>,
 }
 
 /// The full comparison: every `(tool, task)` pair that ran, in run order.
@@ -231,6 +239,7 @@ pub fn run_comparison(
                         tool_calls: 0,
                         wall_seconds: 0,
                         tokens: None,
+                        model: None,
                     });
                     eprintln!("bench-cross: {tool_name}/{}: {e:?}", task.id);
                     continue;
@@ -241,16 +250,17 @@ pub fn run_comparison(
             let outcome = adapter.run(task, &workdir);
             let wall_seconds = start.elapsed().as_secs() as u32;
 
-            let (tool_calls, tokens, cost_micros, adapter_ran) = match &outcome {
+            let (tool_calls, tokens, model, cost_micros, adapter_ran) = match &outcome {
                 Ok(o) => (
                     o.tool_calls.unwrap_or(0),
                     o.tokens,
+                    o.model.clone(),
                     o.cost_micros.unwrap_or(0),
                     true,
                 ),
                 Err(e) => {
                     eprintln!("bench-cross: {tool_name}/{} adapter failed: {e:?}", task.id);
-                    (0, None, 0, false)
+                    (0, None, None, 0, false)
                 }
             };
 
@@ -266,6 +276,7 @@ pub fn run_comparison(
                 tool_calls,
                 wall_seconds,
                 tokens,
+                model,
             });
         }
     }
@@ -281,16 +292,22 @@ pub fn render_markdown(report: &CrossToolReport) -> String {
         return "# Cross-tool benchmark report\n\nNo tasks ran.\n".to_string();
     }
     let mut out = String::from("# Cross-tool benchmark report\n\n");
-    out.push_str("| Tool | Task | Result | Score | Cost | Tool calls | Wall time |\n");
-    out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str(
+        "| Tool | Task | Model | Result | Score | Cost | Tokens | Tool calls | Wall time |\n",
+    );
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for r in &report.results {
         out.push_str(&format!(
-            "| {} | {} | {} | {:.2} | ${:.4} | {} | {}s |\n",
+            "| {} | {} | {} | {} | {:.2} | ${:.4} | {} | {} | {}s |\n",
             r.tool,
             r.task_id,
+            r.model.as_deref().unwrap_or("-"),
             if r.passed { "pass" } else { "fail" },
             r.score,
             r.cost_micros as f64 / 1_000_000.0,
+            r.tokens
+                .map(|t| t.to_string())
+                .unwrap_or_else(|| "-".to_string()),
             r.tool_calls,
             r.wall_seconds,
         ));
@@ -326,6 +343,12 @@ impl TmAdapter {
         let output = Command::new(&self.binary)
             .args(&full_args)
             .current_dir(workdir)
+            // `tm` never expects to read from stdin here (every one of these calls is
+            // non-interactive), and an inherited *open* stdin pipe (e.g. this xtask itself
+            // running under a CI runner or another tool's pipe) can make a child that probes
+            // stdin block indefinitely rather than treating "nothing there" as EOF -- the same
+            // hang this closes off for the other three adapters below.
+            .stdin(Stdio::null())
             .output()
             .with_context(|| format!("failed to run `tm {}`", full_args.join(" ")))?;
         if !output.status.success() {
@@ -372,6 +395,11 @@ impl ToolAdapter for TmAdapter {
                 tool_calls: Some(m.tool_calls),
                 tokens: Some(m.tokens_in.saturating_add(m.tokens_out)),
                 cost_micros: Some(m.dollars_micros),
+                // `TicketMetrics` (the pure fold `tm stats` renders from) doesn't carry a model
+                // column -- it attributes cost/tokens per (provider, model) pair only under
+                // `tm stats --by model`, not per-ticket, so this adapter has nothing to report
+                // here yet.
+                model: None,
             }),
             None => Ok(AdapterOutcome::default()),
         }
@@ -392,6 +420,10 @@ impl ToolAdapter for ClaudeAdapter {
         let output = Command::new(&self.binary)
             .args(["-p", &task.task, "--output-format", "json"])
             .current_dir(workdir)
+            // Closed, not just unpiped: `claude -p` probes stdin for piped input and prints
+            // "no stdin data received in 3s" then hangs when it's an open pipe with nothing
+            // written to it (the real failure this fixes -- see this module's own doc comment).
+            .stdin(Stdio::null())
             .output()
             .context("failed to run `claude -p`")?;
         // Best-effort: `claude -p --output-format json` prints one JSON result object with a
@@ -414,6 +446,10 @@ impl ToolAdapter for OpencodeAdapter {
         let output = Command::new(&self.binary)
             .args(["run", &task.task, "--format", "json"])
             .current_dir(workdir)
+            // `opencode run` hung for the full timeout against an open stdin pipe and finished
+            // in 14s against `/dev/null` (docs/audits/2026-09-25-bench-plan.md's evidence) --
+            // close it explicitly rather than inheriting whatever the caller's stdin is.
+            .stdin(Stdio::null())
             .output()
             .context("failed to run `opencode run`")?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -432,6 +468,7 @@ impl ToolAdapter for CodexAdapter {
         let output = Command::new(&self.binary)
             .args(["exec", &task.task, "--json"])
             .current_dir(workdir)
+            .stdin(Stdio::null())
             .output()
             .context("failed to run `codex exec`")?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -471,6 +508,7 @@ fn parse_best_effort_usage(text: &str) -> AdapterOutcome {
                 .and_then(|v| v.as_f64())
                 .map(|dollars| (dollars * 1_000_000.0).round() as u64)
         });
+        outcome.model = find_str(&value, &["model", "model_id", "modelId"]);
         break;
     }
     outcome
@@ -487,6 +525,13 @@ fn find_u64(value: &serde_json::Value, keys: &[&str]) -> Option<u64> {
     keys.iter()
         .find_map(|k| value.get(*k))
         .and_then(|v| v.as_u64())
+}
+
+fn find_str(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|k| value.get(*k))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// `cargo xtask bench-cross [--tools tm,opencode,...] [--task <filter>] [--out <dir>]
@@ -633,6 +678,7 @@ mod tests {
                     tool_calls: Some(1),
                     tokens: Some(100),
                     cost_micros: Some(1_000),
+                    model: Some("fake-model".to_string()),
                 },
             }
         }
@@ -709,6 +755,7 @@ mod tests {
                     tool_calls: 2,
                     wall_seconds: 3,
                     tokens: Some(42),
+                    model: Some("claude-sonnet-5".to_string()),
                 },
                 CrossTaskResult {
                     tool: "opencode".to_string(),
@@ -719,13 +766,15 @@ mod tests {
                     tool_calls: 0,
                     wall_seconds: 1,
                     tokens: None,
+                    model: None,
                 },
             ],
         };
         let markdown = render_markdown(&report);
-        assert!(markdown.contains("| Tool | Task |"));
-        assert!(markdown.contains("| tm | live-smoke | pass"));
-        assert!(markdown.contains("| opencode | live-smoke | fail"));
+        assert!(markdown.contains("| Tool | Task | Model |"));
+        assert!(markdown.contains("Tokens"));
+        assert!(markdown.contains("| tm | live-smoke | claude-sonnet-5 | pass"));
+        assert!(markdown.contains("| opencode | live-smoke | - | fail"));
     }
 
     #[test]
@@ -744,10 +793,11 @@ mod tests {
 
     #[test]
     fn parse_best_effort_usage_reads_claude_style_usage_object() {
-        let text = r#"{"usage":{"input_tokens":10,"output_tokens":5},"cost_usd":0.002}"#;
+        let text = r#"{"usage":{"input_tokens":10,"output_tokens":5},"cost_usd":0.002,"model":"claude-sonnet-5"}"#;
         let outcome = parse_best_effort_usage(text);
         assert_eq!(outcome.tokens, Some(15));
         assert_eq!(outcome.cost_micros, Some(2_000));
+        assert_eq!(outcome.model.as_deref(), Some("claude-sonnet-5"));
     }
 
     #[test]
@@ -756,6 +806,7 @@ mod tests {
         assert!(outcome.tool_calls.is_none());
         assert!(outcome.tokens.is_none());
         assert!(outcome.cost_micros.is_none());
+        assert!(outcome.model.is_none());
     }
 
     #[test]
