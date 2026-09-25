@@ -1,0 +1,28 @@
+# See py-list-chunk-off-by-one.toml's header comment for this directory's shape and
+# `bench/tools/PROVENANCE.md` for provenance/license.
+
+id = "py-merge-counts-overwrites"
+task = "Fix merge_counts() in solution.py so shared keys are summed instead of overwritten."
+
+[fixture]
+path = "fixtures/py-merge-counts-overwrites"
+description = "solution.py's merge_counts() overwrites shared keys instead of summing; test_solution.py covers it."
+test_command = ["python3", "-m", "unittest", "test_solution"]
+setup_commands = []
+
+[scoring]
+success_weight = 0.6
+cost_weight = 0.1
+latency_weight = 0.1
+tool_count_weight = 0.1
+context_weight = 0.1
+unnecessary_ops_weight = 0.0
+
+[expected]
+max_cost_micros = 10000
+max_wall_seconds = 60
+max_tool_calls = 5
+max_context_bytes = 10000
+
+[expected.predicate]
+tests_pass = { suite = "py-merge-counts-overwrites" }

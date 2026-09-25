@@ -1,0 +1,9 @@
+--- solution.py
++++ solution.py
+@@ -5,5 +5,5 @@
+     """Split items into consecutive chunks of at most size elements each."""
+     chunks = []
+     for i in range(0, len(items), size):
+-        chunks.append(items[i:i + size - 1])
++        chunks.append(items[i:i + size])
+     return chunks

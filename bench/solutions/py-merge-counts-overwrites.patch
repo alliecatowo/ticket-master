@@ -1,0 +1,9 @@
+--- solution.py
++++ solution.py
+@@ -5,5 +5,5 @@
+     """Merge two dicts of counts, summing values for keys present in both."""
+     result = dict(a)
+     for key, value in b.items():
+-        result[key] = value
++        result[key] = result.get(key, 0) + value
+     return result

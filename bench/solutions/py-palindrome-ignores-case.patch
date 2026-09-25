@@ -1,0 +1,9 @@
+--- solution.py
++++ solution.py
+@@ -3,4 +3,5 @@
+ 
+ def is_palindrome(text):
+     """Return True if text is a palindrome, ignoring case."""
+-    return text == text[::-1]
++    lowered = text.lower()
++    return lowered == lowered[::-1]
