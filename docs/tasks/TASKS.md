@@ -1239,7 +1239,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-tui`
   evidence: The TUI trial: the `?` panel on the tickets screen had no Tab row, and the footer said `enter to collapse · esc to go back` on an empty list.
 
-- [ ] **u1-tui-overlay-swallows-quit** — Ctrl+C twice must quit from any overlay (shortcuts panel, peek), as it does from the base screen
+- [~] **u1-tui-overlay-swallows-quit** — Ctrl+C twice must quit from any overlay (shortcuts panel, peek), as it does from the base screen (needs another pass: the worker made no changes)
   model: haiku · severity: low · builds Rust: yes · area: tui · deps: u1-chat-header-unusable-model
   files: `crates/tm-cli/src/tui.rs`
   change: With the tickets screen's `?` panel open, Ctrl+C, Ctrl+C left the TUI running with the panel still open. Route Ctrl+C to the app-level quit handler (first press closes the overlay and arms quit, second press quits) before overlay key handling.
