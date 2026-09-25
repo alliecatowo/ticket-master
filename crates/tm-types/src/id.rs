@@ -93,7 +93,7 @@ fn valid_hex(s: &str, prefix: &str, len: usize) -> bool {
 }
 
 macro_rules! id_newtype {
-    ($name:ident, $doc:literal, $validate:expr, $shape:literal, $friendly_name:literal) => {
+    ($name:ident, $doc:literal, $validate:expr, $shape:literal, $friendly_name:literal, $example:literal) => {
         #[doc = $doc]
         #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name(String);
@@ -107,10 +107,8 @@ macro_rules! id_newtype {
                     Ok($name(s))
                 } else {
                     Err(TmError::parse(format!(
-                        "{} must look like {} (e.g. {})",
-                        $friendly_name,
-                        $shape,
-                        $shape.split(',').next().unwrap_or($shape)
+                        "{} must look like {} (e.g. {}), got \"{}\"",
+                        $friendly_name, $shape, $example, s
                     )))
                 }
             }
@@ -177,42 +175,48 @@ id_newtype!(
     "A ticket identifier. Work tickets are `T-<n>`; verification nodes are `V-<n>`; audit nodes are `A-<n>`.",
     |s| valid_numeric(s, &["T-", "V-", "A-"]),
     "T-<n>, V-<n> or A-<n>",
-    "ticket ID"
+    "ticket ID",
+    "T-12"
 );
 id_newtype!(
     MilestoneId,
     "A milestone identifier, `M-<n>`.",
     |s| valid_numeric(s, &["M-"]),
     "M-<n>",
-    "milestone ID"
+    "milestone ID",
+    "M-3"
 );
 id_newtype!(
     DecisionId,
     "A decision identifier, `D-<n>`.",
     |s| valid_numeric(s, &["D-"]),
     "D-<n>",
-    "decision ID"
+    "decision ID",
+    "D-001"
 );
 id_newtype!(
     SessionId,
     "A session identifier, `S-<n>`.",
     |s| valid_numeric(s, &["S-"]),
     "S-<n>",
-    "session ID"
+    "session ID",
+    "S-4"
 );
 id_newtype!(
     ArtifactId,
     "An artifact identifier, `ART-<hex12>`.",
     |s| valid_hex(s, "ART-", 12),
     "ART-<12 lowercase hex digits>",
-    "artifact ID"
+    "artifact ID",
+    "ART-9f2a1c0b77de"
 );
 id_newtype!(
     LeaseId,
     "A lease identifier, `L-<hex12>`.",
     |s| valid_hex(s, "L-", 12),
     "L-<12 lowercase hex digits>",
-    "lease ID"
+    "lease ID",
+    "L-0123456789ab"
 );
 id_newtype!(
     ParticipantId,
@@ -227,8 +231,9 @@ id_newtype!(
             s == "system"
         }
     },
-    "agent:<provider>/<id>, human:<handle> or system",
-    "participant ID"
+    "agent:<provider>/<id>, human:<handle>, or system",
+    "actor",
+    "agent:claude/worker-1"
 );
 
 impl TicketId {
@@ -393,5 +398,89 @@ mod tests {
         assert_eq!(Id::new("ART-000000000000").kind(), Some(IdKind::Artifact));
         assert_eq!(Id::new("whatever").kind(), None);
         assert!(Id::none().is_empty());
+    }
+
+    #[test]
+    fn ticket_id_error_message_is_plain_language() {
+        let err = TicketId::new("invalid-id").unwrap_err().to_string();
+        assert!(
+            err.contains("ticket ID"),
+            "error should mention 'ticket ID', got: {err}"
+        );
+        assert!(
+            err.contains("invalid-id"),
+            "error should show rejected input, got: {err}"
+        );
+        assert!(
+            !err.contains("TicketId"),
+            "error should not contain type name, got: {err}"
+        );
+        assert!(
+            err.contains("T-12"),
+            "error should show example, got: {err}"
+        );
+    }
+
+    #[test]
+    fn decision_id_error_message_is_plain_language() {
+        let err = DecisionId::new("invalid-id").unwrap_err().to_string();
+        assert!(
+            err.contains("decision ID"),
+            "error should mention 'decision ID', got: {err}"
+        );
+        assert!(
+            err.contains("invalid-id"),
+            "error should show rejected input, got: {err}"
+        );
+        assert!(
+            !err.contains("DecisionId"),
+            "error should not contain type name, got: {err}"
+        );
+        assert!(
+            err.contains("D-001"),
+            "error should show example, got: {err}"
+        );
+    }
+
+    #[test]
+    fn lease_id_error_message_is_plain_language() {
+        let err = LeaseId::new("invalid-id").unwrap_err().to_string();
+        assert!(
+            err.contains("lease ID"),
+            "error should mention 'lease ID', got: {err}"
+        );
+        assert!(
+            err.contains("invalid-id"),
+            "error should show rejected input, got: {err}"
+        );
+        assert!(
+            !err.contains("LeaseId"),
+            "error should not contain type name, got: {err}"
+        );
+        assert!(
+            err.contains("L-0123456789ab"),
+            "error should show example, got: {err}"
+        );
+    }
+
+    #[test]
+    fn participant_id_error_message_is_plain_language() {
+        let err = ParticipantId::new("invalid").unwrap_err().to_string();
+        assert!(
+            err.contains("actor"),
+            "error should mention 'actor', got: {err}"
+        );
+        assert!(
+            err.contains("invalid"),
+            "error should show rejected input, got: {err}"
+        );
+        assert!(
+            !err.contains("ParticipantId"),
+            "error should not contain type name, got: {err}"
+        );
+        assert!(
+            err.contains("agent:claude/worker-1"),
+            "error should show example, got: {err}"
+        );
     }
 }

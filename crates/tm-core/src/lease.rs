@@ -42,6 +42,16 @@ impl Lease {
 /// Why [`acquire`] refused to grant a lease.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AcquireError {
+    /// A live lease already holds the ticket.
+    #[error("{ticket} is already being worked by {holder} until {until}")]
+    AlreadyLeased {
+        /// The ticket that already has a live lease.
+        ticket: TicketId,
+        /// The participant currently holding that lease.
+        holder: ParticipantId,
+        /// When the current lease's heartbeat/TTL window ends.
+        until: Timestamp,
+    },
     /// The ticket was not in [`TicketState::Ready`].
     #[error("ticket {0} is not Ready")]
     NotReady(TicketId),
@@ -112,6 +122,16 @@ impl LeaseStore {
         ttl_seconds: u32,
         epoch: u64,
     ) -> Result<Lease, AcquireError> {
+        // Check for existing lease before the Ready check to provide a better error message
+        for live in view.live_leases() {
+            if live.ticket == ticket {
+                return Err(AcquireError::AlreadyLeased {
+                    ticket: ticket.clone(),
+                    holder: live.holder.clone(),
+                    until: live.heartbeat.plus_seconds(i64::from(live.ttl_seconds)),
+                });
+            }
+        }
         if ticket_state != TicketState::Ready {
             return Err(AcquireError::NotReady(ticket));
         }
@@ -193,6 +213,14 @@ mod tests {
 
     fn ticket_id() -> TicketId {
         TicketId::new("T-1").unwrap()
+    }
+
+    /// A second, distinct ticket, for the resource-conflict tests: `acquire`'s `AlreadyLeased`
+    /// check refuses a second lease on the *same* ticket outright, before it ever reaches the
+    /// resource-conflict check, so exercising resource-claim conflicts specifically needs an
+    /// existing lease on a different ticket than the one being acquired.
+    fn other_ticket_id() -> TicketId {
+        TicketId::new("T-2").unwrap()
     }
 
     fn lease_id(n: &str) -> tm_types::LeaseId {
@@ -300,7 +328,8 @@ mod tests {
     #[test]
     fn acquire_fails_on_overlapping_exclusive_resource_claim() {
         let now = FixedClock::epoch().now();
-        let existing = base_lease(now);
+        let mut existing = base_lease(now);
+        existing.ticket = other_ticket_id();
         let view = FixedView(vec![existing]);
         let err = LeaseStore::acquire(
             TicketState::Ready,
@@ -323,6 +352,7 @@ mod tests {
     fn acquire_succeeds_when_both_claims_are_shared() {
         let now = FixedClock::epoch().now();
         let mut existing = base_lease(now);
+        existing.ticket = other_ticket_id();
         existing.resources = vec![claim(&["src/**"], crate::ticket::ResourceMode::Shared)];
         let view = FixedView(vec![existing]);
         let result = LeaseStore::acquire(
@@ -339,6 +369,43 @@ mod tests {
             0,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn acquire_fails_with_already_leased_error_when_ticket_already_leased() {
+        let clock = FixedClock::epoch();
+        let now = clock.now();
+        let existing_holder = ParticipantId::new("agent:mock/worker-1").unwrap();
+        let mut existing = base_lease(now);
+        existing.holder = existing_holder.clone();
+        existing.ttl_seconds = 30;
+        let view = FixedView(vec![existing]);
+
+        let err = LeaseStore::acquire(
+            TicketState::Ready,
+            &Authority::root(),
+            &view,
+            lease_id("cccccccccccc"),
+            ticket_id(),
+            holder(),
+            Authority::none(),
+            vec![],
+            now,
+            60,
+            0,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, AcquireError::AlreadyLeased { .. }));
+        let err_str = err.to_string();
+        assert!(
+            err_str.contains("already being worked by"),
+            "error should describe the lease holder, got: {err_str}"
+        );
+        assert!(
+            err_str.contains("agent:mock/worker-1"),
+            "error should name the lease holder, got: {err_str}"
+        );
     }
 
     #[test]
