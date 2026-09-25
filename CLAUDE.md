@@ -175,9 +175,10 @@ never drift between sessions:
   (in practice this fires right after `Ignition` commits the Draft ticket graph, since nothing
   activates those tickets on its own), or after the maturity gate fails once, it prints the
   ticket count and milestone, says to run `tm sched run` (or `tm run <T>`) then re-run `tm
-  genesis`, and exits 0. Re-running today starts a fresh run rather than resuming the stopped
-  one — `GenesisDriver::resume` exists but `genesis()` doesn't call it yet (separate task:
-  `genesis-cli-resume-flag`). See `docs/decisions/D-027-genesis-cli-stops-for-work.md`. Under
+  genesis`, and exits 0. Re-run with `tm genesis --resume` to continue that stopped run from its
+  persisted stage instead of starting over (an omitted `--prompt` auto-detects a persisted
+  snapshot the same way; `--resume` with no snapshot yet is a real error). See
+  `docs/decisions/D-027-genesis-cli-stops-for-work.md`. Under
   `TM_TEST_MOCK_PROVIDER=1` (the same offline test hook `tm run` and chat turns honor via
   `crate::agent::TEST_MOCK_PROVIDER_ENV`), `tm genesis` skips provider resolution entirely:
   `resolve_genesis_provider` returns a `MockProvider` scripted with
@@ -373,6 +374,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   (`Submitted`/`Verifying`/`Auditing`/`Closed`); anything else — a retry, an escalation, a
   `RUN_TICKET_MAX_WAIT` detach — leaves it on disk with the `git worktree remove --force` command
   to clean it up by hand printed alongside.
+- `tm run <ticket> --record <path>` captures every provider call the run makes to a cassette file
+  at `<path>` (`docs/decisions/D-028-record-replay-harness.md`) and stores those same bytes as the
+  ticket's `ArtifactKind::Transcript` artifact once the run finishes; combinable with
+  `--worktree`. `tm run --replay <path>` (offline ordered replay) is a separate later task.
 
 ## Background and parallel subagents
 

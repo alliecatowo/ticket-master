@@ -331,12 +331,19 @@ pub struct AttachArgs {
     pub path: Option<PathBuf>,
 }
 
-/// `tm genesis [--prompt <text>|-]`
+/// `tm genesis [--prompt <text>|-] [--resume]`
 #[derive(Debug, Args)]
 pub struct GenesisArgs {
     /// The seed prompt describing the project to build. Pass `-` to read the prompt from stdin.
     #[arg(long, value_name = "TEXT|-")]
     pub prompt: Option<String>,
+
+    /// Resume the most recently stopped genesis run instead of starting a fresh one. Implied
+    /// automatically when `--prompt` is omitted and a persisted snapshot exists; pass this
+    /// explicitly to make the intent clear, or to get a real error instead of a silent fresh
+    /// start when no snapshot exists yet.
+    #[arg(long)]
+    pub resume: bool,
 }
 
 /// `tm status`
@@ -780,6 +787,11 @@ pub struct RunArgs {
     /// one commit.
     #[arg(long)]
     pub worktree: bool,
+    /// Capture every provider call this run makes to a cassette file at `<path>`, and save it
+    /// as the ticket's transcript once the run finishes. Without this flag, behavior is
+    /// unchanged.
+    #[arg(long, value_name = "PATH")]
+    pub record: Option<PathBuf>,
 }
 
 /// The retrieval mode for `tm search`.
