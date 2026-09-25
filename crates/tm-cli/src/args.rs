@@ -1097,6 +1097,12 @@ pub struct BenchRunArgs {
     /// Where to write the resulting `BenchmarkReport` JSON.
     #[arg(long, value_name = "PATH")]
     pub out: Option<PathBuf>,
+    /// Run each task for real instead of replaying a fixed script: a worker actually attempts
+    /// the task in a scratch copy of its fixture, and pass/fail comes from running the task's
+    /// own test command. Slower and non-deterministic (a real model call per task), and costs
+    /// real money unless a mock provider is configured for the run.
+    #[arg(long)]
+    pub live: bool,
 }
 
 /// `tm bench compare`

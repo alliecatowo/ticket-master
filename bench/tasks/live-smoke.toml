@@ -1,0 +1,35 @@
+# A purpose-built `--live` fixture (`bench-live-seeded-provider`,
+# `docs/decisions/D-032-live-benchmark-mode.md`): its `test_command` always exits zero, so this
+# task exists to prove `tm bench run --live`'s own plumbing works end to end (a real ticket
+# actually created, activated, and driven to completion; a cassette actually recorded; real
+# metrics actually folded from the scratch project's event log), not to test whether a worker can
+# solve anything. `test_command` is set with no scripted `script.txt` content in
+# `fixtures/live-smoke/`, so the default, non-live `tm bench run` treats this as a live-only task
+# and skips it (`tm-harness/src/bench.rs`'s `BenchRunner::run_all` doc comment) — this task is
+# invisible to the scripted path, matching every other `test_command`-bearing fixture in this
+# directory.
+
+id = "live-smoke"
+task = "This is a smoke test of tm's own live benchmark mode; no code change is needed. Reply to confirm you're ready."
+
+[fixture]
+path = "fixtures/live-smoke"
+description = "A single NOTE.md; nothing here needs editing. test_command is `true`, which always exits zero."
+test_command = ["true"]
+
+[scoring]
+success_weight = 1.0
+cost_weight = 0.0
+latency_weight = 0.0
+tool_count_weight = 0.0
+context_weight = 0.0
+unnecessary_ops_weight = 0.0
+
+[expected]
+max_cost_micros = 10000000
+max_wall_seconds = 600
+max_tool_calls = 50
+max_context_bytes = 10000000
+
+[expected.predicate]
+tests_pass = {}

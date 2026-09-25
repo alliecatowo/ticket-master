@@ -17,6 +17,8 @@
 //! - [`sched`] — the `sched`, `lease`, and `run` command groups.
 //! - [`search`] — the `search`, `symbol`, and `history` command groups over `tm-codeintel`.
 //! - [`ops`] — the `docs`, `provider`, `harness`, `bench`, `mirror`, and `events` command groups.
+//! - [`bench_live`] — `tm bench run --live`'s [`tm_harness::SeededProvider`] adapter, which
+//!   drives each task through a real ticket run instead of a fixed script.
 //! - [`auth`] — the `auth` command (`SPEC.md` §28.2) over `tm-auth`.
 //! - [`workflow`] — the `workflow` command group (`SPEC.md` §25) over `tm-workflow`.
 //! - [`drive`] — the `browser` and `computer` command groups over `tm-browser`/`tm-computer`.
@@ -43,6 +45,7 @@ pub mod acp;
 pub mod agent;
 pub mod args;
 pub mod auth;
+pub mod bench_live;
 pub mod bench_report;
 pub mod dispatch;
 pub mod drive;

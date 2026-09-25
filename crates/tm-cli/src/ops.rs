@@ -1823,7 +1823,10 @@ pub fn bench_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()
 /// Build a `BenchRunner` over a `SeededProvider`, run every task matching `args.filter` via
 /// `BenchRunner::run_all`, write the resulting `BenchmarkReport` to `args.out` if given (else
 /// `.tm/bench/<timestamp>.json`), render a summary table (task, pass/fail, score) or the full
-/// report as JSON.
+/// report as JSON. `args.live` swaps the scripted `FixtureScriptProvider` for
+/// `crate::bench_live::LiveSeededProvider` — a real ticket run per task instead of a replayed
+/// transcript — and patches the resulting report's cost/tool-call numbers with what that run
+/// actually recorded.
 pub async fn bench_run(
     args: &BenchRunArgs,
     project: &Project,
@@ -1841,7 +1844,6 @@ pub async fn bench_run(
         .collect();
 
     let bench_root = project.root.join("bench");
-    let provider = FixtureScriptProvider::load(&bench_root, &filtered)?;
 
     // The epoch a run is scored against is the highest epoch actually promoted so far (0, the
     // never-persisted genesis epoch, when nothing has been promoted yet — see
@@ -1859,7 +1861,17 @@ pub async fn bench_run(
         clock: project.clock.as_ref(),
         ids: project.ids.as_ref(),
     };
-    let report = runner.run_all(&filtered, &provider, epoch)?;
+    let report = if args.live {
+        // `--live` drives every matched task through a real ticket run instead of replaying
+        // `bench/<fixture>/script.txt` — see `crate::bench_live`'s own module doc comment.
+        let provider = crate::bench_live::LiveSeededProvider::new(project, renderer);
+        let mut report = runner.run_all(&filtered, &provider, epoch)?;
+        provider.apply_live_metrics(&mut report);
+        report
+    } else {
+        let provider = FixtureScriptProvider::load(&bench_root, &filtered)?;
+        runner.run_all(&filtered, &provider, epoch)?
+    };
 
     let out_path = args.out.clone().unwrap_or_else(|| {
         project.state_dir.join("bench").join(format!(
@@ -3784,6 +3796,109 @@ mod tests {
     #[test]
     fn bench_run_creates_report() {
         // Bench run should create a report
+    }
+
+    /// No other test in this crate mutates `TEST_MOCK_PROVIDER_ENV` inside `ops.rs`, but this
+    /// guards against a future one racing this test's transient env mutation under `cargo test`'s
+    /// default multi-threaded runner -- same convention as `agent.rs`'s
+    /// `devpass_build_fabric_env_lock`/`sched.rs`'s `record_test_env_lock`.
+    fn live_bench_test_env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// `bench-live-seeded-provider`'s acceptance check: under `TM_TEST_MOCK_PROVIDER=1`,
+    /// `tm bench run --live --filter live-smoke` drives a real ticket to completion through
+    /// `crate::sched::run_ticket` (never a reimplementation of it), actually runs the task's
+    /// `test_command`, records a cassette next to the report, and folds real numbers into the
+    /// resulting `TaskResult`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bench_run_live_produces_a_real_task_result_from_a_real_ticket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = test_renderer();
+
+        let fixture_dir = dir.path().join("bench").join("fixtures").join("live-smoke");
+        std::fs::create_dir_all(&fixture_dir).unwrap();
+        std::fs::write(fixture_dir.join("NOTE.md"), "live-smoke fixture\n").unwrap();
+        std::fs::write(fixture_dir.join("script.txt"), "").unwrap();
+
+        let tasks_dir = dir.path().join("bench").join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        std::fs::write(
+            tasks_dir.join("live-smoke.toml"),
+            r#"
+id = "live-smoke"
+task = "Reply to confirm you're ready; no code changes are needed."
+
+[fixture]
+path = "fixtures/live-smoke"
+description = "smoke test fixture"
+test_command = ["true"]
+
+[scoring]
+success_weight = 1.0
+cost_weight = 0.0
+latency_weight = 0.0
+tool_count_weight = 0.0
+context_weight = 0.0
+unnecessary_ops_weight = 0.0
+
+[expected]
+max_cost_micros = 10000000
+max_wall_seconds = 600
+max_tool_calls = 50
+max_context_bytes = 10000000
+
+[expected.predicate]
+tests_pass = {}
+"#,
+        )
+        .unwrap();
+
+        let out_path = dir.path().join("report.json");
+        let args = BenchRunArgs {
+            filter: Some("live-smoke".to_string()),
+            out: Some(out_path.clone()),
+            live: true,
+        };
+
+        {
+            let _guard = live_bench_test_env_lock().lock().await;
+            std::env::set_var(crate::agent::TEST_MOCK_PROVIDER_ENV, "1");
+            let result = bench_run(&args, &project, &renderer).await;
+            std::env::remove_var(crate::agent::TEST_MOCK_PROVIDER_ENV);
+            result.expect("a live bench run of the smoke task should succeed");
+        }
+
+        let report: tm_harness::BenchmarkReport =
+            serde_json::from_str(&std::fs::read_to_string(&out_path).expect("read report"))
+                .expect("parse report");
+        assert_eq!(
+            report.tasks.len(),
+            1,
+            "the live-smoke task should have run, not been skipped"
+        );
+        let task_result = &report.tasks[0];
+        assert_eq!(task_result.task_id, "live-smoke");
+        assert!(
+            task_result.passed,
+            "the smoke task's `true` test command always exits zero"
+        );
+        assert!(
+            task_result.context_bytes > 0,
+            "a real ticket run should record a nonzero token count"
+        );
+
+        let cassette_path = project
+            .state_dir
+            .join("bench")
+            .join("live")
+            .join("live-smoke.cassette.jsonl");
+        assert!(
+            cassette_path.is_file(),
+            "a cassette should have been recorded next to the report"
+        );
     }
 
     #[test]
