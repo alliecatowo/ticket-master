@@ -583,7 +583,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-tui`
   evidence: workflow wf_87a85411-848's critic result, "missing" item 9(2): the TUI slash-command list gets no entries for stats/bench/events/replay/genesis/search/symbol, cross-checked against `crates/tm-tui/src/chat/commands.rs`'s current command set.
 
-- [ ] **critic-secure-kaggle-token** — Store the owner-pasted Kaggle API token safely; never in prompts, commits, or TASKS.md
+- [~] **critic-secure-kaggle-token** — Store the owner-pasted Kaggle API token safely; never in prompts, commits, or TASKS.md (needs the owner: add KAGGLE_API_TOKEN to the primary checkout's .env directly, then rotate the token in Kaggle account settings)
   model: haiku · severity: low · builds Rust: no · area: security · deps: none
   files: `.env`, `docs/backlog.md`
   change: The owner pasted a live Kaggle API token directly into a chat turn during this session (for the Laya fine-tune path per `d20-backlog-status-accepted`'s research notes). Treat it as already exposed: add it only to `.env` (gitignored, never printed/echoed/committed per this repo's hard rules) under a clearly named key (e.g. `KAGGLE_API_TOKEN`), and add a one-line note next to the existing DevPass-key-rotation entry in `docs/backlog.md` recording that a second credential (Kaggle) is pending rotation once the Laya fine-tune work actually needs it. Do not paste the token's value anywhere in `docs/`, `TASKS.md`, commit messages, or agent transcripts going forward.
@@ -763,7 +763,7 @@ Gate: `mise run verify`
   acceptance: The test passes deterministically in a few seconds, makes no network calls and cannot hang, because the timeout guard fails the test instead of hanging.
   test: `mise run test:crate -- tm-cli`
 
-- [ ] **mirror-persist-content-hash-for-idempotency** — Add content_hash to mirror_links so push idempotency survives restarts
+- [x] **mirror-persist-content-hash-for-idempotency** — Add content_hash to mirror_links so push idempotency survives restarts (landed 143c276)
   model: sonnet · size: M · builds Rust: yes · area: mirror (SPEC §28) · deps: none
   files: `crates/tm-core/src/schema.rs`, `crates/tm-core/src/store.rs`, `crates/tm-cli/src/ops.rs`
   change: Add a content_hash TEXT column to mirror_links (schema.rs:271-277), with a schema-version bump that follows the file's existing migration convention. Thread the column through MirrorLinkRow's read and write helpers in store.rs. Change mirror_push (ops.rs:1870-1893) to look up the existing row and pass Some(MirrorLink{..., content_hash}) to SyncEngine::push instead of None. Update the doc comment that explains why it was None.
@@ -864,7 +864,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **replay-cli-replay-flag** — tm run <T> --replay <path>: offline ordered replay with divergence report
+- [x] **replay-cli-replay-flag** — tm run <T> --replay <path>: offline ordered replay with divergence report (landed 5483da7)
   model: sonnet · size: M · builds Rust: yes · area: replay · deps: replay-cli-record-flag
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/sched.rs`, `crates/tm-cli/src/dispatch.rs`, `crates/tm-cli/src/agent.rs`, `docs/decisions/D-NNN-record-replay-harness.md`, `CLAUDE.md`
   change: Add --replay <path>, which conflicts with --record, and --strict-replay. Build the fabric so each recorded role's provider is MockProvider::script_from_cassette, which uses ordered replay; no network is possible. When the run ends, report the divergence count and the first divergent seq, as JSON under --json. Under --strict-replay, any divergence or exhaustion (Unscripted) is a hard error. Amend [new decision: record/replay cassettes] and CLAUDE.md.
@@ -882,7 +882,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **tel-stats-cli-command** — tm stats: per-ticket/day/model/tool rollups over local telemetry
+- [x] **tel-stats-cli-command** — tm stats: per-ticket/day/model/tool rollups over local telemetry (landed b303b89)
   model: sonnet · size: M · builds Rust: yes · area: telemetry · deps: tel-ticket-metrics-fold, tel-tool-call-event-kind, tel-usage-payload-model-field
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/stats.rs`, `crates/tm-cli/src/lib.rs`, `crates/tm-cli/src/main.rs`, `CLAUDE.md`, `docs/decisions/D-NNN-local-telemetry.md`
   change: Add Command::Stats(StatsArgs) with `--by ticket|day|model|tool` (default ticket), `--ticket T` and --json. Read the project's EventLog. Per ticket, use tm_harness ticket_metrics_from_events. Day buckets come from event timestamps. Model grouping uses usage.recorded provider and model, with None shown as 'unattributed'. Tool grouping reports count, failures and average duration_ms. Keep the aggregation in a pure, unit-tested function and render a Table or JSON. Wire it up in main.rs and lib.rs, then amend [new decision: telemetry and cost attribution] and CLAUDE.md. Absorbs tel-stats-tools-rollup.
@@ -1015,7 +1015,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **genesis-wire-template-catalog** — Pass a real template catalog into GenesisDriver's graph compilation
+- [x] **genesis-wire-template-catalog** — Pass a real template catalog into GenesisDriver's graph compilation (landed 655e822)
   model: sonnet · size: M · builds Rust: yes · area: genesis · deps: genesis-explicit-v0-v1-milestone-marking, genesis-cli-resume-flag
   files: `crates/tm-genesis/src/stages.rs`, `crates/tm-cli/src/project.rs`, `crates/tm-templates/src/lib.rs`
   change: stages.rs:401-416 passes `&[]` as the catalog. Recommended: tm-templates exposes a bundled catalog (manifests from templates/starter embedded at compile time) with a TM_TEMPLATES_DIR runtime override. GenesisDriver takes the catalog as a constructor argument, and the CLI supplies it. Remove the 'no catalog wired' comment.

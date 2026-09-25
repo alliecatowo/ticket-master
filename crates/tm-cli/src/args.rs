@@ -162,6 +162,9 @@ pub enum Command {
     #[command(display_order = 2)]
     Status(StatusArgs),
 
+    /// Roll up local usage into tables: by ticket, by day, by model, or by tool.
+    Stats(StatsArgs),
+
     /// Run invariants, the hash-chain check, index health, and computer-use permission probes.
     #[command(display_order = 8)]
     Doctor(DoctorArgs),
@@ -362,6 +365,30 @@ pub struct DoctorArgs {
     /// macOS).
     #[arg(long)]
     pub skip_computer_probe: bool,
+}
+
+/// `tm stats`
+#[derive(Debug, Args)]
+pub struct StatsArgs {
+    /// Roll up by ticket (default), day, model, or tool.
+    #[arg(long, value_enum, default_value_t = StatsBy::Ticket)]
+    pub by: StatsBy,
+    /// Only show this one ticket (only meaningful with `--by ticket`).
+    #[arg(long, value_name = "TICKET")]
+    pub ticket: Option<String>,
+}
+
+/// How to roll up `tm stats`.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum StatsBy {
+    /// One row per ticket.
+    Ticket,
+    /// One row per calendar day.
+    Day,
+    /// One row per provider/model pair.
+    Model,
+    /// One row per tool.
+    Tool,
 }
 
 /// `tm ticket ...`
@@ -792,6 +819,14 @@ pub struct RunArgs {
     /// unchanged.
     #[arg(long, value_name = "PATH")]
     pub record: Option<PathBuf>,
+    /// Rerun this ticket offline from a cassette saved with `--record`, without calling any
+    /// real provider. Conflicts with `--record`.
+    #[arg(long, value_name = "PATH", conflicts_with = "record")]
+    pub replay: Option<PathBuf>,
+    /// With `--replay`, fail the run if any call differs from what was recorded, or if the run
+    /// makes more calls than the recording has. Has no effect without `--replay`.
+    #[arg(long, requires = "replay")]
+    pub strict_replay: bool,
 }
 
 /// The retrieval mode for `tm search`.

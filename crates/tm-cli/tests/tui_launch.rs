@@ -234,14 +234,14 @@ fn tm_help_groups_daily_commands_and_hides_plumbing_verbs() {
         );
     }
 
-    // ~16 commands, grouped: 8 daily + 3 planning + 2 serving + `provider` + `auth` (left
-    // untouched per the task) + the auto-generated `help` entry.
+    // ~16 commands, grouped: 8 daily + 3 planning + 2 serving + `stats` + `provider` + `auth`
+    // (left untouched per the task) + the auto-generated `help` entry.
     let listed = commands_section
         .lines()
         .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
         .count();
     assert!(
-        listed <= 17,
+        listed <= 18,
         "the regrouped listing should be about 16 commands, got {listed} lines: \
          {commands_section}"
     );

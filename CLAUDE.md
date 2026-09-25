@@ -376,8 +376,19 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   to clean it up by hand printed alongside.
 - `tm run <ticket> --record <path>` captures every provider call the run makes to a cassette file
   at `<path>` (`docs/decisions/D-028-record-replay-harness.md`) and stores those same bytes as the
-  ticket's `ArtifactKind::Transcript` artifact once the run finishes; combinable with
-  `--worktree`. `tm run --replay <path>` (offline ordered replay) is a separate later task.
+  ticket's `ArtifactKind::Transcript` artifact once the run finishes; combinable with `--worktree`.
+  `tm run <ticket> --replay <path>` reruns a ticket offline against a cassette instead: the
+  ticket's role gets a single `MockProvider` scripted from the cassette and no other provider is
+  registered, so no network call is reachable. Once the run finishes it reports how many served
+  calls diverged from the recording and how many ran past its end, as JSON under `--json`;
+  `--strict-replay` turns either into a hard error.
+- `tm stats [--by ticket|day|model|tool] [--ticket T]` rolls up local usage from the project's own
+  event log: tokens, cost, and tool calls per ticket (default), per UTC calendar day, per
+  provider/model pair (`unattributed` when a call predates cost/model attribution), or per tool
+  (count, failures, average duration). `--ticket T` restricts any of the four to one ticket. A
+  `0` cost means the serving candidate has no price configured (`not priced`), not that the call
+  was free. It folds the whole event log fresh on every run — nothing is cached or persisted
+  separately (`docs/decisions/D-030-local-telemetry.md`).
 
 ## Background and parallel subagents
 
