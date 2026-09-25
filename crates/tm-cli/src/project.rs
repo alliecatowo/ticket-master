@@ -2056,10 +2056,11 @@ fn render_doctor_report(report: &DoctorReport) -> String {
 /// controls), then every other known backend, reported as configured/not by env-var presence
 /// alone (this crate has no free way to probe a paid third-party API's reachability).
 ///
-/// This check is always `ok: true` — it is advisory ("here's what's available, here's the
-/// fastest free path if nothing is"), not a correctness invariant like `"invariants"` or
-/// `"hash-chain"`; a freshly-`tm init`'d project genuinely has no provider configured yet, and
-/// that is expected, not a doctor failure.
+/// This check is advisory ("here's what's available, here's the fastest free path if nothing
+/// is"), not a correctness invariant like `"invariants"` or `"hash-chain"`. When no provider
+/// is ready, the status is `warn` (ok: false, required: false), not a failure — a freshly-`tm
+/// init`'d project genuinely has no provider configured yet, and that is expected, not a doctor
+/// failure.
 async fn provider_doctor_detail(clock: Arc<dyn Clock>) -> DoctorCheck {
     let known = tm_provider::Registry::known_providers();
 
@@ -2123,8 +2124,8 @@ async fn provider_doctor_detail(clock: Arc<dyn Clock>) -> DoctorCheck {
 
     DoctorCheck {
         name: "providers".to_string(),
-        ok: true,
-        required: true,
+        ok: any_ready,
+        required: false,
         detail,
     }
 }
@@ -2132,9 +2133,9 @@ async fn provider_doctor_detail(clock: Arc<dyn Clock>) -> DoctorCheck {
 /// Build `tm doctor`'s `"workflow-1x1"` check: `SPEC.md` §25.3 -- "`tm doctor` should warn on a
 /// workflow whose graph is one node wide and one node deep, because that is a prompt wearing a
 /// costume." Advisory only (`ok: true` regardless -- a 1x1 workflow is a smell, not a
-/// correctness failure, matching the `"providers"` check's own always-`ok` precedent above), and
-/// silent (an empty, non-alarming detail) when the project has no `.tm/workflows/` at all, since
-/// most projects will not use this feature and that is not itself worth a note.
+/// correctness failure, like the `"providers"` and `"index-health"` checks), and silent (an
+/// empty, non-alarming detail) when the project has no `.tm/workflows/` at all, since most
+/// projects will not use this feature and that is not itself worth a note.
 fn workflow_doctor_detail(project: &Project) -> DoctorCheck {
     if !crate::workflow::has_any_workflow(project) {
         return DoctorCheck {
@@ -2172,8 +2173,9 @@ pub fn doctor(
 ) -> tm_types::Result<DoctorReport> {
     let mut checks = Vec::new();
 
-    // Advisory, always `ok: true` — see the `"providers"`/`"workflow-1x1"` checks below for the
-    // same convention. Purely informational: where this project's state actually lives (D-003).
+    // Purely informational: where this project's state actually lives (D-003). Advisory
+    // checks like `"providers"` and `"workflow-1x1"` can be `warn` or `ok` depending on the
+    // project state, not failures.
     checks.push(DoctorCheck {
         name: "scope".to_string(),
         ok: true,
@@ -2221,23 +2223,51 @@ pub fn doctor(
     let index_check = match tm_codeintel::CodeIntel::open_at(&project.state_dir, &project.root)
         .and_then(|ci| ci.update_incremental(project.clock.as_ref()))
     {
-        Ok(delta) => DoctorCheck {
-            name: "index-health".to_string(),
-            ok: true,
-            required: true,
-            detail: format!(
-                "repaired incremental drift: {} added, {} modified, {} removed, {} chunks written, \
-                 {} commits ingested",
-                delta.files_added, delta.files_modified, delta.files_removed, delta.chunks_written,
-                delta.commits_ingested
-            ),
-        },
-        Err(e) => DoctorCheck {
-            name: "index-health".to_string(),
-            ok: false,
-            required: true,
-            detail: e.to_string(),
-        },
+        Ok(delta) => {
+            // When the index was empty before (first build), all files are newly added.
+            // In that case, show "indexed X files (Y chunks, Z commits)" instead of the
+            // "repaired incremental drift" message.
+            let detail = if delta.files_modified == 0
+                && delta.files_removed == 0
+                && delta.files_added > 0
+            {
+                format!(
+                    "indexed {} files ({} chunks, {} commits)",
+                    delta.files_added, delta.chunks_written, delta.commits_ingested
+                )
+            } else {
+                format!(
+                    "repaired incremental drift: {} added, {} modified, {} removed, {} chunks written, \
+                     {} commits ingested",
+                    delta.files_added, delta.files_modified, delta.files_removed, delta.chunks_written,
+                    delta.commits_ingested
+                )
+            };
+            DoctorCheck {
+                name: "index-health".to_string(),
+                ok: true,
+                required: true,
+                detail,
+            }
+        }
+        Err(e) => {
+            // Special case: when there are no commits in the repo, the history ingest fails
+            // with a git2 error when trying to resolve HEAD or push a reference. Treat this as
+            // a warning (ok: false, required: false) with a user-friendly message.
+            let error_str = e.to_string();
+            let (ok, required, detail) =
+                if error_str.contains("reference") || error_str.contains("HEAD") {
+                    (false, false, "no commits yet".to_string())
+                } else {
+                    (false, true, error_str)
+                };
+            DoctorCheck {
+                name: "index-health".to_string(),
+                ok,
+                required,
+                detail,
+            }
+        }
     };
     checks.push(index_check);
 
@@ -3135,6 +3165,94 @@ mod tests {
         assert!(report.checks.iter().any(|c| c.name == "index-health"));
         assert!(!report.checks.iter().any(|c| c.name == "computer-use"));
         assert!(report.all_ok());
+    }
+
+    #[test]
+    fn doctor_provider_check_shows_warn_when_no_provider_is_ready() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = open_test_project(tmp.path());
+        let args = DoctorArgs {
+            skip_computer_probe: true,
+        };
+
+        let report = doctor(&project, &args, &test_renderer()).unwrap();
+
+        let provider_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "providers")
+            .unwrap();
+        // When no provider is ready, ok should be false and required should be false (showing "warn")
+        assert!(!provider_check.ok);
+        assert!(!provider_check.required);
+        assert!(provider_check.detail.contains("no model provider is ready"));
+    }
+
+    #[test]
+    fn doctor_index_check_shows_indexed_files_on_first_build() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".tm")).unwrap();
+        init_git_repo(root);
+
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::new(
+            Timestamp::from_unix_seconds(1_000_000),
+        ));
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::seeded(1));
+        let store = Arc::new(tm_core::Store::open_with(root, clock.clone(), ids.clone()).unwrap());
+        let project = Project::for_test(root, store, clock, ids);
+
+        // Create a file so the index has something to build
+        std::fs::write(root.join("test.rs"), "fn main() {}").unwrap();
+
+        let args = DoctorArgs {
+            skip_computer_probe: true,
+        };
+
+        let report = doctor(&project, &args, &test_renderer()).unwrap();
+
+        let index_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "index-health")
+            .unwrap();
+        // On first build, the detail should say "indexed X files" not "repaired incremental drift"
+        assert!(index_check.ok);
+        assert!(index_check.detail.contains("indexed") && index_check.detail.contains("files"));
+        assert!(!index_check.detail.contains("repaired incremental drift"));
+    }
+
+    #[test]
+    fn doctor_index_check_shows_warn_when_repo_has_no_commits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join(".tm")).unwrap();
+
+        // Initialize git repo WITHOUT any commits
+        git2::Repository::init(root).unwrap();
+
+        let clock: Arc<dyn Clock> = Arc::new(tm_types::FixedClock::new(
+            Timestamp::from_unix_seconds(1_000_000),
+        ));
+        let ids: Arc<dyn IdSource> = Arc::new(CounterIds::seeded(1));
+        let store = Arc::new(tm_core::Store::open_with(root, clock.clone(), ids.clone()).unwrap());
+        let project = Project::for_test(root, store, clock, ids);
+
+        let args = DoctorArgs {
+            skip_computer_probe: true,
+        };
+
+        let report = doctor(&project, &args, &test_renderer()).unwrap();
+
+        let index_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "index-health")
+            .unwrap();
+        // When repo has no commits, should be a warning, not a failure
+        assert!(!index_check.ok);
+        assert!(!index_check.required);
+        assert_eq!(index_check.detail, "no commits yet");
     }
 
     #[test]
