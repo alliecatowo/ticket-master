@@ -183,7 +183,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
   evidence: finding (workflow): "Add /workflow slash command to chat for discovering and running workflows"; CommandId lacks Memory/Export/Doctor/Permissions/Workflow.
 
-- [ ] **s1-id-parse-and-lease-error-copy** — Plain-language errors for milestone/ticket/decision/lease ID parsing and lease conflicts
+- [x] **s1-id-parse-and-lease-error-copy** — Plain-language errors for milestone/ticket/decision/lease ID parsing and lease conflicts (landed e4a94ac)
   model: haiku · severity: low · builds Rust: yes · area: cli/copy · deps: s1-milestone-new-show
   files: `crates/tm-types/src/id.rs`, `crates/tm-core/src/lease.rs`, `crates/tm-cli/src/tickets.rs`
   change: In the `id_newtype!` macro (id.rs ~109-114), replace the internal type name in the format string with a user-friendly noun per type ("Ticket identifier", "Milestone identifier", "Decision identifier", "Lease identifier", "Actor") so e.g. `tm decision show invalid-id` says "Decision identifier must look like D-<n>, got \"invalid-id\"" instead of "DecisionId must look like...". Do the same for ParticipantId/LeaseId's format-string errors ("lease IDs start with L- followed by 12 hex digits" instead of dumping the pattern). Replace the lease-acquire-on-already-leased error (currently AcquireError::NotReady, displaying as "ticket T-3 is not Ready" even when the real cause is an active lease) with "T-3 is already being worked by <holder> until <time>" — check for an existing lease before the Ready check, or special-case the message.
@@ -423,7 +423,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-server`
   evidence: `find crates/tm-server -path '*test*'` finds no test files; the `serve-api` probe drove all of this manually with `curl`.
 
-- [ ] **p1-e2e-genesis-offline-mock-provider** — Offline e2e test: Genesis runs to completion under the mock provider via the CLI
+- [x] **p1-e2e-genesis-offline-mock-provider** — Offline e2e test: Genesis runs to completion under the mock provider via the CLI (already satisfied)
   model: haiku · severity: medium · builds Rust: yes · area: testing · deps: genesis-cli-wire-mock-provider, genesis-cli-offline-integration-test
   files: `crates/tm-e2e/tests/genesis_e2e.rs`
   change: `genesis_e2e.rs`'s `seed_to_steady_state_offline_and_deterministic` already drives the `GenesisDriver` in-process offline, and `genesis-cli-offline-integration-test` (existing task) adds a real-binary subprocess test once `genesis-cli-wire-mock-provider` lands. Confirm after both land that the CLI-level path (`tm genesis --prompt ... --plain` under `TM_TEST_MOCK_PROVIDER=1`) is exercised as a regression test, not just the in-process driver test — the `genesis-offline` probe found `resolve_genesis_provider` had no mock-provider check at all, which the in-process test wouldn't have caught since it doesn't go through CLI provider resolution. If `genesis-cli-offline-integration-test`'s acceptance already covers this exact path end to end, mark this task `[~]` (deferred/superseded) with a one-line pointer instead of duplicating it.
@@ -495,7 +495,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run test:crate -- tm-harness`
   evidence: `crates/tm-harness/src/bench.rs` exists (`find crates -iname '*bench*.rs'` outside worktrees/target → only this file) and is the natural extension point named in D-020 consequence "Plus a `tm bench` decision task scored against `Session.promote` and `StepRecord`."
 
-- [ ] **d20-flip-status-and-amend-spec** — Flip D-020 from proposed to accepted and amend SPEC.md §6.1 with the decider role, once the trait/mock lands
+- [~] **d20-flip-status-and-amend-spec** — Flip D-020 from proposed to accepted and amend SPEC.md §6.1 with the decider role, once the trait/mock lands (needs the owner: this batch's editor died without reporting; its partial, unverifiable SPEC.md/D-020 edits were reverted rather than landed since the precondition — the decision trait/mock actually landing in code, not just SPEC.md pseudocode — was not confirmed met)
   model: haiku · severity: low · builds Rust: no · area: docs (D-020) · deps: d20-decider-trait-and-mock, d20-shadow-triage-new-tickets
   files: `docs/decisions/D-020-system-one-decision-providers.md`, `SPEC.md`
   change: Once `d20-decider-trait-and-mock` (and ideally `d20-shadow-triage-new-tickets`) merge, change D-020's "Status: proposed" line to "Status: accepted", and add the decider role / DecisionProvider trait to SPEC.md §6.1 per D-020's own closing line ("If accepted, SPEC.md ... gains the decider role and the DecisionProvider trait"), per this repo's "keep documentation honest as you change things" rule.
@@ -519,7 +519,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run verify`
   evidence: workflow wf_87a85411-848's critic result, "missing" item 1: CI run 35917628490 (clippy for_kv_map at walk.rs:279) and Release run 35883664234 (linux.rs vs x11rb 0.14); `rust-toolchain.toml` confirmed unpinned (`channel = "stable"`) against a local 1.95 toolchain.
 
-- [~] **critic-merge-odw-integrate-before-b1** — Merge or rebase odw-integrate before B1 starts; it overlaps most of the plan's early files (needs the owner: odw-integrate/main history is already merged, but the odw-integrate worktree still holds uncommitted, unowned changes to agent.rs/ops.rs/sched.rs — a `/level` chat-role-selection feature that neither applies nor reverse-applies against `integrate`'s current state — that only the main session can land or explicitly abandon before any batch touches those three files)
+- [~] **critic-merge-odw-integrate-before-b1** — Merge or rebase odw-integrate before B1 starts; it overlaps most of the plan's early files (needs the owner: narrowed this batch — workflow/odw-integrate is already merged into main and workflow/odw-provider is content-equivalent for every owned file, so B1's project.rs/dispatch.rs aren't gated at all; the real remaining blocker is that the odw-integrate worktree still holds uncommitted, unowned WIP — a `/level` chat-role-selection feature touching agent.rs/ops.rs/sched.rs plus render.rs/tickets.rs/chat_ops.rs/wiki.rs/workflow.rs/budget.rs/tm-tui files — that no salvage/* branch cleanly ports and that only the owner can land or explicitly abandon)
   model: sonnet · severity: critical · builds Rust: yes · area: repo/merge · deps: critic-b0-ci-green
   files: `crates/tm-cli/src/project.rs`, `crates/tm-cli/src/dispatch.rs`, `crates/tm-cli/src/sched.rs`, `crates/tm-cli/src/agent.rs`, `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs`, `crates/tm-cli/src/main.rs`, `crates/tm-provider/src/role_config.rs`
   change: The `odw-integrate` worktree (provider-overhaul work, untouched by this plan per CLAUDE.md) has uncommitted edits to project.rs, dispatch.rs, sched.rs, agent.rs, ops.rs, chat_ops.rs and tm-types budget.rs, plus odw-provider's edits to role_config.rs/route.rs/providers/*. B1 (project.rs, dispatch.rs), B2/B4/B6/B7 (ops.rs, args.rs), B3/B6/B8 (project.rs, agent.rs), B12/B13 (args/sched/dispatch/agent.rs) and d020-role-decider (role_config.rs) all collide with it, and main has moved past the `--ff-only` merge the odw README plans. This task is: get the odw owner to land (a normal merge, likely with conflicts) or explicitly abandon odw-integrate/odw-provider before any batch below B1 starts editing the same files — do not touch `.claude/worktrees/odw-*` directly. If the owner instead says to proceed in parallel, record that decision here and have each colliding task rebase onto odw's landed state instead of main.
@@ -828,7 +828,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **tel-tool-call-event-kind** — Add and emit tool_call.completed events
+- [x] **tel-tool-call-event-kind** — Add and emit tool_call.completed events (landed a275f8c)
   model: sonnet · size: M · builds Rust: yes · area: telemetry · deps: tel-usage-payload-model-field
   files: `crates/tm-events/src/kind.rs`, `crates/tm-events/src/payload.rs`, `crates/tm-agent/src/agent_loop.rs`, `docs/decisions/D-NNN-local-telemetry.md`
   change: Add EventKind::ToolCallCompleted ("tool_call.completed"): its serde rename, Display and FromStr arms, and the exhaustive kind lists in the tests. Follow the command.* precedent for its category. Add ToolCallCompletedPayload {ticket: Option<TicketId>, session: Option<SessionId>, tool_name: String, duration_ms: u64, outcome: String}, where outcome is completed, denied or error, mirroring ToolCallResolution. In agent_loop's tool-call loop (~878-964), append one event per ToolCallRecord, batched with the step's other appends where the code already batches. materialize.rs's `_ => {}` arm already tolerates new kinds. Amend [new decision: telemetry and cost attribution]. Absorbs tel-emit-tool-call-events.
@@ -979,7 +979,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **genesis-emit-lifecycle-events** — Append genesis.* events on each stage transition
+- [x] **genesis-emit-lifecycle-events** — Append genesis.* events on each stage transition (landed 62018f1)
   model: sonnet · size: M · builds Rust: yes · area: genesis · deps: genesis-stop-infinite-maturity-loop
   files: `crates/tm-core/src/store.rs`, `crates/tm-genesis/src/stages.rs`
   change: The genesis.started, genesis.stage_entered and genesis.stage_completed kinds already exist (tm-events kind.rs:273-280). GenesisDriver cannot append them only because Store exposes no API for it (stages.rs:12-19). Add a narrow Store method, e.g. record_genesis_stage(stage, artifact ref, actor), and call it from GenesisDriver::advance. Update stages.rs's module doc.
@@ -1022,7 +1022,7 @@ Gate: `mise run verify`
   acceptance: A test advances GraphCompilation with a non-empty catalog and a Specification whose prose matches one template's tags, and GraphSummary.selected_template is populated. tm-templates' starter tests still pass.
   test: `mise run test:crate -- tm-templates && mise run test:crate -- tm-genesis && mise run test:crate -- tm-cli`
 
-- [ ] **acp-wire-tm-acp-serve-command** — tm acp: serve the project as an ACP agent over stdio
+- [x] **acp-wire-tm-acp-serve-command** — tm acp: serve the project as an ACP agent over stdio (landed 55414ec)
   model: sonnet · size: M · builds Rust: yes · area: clients / ACP (SPEC §28.1) · deps: none
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/acp.rs`, `crates/tm-cli/src/main.rs`, `crates/tm-cli/src/lib.rs`, `CLAUDE.md`
   change: Add Command::Acp(AcpArgs), modeled on McpArgs, and a new acp.rs modeled on mcp.rs. Open the project with project::open_for_command, build tm_acp::AcpServer::new(Arc::new(ProjectAgentBackend::new(project.store.clone(), ids))), attach stdin and stdout, keep diagnostics on stderr, and await until stdin closes. Add a main.rs arm next to Command::Mcp and a CLAUDE.md line. tm-cli already depends on tm-acp (dispatch.rs uses AcpExecutor).
@@ -1033,7 +1033,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **nav-add-swift-language-support** — tree-sitter Swift support so clients/macos gets symbol navigation
+- [x] **nav-add-swift-language-support** — tree-sitter Swift support so clients/macos gets symbol navigation (landed 4824777)
   model: sonnet · size: M · builds Rust: yes · area: code-navigation · deps: nav-design-symbol-index-caching-stable-ids
   files: `crates/tm-codeintel/src/walk.rs`, `crates/tm-codeintel/src/symbols.rs`, `crates/tm-codeintel/Cargo.toml`, `Cargo.toml`, `Cargo.lock`
   change: Add Language::Swift and map .swift to it in from_extension (walk.rs:58-69). Add a tree-sitter-swift dependency pinned compatibly with the workspace's tree-sitter version, and wire grammar_for. Write symbol and reference queries covering func, class, struct, enum, protocol and extension declarations and call sites, applying the same self-reference exclusion. Ids come from the [new decision: stable symbol ids] scheme.
