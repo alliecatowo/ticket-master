@@ -2259,7 +2259,7 @@ pub(crate) fn format_step(step: &StepRecord) -> String {
 
 /// Render one resolved tool call as a single summary line.
 pub(crate) fn format_tool_call(call: &ToolCallRecord) -> String {
-    let action = plain_tool_action(&call.tool_name);
+    let action = plain_tool_action(&call.tool_name, &call.input);
     match &call.resolution {
         ToolCallResolution::Completed { .. } => format!("  * {action}"),
         ToolCallResolution::Denied { reason } => {
@@ -2271,46 +2271,145 @@ pub(crate) fn format_tool_call(call: &ToolCallRecord) -> String {
     }
 }
 
-/// A short plain-language phrase for a dotted tool-kind identifier (e.g. `fs.read` ->
-/// `"Read a file"`), for live `tm run` progress output — a person watching a run shouldn't see
-/// the wire-level tool catalog (`tm_agent::tools::ToolName`'s dotted names), matching this
-/// repo's voice rules (`CLAUDE.md`: no internal type/enum names in anything a person reads).
-/// Falls back to the raw name for anything not in the catalog rather than hiding it, since an
-/// unrecognized tool is more useful shown than silently genericized.
-fn plain_tool_action(tool_name: &str) -> String {
-    let phrase = match tool_name {
-        "search.semantic" | "search.exact" | "search.regex" | "search.hybrid" => {
-            "Searched the code"
+/// Cap on a salient argument's length in a live `tm run` progress line, so a long shell command,
+/// query or path doesn't wrap the line — clipped with a trailing ellipsis rather than dropped,
+/// since a truncated hint is still more useful than none.
+const PLAIN_ARG_MAX_CHARS: usize = 80;
+
+fn clip_arg(s: &str) -> String {
+    if s.chars().count() <= PLAIN_ARG_MAX_CHARS {
+        return s.to_string();
+    }
+    let truncated: String = s
+        .chars()
+        .take(PLAIN_ARG_MAX_CHARS.saturating_sub(1))
+        .collect();
+    format!("{truncated}\u{2026}")
+}
+
+/// Pull the one salient argument out of a tool call's `input` for `plain_tool_action` to fold
+/// into its plain verb (the shell command, the file path, the search query, ...). Returns `None`
+/// when the tool has no single argument worth surfacing, or `input` doesn't carry the shape it
+/// expects (a malformed/mocked call shouldn't panic the progress printer).
+fn plain_tool_arg(tool_name: &str, input: &serde_json::Value) -> Option<String> {
+    let str_field = |field: &str| input.get(field).and_then(serde_json::Value::as_str);
+    let u64_field = |field: &str| input.get(field).and_then(serde_json::Value::as_u64);
+    // A plain path, clipped but with no surrounding quotes/backticks (a path stands on its own
+    // in a sentence like "Read <path>").
+    let path_with_range = |start_field: &str, end_field: &str| {
+        let path = str_field("path")?;
+        match (u64_field(start_field), u64_field(end_field)) {
+            (Some(start), Some(end)) => Some(clip_arg(&format!("{path}:{start}-{end}"))),
+            _ => Some(clip_arg(path)),
         }
+    };
+    match tool_name {
+        "shell.run" | "shell.query_output" => {
+            if let Some(cmd) = str_field("command") {
+                return Some(format!("`{}`", clip_arg(cmd)));
+            }
+            let argv: Vec<&str> = input
+                .get("argv")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            if argv.is_empty() {
+                None
+            } else {
+                Some(format!("`{}`", clip_arg(&argv.join(" "))))
+            }
+        }
+        "fs.read" | "fs.stat" | "fs.list" => str_field("path").map(clip_arg),
+        "fs.read_range" => path_with_range("byte_start", "byte_end"),
+        "edit.apply_patch" | "edit.write_file" | "edit.create_file" | "edit.delete_file" => {
+            str_field("path").map(clip_arg)
+        }
+        "search.semantic" | "search.exact" | "search.hybrid" => {
+            str_field("query").map(|q| format!("\"{}\"", clip_arg(q)))
+        }
+        "search.regex" => str_field("pattern").map(|p| format!("\"{}\"", clip_arg(p))),
+        "history.why" => path_with_range("line_start", "line_end"),
+        "history.search" | "history.deleted" => {
+            str_field("query").map(|q| format!("\"{}\"", clip_arg(q)))
+        }
+        "symbol.definition" => str_field("name").map(clip_arg),
+        "symbol.outline" => str_field("path").map(clip_arg),
+        _ => None,
+    }
+}
+
+/// A short plain-language phrase for a dotted tool-kind identifier and its call arguments (e.g.
+/// `fs.read` with `{"path": "a.rs"}` -> `"Read a.rs"`), for live `tm run` progress output — a
+/// person watching a run shouldn't see the wire-level tool catalog
+/// (`tm_agent::tools::ToolName`'s dotted names) or bare "did a thing" verbs with no idea what
+/// thing, matching this repo's voice rules (`CLAUDE.md`: no internal type/enum names in anything
+/// a person reads). Falls back to a generic phrase when `input` has no salient argument (an older
+/// cassette, a mocked call in a test, or a tool this function doesn't special-case), and to the
+/// raw tool name for anything not in the catalog at all rather than hiding it, since an
+/// unrecognized tool is more useful shown than silently genericized.
+fn plain_tool_action(tool_name: &str, input: &serde_json::Value) -> String {
+    let arg = plain_tool_arg(tool_name, input);
+    match tool_name {
+        "search.semantic" | "search.exact" | "search.regex" | "search.hybrid" => match arg {
+            Some(a) => format!("Searched for {a}"),
+            None => "Searched the code".to_string(),
+        },
         "symbol.definition"
         | "symbol.references"
         | "symbol.callers"
         | "symbol.callees"
         | "symbol.outline"
-        | "symbol.rename_preview" => "Looked up code",
-        "history.why" | "history.search" | "history.deleted" => "Checked history",
-        "fs.read" | "fs.read_range" | "fs.stat" => "Read a file",
-        "fs.list" => "Listed files",
-        "edit.apply_patch" => "Edited a file",
-        "edit.write_file" | "edit.create_file" => "Created a file",
-        "edit.delete_file" => "Deleted a file",
-        "shell.run" | "shell.query_output" => "Ran a command",
-        "git.status" | "git.diff" | "git.log" | "git.branch" | "git.worktree" => "Checked git",
-        "git.commit" => "Made a commit",
-        "test.run" => "Ran tests",
-        "build.run" => "Built the project",
-        "ticket.create_child" | "ticket.delegate" => "Created a ticket",
-        "ticket.submit" => "Submitted the ticket",
-        "ticket.comment" => "Commented on the ticket",
-        "ticket.list" | "ticket.get" => "Checked the ticket",
-        "ticket.transition" => "Updated the ticket",
-        "decision.record" => "Recorded a decision",
-        "artifact.store" => "Saved a result",
-        "evidence.attach" => "Attached evidence",
-        "ask.human" => "Asked for input",
-        other => return other.to_string(),
-    };
-    phrase.to_string()
+        | "symbol.rename_preview" => match arg {
+            Some(a) => format!("Looked up {a}"),
+            None => "Looked up code".to_string(),
+        },
+        "history.why" | "history.search" | "history.deleted" => match arg {
+            Some(a) => format!("Checked history for {a}"),
+            None => "Checked history".to_string(),
+        },
+        "fs.read" | "fs.read_range" | "fs.stat" => match arg {
+            Some(a) => format!("Read {a}"),
+            None => "Read a file".to_string(),
+        },
+        "fs.list" => match arg {
+            Some(a) => format!("Listed {a}"),
+            None => "Listed files".to_string(),
+        },
+        "edit.apply_patch" => match arg {
+            Some(a) => format!("Edited {a}"),
+            None => "Edited a file".to_string(),
+        },
+        "edit.write_file" | "edit.create_file" => match arg {
+            Some(a) => format!("Created {a}"),
+            None => "Created a file".to_string(),
+        },
+        "edit.delete_file" => match arg {
+            Some(a) => format!("Deleted {a}"),
+            None => "Deleted a file".to_string(),
+        },
+        "shell.run" | "shell.query_output" => match arg {
+            Some(a) => format!("Ran {a}"),
+            None => "Ran a command".to_string(),
+        },
+        "git.status" | "git.diff" | "git.log" | "git.branch" | "git.worktree" => {
+            "Checked git".to_string()
+        }
+        "git.commit" => "Made a commit".to_string(),
+        "test.run" => "Ran tests".to_string(),
+        "build.run" => "Built the project".to_string(),
+        "ticket.create_child" | "ticket.delegate" => "Created a ticket".to_string(),
+        "ticket.submit" => "Submitted the ticket".to_string(),
+        "ticket.comment" => "Commented on the ticket".to_string(),
+        "ticket.list" | "ticket.get" => "Checked the ticket".to_string(),
+        "ticket.transition" => "Updated the ticket".to_string(),
+        "decision.record" => "Recorded a decision".to_string(),
+        "artifact.store" => "Saved a result".to_string(),
+        "evidence.attach" => "Attached evidence".to_string(),
+        "ask.human" => "Asked for input".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// A plain-language rendering of a tool-call error's detail text, for the same live `tm run`
@@ -3143,7 +3242,8 @@ mod tests {
                     let start = "def sub(a, b):\n    return a ".len();
                     serde_json::json!({
                         "path": "src/calc.py",
-                        "edits": [{"byte_start": start, "byte_end": start + 1, "replacement": "-"}],
+                        "edits": [{"byte_start": start, "byte_end": start + 1, "replacement": "-",
+                                   "old_text": "+"}],
                         "expected_hash": last_hash(seen),
                     })
                 }),
@@ -3964,5 +4064,71 @@ mod tests {
                 "expected {line:?} to not contain the raw tool identifier"
             );
         }
+    }
+
+    /// Regression guard for u1-run-progress-shows-args: live `tm run` progress must show what
+    /// each step actually did (the command, path or query), not just a generic "Ran a command".
+    #[test]
+    fn format_tool_call_shows_the_call_s_salient_argument() {
+        let with_input = |tool_name: &str, input: serde_json::Value| ToolCallRecord {
+            tool_use_id: "call-1".to_string(),
+            tool_name: tool_name.to_string(),
+            input,
+            resolution: ToolCallResolution::Completed {
+                result: serde_json::Value::Null,
+                artifact: None,
+            },
+        };
+
+        let line = format_tool_call(&with_input(
+            "shell.run",
+            serde_json::json!({"command": "cargo test -p tm-cli"}),
+        ));
+        assert_eq!(line, "  * Ran `cargo test -p tm-cli`");
+
+        let line = format_tool_call(&with_input(
+            "fs.read_range",
+            serde_json::json!({
+                "path": "crates/tm-cli/src/project.rs",
+                "byte_start": 2200,
+                "byte_end": 2280,
+            }),
+        ));
+        assert_eq!(line, "  * Read crates/tm-cli/src/project.rs:2200-2280");
+
+        let line = format_tool_call(&with_input(
+            "search.exact",
+            serde_json::json!({"query": "providers"}),
+        ));
+        assert_eq!(line, "  * Searched for \"providers\"");
+
+        // A long shell command clips rather than wrapping the progress line.
+        let long_cmd = "x".repeat(200);
+        let line = format_tool_call(&with_input(
+            "shell.run",
+            serde_json::json!({"command": long_cmd}),
+        ));
+        assert!(line.len() < 200, "expected a clipped line, got {line:?}");
+        assert!(line.ends_with('\u{2026}') || line.ends_with("\u{2026}`"));
+
+        // A tool call with no recognized argument field still falls back to the generic verb
+        // instead of panicking or printing raw JSON.
+        let line = format_tool_call(&with_input("fs.read", serde_json::Value::Null));
+        assert_eq!(line, "  * Read a file");
+
+        // An errored call still carries the path, not just the generic verb.
+        let errored = ToolCallRecord {
+            tool_use_id: "call-1".to_string(),
+            tool_name: "fs.read".to_string(),
+            input: serde_json::json!({"path": "crates/tm-cli/src/project.rs"}),
+            resolution: ToolCallResolution::Errored {
+                detail: "io: stream did not contain valid UTF-8".to_string(),
+            },
+        };
+        let line = format_tool_call(&errored);
+        assert_eq!(
+            line,
+            "  * Read crates/tm-cli/src/project.rs -> error: couldn't read or write a file"
+        );
     }
 }
