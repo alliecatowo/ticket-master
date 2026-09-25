@@ -1215,7 +1215,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-events && mise run test:crate -- tm-cli`
   evidence: The dogfood forensics needed `sqlite3 .tm/project.db` to see that 18 calls cost 1.03M tokens. `tm stats` only showed `T-1 S-2 18 1025330 not priced 203`.
 
-- [ ] **u1-record-flush-incremental** — `tm run --record` must write the cassette incrementally so a killed or timed-out run still leaves one
+- [~] **u1-record-flush-incremental** — `tm run --record` must write the cassette incrementally so a killed or timed-out run still leaves one (needs another pass: the worker made no changes)
   model: sonnet · severity: medium · builds Rust: yes · area: replay · deps: none
   files: `crates/tm-provider/src/cassette.rs`
   change: `tm run T-2 --record /tmp/x.cassette` killed by SIGTERM at a 580s bound left no file at all. Make the recording provider append each entry as it happens (JSONL, header first, fsync per entry or per N entries), and have the reader accept a cassette without a footer or with a truncated last line (treat it as ended at the last complete entry). Keep the file format backward compatible for reading.
