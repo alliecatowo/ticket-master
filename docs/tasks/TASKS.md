@@ -1183,7 +1183,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/self `tm doctor`: `providers ok ... no model provider is ready`, and `index-health ok repaired incremental drift` on the very first index. /tmp/tm-audit/probe (fresh `git init`): `index-health FAIL storage: git2: reference 'refs/heads/main' not found`, and doctor exits non-zero.
 
-- [ ] **u1-bare-text-starts-chat** — `tm "fix the bug"` should open the chat with that prompt (as `claude "…"` does), not error with "--prompt required"
+- [x] **u1-bare-text-starts-chat** — `tm "fix the bug"` should open the chat with that prompt (as `claude "…"` does), not error with "--prompt required" (landed 14fc4d2)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: u1-hygiene-spec-refs-in-user-strings
   files: `crates/tm-cli/src/main.rs`, `crates/tm-cli/src/args.rs`
   change: `tm "some words"` today fails with `error: the following required arguments were not provided: --prompt`. When `[TEXT]` is given without `-p` in an interactive terminal, start the TUI chat with TEXT submitted as the first message. Without a TTY, behave like `-p`. Update `--help`'s TEXT description.
