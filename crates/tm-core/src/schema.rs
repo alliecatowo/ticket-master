@@ -52,7 +52,18 @@ use tm_types::TmError;
 /// exception `workflows` documents above -- [`crate::store::Store::rebuild`] (which drops and
 /// replays every materialized table) costs at most one redundant re-push per ticket/adapter
 /// afterward, not a correctness problem.
-pub const SCHEMA_VERSION: i64 = 6;
+///
+/// `7`: adds the `harness_epochs.benchmark_json` column (bench-promotion-baseline-persistence),
+/// so `tm harness promote` can persist the resolved `tm_harness::BenchmarkReport` alongside the
+/// epoch it scored and reuse it as the next promotion's default baseline. Same guarded-`ALTER
+/// TABLE` pattern as `4`/`5`/`6`. Like `6`'s `mirror_links.content_hash`, this column is not
+/// restored by [`drop_views`]/replay: `harness.promoted`'s payload carries only `candidate` (the
+/// closed event-payload catalogue has no room for an arbitrary benchmark-report blob — see
+/// [`crate::materialize::apply`]'s `HarnessPromoted` arm), so `benchmark_json` is written
+/// directly to the row outside the event-replay path via
+/// [`crate::store::Store::set_harness_epoch_benchmark`], the same "cache column, not
+/// replay-derived state" exception as `mirror_links.content_hash`.
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// One materialized table's name, paired with the `CREATE TABLE IF NOT EXISTS` DDL for it.
 pub struct TableDef {
@@ -286,7 +297,8 @@ pub const TABLES: &[TableDef] = &[
             CREATE TABLE IF NOT EXISTS harness_epochs (
                 epoch INTEGER PRIMARY KEY,
                 harness_config TEXT NOT NULL,
-                ts TEXT NOT NULL
+                ts TEXT NOT NULL,
+                benchmark_json TEXT
             )
         ",
     },
@@ -472,6 +484,22 @@ pub fn migrate(conn: &mut Connection, clock: &dyn tm_types::Clock) -> tm_types::
             > 0;
         if !has_content_hash_column {
             tx.execute_batch("ALTER TABLE mirror_links ADD COLUMN content_hash TEXT")
+                .map_err(storage_err)?;
+        }
+
+        // Same reasoning as `due`/`state`/`last_verified`/`content_hash` above: a
+        // `harness_epochs` table predating schema version 7 has no `benchmark_json`, and
+        // `CREATE TABLE IF NOT EXISTS` cannot retrofit it.
+        let has_benchmark_json_column: bool = tx
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('harness_epochs') WHERE name = 'benchmark_json'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(storage_err)?
+            > 0;
+        if !has_benchmark_json_column {
+            tx.execute_batch("ALTER TABLE harness_epochs ADD COLUMN benchmark_json TEXT")
                 .map_err(storage_err)?;
         }
 
@@ -781,6 +809,71 @@ mod tests {
             .expect("existing row survives the ALTER TABLE with the new column's default");
         assert_eq!(remote_id, "gh-1");
         assert_eq!(content_hash, None);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM tm_core_schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query version after migrate");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_adds_harness_epochs_benchmark_json_column_to_a_pre_v7_database() {
+        // Simulate a database migrated by a build before schema version 7: every table's DDL
+        // except `harness_epochs`, which is created in its pre-7 shape (no `benchmark_json`).
+        let path = temp_db_path("test_upgrade_adds_harness_epochs_benchmark_json_column");
+        let conn = rusqlite::Connection::open(&path).expect("create db");
+        for table in TABLES {
+            if table.name != "harness_epochs" {
+                conn.execute_batch(table.create_sql).expect("create table");
+            }
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS harness_epochs (
+                epoch INTEGER PRIMARY KEY,
+                harness_config TEXT NOT NULL,
+                ts TEXT NOT NULL
+            )",
+        )
+        .expect("create pre-7 harness_epochs table");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tm_core_schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )",
+        )
+        .expect("create version table");
+        conn.execute(
+            "INSERT INTO tm_core_schema_version (version, applied_at) VALUES (6, '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("record version 6");
+        // A pre-v7 row, to confirm the retrofit is a genuine `ALTER TABLE` (preserving existing
+        // rows) rather than a table rebuild.
+        conn.execute(
+            "INSERT INTO harness_epochs (epoch, harness_config, ts)
+             VALUES (1, 'name = \"default\"', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("insert pre-7 harness_epochs row");
+
+        drop(conn);
+        let mut conn = rusqlite::Connection::open(&path).expect("reopen db");
+        migrate(&mut conn, &tm_types::FixedClock::epoch())
+            .expect("migrate an existing v6 database");
+
+        let (harness_config, benchmark_json): (String, Option<String>) = conn
+            .query_row(
+                "SELECT harness_config, benchmark_json FROM harness_epochs WHERE epoch = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("existing row survives the ALTER TABLE with the new column's default");
+        assert_eq!(harness_config, "name = \"default\"");
+        assert_eq!(benchmark_json, None);
 
         let version: i64 = conn
             .query_row(

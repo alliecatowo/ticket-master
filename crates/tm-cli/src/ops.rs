@@ -1503,11 +1503,15 @@ pub fn harness_epochs(project: &Project, renderer: &Renderer) -> tm_types::Resul
 /// Reconstruct the current [`tm_harness::EpochRegistry`] state from
 /// [`tm_core::Store::harness_epochs`]'s last row (or the genesis default when none exists),
 /// promote the on-disk `.tm/harness.toml` as the candidate via `EpochRegistry::promote` (which
-/// consults `PromotionGate::evaluate`), then persist the outcome via
-/// [`tm_core::Store::promote_epoch`]. `args.force` relaxes the gate to "no benchmark-gain check"
-/// rather than silently bypassing it — this command has no authority-check mechanism of its own
-/// to surface `TmError::AuthorityDenied` from (the CLI runs as whatever OS user invoked it, not
-/// under a checked `Authority`), so `--force` is documented, not hidden, in its effect.
+/// consults `PromotionGate::evaluate` against the reconstructed current epoch's `benchmark` --
+/// the previous epoch's stored `benchmark_json`, when it has one -- as the automatic baseline
+/// unless `--baseline` overrides it), then persist the outcome via
+/// [`tm_core::Store::promote_epoch`] and, when a benchmark report was resolved, the report itself
+/// via [`tm_core::Store::set_harness_epoch_benchmark`]. `args.force` relaxes the gate to "no
+/// benchmark-gain check" rather than silently bypassing it — this command has no authority-check
+/// mechanism of its own to surface `TmError::AuthorityDenied` from (the CLI runs as whatever OS
+/// user invoked it, not under a checked `Authority`), so `--force` is documented, not hidden, in
+/// its effect.
 pub fn harness_promote(
     args: &HarnessPromoteArgs,
     project: &Project,
@@ -1535,22 +1539,47 @@ pub fn harness_promote(
         .map_err(|e| tm_types::TmError::parse(format!("Invalid harness.toml: {e}")))?;
 
     // The current epoch this candidate is promoted from, reconstructed just well enough for
-    // `EpochRegistry::promote` to compute `next_number`/apply the gate. `harness_epochs` has no
-    // benchmark column (see `Store::harness_epochs`'s doc comment), so the reconstructed current
-    // epoch's `benchmark` is always `None` — meaning the gate never has an automatic baseline;
-    // one must be supplied via `--baseline` or the gate (unless `--force`) rejects.
+    // `EpochRegistry::promote` to compute `next_number`/apply the gate. `harness_epochs.
+    // benchmark_json` (`Store::set_harness_epoch_benchmark`) is the automatic baseline: when the
+    // previous epoch was promoted with a benchmark report, that report becomes the reconstructed
+    // current epoch's `benchmark` here, so a promotion with no explicit `--baseline` still gates
+    // against it. Only when no epoch has ever stored one (nothing promoted yet, or an older
+    // promotion predating this column) does `benchmark` stay `None`, requiring `--baseline` or
+    // `--force`.
     let current_epoch = match existing.last() {
         Some(row) => {
             let config = tm_harness::HarnessConfig::parse(&row.harness_config).map_err(|e| {
                 tm_types::TmError::parse(format!("Invalid persisted epoch {}: {e}", row.epoch))
             })?;
+            // Only bother reading the stored report when it would actually be used: an explicit
+            // `--baseline` overrides it below regardless, and a stored report that fails to parse
+            // (e.g. an older `BenchmarkReport` shape) shouldn't block a promotion that doesn't
+            // need it at all. On a parse failure, fall back to no automatic baseline instead of
+            // erroring — `--baseline`/`--force` still work either way.
+            let benchmark = if args.baseline.is_some() {
+                None
+            } else {
+                match row.benchmark_json.as_deref() {
+                    Some(json) => match serde_json::from_str::<tm_harness::BenchmarkReport>(json) {
+                        Ok(report) => Some(report),
+                        Err(_) => {
+                            renderer.note(&format!(
+                                "The saved benchmark for epoch {} can't be read, so there's no automatic baseline. Pass --baseline <report.json> or --force.",
+                                row.epoch
+                            ));
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            };
             tm_harness::HarnessEpoch {
                 number: row.epoch,
                 config_hash: config.config_hash(),
                 config,
                 promoted_at: row.ts,
                 promoted_by: tm_types::ParticipantId::system(),
-                benchmark: None,
+                benchmark,
             }
         }
         None => tm_harness::HarnessEpoch {
@@ -1610,7 +1639,9 @@ pub fn harness_promote(
             candidate.clone(),
             project.clock.now(),
             project.actor.clone(),
-            benchmark,
+            // `.clone()`, not a move: `benchmark` is reused below to persist this epoch's
+            // report onto its `harness_epochs` row via `Store::set_harness_epoch_benchmark`.
+            benchmark.clone(),
             &gate,
         )
         .map_err(|e| tm_types::TmError::invariant(e.to_string()))?;
@@ -1623,6 +1654,19 @@ pub fn harness_promote(
             project
                 .store
                 .promote_epoch(config_toml, project.actor.clone())?;
+
+            // Persist the resolved benchmark report onto this epoch's row so the next promotion
+            // finds it as its automatic baseline (`current_epoch`'s reconstruction above). Not
+            // event-payload state (see `Store::set_harness_epoch_benchmark`'s doc comment), so
+            // this runs as a separate write after `promote_epoch` rather than inside it.
+            if let Some(report) = &benchmark {
+                let benchmark_json = serde_json::to_string(report).map_err(|e| {
+                    tm_types::TmError::storage(format!("Failed to serialize benchmark report: {e}"))
+                })?;
+                project
+                    .store
+                    .set_harness_epoch_benchmark(epoch.number, &benchmark_json)?;
+            }
 
             if renderer.is_json() {
                 renderer.emit(
@@ -3780,6 +3824,109 @@ mod tests {
         assert!(
             !msg.contains("invariant"),
             "Error message should not use jargon like 'invariant', got: {msg}"
+        );
+    }
+
+    /// bench-promotion-baseline-persistence's acceptance check: promoting a second epoch with no
+    /// `--baseline` still gates against the first epoch's stored report, because
+    /// `Store::set_harness_epoch_benchmark` persisted it onto `harness_epochs` when epoch 1 was
+    /// promoted and `harness_promote`'s reconstructed `current_epoch` reads it back.
+    #[test]
+    fn harness_promote_defaults_baseline_to_previous_epochs_stored_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+
+        harness_set(
+            &HarnessSetArgs {
+                key: "routing.recency_weight".to_string(),
+                value: "0.5".to_string(),
+            },
+            &project,
+            &renderer,
+        )
+        .expect("harness_set creates harness.toml");
+
+        let report_path = root.join("report-1.json");
+        fs::write(
+            &report_path,
+            serde_json::json!({
+                "epoch": 1,
+                "aggregate_score": 0.8,
+                "tasks": [],
+                "generated_at": "2020-01-01T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        // Epoch 1 has no prior epoch to gate against, so `--force` is needed the first time --
+        // the report is still supplied and still persisted onto epoch 1's row.
+        harness_promote(
+            &HarnessPromoteArgs {
+                epoch: 1,
+                force: true,
+                report: Some(report_path),
+                baseline: None,
+            },
+            &project,
+            &renderer,
+        )
+        .expect("promote epoch 1");
+
+        let epochs = project.store.harness_epochs().expect("harness_epochs");
+        assert_eq!(epochs.len(), 1);
+        assert!(
+            epochs[0].benchmark_json.is_some(),
+            "epoch 1's report should be persisted onto its harness_epochs row"
+        );
+
+        harness_set(
+            &HarnessSetArgs {
+                key: "routing.recency_weight".to_string(),
+                value: "0.6".to_string(),
+            },
+            &project,
+            &renderer,
+        )
+        .expect("harness_set updates harness.toml for the epoch 2 candidate");
+
+        // A candidate scoring lower than epoch 1's stored report, with neither `--baseline` nor
+        // `--force`: rejected on an insufficient *gain*, not on "no baseline to compare against"
+        // -- proving the gate read epoch 1's persisted report as its automatic baseline.
+        let worse_report_path = root.join("report-2.json");
+        fs::write(
+            &worse_report_path,
+            serde_json::json!({
+                "epoch": 2,
+                "aggregate_score": 0.3,
+                "tasks": [],
+                "generated_at": "2020-01-02T00:00:00Z",
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let err = harness_promote(
+            &HarnessPromoteArgs {
+                epoch: 2,
+                force: false,
+                report: Some(worse_report_path),
+                baseline: None,
+            },
+            &project,
+            &renderer,
+        )
+        .expect_err("a lower-scoring candidate with no explicit baseline should still be gated");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("gain"),
+            "rejection should cite an insufficient benchmark gain, not a missing baseline, got: {msg}"
+        );
+        assert!(
+            !msg.contains("no baseline"),
+            "a baseline was available from epoch 1's stored report, got: {msg}"
         );
     }
 

@@ -687,6 +687,12 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
                 // `counters`, bumped by one on every promotion; deterministic because `apply`
                 // sees promotions in the same total order on the live path and on replay.
                 let epoch = next_counter(tx, "harness_epoch")? as i64;
+                // `benchmark_json` is deliberately left NULL here (never named in this INSERT's
+                // column list, so it takes the column's own default) -- `harness.promoted`'s
+                // payload carries no benchmark report (see `crate::schema`'s `SCHEMA_VERSION` `7`
+                // doc comment), so it is set afterward, outside replay, by
+                // `Store::set_harness_epoch_benchmark`. A rebuild therefore resets it to `None`
+                // for every epoch, same as `mirror_links.content_hash` after a rebuild.
                 tx.raw()
                     .execute(
                         "INSERT INTO harness_epochs (epoch, harness_config, ts)

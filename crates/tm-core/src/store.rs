@@ -226,6 +226,12 @@ pub struct HarnessEpochRow {
     pub harness_config: String,
     /// When this epoch was promoted.
     pub ts: Timestamp,
+    /// The serialized `tm_harness::BenchmarkReport` this epoch was promoted with, if any --
+    /// `None` until [`Store::set_harness_epoch_benchmark`] is called for this epoch. Like
+    /// `mirror_links.content_hash`, this is a cache column written outside the event-replay
+    /// path (see `crate::schema`'s `SCHEMA_VERSION` `7` doc comment), so it resets to `None`
+    /// after a [`Store::rebuild`].
+    pub benchmark_json: Option<String>,
 }
 
 /// One row of the `workflows` table: a versioned `tm-workflow` `WorkflowDef` TOML source,
@@ -3220,7 +3226,9 @@ impl Store {
     pub fn harness_epochs(&self) -> tm_types::Result<Vec<HarnessEpochRow>> {
         let conn = tm_events::schema::open_read_connection(self.log.path())?;
         let mut stmt = conn
-            .prepare("SELECT epoch, harness_config, ts FROM harness_epochs ORDER BY epoch")
+            .prepare(
+                "SELECT epoch, harness_config, ts, benchmark_json FROM harness_epochs ORDER BY epoch",
+            )
             .map_err(storage_err)?;
         let rows = stmt
             .query_map([], |row| {
@@ -3228,19 +3236,50 @@ impl Store {
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })
             .map_err(storage_err)?;
         let mut epochs = Vec::new();
         for row in rows {
-            let (epoch, harness_config, ts) = row.map_err(storage_err)?;
+            let (epoch, harness_config, ts, benchmark_json) = row.map_err(storage_err)?;
             epochs.push(HarnessEpochRow {
                 epoch: epoch as u64,
                 harness_config,
                 ts: parse_ts(&ts)?,
+                benchmark_json,
             });
         }
         Ok(epochs)
+    }
+
+    /// Persist `benchmark_json` (a serialized `tm_harness::BenchmarkReport`) onto the already-
+    /// promoted `harness_epochs` row for `epoch`, so a later `tm harness promote` can reuse it as
+    /// the automatic baseline without a `--baseline` flag. `harness.promoted`'s payload has no
+    /// room for it (see `crate::schema`'s `SCHEMA_VERSION` `7` doc comment), so this writes
+    /// directly to the row outside the event-replay path, the same pattern
+    /// [`Store::set_mirror_content_hash`] uses for `mirror_links.content_hash`.
+    ///
+    /// Call this after [`Store::promote_epoch`] records the promotion, so a crash between the two
+    /// leaves `benchmark_json` unset rather than pointing at a promotion that never happened.
+    ///
+    /// No-op (not an error) if no `harness_epochs` row exists yet for `epoch`.
+    pub fn set_harness_epoch_benchmark(
+        &self,
+        epoch: u64,
+        benchmark_json: &str,
+    ) -> tm_types::Result<()> {
+        let epoch = epoch as i64;
+        let benchmark_json = benchmark_json.to_string();
+        self.transaction(move |tx| {
+            tx.raw()
+                .execute(
+                    "UPDATE harness_epochs SET benchmark_json = ?1 WHERE epoch = ?2",
+                    rusqlite::params![benchmark_json, epoch],
+                )
+                .map_err(storage_err)?;
+            Ok(())
+        })
     }
 
     /// Register a `tm-workflow` `WorkflowDef`'s TOML `source` under `content_hash` (its blake3
@@ -5845,6 +5884,38 @@ mod tests {
             events[0].payload.as_harness_promoted().unwrap().candidate,
             "config-a"
         );
+    }
+
+    #[test]
+    fn set_harness_epoch_benchmark_persists_and_survives_a_fresh_read() {
+        let (_dir, store) = open_store();
+        store
+            .promote_epoch("config-a".into(), actor())
+            .expect("promote_epoch");
+
+        let epochs = store.harness_epochs().expect("harness_epochs before set");
+        assert_eq!(epochs.len(), 1);
+        assert_eq!(epochs[0].benchmark_json, None);
+
+        store
+            .set_harness_epoch_benchmark(epochs[0].epoch, r#"{"epoch":1,"aggregate_score":0.9}"#)
+            .expect("set_harness_epoch_benchmark");
+
+        let epochs = store.harness_epochs().expect("harness_epochs after set");
+        assert_eq!(epochs.len(), 1);
+        assert_eq!(
+            epochs[0].benchmark_json.as_deref(),
+            Some(r#"{"epoch":1,"aggregate_score":0.9}"#)
+        );
+    }
+
+    #[test]
+    fn set_harness_epoch_benchmark_is_a_no_op_when_no_row_exists() {
+        let (_dir, store) = open_store();
+        store
+            .set_harness_epoch_benchmark(42, r#"{"epoch":42}"#)
+            .expect("set_harness_epoch_benchmark should not error on a missing epoch");
+        assert!(store.harness_epochs().expect("harness_epochs").is_empty());
     }
 
     #[test]
