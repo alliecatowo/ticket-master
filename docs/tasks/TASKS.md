@@ -1408,7 +1408,7 @@ is based on.
   acceptance: A simulated no-submit ticket whose next attempt repeats the same file reads is steered to a different action or stops with a user-actionable explanation, while normal retries continue to work.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260925-1314/BurntSushi-ripgrep-3376/tm.log` lines 5-37 and 58-82 show repeated reads of `walk.rs`/`dir.rs` followed by the identical no-submit failure; `tm events tail --from 0` shows two sessions and retry scheduling (events 164-176, 287-294).
-- [ ] **t20260925-1314-gohugoio-hugo-15360-actionable-tool-errors** — Make tool-call error messages actionable during `tm run`
+- [~] **t20260925-1314-gohugoio-hugo-15360-actionable-tool-errors** — Make tool-call error messages actionable during `tm run` (needs another pass: the worker made no changes)
   model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/agent.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: Extend `plain_tool_error` and its progress rendering to preserve a concise safe diagnostic and identify an actionable recovery step, especially for invariant and parse failures, instead of reducing them to generic phrases.
