@@ -334,7 +334,7 @@ pub struct AttachArgs {
     pub path: Option<PathBuf>,
 }
 
-/// `tm genesis [--prompt <text>|-] [--resume]`
+/// `tm genesis [--prompt <text>|-] [--resume] [--run]`
 #[derive(Debug, Args)]
 pub struct GenesisArgs {
     /// The seed prompt describing the project to build. Pass `-` to read the prompt from stdin.
@@ -347,6 +347,10 @@ pub struct GenesisArgs {
     /// start when no snapshot exists yet.
     #[arg(long)]
     pub resume: bool,
+
+    /// Run the committed tickets with the scheduler and continue Genesis when V0 closes.
+    #[arg(long)]
+    pub run: bool,
 }
 
 /// `tm status`

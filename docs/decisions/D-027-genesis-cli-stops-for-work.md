@@ -2,6 +2,8 @@
 
 **Status:** accepted · **Date:** 2026-09-24 · **Supersedes:** nothing
 
+Superseded in part by D-035.
+
 ## Context
 
 `tm genesis`'s CLI loop (`crates/tm-cli/src/project.rs`'s `genesis`) drove `GenesisDriver::advance`

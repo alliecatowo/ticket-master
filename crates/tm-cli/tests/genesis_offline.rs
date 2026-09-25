@@ -78,7 +78,7 @@ fn run_tm_offline(dir: &Path, tm_home: &Path, args: &[&str]) -> std::process::Ou
 /// The end-to-end offline story: `tm genesis --prompt ... --plain` under
 /// `TM_TEST_MOCK_PROVIDER=1` runs to completion (a stop-for-work policy, not a hang or a network
 /// error), reports the committed tickets and the next step in plain human-readable stdout, and
-/// `tm tickets --json --all` shows those tickets as real Draft tickets in the project it just
+/// `tm tickets --json --all` shows those tickets as real Ready tickets in the project it just
 /// created.
 #[test]
 fn tm_genesis_runs_offline_end_to_end_through_the_real_binary() {
@@ -127,9 +127,8 @@ fn tm_genesis_runs_offline_end_to_end_through_the_real_binary() {
     assert!(
         tickets
             .iter()
-            .all(|t| t.get("state").and_then(|s| s.as_str()) == Some("draft")),
-        "genesis's committed tickets must all still be Draft (nothing activates them on its \
-         own), got {tickets:?}"
+            .all(|t| t.get("state").and_then(|s| s.as_str()) == Some("ready")),
+        "genesis's committed tickets must be Ready so the scheduler can work them, got {tickets:?}"
     );
 }
 

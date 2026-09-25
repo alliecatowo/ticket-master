@@ -1424,8 +1424,7 @@ fn genesis_stop_message(stop: &GenesisStop) -> String {
         GenesisStop::MilestoneNotClosed {
             milestone, tickets, ..
         } => format!(
-            "{tickets} ticket{s} committed under milestone {milestone}. Run `tm sched run` (or \
-             `tm run <T>`) to work them, then re-run `tm genesis --resume` to continue.",
+            "{tickets} ticket{s} committed under milestone {milestone}. Run `tm sched run`, then re-run `tm genesis --resume` to continue.",
             s = if *tickets == 1 { "" } else { "s" },
         ),
         GenesisStop::MaturityGateFailed { open_tickets } => format!(
@@ -1494,7 +1493,19 @@ async fn run_genesis_stages(
         }
         on_stage(state.stage);
         let prev_stage = state.stage;
+        let prior_ticket_ids: BTreeSet<_> = if prev_stage == tm_genesis::Stage::GraphCompilation {
+            store.view()?.tickets.keys().cloned().collect()
+        } else {
+            BTreeSet::new()
+        };
         state = driver.advance(&state, actor.clone()).await?;
+        if prev_stage == tm_genesis::Stage::GraphCompilation {
+            for ticket in store.view()?.tickets.values().filter(|t| {
+                !prior_ticket_ids.contains(&t.id) && t.state == tm_core::TicketState::Draft
+            }) {
+                store.activate(&ticket.id, actor.clone())?;
+            }
+        }
         if prev_stage == tm_genesis::Stage::MaturityGate
             && state.stage == tm_genesis::Stage::Stabilization
         {
@@ -1545,7 +1556,7 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
         // silently orphans one.
         create_or_promote_project_dir(&dir, false)?.0
     };
-    let project = open(&root)?;
+    let project = Arc::new(open(&root)?);
 
     // `--resume` (or an omitted `--prompt`, which auto-detects) continues the most recently
     // persisted `GenesisState` snapshot instead of starting a fresh `Seed`, via the same
@@ -1579,6 +1590,7 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
     let actor = project.actor.clone();
     let quiet = renderer.is_quiet();
     let progress = *renderer;
+    let run_tickets = args.run;
     // A missing/unreadable bundled catalog degrades to the pre-catalog behavior (template
     // selection is a no-op) rather than failing the whole run — this can legitimately happen for
     // an installed `tm` whose layout doesn't ship the starter templates yet.
@@ -1595,7 +1607,7 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
             project.ids.as_ref(),
             &catalog,
         );
-        run_genesis_stages(
+        let (state, stop) = run_genesis_stages(
             &driver,
             project.store.as_ref(),
             initial_state,
@@ -1606,7 +1618,58 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
                 }
             },
         )
-        .await
+        .await?;
+        if run_tickets {
+            if let Some(GenesisStop::MilestoneNotClosed {
+                stage: tm_genesis::Stage::V0,
+                milestone,
+                ..
+            }) = &stop
+            {
+                let runner = crate::sched::spawn_background_runner(
+                    project.clone(),
+                    std::time::Duration::from_secs(1),
+                )?;
+                loop {
+                    let view = project.store.view()?;
+                    let closed = view
+                        .milestones
+                        .get(milestone)
+                        .is_some_and(|m| m.state == tm_core::MilestoneState::Closed);
+                    let escalated = view.milestones.get(milestone).is_some_and(|m| {
+                        m.tickets.iter().any(|id| {
+                            view.tickets
+                                .get(id)
+                                .is_some_and(|t| t.state == tm_core::TicketState::Escalated)
+                        })
+                    });
+                    if closed || escalated {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                runner.abort();
+                let driver = tm_genesis::GenesisDriver::new(
+                    project.store.as_ref(),
+                    provider.as_ref(),
+                    project.clock.as_ref(),
+                    project.ids.as_ref(),
+                    &catalog,
+                );
+                run_genesis_stages(
+                    &driver,
+                    project.store.as_ref(),
+                    state,
+                    project.actor.clone(),
+                    |_| {},
+                )
+                .await
+            } else {
+                Ok((state, stop))
+            }
+        } else {
+            Ok((state, stop))
+        }
     })?;
 
     let human = match &stop {

@@ -182,11 +182,11 @@ never drift between sessions:
   `tm-acp`'s own doc comments for the seam it would plug into). It resolves the project the way
   every other subcommand does, so pin one with `--project DIR` if none exists at the working
   directory. Stdout carries JSON-RPC only; log to stderr.
-- `tm genesis` stops for work instead of spinning: once V0 or V1's milestone isn't closed yet
-  (in practice this fires right after `Ignition` commits the Draft ticket graph, since nothing
-  activates those tickets on its own), or after the maturity gate fails once, it prints the
-  ticket count and milestone, says to run `tm sched run` (or `tm run <T>`) then re-run `tm
-  genesis`, and exits 0. Re-run with `tm genesis --resume` to continue that stopped run from its
+- `tm genesis` activates its committed ticket graph after compilation so `tm sched run` can work
+  it. Once V0 or V1's milestone isn't closed yet, or after the maturity gate fails once, it prints
+  the next step and exits 0. Use `tm genesis --run` to run the scheduler in-process until V0 closes
+  (or a ticket escalates), then continue Genesis automatically. Re-run with `tm genesis --resume` to
+  continue a stopped run from its
   persisted stage instead of starting over (an omitted `--prompt` auto-detects a persisted
   snapshot the same way; `--resume` with no snapshot yet is a real error). See
   `docs/decisions/D-027-genesis-cli-stops-for-work.md`. Under
