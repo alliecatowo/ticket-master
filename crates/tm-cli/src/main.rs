@@ -12,7 +12,7 @@ use tm_cli::args::{Cli, Command};
 use tm_cli::project;
 use tm_cli::render::Renderer;
 use tm_cli::{
-    acp, agent, auth, drive, mcp, ops, sched, search, serve, tickets, tui, wiki, workflow,
+    acp, agent, auth, drive, mcp, ops, sched, search, serve, stats, tickets, tui, wiki, workflow,
 };
 
 #[cfg(feature = "otel")]
@@ -215,6 +215,10 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
         Some(Command::Status(args)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
             project::status(&opened, &args, renderer)
+        }
+        Some(Command::Stats(args)) => {
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
+            stats::dispatch_stats(&args, &opened, renderer)
         }
         Some(Command::Doctor(args)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;

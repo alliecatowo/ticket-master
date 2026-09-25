@@ -52,6 +52,7 @@ pub mod render;
 pub mod sched;
 pub mod search;
 pub mod serve;
+pub mod stats;
 pub mod ticket;
 pub mod tickets;
 pub mod tui;

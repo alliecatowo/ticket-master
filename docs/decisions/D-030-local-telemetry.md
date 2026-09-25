@@ -50,6 +50,18 @@ not a new durable table.
   them had to change to stay green. `AgentLoop::record_usage` is the only caller that passes
   `Some(...)`, built from the same `Completion::model` `StepRecord.served_by` already stringifies.
 
+**`tm stats` (`tel-stats-cli-command`) is the one command that reads this telemetry back.** It
+folds the whole event log (`crates/tm-cli/src/stats.rs`'s `read_all_events`, mirroring
+`project.rs`'s own private helper of the same name/shape rather than sharing it) and rolls it up
+`--by ticket` (default; `tm_harness::metrics::ticket_metrics_from_events` per distinct ticket, or
+just `--ticket T` when given), `--by day` (calendar-date buckets from each event's own
+timestamp), `--by model` (keyed `"<provider>/<model>"`, or `"unattributed"` for a `usage.recorded`
+event with no `served_by` — the pre-attribution shape this same decision's cost/attribution split
+above describes), and `--by tool` (count/failures/mean `duration_ms` per `tool_name`, `failures`
+counting any `outcome` other than `"completed"`). Every aggregation is a pure function of `&[Event]`
+(`stats_by_ticket`/`stats_by_day`/`stats_by_model`/`stats_by_tool`), unit-tested directly; only
+`dispatch_stats` itself touches the log or a renderer.
+
 **`tool_call.completed` (`tel-tool-call-event-kind`) is the new event kind `usage.recorded`'s
 "Why" section below anticipated.** `EventKind::ToolCallCompleted` gets its own `EventCategory::
 ToolCall`, following the `command.*`/`EventCategory::Command` precedent rather than folding into
