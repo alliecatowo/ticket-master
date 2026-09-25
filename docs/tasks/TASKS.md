@@ -1011,6 +1011,315 @@ Gate: `mise run verify`
   acceptance: On a doc with an open Review ticket, attest closes the ticket, writes a HumanAttestation evidence row, and a following docs list shows Fresh.
   test: `mise run test:crate -- tm-cli`
 
+## U — Opus audit 2026-09-25 (docs/audits/2026-09-25-opus-audit.md)
+
+## U1 — Found in the 2026-09-25 end-to-end audit (/tmp/tm-audit/AUDIT.md)
+
+- [ ] **u1-agent-search-exact-limit** — Cap agent/MCP `search.exact`/`search.regex` results (default 50) and add `limit` + `path_glob` params
+  model: sonnet · severity: critical · builds Rust: yes · area: agent-tools · deps: none
+  files: `crates/tm-agent/src/tools.rs`, `crates/tm-codeintel/src/exact.rs`, `crates/tm-codeintel/src/api.rs`, `crates/tm-mcp/src/server.rs`
+  change: `ToolName::SearchExact`/`SearchRegex` in tools.rs (grep `ToolName::SearchExact =>`) call `self.ci.search_exact(needle)` which uses `DEFAULT_HIT_CAP = 1000` (exact.rs:30), with the full `line_text` of every hit going to the model. Add optional `limit` (default 50, max 200) and `path_glob` (a glob filter applied during the walk) to both tool schemas and to `CodeIntel::search_exact`/`search_regex` (new `*_with` variants taking an options struct, so existing callers stay the same). Truncate each `line_text` to 240 chars. When results are cut, return `"truncated": true` plus `"total_seen"` and a hint string: "narrow the query or pass path_glob". Apply the same defaults to the MCP `search_exact`/`search_regex` tools.
+  acceptance: In a repo with more than 1000 occurrences of `provider`, one agent `search.exact {"query":"provider"}` returns at most 50 hits and `truncated:true`; `{"query":"provider","path_glob":"crates/tm-cli/**","limit":10}` returns at most 10 hits, all under crates/tm-cli. Unit tests cover the limit, the glob and the line clipping.
+  test: `mise run test:crate -- tm-agent && mise run test:crate -- tm-codeintel && mise run test:crate -- tm-mcp`
+  evidence: A dogfood ticket on a clone of this repo spent 1,025,330 tokens over 18 tool calls (`tm stats`). Right after its first `search.exact` call a single request was 67,870 tokens, and every later request was 36k–94k tokens. It never edited a file. Measured directly: `tm search --exact provider --limit 100000 --json` on the clone returns 1000 hits and 177,808 bytes (about 45k tokens), which is what one agent `search.exact` call hands the model. The MCP tool and CLI default are already capped at about 20 hits; only the agent tool is uncapped.
+
+- [ ] **u1-context-pack-fit-sections** — Fit context-pack sections to their share (top-k until full) instead of dropping them whole
+  model: sonnet · severity: critical · builds Rust: yes · area: context · deps: none
+  files: `crates/tm-context/src/pack.rs`, `crates/tm-context/src/sections.rs`
+  change: `assemble` (pack.rs, grep `"exceeds remaining token budget"`) either admits a section whole or drops it. Make retrieval-like sections (SearchHits, Wiki, Conventions, SymbolOutlines, GitHistory) truncatable: have `RawSection` carry ordered items, and admit items in order until the section's share or the remaining budget is used up, recording a `DroppedSection` only for the items left out, with a reason like "trimmed 41 of 60 hits to fit". In sections.rs, cap the search-hits builder at 20 hits of at most 40 lines each before assembly, and give Conventions a head-truncation (the first N lines of AGENTS.md/CLAUDE.md plus "…truncated"). Derive expected values in tests from `SectionKind` shares, not hardcoded quotients (CLAUDE.md convention).
+  acceptance: `tm ticket context <T>` on a clone of this repo admits a non-empty "Search hits" and "Project conventions" section. The total stays within the pack budget, and "Left out to fit the budget" lists only trimmed items. New unit tests show a 100-hit section admitted partially, not dropped.
+  test: `mise run test:crate -- tm-context`
+  evidence: `tm ticket context T-1` on /tmp/tm-audit/self admitted 478 tokens across 7 sections, and dropped "Search hits — would have needed ~93427 tokens", "Project conventions — ~12197 tokens" and "Wiki pages — ~1771 tokens". The worker got no retrieval context at all.
+
+- [ ] **u1-provider-table-follows-env** — Stop freezing env-detected providers into providers.toml at `tm init`; re-detect at load, and add `tm provider reset`
+  model: sonnet · severity: critical · builds Rust: yes · area: providers · deps: none
+  files: `crates/tm-provider/src/role_config.rs`, `crates/tm-cli/src/ops.rs`, `crates/tm-cli/src/args.rs`, `docs/providers.md`
+  change: `RoleTable::default_table_with(devpass_model)` (role_config.rs, grep `fn default_table_with`) is written to `.tm/providers.toml` by `tm init` using whatever env vars exist at init time. A project initialised without DEVPASS_* never routes to devpass, even after the key is set later. Fix: (1) have `tm init` record that providers.toml was generated. Check first whether `RoleTable::parse`'s `collect_roles` would treat a top-level `generated = true` as a role; if it would, use a `[meta]` table it skips or a sibling `.tm/providers.generated` marker file; (2) in the effective-table loader, when `generated = true`, merge env-detected candidates (devpass, and any other `Registry::autodetect` provider that is ready) ahead of not-configured ones at load time; (3) add `tm provider reset` to regenerate the file from the current environment (keeping a `.bak`). A hand-edited file (no `generated` key) is never touched. Update docs/providers.md.
+  acceptance: In a fresh dir: `tm init` without DEVPASS_*, then with `.env` loaded, `tm -p "Reply hello"` replies via devpass, and `tm run T-1` routes coder.fast to devpass. `tm provider reset` rewrites the table and prints what changed. Unit tests cover the merge and the hand-edited opt-out. Projects created before this change have no marker, so only `tm provider reset` fixes them; `tm doctor` should suggest it when the table routes to unconfigured providers while a configured one is ready.
+  test: `mise run test:crate -- tm-provider && mise run test:crate -- tm-cli`
+  evidence: /tmp/tm-audit/split: `tm init` (no .env), then `set -a; . .env; tm -p ...` gave `no usable model is configured for coder.fast`, and `tm run T-1` gave `no candidate can serve role coder.fast: provider not registered: anthropic`. The same binary in /tmp/tm-audit/probe (init with .env loaded) works.
+
+- [ ] **u1-genesis-reasoning-model-tokens** — Genesis stages must survive reasoning models: raise max_tokens and retry once on an empty/MaxTokens reply
+  model: sonnet · severity: critical · builds Rust: yes · area: genesis · deps: none
+  files: `crates/tm-genesis/src/seed.rs`, `crates/tm-genesis/src/vision.rs`, `crates/tm-genesis/src/spec.rs`, `crates/tm-genesis/src/compile.rs`, `crates/tm-genesis/src/maturity.rs`
+  change: Every stage hard-codes a small `max_tokens` (seed.rs:199 and vision.rs:136 use 2048; maturity.rs:253 uses 1024). With devpass's reasoning model (`muse-spark-1.3-contributor`), `analyze_prompt` gets a completion with no text block and fails with `parse: completion has no text content`. That fits (but does not prove) the truncation compat.rs:921 documents, where the gateway returns `finish_reason:"incomplete"`/null content when reasoning uses up max_tokens. First confirm with `RUST_LOG=tm_provider=trace` or a `--record` cassette; if it is not MaxTokens, handle the actual stop reason the same way. Add one helper in tm-genesis (e.g. `complete_text(provider, req)`) that: uses max_tokens of at least 16384; if the completion has no text and `StopReason::MaxTokens`, retries once with double the tokens; and on final failure returns a plain error naming the model and saying the reply was empty or truncated. Route all five stages through it. Add mock-provider tests for the empty-then-success path.
+  acceptance: With `.env` loaded (devpass only), `tm genesis --plain --prompt "A todo CLI in Python with pytest tests"` in an empty git repo gets past "reading the prompt" and commits a ticket graph. The unit test for the retry passes.
+  test: `mise run test:crate -- tm-genesis`
+  evidence: /tmp/tm-audit/genesis1.log and genesis2.log both show `genesis: reading the prompt` then `error: parse: completion has no text content` (exit 1, about 30s), reproducibly, on the only live provider.
+
+- [ ] **u1-genesis-activates-its-graph** — `tm genesis` should activate the tickets it commits (or offer `--run`) so `tm sched run` actually works them
+  model: sonnet · severity: critical · builds Rust: yes · area: genesis · deps: u1-genesis-reasoning-model-tokens, u1-hygiene-spec-refs-in-user-strings
+  files: `crates/tm-cli/src/project.rs`, `crates/tm-genesis/src/compile.rs`, `docs/decisions/D-NNN-genesis-activates-its-graph.md (next free number)`, `docs/decisions/D-027-genesis-cli-stops-for-work.md`
+  change: `run_genesis_stages` stops with "N tickets committed under milestone M-1. Run `tm sched run` (or `tm run <T>`) to work them, then re-run `tm genesis --resume`". The tickets are Draft, and `tm sched plan`/`tick` ignore drafts, so that advice is a dead end. Change it: after GraphCompilation, activate the committed V0 tickets (Draft to Ready/Blocked through `Store::activate`, as `ticket.activate` does). Add a `--run` flag that then drives the in-process scheduler (`sched::spawn_background_runner` or the `tm sched run` loop) until the V0 milestone closes or a ticket escalates, and resumes the genesis stages after that. Without `--run`, print the exact next command, which must now work. This reverses an accepted D-027 choice, so write a new decision doc (next free number, [new decision: genesis activates its graph] at the time of writing; check `ls docs/decisions`) that supersedes that part, and add only a "Superseded in part by D-0NN" line to D-027's status.
+  acceptance: Under `TM_TEST_MOCK_PROVIDER=1`, `tm genesis --prompt "x"` leaves its tickets `ready` (not `draft`), and `tm sched plan` then lists lease actions. `tm genesis --run --prompt "x"` under the mock reaches past V0. The e2e test in tm-cli covers both.
+  test: `mise run test:crate -- tm-cli && mise run test:crate -- tm-genesis`
+  evidence: /tmp/tm-audit/genmock: genesis committed T-1/T-2 as `draft`. `tm sched plan` then printed "No scheduler actions planned" and `tm sched tick` printed "No work to do right now".
+
+- [ ] **u1-fabric-error-copy-not-configured** — Say "not configured (ANTHROPIC_API_KEY is not set)" instead of "provider not registered: anthropic"
+  model: haiku · severity: high · builds Rust: yes · area: providers · deps: u1-provider-table-follows-env
+  files: `crates/tm-provider/src/fabric.rs`
+  change: fabric.rs:406 and :485 (grep `provider not registered`) produce `no candidate can serve role coder.fast: provider not registered: anthropic`. Replace them with plain wording that names the missing credential env var when known (from `Registry::known_providers`), lists which candidates were tried, and ends with the fix: "Set ANTHROPIC_API_KEY, or run `tm provider reset` to route to a provider that is configured (devpass is ready)." Update any test asserting the old string.
+  acceptance: `tm run T-1` in a project whose roles only name anthropic, with no ANTHROPIC_API_KEY, prints the new message, naming the env var and a ready alternative when one exists.
+  test: `mise run test:crate -- tm-provider`
+  evidence: The dogfood run's first attempt died with `provider was unavailable: provider: no candidate can serve role coder.fast: provider not registered: anthropic`. Anthropic is a known provider; it just had no key.
+
+- [ ] **u1-worker-submit-nudge** — When a ticketed run ends with plain text, send one reminder turn before failing the attempt
+  model: sonnet · severity: high · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-agent/src/executor.rs`
+  change: In `AgentLoop::drive` (grep `"model ended turn without submitting"` in executor.rs and the matching path in agent_loop.rs), when a ticketed task (no `conversation`) gets a text-only assistant turn, append one user message ("You ended your turn without calling ticket.submit. If the work is done and verified, call ticket.submit with evidence now; if not, continue working.") and continue. Do this at most once per attempt (twice if configurable), and only then fail with the existing message. Record the nudge in the step transcript.
+  acceptance: A MockProvider script (text-only turn, then a `ticket.submit` call) ends `AgentOutcome::Submitted`. Two text-only turns in a row still fail with "model ended turn without submitting".
+  test: `mise run test:crate -- tm-agent`
+  evidence: Dogfood T-1 (/tmp/tm-audit/dogfood2.log) ran 18 tool calls in 253s, then failed with `something went wrong: model ended turn without submitting`, with no edits. Claude Code/Codex never lose a run's work to this: their loop ends on a text turn and the harness decides what happens next.
+
+- [ ] **u1-run-progress-shows-args** — Show what each step did in `tm run`'s live output (the command, path or query), not "Ran a command"
+  model: haiku · severity: high · builds Rust: yes · area: cli-ux · deps: none
+  files: `crates/tm-cli/src/agent.rs`
+  change: `tm run T --plain` prints lines like `* Ran a command`, `* Read a file`, `* Searched the code`, `* Read a file -> error: couldn't read or write a file`. The step printer is `plain_tool_action` (agent.rs:2280-2314, grep `"Ran a command"`) and include the salient argument, clipped to about 80 chars: the shell command, the file path (plus the line range for read_range), the search query, and for errors the path and error kind. It already receives the tool name; pass the call's `input` too, and keep the plain verb as the prefix.
+  acceptance: `tm run` on a mock-scripted ticket prints `* Ran \`cargo test -p tm-cli\``, `* Read crates/tm-cli/src/project.rs:2200-2280`, and `* Searched for "providers"`. A snapshot test covers the formatter.
+  test: `mise run test:crate -- tm-cli`
+  evidence: /tmp/tm-audit/dogfood2.log: 18 steps, none of which says what was run or read, including a failed read with no path.
+
+- [ ] **u1-wire-potion-embedder** — Use `open_at_auto` (Potion when cached) on every real command path, and store the embedder's identity in the index so a change triggers a re-embed
+  model: sonnet · severity: high · builds Rust: yes · area: code-intel · deps: u1-agent-search-exact-limit, u1-genesis-resume-checks-snapshot-first
+  files: `crates/tm-codeintel/src/api.rs`, `crates/tm-codeintel/src/store.rs`, `crates/tm-cli/src/project.rs`, `crates/tm-cli/src/dispatch.rs`, `crates/tm-mcp/src/server.rs`, `crates/tm-genesis/src/attach.rs`
+  change: No production code calls `CodeIntel::open_auto`/`open_at_auto`. `Project::code_intel` (project.rs:91), `doctor` (project.rs:2221), `open_and_refresh_code_intel` (dispatch.rs:447), `McpServer::code_intel` (tm-mcp server.rs:386) and `attach_repository` (attach.rs:430) all use hash-only `open_at`. The embed.rs:222 doc comment says "real command paths use" it, which is false. (1) Persist `embedder_id` (e.g. `hash-v1`, `potion-code-16M-v2`) in the index DB's meta table. On open with a different embedder, clear the vector table and let `update_incremental` re-embed. (2) Switch those five call sites to `open_at_auto(.., None)`. Tests keep using `open`/`open_at` (hash) so they stay network-free (hygiene). Tests that go through `Project::code_intel` would otherwise pick Potion on this machine and hash on CI, so force hash in the test harness (`TM_EMBEDDER=hash` or the `config_override` argument) to keep them deterministic. (3) Correct the embed.rs comment and D-025's "no real command path calls open_auto yet" note.
+  acceptance: With the Potion model cached in `~/.cache/huggingface/hub/models--minishlab--potion-code-16M-v2` (it is on this machine), `tm search --semantic "where does the scheduler decide a ticket is ready"` on a clone of this repo puts a `crates/tm-scheduler` hit in the top 5, where today it returns flat 0.51 scores from docs. `TM_EMBEDDER=hash` restores the old behaviour. A unit test covers the embedder-change re-embed.
+  test: `mise run test:crate -- tm-codeintel && mise run test:crate -- tm-cli`
+  evidence: `tm search --semantic "where does the scheduler decide a ticket is ready"` on /tmp/tm-audit/self returned D-008, D-023, TASKS.md and thesis.md, all scoring 0.51–0.52, and no readiness code (`crates/tm-scheduler/src/select.rs`). The model cache directory exists but is never used.
+
+- [ ] **u1-decider-wire-shadow-triage** — Wire the configured `Role::Decider` into `Store` at project open, with a `DecisionProvider`→`TriageDecider` adapter
+  model: sonnet · severity: high · builds Rust: yes · area: providers (D-020) · deps: u1-init-builds-index
+  files: `crates/tm-provider/src/decide.rs`, `crates/tm-cli/src/project.rs`, `docs/decisions/D-020-system-one-decision-providers.md`
+  change: `Store::with_decider` (store.rs:616) and `Registry::build_decider` (registry.rs:421) are only ever called from tests. No production code builds a decider, and nothing implements `TriageDecider` for a `DecisionProvider`, so the "landed" d20-shadow-triage task never fires outside unit tests. (1) In tm-provider (or tm-cli, whichever avoids a tm-core→tm-provider dependency; tm-core must not depend on tm-provider), add `TriageAdapter { inner: Arc<dyn DecisionProvider>, runtime handle }` implementing `tm_core::store::TriageDecider`, which builds the triage `DecideRequest` (kind + routing questions) and maps the top answer. (2) In project open (grep `Store::open_at` in project.rs), when the effective role table's `decider` candidate is not `mock`, or when `TM_DECIDER_SHADOW=1`, build it through `Registry::build_decider` and call `with_decider`. By default the mock writes no `classify.decided` events. (3) Update D-020's status line to say what is actually wired.
+  acceptance: With `providers.toml` `[decider]` set to a `systemone-http` candidate pointing at a local stub HTTP server (test), `tm ticket new "x"` appends `ticket.created` and `classify.decided` with `disposition:"shadow"`. With the default config it appends no `classify.decided`. A decider HTTP error still creates the ticket.
+  test: `mise run test:crate -- tm-provider && mise run test:crate -- tm-cli`
+  evidence: `rg -ln "with_decider|build_decider|TriageDecider|DecisionProvider" crates` finds production callers nowhere, only the definitions, store.rs tests and registry.rs tests. `tm provider list` shows `decider mock mock-decider not-configured`.
+
+- [ ] **u1-automatic-verification-step** — After a submit, run the ticket's declared verification commands and record pass/fail evidence, keeping the ticket in Submitted
+  model: sonnet · severity: high · builds Rust: yes · area: scheduler · deps: none
+  files: `crates/tm-scheduler/src/dispatch.rs`, `crates/tm-e2e/tests/ticket_lifecycle_e2e.rs`
+  change: SPEC.md:721-724 ("Verification separation", non-negotiable) and :308 (`Submitted -> Verifying` automatically) have no implementation. Nothing creates a Verification ticket or runs checks, and `Store::verify` is only reachable from the HTTP route (routes.rs:846). First slice, with no state-machine change: in `report_outcome` (dispatch.rs, grep `store.submit(ticket`), after a successful submit, when the ticket's `VerificationPolicy` names commands (or the project's `harness.toml` has a `verify_command`), run them in the ticket's workspace with the existing command executor as `system`. Attach the output as a verification evidence record with `passed: bool`, and leave the ticket in `Submitted` so `Store::accept`/`reject` (which begin with `Trigger::VerificationStarted` from Submitted) keep working. If the check fails, reject it through the existing `Store::reject` path as `system`, with the failing output as the reason, so it goes back through retry. Don't call `Store::verify` here: it takes a verifier `TicketId` and is subject to `AuditorMustDiffer`, which is part of task u1-verification-state-and-review.
+  acceptance: Mock-provider e2e tests: with verification command `false`, a submitted ticket gets rejected by `system` with the command output and returns to the retry path; with `true`, it stays in Submitted with a passing verification evidence record, and `tm ticket accept` still closes it.
+  test: `mise run test:crate -- tm-scheduler && mise run test:crate -- tm-e2e`
+  evidence: `rg "store\.verify\(|TicketKind::Verification"` outside tests finds only routes.rs:846 and label/mirror code. Every "Ready for review" ticket today depends entirely on the model's own claim that it ran the tests.
+
+- [ ] **u1-dogfood-e2e-smoke** — Add a mise task that runs one real ticket against a scratch clone of this repo and reports submit/tokens/wall time
+  model: sonnet · severity: high · builds Rust: no · area: harness · deps: u1-agent-search-exact-limit, u1-context-pack-fit-sections, u1-worker-submit-nudge
+  files: `scripts/dogfood-smoke.sh`, `mise.toml`, `CLAUDE.md`
+  change: Add `scripts/dogfood-smoke.sh` (POSIX sh, as in disk-guard.sh): clone the primary checkout into `mktemp -d` via `git clone file://…`, `tm init`, `mise trust`, create a fixed small ticket (the doctor providers-warn fix), and run `tm run T-1 --plain --record <tmp>/cassette` under a wall-clock bound. Print the final state, `tm stats` tokens/tool calls, and `git diff --stat`, and exit non-zero unless the ticket reached Submitted. Use DevPass from `.env` only through `set -a; . .env` inside the script, never echoing it. Add `mise run dogfood` and a CLAUDE.md line. Not part of verify.
+  acceptance: `mise run dogfood` prints a one-line verdict like `SUBMITTED in 212s, 380k tokens, 14 tool calls, 2 files changed` or a clear failure, and cleans up its tempdir.
+  test: `sh -n scripts/dogfood-smoke.sh && mise tasks | grep dogfood`
+  evidence: Nothing in the repo measures "can tm work on itself". The audit's manual dogfood took about 6 calls to set up and exposed 4 critical bugs.
+
+- [ ] **u1-edit-anchor-by-text** — Let `edit.apply_patch` anchor on exact old text (search/replace) and reject byte ranges that don't split on line boundaries the model saw
+  model: sonnet · severity: high · builds Rust: yes · area: agent-tools · deps: u1-agent-search-exact-limit
+  files: `crates/tm-agent/src/patch.rs`, `crates/tm-agent/src/tools.rs`
+  change: The model edits with `{"edits":[{"byte_start","byte_end","replacement"}]}` (patch.rs `Edit`, around line 25-63). In dogfood T-2, a correct 3-line change to `provider_doctor_detail` also duplicated a phrase in the next doc comment (`a smell, not a regardless -- a 1x1 workflow is a smell, not a`), which is the classic off-by-N byte-offset failure. First check whether the edit-hash-fix track has landed a fix (`git log --oneline -- crates/tm-agent/src/patch.rs`); if it has, only add the regression test below. Otherwise add an `old_text` form (`{"path","old_text","new_text"}`, which must match exactly once, like Claude Code's Edit), make it the schema's preferred form, and keep byte ranges as a fallback that must also carry the `old_text` they replace, verified before applying.
+  acceptance: A unit test replays the T-2 shape (a byte range off by several bytes with `old_text` supplied) and gets a clear "old_text does not match at that range" error instead of corruption. A unique `old_text` replacement succeeds; an ambiguous one fails with the match count.
+  test: `mise run test:crate -- tm-agent`
+  evidence: /tmp/tm-audit/self `git diff` after T-2: the second hunk corrupts the doc comment at project.rs:~2134.
+
+- [ ] **u1-decider-provider-status** — Show the decider role correctly in `tm provider list/status/test` (not "not-configured" for the mock) and add `tm provider test decider`
+  model: haiku · severity: medium · builds Rust: yes · area: providers (D-020) · deps: u1-decider-wire-shadow-triage
+  files: `crates/tm-cli/src/ops.rs`
+  change: `tm provider list` prints `decider  mock  mock-decider  1  not-configured`. Report the mock as `offline (mock)`, and a systemone candidate as `ready`/`missing AI_GATEWAY_API_KEY`. Extend `tm provider test` so `tm provider test decider` sends one triage `DecideRequest` through the configured decider and prints the answers with confidences.
+  acceptance: `tm provider list` shows `offline (mock)` for the default decider, and `tm provider test decider` against the mock prints a triage answer and exits 0.
+  test: `mise run test:crate -- tm-cli`
+  evidence: /tmp/tm-audit/probe `tm provider list` output, last row.
+
+- [ ] **u1-verification-state-and-review** — Move auto-verified tickets through `Verifying` and adapt accept/reject, the tickets-screen peek and the server transitions to match
+  model: sonnet · severity: medium · builds Rust: yes · area: core · deps: u1-automatic-verification-step, u1-hub-shortcuts-panel-tabs
+  files: `crates/tm-core/src/store.rs`, `crates/tm-server/src/routes.rs`, `crates/tm-tui/src/screens/tickets.rs`, `SPEC.md`
+  change: Once u1-automatic-verification-step records verification evidence, drive `Submitted -> Verifying -> Auditing` through `Store::verify` using a system verifier id that satisfies `AuditorMustDiffer`. Make `Store::accept`/`reject` accept a ticket in `Verifying`/`Auditing` as well as `Submitted` (grep `Trigger::VerificationStarted` in accept/reject). Show the verification result in the peek ("checks passed: cargo test -p x"). Correct SPEC §4/§11 to describe what is implemented, and keep the V-*/A-* ticket split as documented future work.
+  acceptance: Core unit tests: accept and reject work from Submitted, Verifying and Auditing; invariants hold. A TUI snapshot shows the check result in the peek.
+  test: `mise run test:crate -- tm-core && mise run test:crate -- tm-server && mise run test:crate -- tm-tui`
+  evidence: store.rs:1205-1313 `accept`/`reject` both start with `step(t.state, Trigger::VerificationStarted)`, so they are only valid from Submitted.
+
+- [ ] **u1-genesis-maturity-without-verification-tickets** — Make the maturity gate's verification-pass-rate predicate use the verification evidence that actually exists
+  model: sonnet · severity: medium · builds Rust: yes · area: genesis · deps: u1-automatic-verification-step
+  files: `crates/tm-genesis/src/maturity.rs`
+  change: `evaluate_predicate` (maturity.rs:86-159) filters `t.kind == TicketKind::Verification`, and no code path creates such tickets, so the pass rate is computed over nothing. Count the verification evidence/`ticket.verified`/`ticket.verification_failed` events on Work tickets in the window instead (keep counting Verification tickets too, for later). Define explicitly what an empty window means (fail, with the reason "no verified work yet") and test it.
+  acceptance: Unit tests: a window with 3 verified-passed and 1 failed Work ticket gives a 0.75 pass rate; an empty window fails with a readable reason.
+  test: `mise run test:crate -- tm-genesis`
+  evidence: maturity.rs:95 filters on `TicketKind::Verification`, and `rg TicketKind::Verification crates/tm-genesis/src crates/tm-scheduler/src` shows no creator.
+
+- [ ] **u1-hub-board-display-labels** — Use the tickets screen's display labels on the Kanban board, and show the tab strip there
+  model: sonnet · severity: medium · builds Rust: yes · area: tui · deps: none
+  files: `crates/tm-tui/src/screens/kanban.rs`, `crates/tm-cli/src/tui.rs`
+  change: The board (Tab or Ctrl+B from the tickets screen) shows raw state names as columns: `draft (0) blocked (0) ready (0) leased (0) active (0)` (only 5 were visible at 120 cols; confirm whether the other states are cut off). There is no header or tab strip, and it breaks D-024's one-set-of-display-labels rule. Use the same group labels as the tickets screen (Needs input / Working / Ready for review / Queued / Completed) as columns, render the shared header and tab strip (Tickets · Board · Milestones · Timeline · Graph) with Board highlighted, and make columns fit the width.
+  acceptance: In a 120x36 PTY, the board shows 5 labelled columns, all visible, under the tab strip. A render snapshot test at 120 cols covers it.
+  test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
+  evidence: The TUI trial (terminal-mcp, /tmp/tm-audit/chatgen): Tab from the tickets screen rendered only `Left/Right: columns ... draft (0) blocked (0) ready (0) leased (0) active (0)`.
+
+- [ ] **u1-chat-header-unusable-model** — Don't advertise a model the chat can't use: flag the header and welcome box when the default model has no credential
+  model: sonnet · severity: medium · builds Rust: yes · area: tui · deps: u1-provider-table-follows-env, u1-hub-board-display-labels
+  files: `crates/tm-cli/src/tui.rs`, `crates/tm-tui/src/screens/chat.rs`
+  change: Opening `tm` in a project whose default model is `anthropic/claude-sonnet-5`, with no ANTHROPIC_API_KEY, shows `model: anthropic/claude-sonnet-5` in the welcome box and status line with no warning. The first message then fails with `no usable model is configured for coder.fast`. At startup, check the effective chat model's availability (the same check `tm provider status` uses). When unavailable, show `model: anthropic/claude-sonnet-5 (not set up — /connect)` in the welcome box and a warning-coloured dot in the status line.
+  acceptance: A render test with an unavailable model shows the "not set up" hint, and with an available one it shows the plain model.
+  test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
+  evidence: The TUI trial in /tmp/tm-audit/chatgen without .env: the welcome box said `model: anthropic/claude-sonnet-5`, then `hi` gave `✗ The turn could not run: provider: no usable model is configured for coder.fast`.
+
+- [ ] **u1-ticket-kind-task-alias-api** — Accept `task` as an alias of `work` everywhere (HTTP API, MCP) since the CLI help advertises it
+  model: haiku · severity: medium · builds Rust: yes · area: server · deps: u1-provider-table-follows-env
+  files: `crates/tm-core/src/ticket.rs`, `crates/tm-cli/src/args.rs`
+  change: `tm ticket new --help` says `--kind <KIND> Ticket kind (task, investigation, verification, audit, recovery, ...) [default: task]`, but `POST /tickets {"kind":"task",...}` returns 400 `unknown variant \`task\`, expected one of \`work\`, ...`, and lists show `work`. Add `#[serde(alias = "task")]` on `TicketKind::Work` and make the args.rs help say `work (alias: task)` with default `work`.
+  acceptance: `curl -X POST /tickets -d '{"kind":"task","objective":"x","actor":"human:a"}'` returns 201, and the help text says `work`. A serde round-trip test covers the alias.
+  test: `mise run test:crate -- tm-core && mise run test:crate -- tm-server`
+  evidence: `tm serve` trial: `{"error":"bad_request","message":"This ticket's request body is invalid: unknown variant \`task\`..."}`.
+
+- [ ] **u1-hygiene-spec-refs-in-user-strings** — Extend hygiene to flag `SPEC.md §`/`D-NNN` references inside user-facing string literals, and fix the current ones
+  model: sonnet · severity: medium · builds Rust: yes · area: harness · deps: u1-doctor-providers-warn, u1-ticket-kind-task-alias-api
+  files: `crates/xtask/src/hygiene.rs`, `crates/tm-cli/src/drive.rs`, `crates/tm-cli/src/workflow.rs`, `crates/tm-cli/src/project.rs`, `crates/tm-computer/src/macos.rs`, `crates/tm-cli/src/args.rs`
+  change: Users see these strings: drive.rs:142 ("See SPEC.md §19.1a for examples"), workflow.rs:267 and project.rs:2153 ("prompt wearing a costume (SPEC.md §25.3)"), macos.rs:633 (`tm doctor` prints "... (SPEC.md §20.3)"), and `tm acp --help` ("for editors like Zed (`SPEC.md` §28.1)"). Hygiene only checks args.rs doc comments for D-NNN/crates/tm_*:: jargon. Extend it to flag `SPEC.md §` inside string literals in non-test code and inside args.rs `///` help text (allowlist mechanism as for D-NNN). Rewrite each hit in plain words (e.g. an inline browser.toml example instead of the SPEC pointer). Update the test at drive.rs:588 accordingly.
+  acceptance: `mise run hygiene` fails on a planted `"see SPEC.md §1"` literal and passes on the fixed tree. `tm doctor` and `tm acp --help` contain no "SPEC.md".
+  test: `mise run hygiene && mise run test:crate -- xtask && mise run test:crate -- tm-cli`
+  evidence: The `tm doctor` output on /tmp/tm-audit/probe ends "...both target the active login session (SPEC.md §20.3)". `tm acp --help` first line.
+
+- [ ] **u1-doctor-providers-warn** — `tm doctor`'s providers row says `ok` while its detail says "no model provider is ready"; make it `warn`
+  model: haiku · severity: medium · builds Rust: yes · area: cli-ux · deps: none
+  files: `crates/tm-cli/src/project.rs`
+  change: In `doctor` (project.rs, grep `"providers"` near the doctor checks), set status `warn` when no provider is ready. Also reword the first-index detail `repaired incremental drift: 634 added ...` to `indexed 634 files (3146 chunks, 502 commits)` when the index was empty before, and in a repo with no commits, report `index-health` as `warn: no commits yet` instead of `FAIL git2: reference 'refs/heads/main' not found`.
+  acceptance: Unit tests for all three wordings/statuses. `tm doctor` in a fresh `git init` dir with no commits exits 0, with a warn row.
+  test: `mise run test:crate -- tm-cli`
+  evidence: /tmp/tm-audit/self `tm doctor`: `providers ok ... no model provider is ready`, and `index-health ok repaired incremental drift` on the very first index. /tmp/tm-audit/probe (fresh `git init`): `index-health FAIL storage: git2: reference 'refs/heads/main' not found`, and doctor exits non-zero.
+
+- [ ] **u1-bare-text-starts-chat** — `tm "fix the bug"` should open the chat with that prompt (as `claude "…"` does), not error with "--prompt required"
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: u1-hygiene-spec-refs-in-user-strings
+  files: `crates/tm-cli/src/main.rs`, `crates/tm-cli/src/args.rs`
+  change: `tm "some words"` today fails with `error: the following required arguments were not provided: --prompt`. When `[TEXT]` is given without `-p` in an interactive terminal, start the TUI chat with TEXT submitted as the first message. Without a TTY, behave like `-p`. Update `--help`'s TEXT description.
+  acceptance: An args-parse unit test: `tm hello` parses to "interactive with initial prompt". `echo | tm hello` (no TTY) runs a one-shot turn.
+  test: `mise run test:crate -- tm-cli`
+  evidence: A mis-quoted subcommand (`tm "acp --help"`) returned `error: the following required arguments were not provided: --prompt  Usage: tm --prompt <TEXT>`, which is confusing wording for the most natural invocation.
+
+- [ ] **u1-bench-cross-stdin-closed** — Cross-tool bench: run external CLIs with stdin closed; report tm's tokens and each tool's model
+  model: sonnet · severity: medium · builds Rust: yes · area: bench · deps: none
+  files: `crates/xtask/src/bench_cross.rs`
+  change: `opencode run` hung for the full 300s timeout when stdin was an open pipe, and passed in 14s with `< /dev/null`. `claude -p` printed "no stdin data received in 3s". In each `ToolAdapter::run`, spawn with `Stdio::null()` for stdin. Also record per-tool `model` and `tokens`/`cost` where the tool reports them (claude `--output-format json` usage/total_cost_usd, tm `--json -p` tokens), so the report isn't model-confounded without saying so.
+  acceptance: The unit test's fake adapter command, which blocks on stdin, completes. The rendered report has Model and Tokens columns.
+  test: `mise run test:crate -- xtask`
+  evidence: /tmp/tm-audit/h2h/results.txt: `opencode rc=124 wall=302.2s FAIL`, then the rerun with `< /dev/null`: `rc=0 wall=14s OK`.
+
+- [ ] **u1-init-builds-index** — Build the code index during `tm init` (with a progress line) so the first search/doctor/run isn't a silent 60s stall
+  model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: u1-wire-potion-embedder
+  files: `crates/tm-cli/src/project.rs`
+  change: `tm init` on this repo takes 0s and builds no index. The first `tm doctor` took 57s ("repaired incremental drift: 634 added ... 3146 chunks"), and a first `tm run` pays the same cost inside the attempt. After creating the project, run `update_incremental` with a one-line progress/summary ("Indexed 634 files in 41s"). Add `--no-index` to skip.
+  acceptance: `tm init` in a clone prints the indexed-files summary, and a following `tm doctor` shows index-health with 0 added.
+  test: `mise run test:crate -- tm-cli`
+  evidence: /tmp/tm-audit/self: `init took 0s`, `doctor 57s`.
+
+- [ ] **u1-context-cost-report** — Show per-step context size in `tm stats --by tool`/`tm ticket show` so context blowups are visible
+  model: sonnet · severity: medium · builds Rust: yes · area: telemetry · deps: u1-worker-submit-nudge
+  files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-events/src/payload.rs`, `crates/tm-cli/src/stats.rs`
+  change: `tool_call.completed` records the tool name and duration but not the result size, so finding which tool call blew the context up needed a manual correlation with `usage.recorded`. Add `result_bytes` (and `truncated: bool`) to the `tool_call.completed` payload (an optional field, so old logs still replay), and add a `Result KB` column and a `Max request tokens` column to `tm stats --by tool`/`--by ticket`.
+  acceptance: After a mock run with one big tool result, `tm stats --by tool` shows its bytes. Old event logs still materialise (a replay test).
+  test: `mise run test:crate -- tm-events && mise run test:crate -- tm-cli`
+  evidence: The dogfood forensics needed `sqlite3 .tm/project.db` to see that 18 calls cost 1.03M tokens. `tm stats` only showed `T-1 S-2 18 1025330 not priced 203`.
+
+- [ ] **u1-record-flush-incremental** — `tm run --record` must write the cassette incrementally so a killed or timed-out run still leaves one
+  model: sonnet · severity: medium · builds Rust: yes · area: replay · deps: none
+  files: `crates/tm-provider/src/cassette.rs`
+  change: `tm run T-2 --record /tmp/x.cassette` killed by SIGTERM at a 580s bound left no file at all. Make the recording provider append each entry as it happens (JSONL, header first, fsync per entry or per N entries), and have the reader accept a cassette without a footer or with a truncated last line (treat it as ended at the last complete entry). Keep the file format backward compatible for reading.
+  acceptance: A test writes 3 entries, drops the recorder without finishing it, and reads back 3 entries; `tm run --replay` on a truncated cassette replays up to the cut and then reports the divergence.
+  test: `mise run test:crate -- tm-provider`
+  evidence: /tmp/tm-audit/dogfood3.log ends `TIMEOUT after 580s / EXIT 124`, and `ls /tmp/tm-audit/dog2.cassette` gives No such file.
+
+- [ ] **u1-run-sigterm-releases-lease** — On SIGINT/SIGTERM, `tm run` should release its lease and record an interrupted attempt instead of leaving the ticket `active`
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: u1-run-progress-shows-args
+  files: `crates/tm-cli/src/agent.rs`, `crates/tm-cli/src/sched.rs`
+  change: After `tm run T-2` was killed with SIGTERM, `tm ticket list` still shows `T-2 work active`. Install a signal handler (tokio::signal) for the foreground run. On the first signal, cancel the agent loop, append an attempt failure (`interrupted by user`), release the lease (so the ticket returns to Ready through the existing retry path), and exit 130. On a second signal, exit immediately. Confirm first where the foreground run loop lives (grep `fn run_ticket` in crates/tm-cli/src) and adjust `files:` if it's elsewhere.
+  acceptance: An integration test spawns `tm run` against a mock provider that blocks, sends SIGTERM, and then sees the ticket `ready` with a failure record `interrupted`.
+  test: `mise run test:crate -- tm-cli`
+  evidence: The dogfood T-2 kill left `T-2 work active 0 - In crates/tm-cli/src/project.rs, ...` in `tm ticket list`.
+
+- [ ] **u1-hub-shortcuts-panel-tabs** — List Tab/Shift+Tab (switch view) in the tickets screen's `?` panel, and fix the misleading "enter to collapse" footer hint
+  model: haiku · severity: low · builds Rust: yes · area: tui · deps: u1-hub-board-display-labels
+  files: `crates/tm-tui/src/screens/tickets.rs`
+  change: The tickets screen's `?` panel lists `ctrl+b open the Kanban board`, but not Tab/Shift+Tab, which `tab_cycle_key` (crates/tm-cli/src/tui.rs:618) binds to cycle Tickets/Board/Milestones/Timeline/Graph. The footer says "enter to collapse" while the dispatch input has focus and there are no tickets. Add a `tab / shift+tab  switch view` row, and make the footer hint depend on focus ("enter to dispatch" when the input is non-empty or the list is empty).
+  acceptance: The `?` panel shows the tab row, and the footer reads "enter to dispatch" on an empty project. A snapshot test covers both.
+  test: `mise run test:crate -- tm-tui`
+  evidence: The TUI trial: the `?` panel on the tickets screen had no Tab row, and the footer said `enter to collapse · esc to go back` on an empty list.
+
+- [ ] **u1-tui-overlay-swallows-quit** — Ctrl+C twice must quit from any overlay (shortcuts panel, peek), as it does from the base screen
+  model: haiku · severity: low · builds Rust: yes · area: tui · deps: u1-chat-header-unusable-model
+  files: `crates/tm-cli/src/tui.rs`
+  change: With the tickets screen's `?` panel open, Ctrl+C, Ctrl+C left the TUI running with the panel still open. Route Ctrl+C to the app-level quit handler (first press closes the overlay and arms quit, second press quits) before overlay key handling.
+  acceptance: Key-sequence tests: (`?`, Ctrl+C, Ctrl+C) on the tickets screen, and (Ctrl+C, Ctrl+C) on the base chat screen after leaving the board with Esc, both end the app loop.
+  test: `mise run test:crate -- tm-cli`
+  evidence: The TUI trial: after `?` then Ctrl+C twice, `getContent` still showed the Shortcuts panel. Later, after Esc from the board back to the chat, Ctrl+C twice also left the chat open, and only Ctrl+D quit.
+
+- [ ] **u1-history-why-no-commits-copy** — `tm history why <file>` says "repository may be corrupted" for an untracked file or a repo with no history
+  model: haiku · severity: low · builds Rust: yes · area: cli-ux · deps: u1-wire-potion-embedder
+  files: `crates/tm-codeintel/src/history.rs`, `crates/tm-cli/src/search.rs`
+  change: Map the "file has no commits / unborn HEAD / untracked" cases to "todo.py has no git history yet (it isn't committed)". Keep "may be corrupted" only for real git2 corruption errors.
+  acceptance: A test in a tempdir repo with an untracked file gets the new message.
+  test: `mise run test:crate -- tm-codeintel && mise run test:crate -- tm-cli`
+  evidence: /tmp/tm-audit/chatgen: `tm history why todo.py` gave `error: storage: Unable to read file history — repository may be corrupted.`
+
+- [ ] **u1-genesis-resume-checks-snapshot-first** — `tm genesis --resume` with no snapshot should say so before demanding a provider
+  model: haiku · severity: low · builds Rust: yes · area: genesis · deps: u1-genesis-activates-its-graph
+  files: `crates/tm-cli/src/project.rs`
+  change: `tm genesis --resume` in a project that never ran genesis errors with `provider: ANTHROPIC_API_KEY is not set ... no local model provider is reachable`. Resolve the snapshot first and fail with "No stopped genesis run to resume here. Start one with `tm genesis --prompt \"…\"`."
+  acceptance: A unit test: resume with no snapshot and no provider gives the new message.
+  test: `mise run test:crate -- tm-cli`
+  evidence: /tmp/tm-audit/chatgen: `tm genesis --resume` gave the provider error.
+
+- [ ] **u1-mcp-protocol-version** — `tm mcp` should negotiate the client's protocol version (2025-06-18) rather than always answering 2024-11-05
+  model: haiku · severity: low · builds Rust: yes · area: mcp · deps: u1-wire-potion-embedder
+  files: `crates/tm-mcp/src/server.rs`
+  change: `PROTOCOL_VERSION` is hard-coded to "2024-11-05" (tm-mcp server.rs:53; client.rs:23 and capability.rs:178 are the client side, leave them). `initialize` with `protocolVersion:"2025-06-18"` got `"protocolVersion":"2024-11-05"` back. Echo the client's version when it is one tm supports (2024-11-05, 2025-03-26, 2025-06-18); otherwise answer the latest supported. Keep newline-delimited framing.
+  acceptance: A unit test covers all three versions and an unknown one.
+  test: `mise run test:crate -- tm-cli`
+  evidence: The `tm mcp` stdio trial, first response line.
+
+- [ ] **u1-workflow-list-copy** — `tm workflow list` header `NAME NODES PARAMS 1X1?` and empty state; `tm templates list` empty state
+  model: haiku · severity: low · builds Rust: yes · area: cli-ux · deps: u1-provider-table-follows-env, u1-hygiene-spec-refs-in-user-strings
+  files: `crates/tm-cli/src/workflow.rs`, `crates/tm-cli/src/ops.rs`
+  change: With no workflows, print "No workflows yet. Starters: `tm workflow new --from <starter>`" (list the real starters) instead of a bare header, and rename the `1X1?` column to `Single-ticket`. `tm templates list` prints `No templates declared in /…/templates.toml`. Instead, list the built-in template catalog (B21) and say where to add project templates.
+  acceptance: Snapshot tests for both empty states.
+  test: `mise run test:crate -- tm-cli`
+  evidence: /tmp/tm-audit/chatgen outputs of `tm workflow list` and `tm templates list`.
+
+- [ ] **u1-cli-help-global-flags-once** — Stop repeating the 5 global flags in every subcommand's `--help`
+  model: sonnet · severity: low · builds Rust: yes · area: cli-ux · deps: u1-bare-text-starts-chat
+  files: `crates/tm-cli/src/args.rs`
+  change: Every subcommand help (`tm ticket new --help`, `tm run --help`, ...) lists `--json --quiet --no-color --plain --project` with their full paragraphs, pushing the command's own options off screen. Keep them `global = true`, but put them under a separate `help_heading = "Global options"` and shorten their text (e.g. `--project <PATH>  Use this project root`), with the long form only in `tm --help`.
+  acceptance: `tm run --help` shows the command's own options first and the global ones under "Global options", each one line.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `tm run --help` / `tm ticket new --help` output in the audit: the global flags' 2-3 line paragraphs are mixed in with `--worktree`/`--record`.
+
+- [ ] **u1-fix-false-codeintel-docs** — Correct the doc comments and docs that claim Potion is used on real paths
+  model: haiku · severity: low · builds Rust: yes · area: docs · deps: u1-wire-potion-embedder
+  files: `crates/tm-codeintel/src/embed.rs`, `crates/tm-codeintel/src/lib.rs`, `docs/decisions/D-025-potion-semantic-embedder.md`
+  change: After u1-wire-potion-embedder lands, reconcile embed.rs:222 ("which real command paths use"), lib.rs:12, and D-025's "What this costs" with the new call sites and the embedder-id re-embed behaviour.
+  acceptance: The wording matches the code, and `mise run hygiene` passes.
+  test: `mise run hygiene`
+  evidence: embed.rs:222 claims real command paths use `open_auto`, but no caller exists.
+
+- [ ] **u1-bench-cross-permission-flags** — Cross-tool bench: run each competitor headless with its no-prompt mode, only inside the throwaway task copy
+  model: sonnet · severity: high · builds Rust: yes · area: bench · deps: u1-bench-cross-stdin-closed
+  files: `crates/xtask/src/bench_cross.rs`
+  change: The claude/codex/opencode adapters pass no permission flags, so headless runs stall or get refused and tm wins by default. Add `--permission-mode bypassPermissions` to `claude -p`, `--sandbox workspace-write` to `codex exec`, and OpenCode's non-interactive auto-approve flag (check `opencode run --help`). Always set the working dir to the per-task scratch copy, never the repo.
+  acceptance: The adapter command lines include these flags (unit test on the built argv); the report states each tool's permission posture.
+  test: `mise run test:crate -- xtask`
+  evidence: docs/audits/2026-09-25-bench-plan.md "Required fixes", item 0.
+
+- [ ] **u1-bench-cross-model-timeout-cost** — Cross-tool bench: pin one model per cohort across tools, a per-task timeout and a cost cap
+  model: sonnet · severity: high · builds Rust: yes · area: bench · deps: u1-bench-cross-permission-flags
+  files: `crates/xtask/src/bench_cross.rs`
+  change: Add `--model <provider/model>` passthrough (claude `--model`, codex `-m`, opencode `-m`, tm via a scratch `providers.toml` role candidate), `--task-timeout <secs>` (kill the process group; mark TIMEOUT) and `--max-cost-usd` (stop scheduling new tasks once reported spend reaches it). Record the tool versions (`--version`) in the report.
+  acceptance: Unit tests for the argv per tool, a fake adapter that sleeps past the timeout is marked TIMEOUT, and the report header lists the versions, model and caps.
+  test: `mise run test:crate -- xtask`
+  evidence: docs/audits/2026-09-25-bench-plan.md "Required fixes", items 1-3.
+
+- [ ] **u1-bench-polyglot-subset** — Vendor a 20-exercise Aider Polyglot subset as bench tasks
+  model: sonnet · severity: medium · builds Rust: no · area: bench · deps: none
+  files: `bench/tasks/polyglot-*.toml`, `bench/fixtures/polyglot-*/`
+  change: Per docs/audits/2026-09-25-bench-plan.md Track A: 20 exercises across Python/JS/Go/Rust, each fixture with the stub and the tests and a task TOML in the existing bench/tasks format (copy py-binary-search-bound.toml's shape). Record the upstream commit and licence in a bench/fixtures/POLYGLOT-SOURCE.md.
+  acceptance: `tm bench` lists the 20 new tasks; each fixture's tests fail before a fix (check 3 by hand).
+  test: `mise run test:crate -- tm-harness`
+  evidence: docs/audits/2026-09-25-bench-plan.md Track A recommendation.
+
+
 ## B21 Genesis template catalog; tm acp
 
 Gate: `mise run verify`
