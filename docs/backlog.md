@@ -9,6 +9,8 @@ exposed in this session's transcript. **Treat it as compromised. Rotate/revoke i
 `.env` with the new value** (`DEVPASS_API_KEY`/`LLM_GATEWAY_API_KEY`, same value both places per
 this session's own notes — they're the same credential under two names).
 
+A second credential (Kaggle API token) was pasted into a chat turn on 2026-09-25 for the Laya fine-tune path. Treat it as exposed: add it to the primary checkout's `.env` as `KAGGLE_API_TOKEN`, then rotate it in Kaggle's account settings before the fine-tune work needs it.
+
 ## Resolved for chat (2026-09-22, D-017): Real TUI + live model, structural UX finding
 
 The ratatui TUI was driven end-to-end with a real model for the first time this session (a real
