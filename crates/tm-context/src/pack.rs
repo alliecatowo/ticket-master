@@ -1,9 +1,13 @@
 //! [`ContextPack`]: the bounded, deterministic bundle [`compile`] hands to a worker instead of
 //! raw files (`SPEC.md` §8.1). Sections are assembled in [`crate::tokens::SectionKind`]
 //! priority order and admitted against a [`crate::tokens::TokenBudget`] via a
-//! [`crate::tokens::BudgetLedger`]; whatever doesn't fit is dropped starting from the
-//! lowest-priority section, and every drop is recorded in [`ContextPack::dropped`] rather than
-//! silently truncated. Given the same `(ticket, view, codeintel-state, budget)` *and* the same
+//! [`crate::tokens::BudgetLedger`]. An atomic section (no [`sections::RawSection::items`]) is
+//! admitted or dropped whole; a retrieval-like section (search hits, wiki pages, symbol
+//! outlines, git history, conventions) is fit to its share top-k, admitting as many of its
+//! items as fit — trimming the boundary item's own content by the line, if even a truncated
+//! head of it fits — rather than being dropped in full over one item that doesn't. Whatever
+//! doesn't fit, at the section or item level, is recorded in [`ContextPack::dropped`] rather
+//! than silently omitted. Given the same `(ticket, view, codeintel-state, budget)` *and* the same
 //! on-disk `AGENTS.md`/`.tm/skills/**` content beneath `ci`'s project root, `compile` always
 //! produces byte-identical output, so the pack is snapshot-testable — but as of
 //! `docs/decisions/D-013-hooks-agents-skills.md`, `SectionKind::Conventions` reads those two
@@ -57,20 +61,27 @@ pub struct Section {
     pub provenance: Vec<ProvenanceRef>,
 }
 
-/// A record of a section that did not fit and was dropped, so a consumer can see *that*
-/// something was omitted rather than silently receiving a truncated picture.
+/// A record of content that did not fit and was left out, so a consumer can see *that* something
+/// was omitted rather than silently receiving a partial picture. For an atomic section (no
+/// [`sections::RawSection::items`]), this is the whole section. For a retrieval-like section
+/// admitted item by item (see [`assemble`]), it's only the items that didn't fit after the rest
+/// of the section was admitted — the admitted prefix itself still appears in
+/// [`ContextPack::sections`], not here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DroppedSection {
-    /// Which section was dropped.
+    /// Which section this drop is for.
     pub kind: SectionKind,
-    /// Why it was dropped (currently always a budget-overflow reason; the field is a `String`
-    /// rather than a fixed enum so future drop reasons — e.g. an upstream fetch error a caller
-    /// chooses to downgrade to "dropped" instead of failing the whole pack — don't need a
-    /// signature change).
+    /// Why the content was left out: a budget-overflow reason for an atomic section
+    /// (`"exceeds remaining token budget"`), or how many of a retrieval-like section's items
+    /// were trimmed (`"trimmed N of M items to fit"`) — the field is a `String` rather than a
+    /// fixed enum so future drop reasons — e.g. an upstream fetch error a caller chooses to
+    /// downgrade to "dropped" instead of failing the whole pack — don't need a signature change.
     pub reason: String,
-    /// How many tokens the section would have needed to be admitted in full.
+    /// How many tokens the left-out content would have needed: the whole section, for an atomic
+    /// drop, or just the items left out, for a retrieval-like section's partial drop.
     pub tokens_needed: usize,
-    /// How many bytes the section's rendered body would have needed to be admitted in full.
+    /// How many bytes the left-out content's rendered form would have needed, same scope as
+    /// `tokens_needed`.
     pub bytes_needed: usize,
 }
 
@@ -184,10 +195,12 @@ impl ContextPack {
 
 /// Compile a [`ContextPack`] for `ticket`.
 ///
-/// Sections are built in [`SectionKind::PRIORITY_ORDER`] and admitted whole-or-dropped against
-/// a [`BudgetLedger`] derived from `budget`: on overflow the lowest-priority section is the
-/// first to lose out, and every drop is recorded in [`ContextPack::dropped`] rather than
-/// silently truncating a section's body. Deterministic given identical `(ticket, view,
+/// Sections are built in [`SectionKind::PRIORITY_ORDER`] and admitted against a [`BudgetLedger`]
+/// derived from `budget` (see [`assemble`] for how an atomic section is admitted-or-dropped
+/// whole while a retrieval-like section is fit to its share top-k): on overflow the
+/// lowest-priority section is the first to lose out, and every drop is recorded in
+/// [`ContextPack::dropped`] rather than silently omitted. Deterministic given identical
+/// `(ticket, view,
 /// ci-index-state, budget, roles)` and identical on-disk `AGENTS.md`/`.tm/skills/**` content
 /// under `ci.project_root()` — see this module's doc comment for why that filesystem content is
 /// a sixth real input, not covered by `ci-index-state`, since [`crate::sections::
@@ -340,8 +353,44 @@ fn query_carrier(query: &str) -> Result<Ticket> {
     })
 }
 
+/// Try to fit a line-truncated head of `text` within `remaining` tokens, so one oversized item
+/// (a long `AGENTS.md`, a snippet that still ran long after [`sections`]'s own per-item caps)
+/// doesn't force [`assemble`] to drop it — and everything after it — entirely just because it
+/// alone doesn't fit what's left of a section's share. Takes whole lines only, appending a
+/// `"…truncated"` marker line when any lines were cut, and returns `None` when not even one line
+/// fits. Pure, total.
+fn trim_item_to_remaining(text: &str, remaining: usize) -> Option<String> {
+    if remaining == 0 {
+        return None;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    for n in (1..=lines.len()).rev() {
+        let mut candidate = lines[..n].join("\n");
+        if n < lines.len() {
+            candidate.push_str("\n…truncated");
+        }
+        if estimate_tokens_prose(&candidate) <= remaining {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// Spend `budget` across `raw_sections` in order, keeping each section that fits and recording
 /// each one that doesn't as dropped. Shared by [`compile`] and [`compile_session`].
+///
+/// A section whose [`sections::RawSection::items`] is empty is admitted or dropped whole, as
+/// before this function grew item-level accounting. A section with items (a retrieval-like
+/// section — search hits, wiki pages, symbol outlines, git history, conventions) is instead
+/// admitted item by item, in order, until one no longer fits its remaining share: whatever
+/// admitted first becomes the section (never dropped, even if only a prefix fit). The first item
+/// that doesn't fit whole gets one more chance via [`trim_item_to_remaining`] — a line-truncated
+/// head of it, if even that fits what's left — before assembly gives up on the section; this
+/// keeps a single oversized item (this repo's own `CLAUDE.md`, admitted as a `Conventions` item,
+/// is exactly this shape) from forcing the whole section to drop rather than admitting a partial
+/// head of it. Whatever still doesn't fit after that is recorded as a single [`DroppedSection`]
+/// naming how many of the section's items were left out entirely — "top-k until full" rather
+/// than "whole or nothing" for these sections.
 fn assemble(
     raw_sections: Vec<(SectionKind, sections::RawSection)>,
     budget: &TokenBudget,
@@ -352,25 +401,108 @@ fn assemble(
     let mut dropped = Vec::new();
 
     for (kind, mut raw) in raw_sections {
-        raw.body = tm_auth::redact(&raw.body);
-        let cost = estimate_tokens_prose(&raw.body);
-        let byte_cost = raw.body.len();
-        if ledger.spend(kind, cost) {
-            provenance.extend(raw.provenance.iter().cloned());
-            sections_out.push(Section {
-                kind,
-                title: raw.title,
-                body: raw.body,
-                tokens: cost,
-                bytes: byte_cost,
-                provenance: raw.provenance,
-            });
-        } else {
+        if raw.items.is_empty() {
+            raw.body = tm_auth::redact(&raw.body);
+            let cost = estimate_tokens_prose(&raw.body);
+            let byte_cost = raw.body.len();
+            if ledger.spend(kind, cost) {
+                provenance.extend(raw.provenance.iter().cloned());
+                sections_out.push(Section {
+                    kind,
+                    title: raw.title,
+                    body: raw.body,
+                    tokens: cost,
+                    bytes: byte_cost,
+                    provenance: raw.provenance,
+                });
+            } else {
+                dropped.push(DroppedSection {
+                    kind,
+                    reason: "exceeds remaining token budget".to_string(),
+                    tokens_needed: cost,
+                    bytes_needed: byte_cost,
+                });
+            }
+            continue;
+        }
+
+        for item in &mut raw.items {
+            item.text = tm_auth::redact(&item.text);
+        }
+
+        let total_items = raw.items.len();
+        let mut admitted_texts = Vec::with_capacity(total_items);
+        let mut admitted_provenance = Vec::new();
+        let mut used_tokens = 0usize;
+        let mut admitted_count = 0usize;
+
+        for (idx, item) in raw.items.iter().enumerate() {
+            let cost = estimate_tokens_prose(&item.text);
+            if ledger.spend(kind, cost) {
+                admitted_texts.push(item.text.clone());
+                admitted_provenance.extend(item.provenance.iter().cloned());
+                used_tokens += cost;
+                admitted_count = idx + 1;
+            } else {
+                let remaining = ledger
+                    .accounts
+                    .iter()
+                    .find(|a| a.kind == kind)
+                    .map(|a| a.remaining())
+                    .unwrap_or(0);
+                if let Some(trimmed) = trim_item_to_remaining(&item.text, remaining) {
+                    let trimmed_cost = estimate_tokens_prose(&trimmed);
+                    if ledger.spend(kind, trimmed_cost) {
+                        admitted_texts.push(trimmed);
+                        admitted_provenance.extend(item.provenance.iter().cloned());
+                        used_tokens += trimmed_cost;
+                        admitted_count = idx + 1;
+                    }
+                }
+                break;
+            }
+        }
+
+        if admitted_count == 0 {
+            let tokens_needed: usize = raw
+                .items
+                .iter()
+                .map(|item| estimate_tokens_prose(&item.text))
+                .sum();
+            let bytes_needed: usize = raw.items.iter().map(|item| item.text.len()).sum();
             dropped.push(DroppedSection {
                 kind,
                 reason: "exceeds remaining token budget".to_string(),
-                tokens_needed: cost,
-                bytes_needed: byte_cost,
+                tokens_needed,
+                bytes_needed,
+            });
+            continue;
+        }
+
+        provenance.extend(admitted_provenance.iter().cloned());
+        let body = admitted_texts.join("\n");
+        let bytes = body.len();
+        sections_out.push(Section {
+            kind,
+            title: raw.title,
+            body,
+            tokens: used_tokens,
+            bytes,
+            provenance: admitted_provenance,
+        });
+
+        if admitted_count < total_items {
+            let leftover = &raw.items[admitted_count..];
+            let tokens_needed: usize = leftover
+                .iter()
+                .map(|item| estimate_tokens_prose(&item.text))
+                .sum();
+            let bytes_needed: usize = leftover.iter().map(|item| item.text.len()).sum();
+            dropped.push(DroppedSection {
+                kind,
+                reason: format!("trimmed {} of {} items to fit", leftover.len(), total_items),
+                tokens_needed,
+                bytes_needed,
             });
         }
     }
@@ -951,5 +1083,167 @@ mod tests {
         assert_eq!(cost.tool, "fs.read");
         assert!(cost.bytes > 0);
         assert!(cost.tokens > 0);
+    }
+
+    /// u1-context-pack-fit-sections's core regression gate: a truncatable section
+    /// ([`sections::RawSection::items`] non-empty) with 100 items and a budget that can only
+    /// fit a prefix of them must be admitted *partially*, not dropped whole — the failure mode
+    /// this task fixes (`docs/tasks/TASKS.md`'s "either admits a section whole or drops it").
+    #[test]
+    fn assemble_admits_a_hundred_item_section_partially_instead_of_dropping_it_whole() {
+        use crate::sections::SectionItem;
+
+        const N: usize = 100;
+        let items: Vec<SectionItem> = (0..N)
+            .map(|i| SectionItem {
+                text: format!("hit-{i:03}: {}", "x".repeat(20)),
+                provenance: vec![ProvenanceRef {
+                    locator: format!("file{i}.rs:1"),
+                    detail: "hybrid retrieval hit".to_string(),
+                }],
+            })
+            .collect();
+        // Every item is the same length, so its token cost is uniform; derive `k` (how many fit
+        // a 200-token share) from that cost instead of hardcoding it (CLAUDE.md's
+        // derive-from-cardinality convention), so this test tracks `estimate_tokens_prose` and
+        // this fixture's text length rather than an independently-guessed number.
+        let per_item_cost = estimate_tokens_prose(&items[0].text);
+        let raw = sections::RawSection {
+            kind: SectionKind::Retrieval,
+            title: "Retrieval Results".to_string(),
+            body: String::new(),
+            provenance: Vec::new(),
+            items,
+        };
+
+        let mut shares = BTreeMap::new();
+        shares.insert(SectionKind::Retrieval, 1.0);
+        let budget = TokenBudget { total: 200, shares };
+        let k = budget.share_tokens(SectionKind::Retrieval) / per_item_cost;
+        assert!(
+            k > 0 && k < N,
+            "fixture must fit some but not all items for this test to be meaningful: k={k}"
+        );
+
+        let pack = assemble(vec![(SectionKind::Retrieval, raw)], &budget);
+
+        let section = pack
+            .sections
+            .iter()
+            .find(|s| s.kind == SectionKind::Retrieval)
+            .expect("a prefix of the 100 items is admitted, not the whole section dropped");
+        assert!(section.body.contains("hit-000"), "{}", section.body);
+        assert!(
+            section.body.contains(&format!("hit-{:03}", k - 1)),
+            "expected exactly {k} items admitted: {}",
+            section.body
+        );
+        assert!(
+            !section.body.contains(&format!("hit-{k:03}")),
+            "expected the {k}th item (0-indexed) not to be admitted: {}",
+            section.body
+        );
+
+        let dropped = pack
+            .dropped
+            .iter()
+            .find(|d| d.kind == SectionKind::Retrieval)
+            .expect("the items that did not fit are recorded as dropped");
+        assert_eq!(
+            dropped.reason,
+            format!("trimmed {} of {N} items to fit", N - k)
+        );
+        assert!(dropped.tokens_needed > 0);
+        assert!(dropped.bytes_needed > 0);
+    }
+
+    /// The boundary case `assemble_admits_a_hundred_item_section_partially_instead_of_dropping_it_whole`
+    /// doesn't exercise: a single oversized multi-line item (a long `AGENTS.md`, in practice)
+    /// that doesn't fit its section's remaining share whole still gets a line-truncated head of
+    /// itself admitted, via [`trim_item_to_remaining`], rather than the section falling back to
+    /// fully empty.
+    #[test]
+    fn assemble_trims_a_single_oversized_multiline_item_to_its_remaining_share() {
+        use crate::sections::SectionItem;
+
+        let long_text = (0..500)
+            .map(|i| format!("line {i:04} of a long AGENTS.md"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let raw = sections::RawSection {
+            kind: SectionKind::Conventions,
+            title: "Conventions".to_string(),
+            body: String::new(),
+            provenance: Vec::new(),
+            items: vec![SectionItem {
+                text: long_text,
+                provenance: vec![ProvenanceRef {
+                    locator: "AGENTS.md".to_string(),
+                    detail: String::new(),
+                }],
+            }],
+        };
+
+        let mut shares = BTreeMap::new();
+        shares.insert(SectionKind::Conventions, 1.0);
+        let budget = TokenBudget { total: 300, shares };
+
+        let pack = assemble(vec![(SectionKind::Conventions, raw)], &budget);
+
+        let section = pack
+            .sections
+            .iter()
+            .find(|s| s.kind == SectionKind::Conventions)
+            .expect("a truncated head of the one oversized item is admitted, not nothing");
+        assert!(!section.body.is_empty());
+        assert!(section.body.ends_with("…truncated"), "{}", section.body);
+        assert!(
+            section.tokens <= budget.share_tokens(SectionKind::Conventions),
+            "admitted content must fit the section's share: {} tokens for a {}-token share",
+            section.tokens,
+            budget.share_tokens(SectionKind::Conventions)
+        );
+        // No dropped record: the item was trimmed to fit, not left out — there is exactly one
+        // item, and it *was* admitted (in truncated form).
+        assert!(!pack
+            .dropped
+            .iter()
+            .any(|d| d.kind == SectionKind::Conventions));
+    }
+
+    /// The complementary case: when every item fits, the section is admitted in full and no
+    /// drop is recorded for it at all.
+    #[test]
+    fn assemble_admits_every_item_when_the_whole_section_fits() {
+        use crate::sections::SectionItem;
+
+        let items: Vec<SectionItem> = (0..5)
+            .map(|i| SectionItem {
+                text: format!("hit-{i}"),
+                provenance: Vec::new(),
+            })
+            .collect();
+        let raw = sections::RawSection {
+            kind: SectionKind::Retrieval,
+            title: "Retrieval Results".to_string(),
+            body: String::new(),
+            provenance: Vec::new(),
+            items,
+        };
+
+        let mut shares = BTreeMap::new();
+        shares.insert(SectionKind::Retrieval, 1.0);
+        let budget = TokenBudget {
+            total: 100_000,
+            shares,
+        };
+
+        let pack = assemble(vec![(SectionKind::Retrieval, raw)], &budget);
+
+        assert!(pack.dropped.is_empty());
+        let section = &pack.sections[0];
+        for i in 0..5 {
+            assert!(section.body.contains(&format!("hit-{i}")));
+        }
     }
 }

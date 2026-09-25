@@ -24,10 +24,31 @@ pub struct RawSection {
     pub kind: SectionKind,
     /// Short human-readable title, e.g. `"Objective"`.
     pub title: String,
-    /// Rendered body text.
+    /// Rendered body text, ignored by [`crate::pack::compile`]'s admission accounting whenever
+    /// `items` is non-empty (see `items`'s doc comment) but still kept as the full, untrimmed
+    /// rendering for any caller that wants it regardless.
     pub body: String,
     /// What real-world things (decision ids, file paths, commit shas, artifact ids) this
-    /// section's content was drawn from, for [`crate::pack::ContextPack::provenance`].
+    /// section's content was drawn from, for [`crate::pack::ContextPack::provenance`]. Ignored
+    /// by `compile`'s admission accounting whenever `items` is non-empty, same as `body`.
+    pub provenance: Vec<ProvenanceRef>,
+    /// Ordered, independently-admittable chunks of this section's content (one hit, commit, file,
+    /// etc. per item), so [`crate::pack::compile`] can admit a prefix of them — top-k until the
+    /// section's share or the remaining budget is used up — instead of admitting or dropping the
+    /// whole section. Empty for a section that stays whole-or-dropped (`Objective`, `Budget`,
+    /// `Decisions`, `Dependencies`, `PriorFailures`, and any section that rendered no content at
+    /// all): those admit or drop `body`/`provenance` verbatim, same as before this field existed.
+    pub items: Vec<SectionItem>,
+}
+
+/// One independently-admittable chunk of a truncatable [`RawSection`]'s content, carrying just
+/// the provenance this one item contributes so a partial admission's provenance stays accurate
+/// (an item left out to fit the budget must not still claim its provenance was used).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SectionItem {
+    /// This item's rendered text, one entry of the section's body once joined with `"\n"`.
+    pub text: String,
+    /// Provenance this item contributes when admitted.
     pub provenance: Vec<ProvenanceRef>,
 }
 
@@ -124,6 +145,7 @@ pub fn build_objective(ticket: &Ticket) -> RawSection {
         title: "Objective".to_string(),
         body,
         provenance,
+        items: Vec::new(),
     }
 }
 
@@ -269,6 +291,7 @@ pub fn build_budget(ticket: &Ticket, roles: &RoleTable) -> RawSection {
         title: "Budget".to_string(),
         body: lines.join("\n"),
         provenance: Vec::new(),
+        items: Vec::new(),
     }
 }
 
@@ -327,6 +350,7 @@ pub fn build_decisions(ticket: &Ticket, view: &ProjectView) -> RawSection {
         title: "Active Decisions".to_string(),
         body,
         provenance,
+        items: Vec::new(),
     }
 }
 
@@ -369,6 +393,7 @@ pub fn build_open_tickets(view: &ProjectView) -> RawSection {
         title: "Open tickets".to_string(),
         body: body_lines.join("\n"),
         provenance,
+        items: Vec::new(),
     }
 }
 
@@ -421,6 +446,7 @@ pub fn build_dependencies(ticket: &Ticket, view: &ProjectView) -> RawSection {
         title: "Dependencies & Evidence".to_string(),
         body,
         provenance,
+        items: Vec::new(),
     }
 }
 
@@ -430,6 +456,28 @@ pub fn build_dependencies(ticket: &Ticket, view: &ProjectView) -> RawSection {
 /// content twice against the token budget.
 pub fn is_wiki_path(path: &str) -> bool {
     path.starts_with("docs/wiki/")
+}
+
+/// How many hits [`build_retrieval`] and [`build_wiki`] each keep from the same underlying
+/// `search_hybrid` call before assembly gets a chance to trim further — a cap on the raw
+/// candidate list, independent of [`crate::pack::compile`]'s per-item budget admission, so a
+/// pathologically hit-rich query doesn't hand `compile` hundreds of items to iterate.
+const MAX_SEARCH_HITS: usize = 20;
+
+/// How many lines of one hit's snippet [`build_retrieval`] and [`build_wiki`] keep before
+/// assembly, same reasoning as [`MAX_SEARCH_HITS`]: caps one outlier-large snippet rather than
+/// leaving that to token-budget admission alone.
+const MAX_SNIPPET_LINES: usize = 40;
+
+/// Truncate `text` to at most `max_lines` lines, appending a `"…truncated"` marker line when it
+/// had more. Pure, total: `text` with no more than `max_lines` lines is returned unchanged.
+fn cap_lines(text: &str, max_lines: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() <= max_lines {
+        text.to_string()
+    } else {
+        format!("{}\n…truncated", lines[..max_lines].join("\n"))
+    }
 }
 
 /// Section 4: hybrid retrieval results for the ticket's objective (code and non-wiki text; see
@@ -455,36 +503,52 @@ pub fn build_retrieval(
 
     let hits = ci.search_hybrid(&query, &ctx, weights)?;
 
-    let mut body_lines = Vec::new();
-    let mut provenance = Vec::new();
+    let mut items = Vec::new();
 
-    for hit in hits.into_iter().filter(|h| !is_wiki_path(&h.path)) {
+    for hit in hits
+        .into_iter()
+        .filter(|h| !is_wiki_path(&h.path))
+        .take(MAX_SEARCH_HITS)
+    {
         let line_range = match (hit.line_start, hit.line_end) {
             (Some(start), Some(end)) => format!("{}-{}", start, end),
             (Some(start), None) => start.to_string(),
             _ => "?".to_string(),
         };
 
-        body_lines.push(format!("{}:{}: {}", hit.path, line_range, hit.snippet));
+        let snippet = cap_lines(&hit.snippet, MAX_SNIPPET_LINES);
+        let text = format!("{}:{}: {}", hit.path, line_range, snippet);
 
         let locator = match hit.line_start {
             Some(start) => format!("{}:{}", hit.path, start),
             None => hit.path.clone(),
         };
 
-        provenance.push(ProvenanceRef {
-            locator,
-            detail: "hybrid retrieval hit".to_string(),
+        items.push(SectionItem {
+            text,
+            provenance: vec![ProvenanceRef {
+                locator,
+                detail: "hybrid retrieval hit".to_string(),
+            }],
         });
     }
 
-    let body = body_lines.join("\n");
+    let body = items
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let provenance = items
+        .iter()
+        .flat_map(|item| item.provenance.clone())
+        .collect();
 
     Ok(RawSection {
         kind: SectionKind::Retrieval,
         title: "Retrieval Results".to_string(),
         body,
         provenance,
+        items,
     })
 }
 
@@ -508,24 +572,39 @@ pub fn build_wiki(ticket: &Ticket, ci: &CodeIntel, weights: SignalWeights) -> Re
 
     let hits = ci.search_hybrid(&query, &ctx, weights)?;
 
-    let mut body_lines = Vec::new();
-    let mut provenance = Vec::new();
+    let mut items = Vec::new();
 
-    for hit in hits.into_iter().filter(|h| is_wiki_path(&h.path)) {
-        body_lines.push(format!("{}: {}", hit.path, hit.snippet));
-        provenance.push(ProvenanceRef {
-            locator: hit.path.clone(),
-            detail: "wiki page".to_string(),
+    for hit in hits
+        .into_iter()
+        .filter(|h| is_wiki_path(&h.path))
+        .take(MAX_SEARCH_HITS)
+    {
+        let snippet = cap_lines(&hit.snippet, MAX_SNIPPET_LINES);
+        items.push(SectionItem {
+            text: format!("{}: {}", hit.path, snippet),
+            provenance: vec![ProvenanceRef {
+                locator: hit.path.clone(),
+                detail: "wiki page".to_string(),
+            }],
         });
     }
 
-    let body = body_lines.join("\n");
+    let body = items
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let provenance = items
+        .iter()
+        .flat_map(|item| item.provenance.clone())
+        .collect();
 
     Ok(RawSection {
         kind: SectionKind::Wiki,
         title: "Wiki".to_string(),
         body,
         provenance,
+        items,
     })
 }
 /// Section 6: symbol outlines for the ticket's claimed paths.
@@ -534,36 +613,49 @@ pub fn build_wiki(ticket: &Ticket, ci: &CodeIntel, weights: SignalWeights) -> Re
 pub fn build_symbol_outlines(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSection> {
     let paths = claimed_paths(ticket);
 
-    let mut body_lines = Vec::new();
-    let mut provenance = Vec::new();
+    let mut items = Vec::new();
 
     for path in paths {
         let outline = ci.outline(&path)?;
 
         if !outline.is_empty() {
-            body_lines.push(format!("## {}", path));
+            let mut block_lines = vec![format!("## {}", path)];
 
             for entry in outline {
                 let indent = " ".repeat((entry.depth as usize) * 2);
-                body_lines.push(format!("{}{}", indent, entry.rendered));
+                block_lines.push(format!("{}{}", indent, entry.rendered));
             }
 
-            body_lines.push(String::new());
-
-            provenance.push(ProvenanceRef {
-                locator: path,
-                detail: String::new(),
+            items.push(SectionItem {
+                text: block_lines.join("\n"),
+                provenance: vec![ProvenanceRef {
+                    locator: path,
+                    detail: String::new(),
+                }],
             });
         }
     }
 
-    let body = body_lines.join("\n").trim_end().to_string();
+    // `"\n"` between path blocks (no blank line), matching how `crate::pack::assemble` joins
+    // this section's admitted items — this field is a cosmetic fallback in the items-present
+    // case (see `RawSection::body`'s doc comment); `assemble` is the join that actually reaches
+    // a worker.
+    let body = items
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let provenance = items
+        .iter()
+        .flat_map(|item| item.provenance.clone())
+        .collect();
 
     Ok(RawSection {
         kind: SectionKind::SymbolOutlines,
         title: "Symbol Outlines".to_string(),
         body,
         provenance,
+        items,
     })
 }
 
@@ -573,8 +665,7 @@ pub fn build_symbol_outlines(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSecti
 pub fn build_git_history(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSection> {
     let paths = claimed_paths(ticket);
 
-    let mut body_lines = Vec::new();
-    let mut provenance = Vec::new();
+    let mut items = Vec::new();
 
     const MAX_HISTORY_HITS_PER_PATH: usize = 5;
 
@@ -592,22 +683,32 @@ pub fn build_git_history(ticket: &Ticket, ci: &CodeIntel) -> Result<RawSection> 
 
             let first_line = hit.commit.message.lines().next().unwrap_or("");
 
-            body_lines.push(format!("{} {}: {}", sha_short, first_line, hit.snippet));
-
-            provenance.push(ProvenanceRef {
-                locator: hit.commit.sha.clone(),
-                detail: String::new(),
+            items.push(SectionItem {
+                text: format!("{} {}: {}", sha_short, first_line, hit.snippet),
+                provenance: vec![ProvenanceRef {
+                    locator: hit.commit.sha.clone(),
+                    detail: String::new(),
+                }],
             });
         }
     }
 
-    let body = body_lines.join("\n");
+    let body = items
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let provenance = items
+        .iter()
+        .flat_map(|item| item.provenance.clone())
+        .collect();
 
     Ok(RawSection {
         kind: SectionKind::GitHistory,
         title: "Git History".to_string(),
         body,
         provenance,
+        items,
     })
 }
 
@@ -631,8 +732,14 @@ pub fn build_prior_failures(ticket: &Ticket) -> RawSection {
         title: "Prior Failures".to_string(),
         body,
         provenance: Vec::new(),
+        items: Vec::new(),
     }
 }
+
+/// How many lines of one `AGENTS.md`/`CLAUDE.md` file [`build_conventions`] keeps before assembly
+/// — a long project-instructions file (this repo's own `CLAUDE.md` included) is head-truncated
+/// rather than handed whole to token-budget admission, same reasoning as [`MAX_SEARCH_HITS`].
+const MAX_CONVENTIONS_FILE_LINES: usize = 80;
 
 /// Section 9 (lowest priority, dropped first on overflow): project conventions.
 ///
@@ -650,37 +757,58 @@ pub fn build_prior_failures(ticket: &Ticket) -> RawSection {
 ///   for on every turn regardless of whether it's used.
 pub fn build_conventions(ticket: &Ticket, ci: &CodeIntel, extra: &[String]) -> RawSection {
     let root = ci.project_root();
-    let mut body_lines: Vec<String> = extra.to_vec();
-    let mut provenance = Vec::new();
+    let mut items: Vec<SectionItem> = extra
+        .iter()
+        .map(|line| SectionItem {
+            text: line.clone(),
+            provenance: Vec::new(),
+        })
+        .collect();
 
     for (path, content) in discover_agents_md(root, &claimed_paths(ticket)) {
-        body_lines.push(format!("## {}\n{}", path, content.trim_end()));
-        provenance.push(ProvenanceRef {
-            locator: path,
-            detail: String::new(),
+        let head = cap_lines(content.trim_end(), MAX_CONVENTIONS_FILE_LINES);
+        items.push(SectionItem {
+            text: format!("## {}\n{}", path, head),
+            provenance: vec![ProvenanceRef {
+                locator: path,
+                detail: String::new(),
+            }],
         });
     }
 
     let skills = crate::skills::discover_skills(root);
     if !skills.is_empty() {
-        body_lines
-            .push("## Skills (call skill.load with `name` to read the full body)".to_string());
+        items.push(SectionItem {
+            text: "## Skills (call skill.load with `name` to read the full body)".to_string(),
+            provenance: Vec::new(),
+        });
         for skill in &skills {
-            body_lines.push(format!("- {}: {}", skill.name, skill.description));
-            provenance.push(ProvenanceRef {
-                locator: skill.path.clone(),
-                detail: String::new(),
+            items.push(SectionItem {
+                text: format!("- {}: {}", skill.name, skill.description),
+                provenance: vec![ProvenanceRef {
+                    locator: skill.path.clone(),
+                    detail: String::new(),
+                }],
             });
         }
     }
 
-    let body = body_lines.join("\n");
+    let body = items
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let provenance = items
+        .iter()
+        .flat_map(|item| item.provenance.clone())
+        .collect();
 
     RawSection {
         kind: SectionKind::Conventions,
         title: "Conventions".to_string(),
         body,
         provenance,
+        items,
     }
 }
 
@@ -1068,6 +1196,46 @@ mod tests {
         assert!(!section
             .body
             .contains("SENTINEL-SKILL-BODY-SHOULD-NOT-APPEAR"));
+    }
+
+    /// u1-context-pack-fit-sections: a long `AGENTS.md` is head-truncated to
+    /// `MAX_CONVENTIONS_FILE_LINES` lines rather than carried whole into an item that
+    /// `crate::pack::compile`'s budget accounting would then have to admit-or-drop as one
+    /// oversized unit.
+    #[test]
+    fn build_conventions_head_truncates_a_long_agents_md() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let total_lines = MAX_CONVENTIONS_FILE_LINES + 5;
+        let content = (0..total_lines)
+            .map(|i| format!("line-{i:04}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(dir.path().join("AGENTS.md"), content).expect("write AGENTS.md");
+
+        let ci = CodeIntel::open(dir.path()).expect("open index");
+        let ticket = minimal_ticket("T-1", "Task");
+
+        let section = build_conventions(&ticket, &ci, &[]);
+        assert!(
+            section.body.contains("line-0000"),
+            "the head must survive: {}",
+            section.body
+        );
+        assert!(
+            section
+                .body
+                .contains(&format!("line-{:04}", MAX_CONVENTIONS_FILE_LINES - 1)),
+            "the last kept line must survive: {}",
+            section.body
+        );
+        assert!(
+            !section
+                .body
+                .contains(&format!("line-{:04}", MAX_CONVENTIONS_FILE_LINES)),
+            "the first truncated line must not survive: {}",
+            section.body
+        );
+        assert!(section.body.contains("…truncated"), "{}", section.body);
     }
 
     #[test]

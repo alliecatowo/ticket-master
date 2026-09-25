@@ -44,7 +44,7 @@ pub use pack::{
 };
 pub use sections::{
     build_conventions, build_decisions, build_dependencies, build_git_history, build_objective,
-    build_prior_failures, build_retrieval, build_symbol_outlines, RawSection,
+    build_prior_failures, build_retrieval, build_symbol_outlines, RawSection, SectionItem,
 };
 pub use skills::{discover_skills, load_skill, SkillDoc, SkillMetadata};
 pub use tokens::{
