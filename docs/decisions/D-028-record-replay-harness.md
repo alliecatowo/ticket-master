@@ -73,6 +73,31 @@ to close there. Recording it anyway would only grow every cassette file for no r
   *different* absolute path (e.g. a symlink target outside `root`, or `$TMPDIR` itself rather
   than the project root under it) still diverges; callers that need more than one path
   normalized must pick the `root` that actually covers their prompts.
-- No command wires a cassette recording/replay path into `tm`'s CLI yet — this lands the format
-  and the two provider adapters (`RecordingProvider`, `MockProvider::script_from_cassette`) that a
-  later task needs, not an end-to-end "record this run" flow.
+
+## Implemented: `tm run <ticket> --record <path>`
+
+`replay-cli-record-flag` wires the format above into the CLI (`crates/tm-cli/src/args.rs`'s
+`RunArgs`, `crates/tm-cli/src/dispatch.rs`, `crates/tm-cli/src/agent.rs`):
+
+- `tm run <ticket> --record <path>` runs the ticket exactly as `tm run <ticket>` would, plus:
+  every provider `crate::agent::build_fabric_for_project_recording` registers for the run —
+  DevPass, Anthropic, every autodetected fallback backend, and the `TM_TEST_MOCK_PROVIDER=1`
+  mock alike — is wrapped so a successful `complete()` also appends a `CassetteEntry` to one
+  `CassetteSink` (`Arc<Mutex<Vec<CassetteEntry>>>`) shared across every wrapped provider, not one
+  private cassette per provider the way bare `tm_provider::RecordingProvider` would if used
+  directly. `role` is the ticket's own `ExecutorRequirements::role` — a single `tm run`
+  dispatches exactly one ticket, so one role covers the whole recording.
+- On dispatch this way, the request-hash-normalizing `root` is the same execution root the run's
+  own tool calls resolve against (`--worktree`'s isolated checkout when passed, the project root
+  otherwise).
+- Once the ticket leaves `Leased`/`Running`, `run_ticket` writes the accumulated entries plus a
+  `CassetteHeader` (`harness_epoch` read the same way `tm-scheduler`'s own dispatch does — the
+  last promoted epoch, or the genesis epoch `0` if none has promoted yet) to `<path>` via
+  `Cassette::write_jsonl`, then stores those same bytes as the ticket's `ArtifactKind::Transcript`
+  artifact (`Store::store_artifact`) — the first real use of that previously-declared-but-unused
+  kind.
+- Without `--record`, behavior is byte-for-byte unchanged: `build_dispatcher` (no recording) is
+  still what every other caller uses, and `register_recordable`'s `None` branch is a bare
+  `fabric.register_provider(provider)`.
+- `tm run --replay <path>` (offline ordered replay against a recorded cassette) is a separate,
+  later task (`replay-cli-replay-flag`) — this only covers recording.

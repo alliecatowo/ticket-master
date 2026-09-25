@@ -280,6 +280,34 @@ pub fn build_dispatcher_with_human(
     build_dispatcher_with_fabric(project, handle, exec_root, steps, fabric, human_sink)
 }
 
+/// [`build_dispatcher`], but every provider the fabric registers is wrapped so a completion it
+/// serves also appends to `sink` — used only by `tm run <ticket> --record <path>`
+/// (`replay-cli-record-flag`, `docs/decisions/D-028-record-replay-harness.md`) to capture a
+/// cassette of the run's real provider traffic. `role` is the ticket's own
+/// [`tm_core::ticket::ExecutorRequirements::role`] (a single `tm run` dispatches one ticket, so
+/// one role for the whole recording); `sink` is shared across every wrapped provider rather than
+/// each keeping its own private cassette, so a mid-run fallback across candidates still lands in
+/// one ordered recording instead of splitting across several.
+pub(crate) fn build_dispatcher_with_recording(
+    project: &Project,
+    handle: tokio::runtime::Handle,
+    exec_root: Option<&Path>,
+    steps: Option<tokio::sync::mpsc::UnboundedSender<tm_agent::StepRecord>>,
+    role: Role,
+    sink: crate::agent::CassetteSink,
+) -> tm_types::Result<Arc<ExecutorDispatcher>> {
+    let root = execution_root(&project.root, exec_root).to_path_buf();
+    let fabric = crate::agent::build_fabric_for_project_recording(
+        project,
+        project.clock.clone(),
+        crate::agent::RecordingSpec { role, root, sink },
+    )?;
+    let human = Arc::new(StdinApprovalSink {
+        store: project.store.clone(),
+    });
+    build_dispatcher_with_fabric(project, handle, exec_root, steps, fabric, human)
+}
+
 /// [`build_dispatcher`] over an already-built `fabric` instead of the one
 /// [`crate::agent::build_fabric_for_project`] would pick from the project's own configuration —
 /// the seam an in-process test uses to run the real dispatcher against a provider it controls.

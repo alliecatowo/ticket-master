@@ -1635,7 +1635,7 @@ pub(crate) const TEST_MOCK_PROVIDER_ENV: &str = "TM_TEST_MOCK_PROVIDER";
 ///   the default turn points at the first registered candidate when the table primary has
 ///   no credentials. A missing key for one provider never fails construction for the rest.
 pub(crate) fn build_fabric(clock: Arc<dyn Clock>) -> tm_types::Result<Arc<Fabric>> {
-    build_fabric_with_table(RoleTable::default_table(), clock)
+    build_fabric_with_table(RoleTable::default_table(), clock, None)
 }
 
 /// Build the shared provider fabric from the project's role configuration.
@@ -1644,15 +1644,117 @@ pub(crate) fn build_fabric_for_project(
     clock: Arc<dyn Clock>,
 ) -> tm_types::Result<Arc<Fabric>> {
     let table = crate::ops::load_role_table(Some(project))?;
-    build_fabric_with_table(table, clock)
+    build_fabric_with_table(table, clock, None)
+}
+
+/// [`build_fabric_for_project`], but every provider the fabric registers is wrapped in a
+/// cassette recorder that appends to `recording.sink` — `tm run <ticket> --record <path>`'s own
+/// build (`crate::dispatch::build_dispatcher_with_recording`). Includes the
+/// [`TEST_MOCK_PROVIDER_ENV`] mock, so `tm run --record` is itself testable offline
+/// (`replay-cli-record-flag`).
+pub(crate) fn build_fabric_for_project_recording(
+    project: &Project,
+    clock: Arc<dyn Clock>,
+    recording: RecordingSpec,
+) -> tm_types::Result<Arc<Fabric>> {
+    let table = crate::ops::load_role_table(Some(project))?;
+    build_fabric_with_table(table, clock, Some(recording))
+}
+
+/// Shared across every provider one `tm run --record <path>` invocation's fabric registers
+/// (`RecordingSpec::sink`), so a run that falls through more than one candidate mid-run still
+/// records one ordered cassette instead of splitting across several private ones the way
+/// `tm_provider::RecordingProvider`'s own per-provider entries would.
+pub(crate) type CassetteSink = Arc<Mutex<Vec<tm_provider::CassetteEntry>>>;
+
+/// What [`build_fabric_with_table`] needs to wrap every provider it registers for one `tm run
+/// --record <path>` invocation.
+pub(crate) struct RecordingSpec {
+    /// The ticket's own [`tm_core::ticket::ExecutorRequirements::role`] — a single `tm run`
+    /// dispatches one ticket, so every entry this run records is tagged with the same role.
+    pub(crate) role: Role,
+    /// Normalized out of the recorded hash the same way
+    /// [`tm_provider::cassette::normalize_request`] does, so the cassette still replays after a
+    /// project root/tempdir change.
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) sink: CassetteSink,
+}
+
+/// Wraps a registered [`tm_provider::Provider`] so a successful `complete` call also appends a
+/// [`tm_provider::CassetteEntry`] to a [`CassetteSink`] shared with every other provider this
+/// run's fabric registers — see [`RecordingSpec`]. Reuses
+/// [`tm_provider::cassette::hash_normalized_request`]'s exact hashing, so a cassette recorded
+/// this way replays through `tm_provider::MockProvider::script_from_cassette` identically to one
+/// `tm_provider::RecordingProvider` recorded. `embed()` delegates straight through and is never
+/// recorded, matching `tm_provider::RecordingProvider`.
+struct RecordingProviderWrapper {
+    inner: Arc<dyn tm_provider::Provider>,
+    role: Role,
+    root: std::path::PathBuf,
+    sink: CassetteSink,
+}
+
+#[async_trait::async_trait]
+impl tm_provider::Provider for RecordingProviderWrapper {
+    fn id(&self) -> &str {
+        self.inner.id()
+    }
+
+    async fn complete(
+        &self,
+        req: tm_provider::types::CompletionRequest,
+    ) -> Result<tm_provider::types::Completion, tm_provider::types::ProviderError> {
+        let result = self.inner.complete(req.clone()).await;
+        if let Ok(completion) = &result {
+            let hash = tm_provider::cassette::hash_normalized_request(&req, &self.root);
+            let mut entries = self.sink.lock().expect("cassette sink mutex poisoned");
+            let seq = entries.len() as u64;
+            entries.push(tm_provider::CassetteEntry {
+                seq,
+                role: self.role,
+                provider_id: self.inner.id().to_string(),
+                request_hash: hash,
+                request: req,
+                completion: completion.clone(),
+            });
+        }
+        result
+    }
+
+    async fn embed(
+        &self,
+        req: tm_provider::types::EmbedRequest,
+    ) -> Result<tm_provider::types::Embeddings, tm_provider::types::ProviderError> {
+        self.inner.embed(req).await
+    }
+}
+
+/// Registers `provider` with `fabric`, wrapping it first in [`RecordingProviderWrapper`] when
+/// `recording` is set — every registered provider gets one, per `tm run --record`'s spec, so
+/// whichever candidate actually answers this run's calls still lands in the same cassette.
+fn register_recordable(
+    fabric: &Fabric,
+    provider: Arc<dyn tm_provider::Provider>,
+    recording: Option<&RecordingSpec>,
+) {
+    match recording {
+        Some(spec) => fabric.register_provider(Arc::new(RecordingProviderWrapper {
+            inner: provider,
+            role: spec.role,
+            root: spec.root.clone(),
+            sink: spec.sink.clone(),
+        })),
+        None => fabric.register_provider(provider),
+    }
 }
 
 fn build_fabric_with_table(
     mut table: RoleTable,
     clock: Arc<dyn Clock>,
+    recording: Option<RecordingSpec>,
 ) -> tm_types::Result<Arc<Fabric>> {
     if std::env::var_os(TEST_MOCK_PROVIDER_ENV).is_some() {
-        return Ok(Arc::new(build_mock_fabric(clock)));
+        return Ok(Arc::new(build_mock_fabric(clock, recording.as_ref())));
     }
     // Expose every configured, tool-capable backend the static table never mentions as an
     // AGENT_ROLE fallback, so `/model` lists it and turns can route to it. Only appends:
@@ -1687,12 +1789,12 @@ fn build_fabric_with_table(
     if DevPassProvider::preferred_model().is_some() {
         let devpass = DevPassProvider::from_env(clock.clone())
             .map_err(|e| TmError::Provider(e.to_string()))?;
-        fabric.register_provider(Arc::new(devpass));
+        register_recordable(&fabric, Arc::new(devpass), recording.as_ref());
     }
     if let Ok(anthropic) =
         AnthropicProvider::from_env(ModelId::new("anthropic", AGENT_MODEL), clock.clone())
     {
-        fabric.register_provider(Arc::new(anthropic));
+        register_recordable(&fabric, Arc::new(anthropic), recording.as_ref());
     }
     // Every other configured backend the table references: register best-effort, skipping
     // (never failing on) any single failure, so one broken backend never bricks the session.
@@ -1715,7 +1817,7 @@ fn build_fabric_with_table(
             },
             clock.clone(),
         ) {
-            Ok(provider) => fabric.register_provider(provider),
+            Ok(provider) => register_recordable(&fabric, provider, recording.as_ref()),
             Err(e) => {
                 tracing::debug!(provider = info.id, error = %e, "skipping backend that failed to construct")
             }
@@ -1834,7 +1936,7 @@ fn fabric_model_for(fabric: &Fabric, slug: &str) -> Option<String> {
 /// request's own `ContentBlock::ToolResult` text instead of predicting the exact
 /// `CompletionRequest` `AgentLoop::drive` builds (which depends on the rendered system
 /// prompt/context pack).
-fn build_mock_fabric(clock: Arc<dyn Clock>) -> Fabric {
+fn build_mock_fabric(clock: Arc<dyn Clock>, recording: Option<&RecordingSpec>) -> Fabric {
     let table = RoleTable::parse(
         "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
     )
@@ -1842,7 +1944,7 @@ fn build_mock_fabric(clock: Arc<dyn Clock>) -> Fabric {
     let fabric = Fabric::new(table, clock.clone());
     let model = ModelId::new("mock", "m1");
     let provider = ScriptedMockProvider { model, clock };
-    fabric.register_provider(Arc::new(provider));
+    register_recordable(&fabric, Arc::new(provider), recording);
     fabric
 }
 
@@ -3259,7 +3361,7 @@ mod tests {
     async fn the_mock_fabric_scripts_a_real_submission_for_an_attached_ticket() {
         let dir = tempfile::tempdir().expect("tempdir");
         let project = Arc::new(open_test_project(dir.path()));
-        let fabric = Arc::new(build_mock_fabric(project.clock.clone()));
+        let fabric = Arc::new(build_mock_fabric(project.clock.clone(), None));
         let mut session =
             AgentSession::new(project.clone(), Renderer::from_flags(false, true, true))
                 .with_fabric(fabric);
@@ -3325,7 +3427,7 @@ mod tests {
     async fn the_mock_fabric_replies_in_text_with_no_ticket_attached() {
         let dir = tempfile::tempdir().expect("tempdir");
         let project = Arc::new(open_test_project(dir.path()));
-        let fabric = Arc::new(build_mock_fabric(project.clock.clone()));
+        let fabric = Arc::new(build_mock_fabric(project.clock.clone(), None));
         let mut session =
             AgentSession::new(project.clone(), Renderer::from_flags(false, true, true))
                 .with_fabric(fabric);

@@ -6,6 +6,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
+use tm_core::ArtifactKind;
+use tm_provider::{Cassette, CassetteHeader, CASSETTE_FORMAT_VERSION};
 use tm_types::{Authority, LeaseId, ParticipantId, TicketId};
 
 use crate::args::{
@@ -455,6 +457,13 @@ const WORKTREE_COMPLETION_GRACE: Duration = Duration::from_secs(30);
 /// else: a retry/escalation, a `dispatch` failure before any work started keeps nothing to
 /// inspect and cleans up immediately, or a detach past [`RUN_TICKET_MAX_WAIT`] where the run may
 /// still be using it).
+///
+/// `--record <path>` (`docs/decisions/D-028-record-replay-harness.md`) additionally dispatches
+/// through [`crate::dispatch::build_dispatcher_with_recording`] instead of
+/// [`crate::dispatch::build_dispatcher`], so every provider call this run makes is captured as a
+/// cassette written to `path` and stored as the ticket's `ArtifactKind::Transcript` artifact once
+/// the run finishes (see [`write_recording_cassette`]). Without `--record`, behavior is
+/// unchanged.
 pub async fn run_ticket(
     args: &RunArgs,
     project: &Project,
@@ -495,12 +504,23 @@ pub async fn run_ticket(
     let exec_root = worktree.as_ref().map(|w| w.path.as_path());
 
     let (step_tx, mut step_rx) = tokio::sync::mpsc::unbounded_channel();
-    let dispatcher = crate::dispatch::build_dispatcher(
-        project,
-        tokio::runtime::Handle::current(),
-        exec_root,
-        Some(step_tx),
-    )?;
+    let cassette_sink: crate::agent::CassetteSink = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let dispatcher = match &args.record {
+        Some(_) => crate::dispatch::build_dispatcher_with_recording(
+            project,
+            tokio::runtime::Handle::current(),
+            exec_root,
+            Some(step_tx),
+            ticket_state.executor.role,
+            cassette_sink.clone(),
+        )?,
+        None => crate::dispatch::build_dispatcher(
+            project,
+            tokio::runtime::Handle::current(),
+            exec_root,
+            Some(step_tx),
+        )?,
+    };
     let ttl_seconds = u32::try_from(ticket_state.budget.wall_seconds)
         .unwrap_or(u32::MAX)
         .clamp(60, RUN_TICKET_MAX_TTL_SECONDS);
@@ -568,6 +588,10 @@ pub async fn run_ticket(
         renderer.note(&crate::agent::format_step(&step));
     }
 
+    if let Some(path) = &args.record {
+        write_recording_cassette(project, &ticket, path, &cassette_sink, renderer)?;
+    }
+
     if let Some(worktree) = worktree {
         finish_worktree_run(
             worktree,
@@ -588,6 +612,58 @@ pub async fn run_ticket(
         Some(Err(err)) => Err(err),
         None => Ok(()),
     }
+}
+
+/// `tm run <ticket> --record <path>`'s tail: writes everything `cassette_sink` accumulated
+/// during the run to `path` as a cassette (`docs/decisions/D-028-record-replay-harness.md`), then
+/// stores those same bytes as `ticket`'s `ArtifactKind::Transcript` artifact — the first real use
+/// of that previously-declared-but-unused kind. `harness_epoch` is read the same way
+/// `tm-scheduler`'s own dispatch computes it (the last promoted epoch, or the genesis epoch `0`
+/// if none has promoted yet), so a cassette recorded this way carries the same epoch a scheduler-
+/// dispatched run would have stamped on it.
+fn write_recording_cassette(
+    project: &Project,
+    ticket: &TicketId,
+    path: &std::path::Path,
+    cassette_sink: &crate::agent::CassetteSink,
+    renderer: &Renderer,
+) -> tm_types::Result<()> {
+    let harness_epoch = project
+        .store
+        .harness_epochs()
+        .ok()
+        .and_then(|epochs| epochs.last().map(|epoch| epoch.epoch))
+        .unwrap_or(0);
+    let entries = cassette_sink
+        .lock()
+        .expect("cassette sink mutex poisoned")
+        .clone();
+    let entry_count = entries.len();
+    let cassette = Cassette {
+        header: CassetteHeader {
+            format_version: CASSETTE_FORMAT_VERSION,
+            harness_epoch: Some(harness_epoch),
+            recorded_at: project.clock.now(),
+        },
+        entries,
+    };
+    cassette
+        .write_jsonl(path)
+        .map_err(|e| tm_types::TmError::Io(e.to_string()))?;
+    let bytes = std::fs::read(path)?;
+    project.store.store_artifact(
+        ArtifactKind::Transcript,
+        "application/x-ndjson".to_string(),
+        bytes,
+        serde_json::json!({ "source": "tm run --record", "entries": entry_count }),
+        Some(ticket.clone()),
+        project.actor.clone(),
+    )?;
+    renderer.note(&format!(
+        "Recorded {entry_count} provider call(s) to {} (stored as a Transcript artifact on {ticket}).",
+        path.display()
+    ));
+    Ok(())
 }
 
 /// How one `tm run` attempt ended, read from the ticket once it left `Leased`/`Running`: a
@@ -1440,5 +1516,88 @@ mod tests {
         let project = test_project(dir.path());
         let renderer = Renderer::new(false, true, true, false);
         sched_tick(&project, &renderer).expect("quiet sched tick should still succeed");
+    }
+
+    // ---- `tm run --record`: `replay-cli-record-flag` ----
+
+    /// No other test in this crate mutates `TEST_MOCK_PROVIDER_ENV` inside `sched.rs`, but this
+    /// guards against a future one racing this test's transient env mutation under `cargo test`'s
+    /// default multi-threaded runner — same convention as `agent.rs`'s
+    /// `devpass_build_fabric_env_lock`.
+    fn record_test_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// `replay-cli-record-flag`'s acceptance check: dispatch one ticket through a fabric built by
+    /// [`crate::dispatch::build_dispatcher_with_recording`] under `TM_TEST_MOCK_PROVIDER=1`, let
+    /// it finish, then call [`write_recording_cassette`] directly (what `run_ticket` does when
+    /// `--record` is set). The cassette on disk has at least one entry, and the ticket's
+    /// `ArtifactKind::Transcript` artifact's bytes equal the cassette file's bytes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn record_writes_a_cassette_and_stores_it_as_a_transcript_artifact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let ticket = queued_ticket(&project, "write the changelog");
+        let ticket_state = project.store.view().expect("view").tickets[&ticket].clone();
+
+        let cassette_sink: crate::agent::CassetteSink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dispatcher = {
+            let _guard = record_test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            std::env::set_var(crate::agent::TEST_MOCK_PROVIDER_ENV, "1");
+            let dispatcher = crate::dispatch::build_dispatcher_with_recording(
+                &project,
+                tokio::runtime::Handle::current(),
+                None,
+                None,
+                ticket_state.executor.role,
+                cassette_sink.clone(),
+            );
+            std::env::remove_var(crate::agent::TEST_MOCK_PROVIDER_ENV);
+            dispatcher.expect("dispatcher")
+        };
+
+        dispatcher
+            .dispatch(&ticket, &ticket_state, 30, project.actor.clone())
+            .expect("dispatch");
+
+        for _ in 0..500 {
+            let view = project.store.view().expect("view");
+            if !matches!(
+                view.tickets[&ticket].state,
+                tm_core::TicketState::Leased | tm_core::TicketState::Running
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let cassette_path = dir.path().join("cassette.jsonl");
+        let renderer = Renderer::new(false, true, true, false);
+        write_recording_cassette(&project, &ticket, &cassette_path, &cassette_sink, &renderer)
+            .expect("write recording cassette");
+
+        let cassette = Cassette::read_jsonl(&cassette_path).expect("read cassette");
+        assert!(
+            !cassette.entries.is_empty(),
+            "expected at least one recorded provider call"
+        );
+
+        let cassette_bytes = std::fs::read(&cassette_path).expect("read cassette bytes");
+        let view = project.store.view().expect("view");
+        let transcript = view
+            .artifacts
+            .values()
+            .find(|a| a.kind == ArtifactKind::Transcript)
+            .expect("a Transcript artifact was stored");
+        let stored_bytes = match &transcript.storage {
+            tm_core::ArtifactStorage::Inline(bytes) => bytes.clone(),
+            tm_core::ArtifactStorage::OnDisk(path) => {
+                std::fs::read(path).expect("read on-disk artifact")
+            }
+        };
+        assert_eq!(stored_bytes, cassette_bytes);
     }
 }
