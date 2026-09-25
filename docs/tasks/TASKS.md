@@ -1004,7 +1004,7 @@ Gate: `mise run verify`
   acceptance: A test with milestones ordered so the positional heuristic would pick wrong confirms the tagged milestone is selected. The existing genesis and e2e tests pass.
   test: `mise run test:crate -- tm-genesis && mise run test:crate -- tm-e2e`
 
-- [ ] **docs-wire-attestation-cli-path** — tm docs attest <doc> --note: close a Review ticket with a human Attestation
+- [x] **docs-wire-attestation-cli-path** (landed d49d1c2) — tm docs attest <doc> --note: close a Review ticket with a human Attestation
   model: sonnet · size: S · builds Rust: yes · area: docs (SPEC §9) · deps: docs-persist-state-across-invocations
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs`, `crates/tm-docs/src/reconcile.rs`, `CLAUDE.md`
   change: Add a DocsCommand::Attest variant and its dispatch_docs arm. Build a tm_docs::reconcile::Attestation, record it as Evidence{kind: HumanAttestation} against the doc's open Review ticket, close that ticket (human actor only), set the doc's persisted state to Fresh and record the new last-verified commit. Add a CLAUDE.md line.

@@ -191,6 +191,17 @@ never drift between sessions:
   gate.
 - `mise run docs:wiki` — regenerate `docs/wiki/` (`tm wiki generate`); pass `-- --dry-run` to
   preview without writing (see "Navigation" below).
+- `tm docs attest <doc> --note "..."` closes a `Maintained`/`Human` doc's open review ticket with
+  a human attestation (`SPEC.md` §9's "a human closes with an attestation that is itself
+  evidence") — the only path back to `Fresh` for such a doc. `<doc>` is the id or path shown by
+  `tm docs list`; it must already be `Reconciling` (via `tm docs reconcile`) — attest itself
+  drives that ticket the rest of the way (activate, lease, submit with the note as evidence) if
+  it's still sitting `Draft`/`Ready`/etc, the state a fresh `tm docs reconcile` actually leaves
+  it in. Records the note as `EvidenceKind::HumanAttestation` evidence against the ticket
+  (tagged with `HEAD`'s commit sha when the project is a git repo, in the evidence artifact's
+  `meta` — `DocRow` itself has no persisted per-doc commit column yet), closes it via the same
+  human-only `Store::accept` path `tm ticket accept` uses, and persists the doc's `Fresh`
+  transition (`Store::reconcile_doc`) so a following `tm docs list` reads it back.
 - `tm bench report <report.json> [--out FILE]` renders a saved `BenchmarkReport` (from `tm bench
   run --out`) as markdown: an aggregate-score heading, then a per-task table of pass/fail, score,
   cost, tool calls and wall time. Prints to stdout by default; `--out` writes the markdown to a
