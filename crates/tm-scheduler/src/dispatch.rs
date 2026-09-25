@@ -20,7 +20,7 @@ use tm_core::store::Store;
 use tm_core::ticket::{FailureClass, TicketState, Trigger};
 use tm_core::{ArtifactKind, EvidenceKind, Executor, Ticket};
 use tm_events::Event;
-use tm_types::{LeaseId, ParticipantId, Role, TicketId};
+use tm_types::{LeaseId, ParticipantId, Predicate, Role, TicketId};
 
 use crate::select::capabilities_satisfy;
 
@@ -495,10 +495,476 @@ async fn report_outcome(
                 }
             }
         }
+
+        // Either branch above may have left the ticket `Submitted` (the common case, since
+        // `tm-agent`'s `BuiltinExecutor` submits mid-run via its own `ticket.submit` tool and
+        // takes the `else` arm here, not the `store.submit` one). Run the ticket's own automatic
+        // verification commands now, still as part of this same report, rather than leaving
+        // "did the check ever run" to a separate poller.
+        let post_state = store
+            .view()
+            .ok()
+            .and_then(|v| v.tickets.get(ticket).map(|t| t.state));
+        if post_state == Some(TicketState::Submitted) {
+            run_automatic_verification(store, ticket, t, repo_root).await;
+        }
         return;
     };
 
     if let Err(store_err) = store.record_failure(ticket, failure.class, failure.detail, holder) {
         tracing::warn!(%ticket, error = %store_err, "record_failure for a classified executor failure also failed");
+    }
+}
+
+/// The argv of every [`Predicate::CommandSucceeds`] leaf named anywhere in `t.success`
+/// (including nested under `AllOf`/`AnyOf`/`Not` — [`Predicate::walk`] finds them regardless of
+/// nesting). This is the "first slice" of `u1-automatic-verification-step`: `Predicate::TestsPass`
+/// and the other machine-checkable leaves, and a project-wide `harness.toml` `verify_command`,
+/// are later work (see that task's own note in `docs/tasks/TASKS.md`).
+fn verification_commands(t: &Ticket) -> Vec<Vec<String>> {
+    let mut commands = Vec::new();
+    for p in &t.success {
+        p.walk(&mut |leaf| {
+            if let Predicate::CommandSucceeds { command } = leaf {
+                commands.push(command.clone());
+            }
+        });
+    }
+    commands
+}
+
+/// After a submit leaves `ticket` in `Submitted`, run every command
+/// [`verification_commands`] finds in `t.success`, directly (never through a shell), in
+/// `repo_root`, as [`ParticipantId::system`] (`SPEC.md:721-724`'s "verification separation" —
+/// this is deterministic machinery, not a worker certifying its own work). A pass is recorded as
+/// [`EvidenceKind::CommandOutput`] evidence and the ticket is left `Submitted` (so
+/// `Store::accept`/`Store::reject` still work exactly as before); a failure is routed through
+/// [`Store::fail_automatic_verification`], which sends the ticket back through the same
+/// `Submitted -> Verifying -> Recovery -> retry` path a human's `tm ticket reject` uses.
+///
+/// Does nothing (past a `tracing::debug!`) when `t.success` names no `CommandSucceeds` predicate,
+/// or when `repo_root` is `None` — there is no checked-out workspace to run a command in (e.g. a
+/// test harness with no real git working tree).
+///
+/// This does not call [`Store::verify`]: that takes a verifier [`TicketId`] and is subject to
+/// `AuditorMustDiffer`, which needs a real Verification-ticket path
+/// (`u1-verification-state-and-review`) this task deliberately leaves alone.
+async fn run_automatic_verification(
+    store: &Store,
+    ticket: &TicketId,
+    t: &Ticket,
+    repo_root: Option<&std::path::Path>,
+) {
+    let commands = verification_commands(t);
+    if commands.is_empty() {
+        return;
+    }
+    let Some(root) = repo_root else {
+        tracing::debug!(
+            %ticket,
+            "ticket names automatic verification commands but no repo root is configured; skipping"
+        );
+        return;
+    };
+
+    let mut all_passed = true;
+    let mut transcript = String::new();
+    for command in &commands {
+        let Some((program, args)) = command.split_first() else {
+            continue;
+        };
+        let rendered = command.join(" ");
+        match tokio::process::Command::new(program)
+            .args(args)
+            .current_dir(root)
+            .output()
+            .await
+        {
+            Ok(output) => {
+                all_passed &= output.status.success();
+                transcript.push_str(&format!(
+                    "$ {rendered}\nexit code: {}\n{}{}\n",
+                    output.status.code().unwrap_or(-1),
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                ));
+            }
+            Err(e) => {
+                all_passed = false;
+                transcript.push_str(&format!("$ {rendered}\ncould not run this check: {e}\n"));
+            }
+        }
+    }
+
+    let artifact_id = match store.store_artifact(
+        ArtifactKind::CommandOutput,
+        "text/plain".to_string(),
+        transcript.clone().into_bytes(),
+        serde_json::json!({ "commands": commands, "passed": all_passed }),
+        Some(ticket.clone()),
+        ParticipantId::system(),
+    ) {
+        Ok(events) => events
+            .iter()
+            .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone())),
+        Err(e) => {
+            tracing::warn!(%ticket, error = %e, "couldn't store automatic verification output as an artifact");
+            None
+        }
+    };
+
+    if let Some(id) = &artifact_id {
+        let summary = if all_passed {
+            "automatic verification passed".to_string()
+        } else {
+            "automatic verification failed".to_string()
+        };
+        if let Err(e) = store.attach_evidence(
+            ticket,
+            EvidenceKind::CommandOutput,
+            id,
+            summary,
+            ParticipantId::system(),
+        ) {
+            tracing::warn!(%ticket, error = %e, "couldn't attach automatic verification evidence");
+        }
+    }
+
+    if all_passed {
+        return;
+    }
+
+    let tail: String = transcript
+        .chars()
+        .rev()
+        .take(800)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let first_command = commands.first().map(|c| c.join(" ")).unwrap_or_default();
+    let reason = format!("The check `{first_command}` failed:\n{tail}");
+    if let Err(e) = store.fail_automatic_verification(ticket, reason) {
+        tracing::warn!(%ticket, error = %e, "couldn't send the ticket back to retry after a failed automatic verification");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tempfile::TempDir;
+    use tm_core::ticket::{ExecutorRequirements, RetryPolicy, TicketKind, TicketState};
+    use tm_types::{Authority, Budget, Clock, CounterIds, FixedClock, Spend, Tolerance};
+
+    fn executor_reqs() -> ExecutorRequirements {
+        ExecutorRequirements {
+            role: Role::CoderFast,
+            human_required: false,
+            min_capability: Tolerance::Any,
+        }
+    }
+
+    fn retry_policy() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay_seconds: 1,
+            backoff_multiplier: 2.0,
+            max_delay_seconds: 60,
+        }
+    }
+
+    fn open_store(clock: Arc<dyn Clock>) -> (TempDir, Arc<Store>) {
+        let dir = TempDir::new().expect("tempdir");
+        let ids: Arc<dyn tm_types::IdSource> = Arc::new(CounterIds::new());
+        let store = Store::open_with(dir.path(), clock, ids).expect("open store");
+        (dir, Arc::new(store))
+    }
+
+    /// A ready `Work` ticket naming `success` as its verification commands.
+    fn create_ready_ticket_with_success(store: &Store, success: Vec<Predicate>) -> TicketId {
+        let events = store
+            .create_ticket(
+                TicketKind::Work,
+                "do the thing, then verify it".into(),
+                None,
+                None,
+                Authority::root(),
+                vec![],
+                executor_reqs(),
+                vec![],
+                success,
+                tm_core::ticket::VerificationPolicy::Single,
+                Budget::unlimited(),
+                retry_policy(),
+                0,
+                ParticipantId::system(),
+            )
+            .expect("create_ticket should succeed");
+        let ticket = TicketId::new(events[0].subject.as_str()).expect("ticket id");
+        store
+            .activate(&ticket, ParticipantId::system())
+            .expect("activate should succeed");
+        ticket
+    }
+
+    /// An [`Executor`] double that always reports success, citing one evidence artifact it
+    /// stores itself first — mirroring what a real worker's `ticket.submit` evidence looks like.
+    /// When `submits_mid_run` is `false` (the default via [`SucceedingExecutor::new`]),
+    /// `report_outcome` reaches its `store.submit` path, the case a future external-harness
+    /// adapter would hit. When `true`, `execute` itself calls `Store::submit` first — mirroring
+    /// `tm-agent`'s `BuiltinExecutor`, which submits mid-run via its own `ticket.submit` tool —
+    /// so `report_outcome` takes its `else` (already-submitted) branch instead, the path nearly
+    /// every real run actually takes.
+    struct SucceedingExecutor {
+        id: String,
+        store: Arc<Store>,
+        submits_mid_run: bool,
+    }
+
+    impl SucceedingExecutor {
+        fn new(id: &str, store: Arc<Store>) -> Arc<Self> {
+            Arc::new(SucceedingExecutor {
+                id: id.to_string(),
+                store,
+                submits_mid_run: false,
+            })
+        }
+
+        fn new_submitting_mid_run(id: &str, store: Arc<Store>) -> Arc<Self> {
+            Arc::new(SucceedingExecutor {
+                id: id.to_string(),
+                store,
+                submits_mid_run: true,
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Executor for SucceedingExecutor {
+        fn id(&self) -> &str {
+            &self.id
+        }
+
+        fn capabilities(&self) -> tm_core::ExecutorCapabilities {
+            tm_core::ExecutorCapabilities {
+                streaming: false,
+                tool_use: true,
+                patch_output: false,
+                interactive: false,
+                accepts_context_pack: true,
+                sandboxed: true,
+                max_context_tokens: None,
+                cost_class: tm_core::CostClass::Cheap,
+            }
+        }
+
+        async fn execute(&self, task: ExecutorTask) -> tm_types::Result<ExecutorOutcome> {
+            let events = self
+                .store
+                .store_artifact(
+                    ArtifactKind::Report,
+                    "text/plain".to_string(),
+                    b"work done".to_vec(),
+                    serde_json::json!({}),
+                    Some(task.ticket.clone()),
+                    ParticipantId::system(),
+                )
+                .expect("store_artifact should succeed");
+            let artifact = events
+                .iter()
+                .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone()))
+                .expect("artifact_created event");
+            if self.submits_mid_run {
+                self.store
+                    .submit(
+                        &task.ticket,
+                        "done (submitted mid-run)".to_string(),
+                        vec![artifact.clone()],
+                        task.actor.clone(),
+                    )
+                    .expect("mid-run submit should succeed");
+            }
+            Ok(ExecutorOutcome {
+                ticket: task.ticket.clone(),
+                summary: "done".to_string(),
+                evidence: vec![artifact],
+                patch: None,
+                usage: Spend::default(),
+                decisions: vec![],
+                failure: None,
+            })
+        }
+
+        async fn cancel(&self, _handle: &tm_core::ExecutionHandle) -> tm_types::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Always compiles to the same fixed pack text; these tests do not care about pack content.
+    struct FixedContextPack;
+
+    impl ContextPackSource for FixedContextPack {
+        fn compile(&self, _ticket: &TicketId) -> tm_types::Result<String> {
+            Ok("<compiled pack>".to_string())
+        }
+    }
+
+    /// Lease and dispatch `ticket` to `executor`, and wait for `report_outcome` — including
+    /// automatic verification — to fully finish, using
+    /// [`ExecutorDispatcher::dispatch_with_completion`] rather than a fixed sleep.
+    async fn dispatch_and_wait(
+        store: Arc<Store>,
+        ticket: &TicketId,
+        repo_root: Option<PathBuf>,
+        executor: Arc<SucceedingExecutor>,
+    ) {
+        let mut registry = ExecutorRegistry::new(executor.clone());
+        registry.register(Role::CoderFast, executor.clone());
+        let dispatcher = ExecutorDispatcher::new(
+            store.clone(),
+            tokio::runtime::Handle::current(),
+            Arc::new(FixedContextPack),
+            registry,
+            repo_root,
+        );
+        let t = store
+            .view()
+            .expect("view")
+            .tickets
+            .get(ticket)
+            .expect("ticket exists")
+            .clone();
+        let (_events, rx) = dispatcher
+            .dispatch_with_completion(ticket, &t, 60, ParticipantId::system())
+            .expect("dispatch should succeed");
+        tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("the run should finish within the timeout")
+            .expect("the completion channel should not be dropped");
+    }
+
+    #[tokio::test]
+    async fn a_passing_verification_command_leaves_the_ticket_submitted_and_accept_still_works() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let (dir, store) = open_store(clock);
+        let ticket = create_ready_ticket_with_success(
+            &store,
+            vec![Predicate::CommandSucceeds {
+                command: vec!["true".to_string()],
+            }],
+        );
+
+        let executor = SucceedingExecutor::new_submitting_mid_run("verifying-exec", store.clone());
+        dispatch_and_wait(
+            store.clone(),
+            &ticket,
+            Some(dir.path().to_path_buf()),
+            executor,
+        )
+        .await;
+
+        let view = store.view().expect("view");
+        let t = view.tickets.get(&ticket).expect("ticket exists");
+        assert_eq!(
+            t.state,
+            TicketState::Submitted,
+            "a passing automatic check must leave the ticket Submitted, not drive it further"
+        );
+        let verification_artifact = view
+            .artifacts
+            .values()
+            .find(|a| a.kind == ArtifactKind::CommandOutput)
+            .expect("automatic verification must have stored a CommandOutput artifact");
+        assert_eq!(
+            verification_artifact.meta.get("passed"),
+            Some(&serde_json::Value::Bool(true)),
+            "the artifact's meta should record that the check passed: {:?}",
+            verification_artifact.meta
+        );
+        drop(view);
+
+        let human = ParticipantId::new("human:tester").expect("valid participant");
+        store
+            .accept(&ticket, None, human)
+            .expect("tm ticket accept must still work from Submitted after a passing check");
+        let view = store.view().expect("view");
+        assert_eq!(
+            view.tickets.get(&ticket).expect("ticket exists").state,
+            TicketState::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_verification_command_rejects_the_ticket_back_onto_the_retry_path() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let (dir, store) = open_store(clock);
+        let ticket = create_ready_ticket_with_success(
+            &store,
+            vec![Predicate::CommandSucceeds {
+                command: vec!["false".to_string()],
+            }],
+        );
+
+        let executor = SucceedingExecutor::new_submitting_mid_run("verifying-exec", store.clone());
+        dispatch_and_wait(
+            store.clone(),
+            &ticket,
+            Some(dir.path().to_path_buf()),
+            executor,
+        )
+        .await;
+
+        let view = store.view().expect("view");
+        let t = view.tickets.get(&ticket).expect("ticket exists");
+        assert_eq!(
+            t.state,
+            TicketState::Ready,
+            "a failing automatic check must send the ticket back onto the retry path, as system; got {:?}",
+            t.state
+        );
+        assert_eq!(t.attempts, 1);
+        let last_failure = t.failures.last().expect("a failure record was appended");
+        assert_eq!(last_failure.class, FailureClass::VerificationFailed);
+        assert!(
+            last_failure.detail.contains("The check `false` failed"),
+            "the failure detail should name the failing command and carry its output: {}",
+            last_failure.detail
+        );
+        let verification_artifact = view
+            .artifacts
+            .values()
+            .find(|a| a.kind == ArtifactKind::CommandOutput)
+            .expect(
+                "automatic verification must have stored a CommandOutput artifact even on failure",
+            );
+        assert_eq!(
+            verification_artifact.meta.get("passed"),
+            Some(&serde_json::Value::Bool(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn no_success_predicates_leaves_verification_untouched() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let (dir, store) = open_store(clock);
+        let ticket = create_ready_ticket_with_success(&store, vec![]);
+
+        let executor = SucceedingExecutor::new("non-verifying-exec", store.clone());
+        dispatch_and_wait(
+            store.clone(),
+            &ticket,
+            Some(dir.path().to_path_buf()),
+            executor,
+        )
+        .await;
+
+        let view = store.view().expect("view");
+        let t = view.tickets.get(&ticket).expect("ticket exists");
+        assert_eq!(
+            t.state,
+            TicketState::Submitted,
+            "a ticket naming no CommandSucceeds predicate should submit exactly as before"
+        );
     }
 }

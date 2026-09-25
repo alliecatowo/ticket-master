@@ -1312,6 +1312,57 @@ impl Store {
         Ok(events)
     }
 
+    /// Deterministic machinery's own counterpart to [`Store::reject`]: an automatic verification
+    /// check (`u1-automatic-verification-step`) failed, so the ticket goes back through retry the
+    /// same way a human's rejection does — `Submitted -> Verifying -> Recovery`, recorded as a
+    /// failed verification carrying `reason`, then the ticket's retry policy decides between
+    /// another attempt and escalation. Always recorded as [`ParticipantId::system`], never a
+    /// caller-supplied actor: unlike [`Store::reject`] this has no human-only guard to bypass, so
+    /// it must not be reachable from a surface a human or an agent could spoof (CLI, HTTP, an MCP
+    /// tool) — only from the scheduler's own automatic verification step.
+    pub fn fail_automatic_verification(
+        &self,
+        ticket: &TicketId,
+        reason: String,
+    ) -> tm_types::Result<Vec<Event>> {
+        let actor = ParticipantId::system();
+        let reason = rejection_reason(ticket, &reason)?;
+        let id = ticket.clone();
+        let failure_reason = reason.clone();
+        let mut events = self.run_command(move |view| {
+            let t = view
+                .tickets
+                .get(&id)
+                .ok_or_else(|| TmError::not_found("ticket", &id))?;
+            let step = |from, trigger| {
+                machine::transition(from, trigger)
+                    .map_err(|e| TmError::InvalidTransition(e.to_string()))
+            };
+            let verifying = step(t.state, Trigger::VerificationStarted)?;
+            let recovery = step(verifying, Trigger::VerificationFailed)?;
+            Ok(vec![
+                state_changed_draft(&id, t.state, verifying, actor.clone()),
+                state_changed_draft(&id, verifying, recovery, actor.clone()),
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(id.clone()),
+                    Payload::from(TicketVerificationFailedPayload {
+                        ticket: id.clone(),
+                        verifier: id.clone(),
+                        reason: reason.clone(),
+                    }),
+                ),
+            ])
+        })?;
+        events.extend(self.record_failure(
+            ticket,
+            FailureClass::VerificationFailed,
+            failure_reason,
+            ParticipantId::system(),
+        )?);
+        Ok(events)
+    }
+
     /// A human sends an escalated ticket back to work (`Escalated -> Blocked`, then `-> Ready`
     /// when its dependencies allow, as [`Store::activate`] does), with a fresh round of the
     /// attempts its retry policy allows. `guidance`, when given, is appended to the objective,
