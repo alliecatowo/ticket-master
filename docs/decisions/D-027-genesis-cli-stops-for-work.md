@@ -61,9 +61,10 @@ at a time exactly as before but applies an explicit termination policy, stopping
 
 On stopping, the CLI prints a status naming what actually happened — e.g. "3 tickets committed
 under milestone M-000000000002. Run `tm sched run` (or `tm run <T>`) to work them, then re-run `tm
-genesis` to resume." — and exits 0 (not an error: stopping for work is normal operation, not a
-failure). The message says "resume" because that is the eventual, spec-intended behavior once
-`--resume` lands (see "What this costs" below for what actually happens today).
+genesis --resume` to continue." — and exits 0 (not an error: stopping for work is normal
+operation, not a failure). `genesis-cli-resume-flag` wired `--resume` (and auto-detect when
+`--prompt` is omitted) into `genesis()` itself, so re-running does now continue the stopped run
+rather than starting a fresh one (see "What this costs" below for what still isn't covered).
 
 ## Why
 
@@ -91,21 +92,19 @@ the real milestone and the real ticket count, not a guess.
   used (first milestone distinct from V0, or the only one) — `GenesisState` still has no dedicated
   "V1 milestone" field. This change makes that approximation shared and consistent, not more
   precise.
-- **`genesis()` does not call `GenesisDriver::resume` yet.** Re-running `tm genesis` after a stop
-  today starts a brand-new `GenesisState` from `Stage::Seed` — a second full run (a second Seed,
-  Vision, Spec, and a second committed ticket graph under a new milestone), not a continuation of
-  the stopped one. The stopped run's snapshot is preserved (nothing is lost), but nothing
-  automatically picks it back up; that wiring is `genesis-cli-resume-flag`, a separate task. Until
-  it lands, the printed "re-run `tm genesis` to resume" is aspirational for the *state*, accurate
-  only for the *intent* (do the outstanding work, then continue genesis).
+- **`genesis()` now calls `GenesisDriver::resume`** (`genesis-cli-resume-flag`) when `--resume` is
+  passed explicitly, or when `--prompt` is omitted (auto-detect): it reads back the most recently
+  persisted `GenesisState` snapshot and continues from that stage instead of starting over at
+  `Stage::Seed`. `tm genesis --resume` with no persisted snapshot yet is a real error rather than
+  a silent fresh start; an omitted `--prompt` with no snapshot still falls back to reading a fresh
+  prompt from stdin, same as before this task.
 - Relatedly, the printed next step says `tm sched run` (or `tm run <T>`) works the outstanding
   tickets — true for `tm run <T>` (which activates a Draft ticket itself), but `tm sched run` only
   works *Ready* tickets, and `GraphCompilation` commits them as `Draft`. This wording is carried
   over from this task's own spec; flagging it here rather than silently rewording it, since whether
   Draft tickets should auto-activate, or `tm sched run` should, is a call for whoever owns that
   flow, not this task.
-- A run that stops at `V0` and is re-run before its milestone closes will stop at the exact same
-  place again (once resume lands, this becomes "resumes to the same stop point"; today it starts
-  over and stops at the same *kind* of point, since nothing closed the new run's milestone either) —
-  expected, not a bug, but it means a tight `tm genesis` retry loop without doing the intervening
-  work makes no progress.
+- A run that stops at `V0` and is re-run (via `--resume`) before its milestone closes resumes to
+  the exact same stop point and stops again immediately, without a further provider call —
+  expected, not a bug, but it means a tight `tm genesis --resume` retry loop without doing the
+  intervening work makes no progress.

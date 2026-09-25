@@ -1486,12 +1486,13 @@ fn genesis_stop_message(stop: &GenesisStop) -> String {
             milestone, tickets, ..
         } => format!(
             "{tickets} ticket{s} committed under milestone {milestone}. Run `tm sched run` (or \
-             `tm run <T>`) to work them, then re-run `tm genesis` to resume.",
+             `tm run <T>`) to work them, then re-run `tm genesis --resume` to continue.",
             s = if *tickets == 1 { "" } else { "s" },
         ),
         GenesisStop::MaturityGateFailed { open_tickets } => format!(
             "The maturity gate hasn't passed yet ({open_tickets} ticket{s} still open). Run `tm \
-             sched run` (or `tm run <T>`) to work them, then re-run `tm genesis` to resume.",
+             sched run` (or `tm run <T>`) to work them, then re-run `tm genesis --resume` to \
+             continue.",
             s = if *open_tickets == 1 { "" } else { "s" },
         ),
     }
@@ -1580,12 +1581,6 @@ async fn run_genesis_stages(
 /// `tm genesis [--prompt <text>|-]`: turn a prompt into a running project via the Genesis stage
 /// driver.
 pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> {
-    let prompt = resolve_genesis_prompt(
-        args.prompt.as_deref(),
-        std::io::stdin().is_terminal(),
-        std::io::stdin(),
-    )?;
-
     // Resolve the provider before touching the filesystem at all. This used to be a plain
     // `require_anthropic_api_key()?` right here, before any `.tm/` directory got created, so a
     // genesis run that fails on provider selection must keep failing before that side effect —
@@ -1613,10 +1608,35 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
     };
     let project = open(&root)?;
 
+    // `--resume` (or an omitted `--prompt`, which auto-detects) continues the most recently
+    // persisted `GenesisState` snapshot instead of starting a fresh `Seed`, via the same
+    // `GenesisDriver::resume` a crash recovery would use. No snapshot yet falls back to the
+    // fresh-prompt path below unless `--resume` was given explicitly, in which case there is
+    // nothing to resume and that's a real error, not a silent fresh start.
+    let resumed = if args.resume || args.prompt.is_none() {
+        match tm_genesis::GenesisDriver::resume(project.store.as_ref()) {
+            Ok(state) => Some(state),
+            Err(TmError::NotFound { .. }) if !args.resume => None,
+            Err(e) => return Err(e),
+        }
+    } else {
+        None
+    };
+
     // `GenesisState::project` is the only channel `GenesisDriver` has for threading the raw
     // prompt into `Stage::Seed`'s `analyze_prompt` call (it hands `state.project` straight to
     // it), so the seed prompt lives there rather than in a project name/slug.
-    let initial_state = tm_genesis::GenesisState::new(prompt, project.clock.as_ref());
+    let initial_state = match resumed {
+        Some(state) => state,
+        None => {
+            let prompt = resolve_genesis_prompt(
+                args.prompt.as_deref(),
+                std::io::stdin().is_terminal(),
+                std::io::stdin(),
+            )?;
+            tm_genesis::GenesisState::new(prompt, project.clock.as_ref())
+        }
+    };
     let actor = project.actor.clone();
     let quiet = renderer.is_quiet();
     let progress = *renderer;

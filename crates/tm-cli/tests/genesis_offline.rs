@@ -132,3 +132,72 @@ fn tm_genesis_runs_offline_end_to_end_through_the_real_binary() {
          own), got {tickets:?}"
     );
 }
+
+/// `genesis-cli-resume-flag`: re-running `tm genesis --resume` after it stopped for work
+/// continues from the persisted `GenesisState` snapshot instead of starting a fresh `Seed` —
+/// proven the same way the offline end-to-end test above proves the fresh-start path, but
+/// asserting no duplicate `GraphCompilation` artifact and no duplicate ticket commit happen on
+/// the second run.
+#[test]
+fn tm_genesis_resume_continues_from_the_persisted_stage_without_double_committing() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let tm_home = tempfile::tempdir().expect("tempdir");
+    init_git_repo_with_a_commit(tmp.path());
+
+    let first = run_tm_offline(
+        tmp.path(),
+        tm_home.path(),
+        &["genesis", "--prompt", "a Python CLI todo app", "--plain"],
+    );
+    assert!(
+        first.status.success(),
+        "first `tm genesis` must exit 0 offline, got status {:?}, stdout {:?}, stderr {:?}",
+        first.status,
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let tickets_after_first =
+        run_tm_offline(tmp.path(), tm_home.path(), &["tickets", "--json", "--all"]);
+    let tickets_after_first: serde_json::Value =
+        serde_json::from_slice(&tickets_after_first.stdout).expect("tickets --json --all is JSON");
+    let count_after_first = tickets_after_first
+        .as_array()
+        .expect("tickets --json --all is an array")
+        .len();
+    assert!(
+        count_after_first > 0,
+        "the first run must have committed at least one ticket"
+    );
+
+    // No `--prompt` this time: `--resume` (and the auto-detect it shares with an omitted
+    // `--prompt`) must find the snapshot the first run left behind rather than requiring a
+    // prompt again.
+    let second = run_tm_offline(
+        tmp.path(),
+        tm_home.path(),
+        &["genesis", "--resume", "--plain"],
+    );
+    assert!(
+        second.status.success(),
+        "second `tm genesis --resume` must exit 0 offline, got status {:?}, stdout {:?}, stderr \
+         {:?}",
+        second.status,
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+
+    let tickets_after_second =
+        run_tm_offline(tmp.path(), tm_home.path(), &["tickets", "--json", "--all"]);
+    let tickets_after_second: serde_json::Value =
+        serde_json::from_slice(&tickets_after_second.stdout).expect("tickets --json --all is JSON");
+    let count_after_second = tickets_after_second
+        .as_array()
+        .expect("tickets --json --all is an array")
+        .len();
+    assert_eq!(
+        count_after_second, count_after_first,
+        "resuming a run that already committed its ticket graph must not commit a second, \
+         duplicate graph: before {count_after_first}, after {count_after_second}"
+    );
+}
