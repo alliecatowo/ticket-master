@@ -1,6 +1,9 @@
-//! The Kanban board: tickets as cards in columns named after their real
-//! `tm_core::TicketState` (this crate has no `tm_core` dependency, so the caller hands over
-//! already-labelled [`KanbanColumn`]s — see [`KanbanCard`]'s docs).
+//! The Kanban board: tickets as cards in caller-labelled columns — in practice the same five
+//! group labels `screens::tickets::TicketsScreen` groups its rows under (Needs input / Working /
+//! Ready for review / Queued / Completed, D-024's one-set-of-display-labels rule), though this
+//! widget has no opinion on that and never hardcodes a column count or name (this crate has no
+//! `tm_core` dependency, so the caller hands over already-labelled [`KanbanColumn`]s — see
+//! [`KanbanCard`]'s docs).
 //!
 //! Unlike a flat ticket table (one list, sorted, scrolled vertically), this is a genuinely
 //! two-dimensional board: columns scroll horizontally, each
@@ -28,9 +31,11 @@ use ratatui_core::buffer::Buffer;
 use ratatui_core::layout::Rect;
 use ratatui_core::style::Modifier;
 
+use crate::chat::glyphs::Glyphs;
 use crate::component::{Component, ComponentId, FrameContext};
 use crate::event::{Event, InputEvent, KeyBinding, KeyChord, Propagation};
-use crate::text::truncate;
+use crate::text::{display_width, truncate};
+use crate::theme::Theme;
 
 /// One card: a ticket's id and a short label. Both already-formatted strings, not a `TicketId`/
 /// domain type — this crate has no `tm_core` dependency (see the module doc comment), matching
@@ -57,10 +62,10 @@ impl KanbanCard {
     }
 }
 
-/// One column: a heading (conventionally a real `TicketState` name, e.g. `"Running"` — never a
-/// generic label like "In Progress" invented by this crate, which has no opinion on what a
-/// column means) and its cards, top to bottom in whatever order the caller decided (typically the
-/// same deterministic order `tm_core::ProjectView::tickets` iterates in).
+/// One column: a heading (the caller's own display label — a ticket-screen group name like
+/// `"Working"` in `tm-cli`'s board, though this crate has no opinion on what a column means) and
+/// its cards, top to bottom in whatever order the caller decided (typically the same
+/// deterministic order `tm_core::ProjectView::tickets` iterates in).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KanbanColumn {
     /// The column heading.
@@ -79,12 +84,50 @@ impl KanbanColumn {
     }
 }
 
-/// Fixed width, in terminal columns, of one Kanban column (heading + cards). Card text is
-/// truncated to fit via `crate::text::truncate`, matching `Table`/`List`'s own per-cell
-/// truncation. Chosen wide enough for a real ticket id (`"T-1234"`) plus a few words of objective
-/// to read as more than an id, narrow enough that a common 80-column terminal still shows more
-/// than two columns without any horizontal scrolling at all.
+/// The hub's shared identity line, shown above the board's own tab strip — `tm vX.Y.Z`, the
+/// model, and the project's place, the same three facts
+/// `screens::tickets::TicketsScreen`'s compact header line shows. Plain strings, not a
+/// `tm_core`/`Project` type (see the module doc comment): the caller (`tm-cli`) already computes
+/// these once per refresh for the tickets screen and hands the same values over here via
+/// [`Kanban::set_header`], so the two screens cannot disagree about them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KanbanHeader {
+    /// `tm`'s version (`0.1.0`).
+    pub version: String,
+    /// The model dispatched workers use.
+    pub model: String,
+    /// Where the project is (`~/src/app (main)`).
+    pub place: String,
+}
+
+/// The hub's tab strip (Tickets · Board · Milestones · Timeline · Graph), in the order
+/// `tm-cli`'s `next_tab` cycles. Duplicated from `screens::tickets::TicketsScreen::TABS` (private
+/// to that screen) rather than shared, since D-024's one-set-of-display-labels rule is about the
+/// *labels* matching, not the two screens sharing code — this board highlights "Board" instead of
+/// "Tickets", the one difference between the two renderings.
+const TABS: [&str; 5] = ["Tickets", "Board", "Milestones", "Timeline", "Graph"];
+
+/// Which of [`TABS`] this screen highlights.
+const BOARD_TAB: usize = 1;
+
+/// Rows reserved at the top of the board for the shared identity line and tab strip, before the
+/// usage hint and the columns themselves.
+const HEADER_HEIGHT: u16 = 2;
+
+/// Default width, in terminal columns, of one Kanban column (heading + cards) — used once the
+/// area is too narrow to give every column at least [`MIN_COLUMN_WIDTH`] (`render` shares the
+/// width evenly instead; see there). Card text is truncated to fit via `crate::text::truncate`,
+/// matching `Table`/`List`'s own per-cell truncation. Chosen wide enough for a real ticket id
+/// (`"T-1234"`) plus a few words of objective to read as more than an id, narrow enough that a
+/// common 80-column terminal still shows more than two columns without any horizontal scrolling
+/// at all.
 const COLUMN_WIDTH: u16 = 24;
+
+/// The narrowest a column is ever squeezed to when every column fits the area at once (`render`
+/// shares the width evenly in that case) — still wide enough for a short ticket id and a couple
+/// of truncated words, e.g. `"Ready for review (1)"` at exactly this width. Below this, `render`
+/// falls back to [`COLUMN_WIDTH`] and horizontal scrolling instead of squeezing further.
+const MIN_COLUMN_WIDTH: u16 = 20;
 
 /// One row reserved at the top of the board for a static usage hint — the same "how do I use
 /// this" affordance `screens::home::Home`'s always-visible input label gives the chat screen,
@@ -95,10 +138,11 @@ const HINT_HEIGHT: u16 = 1;
 
 const HINT_TEXT: &str = "Left/Right: columns   Up/Down: cards   Enter: open   Esc: back";
 
-/// The Kanban board: N columns, each independently vertically scrollable, with the whole set of
-/// columns horizontally scrollable so a real `TicketState` machine's full column count (14 as of
-/// `tm_core::ticket::TicketState`, though this widget never hardcodes that number — see
-/// `set_columns`) never has to be squeezed, paginated, or relabelled to fit a terminal's width.
+/// The Kanban board: N columns (never hardcoded — see `set_columns`), each independently
+/// vertically scrollable. When every column can have at least `MIN_COLUMN_WIDTH` at once, `render`
+/// shares the area's width evenly across them so all N are visible with no scrolling at all (the
+/// common case for `tm-cli`'s 5-group board); otherwise the whole set of columns scrolls
+/// horizontally at a fixed width rather than being squeezed, paginated, or relabelled to fit.
 #[derive(Debug)]
 pub struct Kanban {
     id: ComponentId,
@@ -125,6 +169,11 @@ pub struct Kanban {
     /// `tm_core` dependency, so opening a ticket's detail screen is the caller's job once it
     /// knows a card was activated.
     pending_activation: Option<String>,
+    /// The shared hub header shown above the board (identity line + tab strip). Starts empty
+    /// (`KanbanHeader::default()`); the caller sets it via [`Kanban::set_header`] once it knows
+    /// the version/model/place, the same way `screens::tickets::TicketsScreen` receives them in
+    /// its `TicketsData`.
+    header: KanbanHeader,
 }
 
 impl Kanban {
@@ -143,6 +192,65 @@ impl Kanban {
             visible_columns: Cell::new(0),
             visible_rows: Cell::new(0),
             pending_activation: None,
+            header: KanbanHeader::default(),
+        }
+    }
+
+    /// Replace the shared hub header (identity line + tab strip) this board renders above its
+    /// hint line and columns.
+    pub fn set_header(&mut self, header: KanbanHeader) {
+        self.header = header;
+    }
+
+    /// Draws the identity line (`tm vX.Y.Z · model · place`) then the tab strip
+    /// (Tickets · Board · Milestones · Timeline · Graph, "Board" highlighted) into `area`'s first
+    /// two rows — mirrors `screens::tickets::TicketsScreen::render_header`'s compact form, minus
+    /// the ticket counts (this screen has no notion of ticket groups; the caller already grouped
+    /// cards into columns).
+    fn render_header(&self, area: Rect, buf: &mut Buffer, theme: &Theme, glyphs: &Glyphs) {
+        if area.height == 0 || area.width == 0 {
+            return;
+        }
+        let muted = ratatui_core::style::Style::default().fg(theme.muted);
+        let sep = glyphs.sep;
+        let identity = format!(
+            "tm v{}{sep}{}{sep}{}",
+            self.header.version, self.header.model, self.header.place
+        );
+        buf.set_stringn(
+            area.x,
+            area.y,
+            truncate(&identity, area.width as usize, glyphs.ellipsis),
+            area.width as usize,
+            muted,
+        );
+        if area.height < 2 {
+            return;
+        }
+        let right = area.x + area.width;
+        let mut x = area.x;
+        for (i, tab) in TABS.iter().enumerate() {
+            if x >= right {
+                break;
+            }
+            if i > 0 {
+                let seg = truncate(sep, (right - x) as usize, glyphs.ellipsis);
+                buf.set_stringn(x, area.y + 1, &seg, (right - x) as usize, muted);
+                x += display_width(&seg) as u16;
+                if x >= right {
+                    break;
+                }
+            }
+            let style = if i == BOARD_TAB {
+                ratatui_core::style::Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                muted
+            };
+            let seg = truncate(tab, (right - x) as usize, glyphs.ellipsis);
+            buf.set_stringn(x, area.y + 1, &seg, (right - x) as usize, style);
+            x += display_width(&seg) as u16;
         }
     }
 
@@ -326,18 +434,40 @@ impl Component for Kanban {
             return;
         }
 
-        let hint_height = HINT_HEIGHT.min(area.height);
+        let hub_header_height = HEADER_HEIGHT.min(area.height);
+        let glyphs = Glyphs::for_caps(ctx.caps);
+        self.render_header(
+            Rect {
+                height: hub_header_height,
+                ..area
+            },
+            buf,
+            ctx.theme,
+            &glyphs,
+        );
+        let below_header = Rect {
+            y: area.y + hub_header_height,
+            height: area.height.saturating_sub(hub_header_height),
+            ..area
+        };
+        if below_header.width == 0 || below_header.height == 0 {
+            self.visible_columns.set(0);
+            self.visible_rows.set(0);
+            return;
+        }
+
+        let hint_height = HINT_HEIGHT.min(below_header.height);
         buf.set_stringn(
-            area.x,
-            area.y,
+            below_header.x,
+            below_header.y,
             HINT_TEXT,
-            area.width as usize,
+            below_header.width as usize,
             ctx.theme.muted,
         );
         let body = Rect {
-            y: area.y + hint_height,
-            height: area.height.saturating_sub(hint_height),
-            ..area
+            y: below_header.y + hint_height,
+            height: below_header.height.saturating_sub(hint_height),
+            ..below_header
         };
         if body.width == 0 || body.height == 0 {
             self.visible_columns.set(0);
@@ -345,7 +475,19 @@ impl Component for Kanban {
             return;
         }
 
-        let column_width = COLUMN_WIDTH.min(body.width).max(1);
+        // Make columns fit the width: when every column can have at least `MIN_COLUMN_WIDTH` at
+        // once, share `body.width` evenly across all of them (no scrolling) rather than always
+        // using the fixed `COLUMN_WIDTH` — a 5-column board (the group labels D-024 asks for)
+        // otherwise scrolls needlessly at, say, 100 columns wide (100 / 24 = 4 visible) even
+        // though 100 / 5 = 20 fits every column. Too narrow for that (e.g. this crate's other
+        // multi-pane screens' typical width with many columns) falls back to the fixed width and
+        // real horizontal scrolling, same as before.
+        let column_count = self.columns.len().max(1) as u16;
+        let column_width = if body.width >= column_count.saturating_mul(MIN_COLUMN_WIDTH) {
+            (body.width / column_count).max(1)
+        } else {
+            COLUMN_WIDTH.min(body.width).max(1)
+        };
         let raw_visible_columns = (body.width / column_width).max(1) as usize;
         let visible_columns = raw_visible_columns.min(self.columns.len().max(1));
         self.visible_columns.set(visible_columns);
@@ -680,7 +822,10 @@ mod tests {
         let mut harness = Harness::new(80, 10);
         let lines = harness.render_lines(&board, &context);
 
-        assert!(lines[0].contains("Left/Right"), "hint line: {lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("Left/Right")),
+            "hint line: {lines:?}"
+        );
         assert!(
             lines.iter().any(|l| l.contains("Draft")),
             "Draft column heading missing: {lines:?}"
@@ -695,6 +840,111 @@ mod tests {
                 .any(|l| l.contains("T-1") && l.contains("card 1")),
             "the first card's id and title must both be on screen: {lines:?}"
         );
+    }
+
+    /// u1-hub-board-display-labels' own acceptance check: at a real 120x36 PTY, with the group
+    /// labels the tickets screen uses (not raw state names), every column fits under the tab
+    /// strip with "Board" highlighted, with no horizontal scrolling needed.
+    #[test]
+    fn render_at_120_cols_shows_the_tab_strip_with_board_highlighted_and_every_group_column() {
+        let group_titles = [
+            "Needs input",
+            "Working",
+            "Ready for review",
+            "Queued",
+            "Completed",
+        ];
+        let columns: Vec<KanbanColumn> = group_titles
+            .iter()
+            .map(|title| column(title, &["1"]))
+            .collect();
+        let mut board = Kanban::new(ComponentId::new("test.kanban"), columns);
+        board.set_header(KanbanHeader {
+            version: "0.1.0".to_string(),
+            model: "anthropic/claude-sonnet-5".to_string(),
+            place: "~/src/app (main)".to_string(),
+        });
+        let theme = Theme::default();
+        let caps = Capabilities::minimal();
+        let clock = FixedClock::epoch();
+        let context = ctx(&theme, &caps, &clock, true);
+        let mut harness = Harness::new(120, 36);
+        let lines = harness.render_lines(&board, &context);
+
+        assert!(
+            lines[0].contains("tm v0.1.0")
+                && lines[0].contains("anthropic/claude-sonnet-5")
+                && lines[0].contains("~/src/app (main)"),
+            "identity line: {lines:?}"
+        );
+        for tab in TABS {
+            assert!(
+                lines[1].contains(tab),
+                "{tab} missing from the tab strip: {lines:?}"
+            );
+        }
+        let pos = |needle: &str| lines[1].find(needle).unwrap();
+        assert!(pos("Tickets") < pos("Board"));
+        assert!(pos("Board") < pos("Milestones"));
+        assert!(pos("Milestones") < pos("Timeline"));
+        assert!(pos("Timeline") < pos("Graph"));
+
+        for title in group_titles {
+            assert!(
+                lines.iter().any(|l| l.contains(title)),
+                "{title} column missing: {lines:?}"
+            );
+        }
+        // All 5 columns fit side by side in one row at 120 columns (`render` shares the width
+        // evenly since 120 / 5 = 24 >= MIN_COLUMN_WIDTH), so every heading is on the same line,
+        // not spread across a scrolled/paginated view.
+        let heading_line = lines
+            .iter()
+            .find(|l| l.contains("Needs input"))
+            .expect("a heading line");
+        for title in group_titles {
+            assert!(
+                heading_line.contains(title),
+                "{title} not on the same row as the other headings: {heading_line:?}"
+            );
+        }
+    }
+
+    /// "make columns fit the width" (the task's own words): the board must not fall back to its
+    /// fixed 24-wide `COLUMN_WIDTH` and scroll away "Completed" just because the terminal is
+    /// narrower than 120 — 100 / 5 = 20, exactly `MIN_COLUMN_WIDTH`, so every column still shares
+    /// the width evenly and all five headings stay on one line.
+    #[test]
+    fn render_at_100_cols_still_fits_all_five_group_columns_with_no_scroll() {
+        let group_titles = [
+            "Needs input",
+            "Working",
+            "Ready for review",
+            "Queued",
+            "Completed",
+        ];
+        let columns: Vec<KanbanColumn> = group_titles
+            .iter()
+            .map(|title| column(title, &["1"]))
+            .collect();
+        let board = Kanban::new(ComponentId::new("test.kanban"), columns);
+        let theme = Theme::default();
+        let caps = Capabilities::minimal();
+        let clock = FixedClock::epoch();
+        let context = ctx(&theme, &caps, &clock, true);
+        let mut harness = Harness::new(100, 20);
+        let lines = harness.render_lines(&board, &context);
+
+        let heading_line = lines
+            .iter()
+            .find(|l| l.contains("Needs input"))
+            .expect("a heading line");
+        for title in group_titles {
+            assert!(
+                heading_line.contains(title),
+                "{title} not on the same row as the other headings at 100 cols: {heading_line:?}"
+            );
+        }
     }
 
     #[test]
@@ -716,13 +966,14 @@ mod tests {
         );
     }
 
-    /// The whole point of one column per real `TicketState` (see this module's own doc comment)
-    /// is that the board scrolls horizontally instead of paginating or relabelling — this is the
-    /// test that actually exercises that windowing at a realistic viewport, rather than only the
-    /// 3-column `sample()` board every other navigation test above uses (too few columns to ever
-    /// force a scroll) or moving without ever calling `render` first (which would leave
-    /// `visible_columns` at its zero-initialized default and exercise `clamp_scroll`'s `visible =
-    /// 1` fallback path instead of the real `body.width / COLUMN_WIDTH` arithmetic).
+    /// With this many columns (14, far more than `MIN_COLUMN_WIDTH` lets an 80-wide area share
+    /// evenly — see `render`'s doc comment), the board falls back to its fixed `COLUMN_WIDTH` and
+    /// real horizontal scrolling instead of paginating or relabelling — this is the test that
+    /// actually exercises that windowing at a realistic viewport, rather than only the 3-column
+    /// `sample()` board every other navigation test above uses (too few columns to ever force a
+    /// scroll) or moving without ever calling `render` first (which would leave `visible_columns`
+    /// at its zero-initialized default and exercise `clamp_scroll`'s `visible = 1` fallback path
+    /// instead of the real `body.width / column_width` arithmetic).
     #[test]
     fn horizontal_scroll_reveals_far_columns_and_hides_the_first_one() {
         let titles = [

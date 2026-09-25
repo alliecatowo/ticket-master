@@ -183,7 +183,16 @@ async fn run_on(
             worker_notice.clone(),
         ),
     );
-    let kanban = Kanban::new(ComponentId::new("tm.kanban"), build_kanban_columns(&view));
+    let mut kanban = Kanban::new(
+        ComponentId::new("tm.kanban"),
+        build_kanban_columns(&view, &activity, now, scheduler.is_some()),
+    );
+    let (kanban_model, kanban_place) = tickets_header(&project);
+    kanban.set_header(tm_tui::screens::kanban::KanbanHeader {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        model: kanban_model,
+        place: kanban_place,
+    });
     let milestones = MilestonesScreen::new(
         ComponentId::new("tm.milestones"),
         build_milestone_rows(&view),
@@ -345,26 +354,51 @@ fn base_status(
     }
 }
 
-/// Build the Kanban board's columns from `view`'s real ticket state: one column per real
-/// `tm_core::TicketState` variant, in `TicketState::ALL`'s declaration order, each holding every
-/// ticket currently in that state.
+/// Build the Kanban board's columns from `view`'s real ticket state: one column per
+/// [`tm_tui::screens::tickets::Group`], in [`tm_tui::screens::tickets::Group::ALL`]'s display
+/// order, each holding every ticket the same grouping the tickets screen uses (D-024's
+/// one-set-of-display-labels rule) currently places there.
 ///
-/// Deliberately one column per raw state rather than a hand-curated "phase" grouping with
-/// invented labels — the board names the real state machine, and a board built directly from
-/// `TicketState::ALL` never drifts out of sync with the enum the way a hardcoded grouping would.
-fn build_kanban_columns(view: &tm_core::ProjectView) -> Vec<KanbanColumn> {
-    tm_core::TicketState::ALL
+/// Grouped rather than one column per raw `tm_core::TicketState` (14 of them, the board's
+/// original shape): a raw state name only means something to someone who already knows the state
+/// machine, and the tickets screen already answers "what does a person looking at this actually
+/// want to know" with five groups — the board should not invent a second, disagreeing answer.
+/// This reuses `tickets::overview::overviews`, the exact function `tm tickets`/the tickets screen
+/// itself groups by, so the two screens cannot disagree about which group a ticket is in either.
+fn build_kanban_columns(
+    view: &tm_core::ProjectView,
+    activity: &crate::tickets::overview::ActivityIndex,
+    now: Timestamp,
+    local_worker: bool,
+) -> Vec<KanbanColumn> {
+    let overviews = crate::tickets::overview::overviews(view, activity, now, local_worker, true);
+    tm_tui::screens::tickets::Group::ALL
         .iter()
-        .map(|state| {
-            let cards = view
-                .tickets
-                .values()
-                .filter(|ticket| &ticket.state == state)
-                .map(|ticket| KanbanCard::new(ticket.id.to_string(), ticket.objective.clone()))
+        .map(|group| {
+            let cards = overviews
+                .iter()
+                .filter(|o| kanban_group(o.group) == *group)
+                .map(|o| KanbanCard::new(o.id.to_string(), o.title.clone()))
                 .collect();
-            KanbanColumn::new(state_label(*state).to_string(), cards)
+            KanbanColumn::new(group.title().to_string(), cards)
         })
         .collect()
+}
+
+/// Maps `tickets::overview::TicketGroup` to `tm_tui::screens::tickets::Group` — the same mapping
+/// `tui/tickets_view.rs`'s own (private) `group` function makes for the tickets screen's rows,
+/// duplicated here rather than shared since that one is not `pub(crate)` and the two call sites
+/// are one match arm each.
+fn kanban_group(g: crate::tickets::overview::TicketGroup) -> tm_tui::screens::tickets::Group {
+    use crate::tickets::overview::TicketGroup as T;
+    use tm_tui::screens::tickets::Group as G;
+    match g {
+        T::NeedsInput => G::NeedsInput,
+        T::Working => G::Working,
+        T::Review => G::Review,
+        T::Queued => G::Queued,
+        T::Completed => G::Completed,
+    }
 }
 
 /// One [`MilestoneRow`] per `view.milestones` entry, in id order (`BTreeMap` iteration), with
@@ -813,6 +847,10 @@ impl App {
             }
         }
         let mut header = tickets_header(&self.project);
+        // The board itself is never filtered to a milestone (unlike the tickets screen below), so
+        // its header keeps the plain place rather than the "· Milestone: ..." suffix the tickets
+        // screen's own header grows for that filter.
+        let (kanban_model, kanban_place) = header.clone();
         let member_ids: Option<std::collections::HashSet<String>> =
             self.milestone_filter.as_ref().map(|(id, title)| {
                 header.1 = format!("{} · Milestone: {title}", header.1);
@@ -832,8 +870,19 @@ impl App {
         if let Some(member_ids) = member_ids {
             data.rows.retain(|row| member_ids.contains(&row.id));
         }
+        self.kanban
+            .set_header(tm_tui::screens::kanban::KanbanHeader {
+                version: data.version.clone(),
+                model: kanban_model,
+                place: kanban_place,
+            });
         self.tickets.set_data(data);
-        self.kanban.set_columns(build_kanban_columns(&view));
+        self.kanban.set_columns(build_kanban_columns(
+            &view,
+            &self.activity,
+            now,
+            self.local_worker,
+        ));
         self.milestones.set_rows(build_milestone_rows(&view));
         self.timeline
             .set_rows(build_timeline_rows(&view, &self.activity, now));
@@ -1567,55 +1616,64 @@ mod tests {
     }
 
     #[test]
-    fn build_kanban_columns_has_one_column_per_real_ticket_state_and_no_more() {
+    fn build_kanban_columns_has_one_column_per_tickets_screen_group_and_no_more() {
         let view = tm_core::ProjectView::empty();
-        let columns = build_kanban_columns(&view);
-        assert_eq!(columns.len(), tm_core::TicketState::ALL.len());
+        let activity = crate::tickets::overview::ActivityIndex::new();
+        let now = Timestamp::from_unix_seconds(0);
+        let columns = build_kanban_columns(&view, &activity, now, true);
+        assert_eq!(columns.len(), tm_tui::screens::tickets::Group::ALL.len());
         let titles: Vec<&str> = columns.iter().map(|c| c.title.as_str()).collect();
-        assert!(titles.contains(&state_label(tm_core::TicketState::Running)));
-        assert!(titles.contains(&state_label(tm_core::TicketState::Closed)));
+        for group in tm_tui::screens::tickets::Group::ALL {
+            assert!(
+                titles.contains(&group.title()),
+                "expected a {:?} column, got {titles:?}",
+                group.title()
+            );
+        }
     }
 
     #[test]
-    fn build_kanban_columns_uses_plain_words_not_the_enum_variant_name() {
+    fn build_kanban_columns_uses_the_tickets_screens_display_labels() {
         let view = tm_core::ProjectView::empty();
-        let columns = build_kanban_columns(&view);
+        let activity = crate::tickets::overview::ActivityIndex::new();
+        let now = Timestamp::from_unix_seconds(0);
+        let columns = build_kanban_columns(&view, &activity, now, true);
         let titles: Vec<&str> = columns.iter().map(|c| c.title.as_str()).collect();
         assert!(
-            titles.contains(&state_label(tm_core::TicketState::Ready)),
-            "expected a {:?} column, got {titles:?}",
-            state_label(tm_core::TicketState::Ready)
+            titles.contains(&"Needs input"),
+            "expected the tickets screen's own group label, got {titles:?}"
         );
         assert!(
-            !titles.contains(&"Ready"),
-            "column title must not be the raw enum variant name: {titles:?}"
+            !titles.iter().any(|t| t.eq_ignore_ascii_case("ready")),
+            "column title must not be a raw ticket-state name: {titles:?}"
         );
     }
 
     #[test]
-    fn build_kanban_columns_places_a_real_ticket_in_its_own_states_column() {
+    fn build_kanban_columns_places_a_real_ticket_in_its_own_groups_column() {
         let tmp = tempfile::tempdir().unwrap();
         let store = Store::open(tmp.path()).expect("open store");
-        create_real_ticket(&store, "wire the kanban board");
+        let ticket_id = create_real_ticket(&store, "wire the kanban board");
+        let card_id = ticket_id.to_string();
 
         let view = store.view().expect("view");
-        let columns = build_kanban_columns(&view);
-        let draft_title = state_label(tm_core::TicketState::Draft);
-        let draft = columns
+        let activity = crate::tickets::overview::ActivityIndex::new();
+        let now = Timestamp::from_unix_seconds(0);
+        let columns = build_kanban_columns(&view, &activity, now, true);
+        // A freshly created ticket is `Draft`, which `tickets::overview::group_for` places in
+        // `Queued` — the same group the tickets screen would list it under. Matched by id, not
+        // by title: a card's title is `TicketOverview::title` (`short_title` of the objective),
+        // which this test does not need to also assert the exact wording of.
+        let queued_title = tm_tui::screens::tickets::Group::Queued.title();
+        let queued = columns
             .iter()
-            .find(|c| c.title == draft_title)
-            .expect("a Draft column always exists");
-        assert!(draft
-            .cards
-            .iter()
-            .any(|c| c.title == "wire the kanban board"));
-        for other in columns.iter().filter(|c| c.title != draft_title) {
+            .find(|c| c.title == queued_title)
+            .expect("a Queued column always exists");
+        assert!(queued.cards.iter().any(|c| c.id == card_id));
+        for other in columns.iter().filter(|c| c.title != queued_title) {
             assert!(
-                !other
-                    .cards
-                    .iter()
-                    .any(|c| c.title == "wire the kanban board"),
-                "a ticket must appear in exactly one state's column, not {}",
+                !other.cards.iter().any(|c| c.id == card_id),
+                "a ticket must appear in exactly one group's column, not {}",
                 other.title
             );
         }
@@ -1624,7 +1682,9 @@ mod tests {
     #[test]
     fn build_kanban_columns_over_an_empty_project_has_no_fake_cards() {
         let view = tm_core::ProjectView::empty();
-        let columns = build_kanban_columns(&view);
+        let activity = crate::tickets::overview::ActivityIndex::new();
+        let now = Timestamp::from_unix_seconds(0);
+        let columns = build_kanban_columns(&view, &activity, now, true);
         assert!(columns.iter().all(|c| c.cards.is_empty()));
     }
 
