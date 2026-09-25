@@ -139,6 +139,16 @@ public struct APIClient: TicketmasterAPI {
         struct AcceptBody: Encodable {
             let note: String?
             let actor: String
+
+            // Synthesized Encodable drops a nil optional; send `"note": null` so the body
+            // always has the shape tm-server's TransitionRequest::Accept documents.
+            func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                try c.encode(note, forKey: .note)
+                try c.encode(actor, forKey: .actor)
+            }
+
+            enum CodingKeys: String, CodingKey { case note, actor }
         }
         let body = try JSONEncoder().encode(["accept": AcceptBody(note: note, actor: actor)])
         _ = try await send(request("tickets/\(id)/transition", method: "POST", body: body))
