@@ -252,6 +252,11 @@ pub enum Command {
     #[command(display_order = 13)]
     Mcp(McpArgs),
 
+    /// Serve the project as an Agent Client Protocol agent over stdio, for editors like Zed
+    /// (`SPEC.md` §28.1).
+    #[command(hide = true)]
+    Acp(AcpArgs),
+
     /// The durable event log: tail, inspect, replay, and verify the hash chain.
     #[command(subcommand, hide = true)]
     Events(EventsCommand),
@@ -1134,6 +1139,10 @@ pub struct McpArgs {
     #[arg(long)]
     pub no_workers: bool,
 }
+
+/// `tm acp`
+#[derive(Debug, Args)]
+pub struct AcpArgs {}
 
 /// `tm events ...`
 #[derive(Debug, Subcommand)]
