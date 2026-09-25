@@ -6,7 +6,10 @@
 //! observes a live session); this module owns only the shape of a record and the pure arithmetic
 //! over it.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
+use tm_events::{Event, EventKind};
 use tm_types::{SessionId, TicketId, Timestamp};
 
 /// One ticket's worth of operational metrics, recorded once the ticket's session-of-work ends.
@@ -44,6 +47,108 @@ pub struct TicketMetrics {
     pub human_interventions: u32,
     /// When this record was recorded.
     pub recorded_at: Timestamp,
+}
+
+/// The session id used by [`ticket_metrics_from_events`] when none of the folded events named a
+/// session (in practice: an empty `events` slice, or a slice with no event for `ticket`).
+/// `"S-0"` is not a real allocated session -- `IdKind::Session`'s counter starts at 1 -- so it
+/// unambiguously means "no session observed" to a reader without needing an `Option<SessionId>`
+/// on [`TicketMetrics`] just for this one caller.
+fn placeholder_session() -> SessionId {
+    // invariant: the literal "S-0" always satisfies SessionId's `S-<digits>` shape validator.
+    SessionId::new("S-0").expect("\"S-0\" is a valid SessionId literal by construction")
+}
+
+/// Derive a ticket's operational metrics purely by folding the event log, rather than a
+/// dedicated `ticket.metrics_recorded` event. That event was `bench`'s original proposal, but
+/// its premise didn't hold: `tm-harness` depends on `tm-core`, not the other way around, so a
+/// payload produced by `tm-core::Store` for `tm-harness` to consume would have created a real
+/// dependency cycle -- and the data it would carry already lives in the log as
+/// `usage.recorded`/`tool_call.completed`/`command.completed`, so recording it twice would just
+/// be duplication with a staleness risk attached.
+///
+/// Only events whose payload names `ticket` are folded; everything else (including events for
+/// other tickets) is ignored. What each event kind contributes:
+/// - `usage.recorded`: `wall_seconds` and `dollars_micros` fold in directly. `tokens` has no
+///   input/output split at the event-log level, so the whole amount lands in `tokens_in`;
+///   `tokens_out` is one of the fields this fold cannot derive (see below).
+/// - `tool_call.completed`: one `tool_calls` increment per matching event.
+/// - `command.completed`: `commands_rerun` increments each time a `command` string repeats for
+///   this ticket, on the theory that an identical argv run twice is very likely the same command
+///   re-attempted rather than two unrelated commands that happen to coincide.
+///
+/// `harness_epoch`, `tokens_out`, `searches_before_first_relevant_hit`,
+/// `verification_failures`, `retries`, `context_bytes` and `human_interventions` have no event
+/// in this fold's input to derive them from, so they stay `0`. `session` is the session carried
+/// by the first matching event that names one (event or payload, in that preference order);
+/// [`placeholder_session`] otherwise. `recorded_at` is the last matching event's timestamp, or
+/// [`Timestamp::EPOCH`] when there were none.
+pub fn ticket_metrics_from_events(ticket: &TicketId, events: &[Event]) -> TicketMetrics {
+    let mut session: Option<SessionId> = None;
+    let mut recorded_at = Timestamp::EPOCH;
+    let mut wall_seconds = 0u64;
+    let mut tokens_in = 0u64;
+    let mut dollars_micros = 0u64;
+    let mut tool_calls = 0u32;
+    let mut commands_rerun = 0u32;
+    let mut seen_commands: HashSet<String> = HashSet::new();
+
+    for event in events {
+        let matched_session = match event.kind {
+            EventKind::UsageRecorded => event.payload.as_usage_recorded().and_then(|p| {
+                if p.ticket.as_ref() != Some(ticket) {
+                    return None;
+                }
+                wall_seconds = wall_seconds.saturating_add(p.wall_seconds);
+                tokens_in = tokens_in.saturating_add(p.tokens);
+                dollars_micros = dollars_micros.saturating_add(p.dollars_micros);
+                Some(p.session.clone())
+            }),
+            EventKind::ToolCallCompleted => event.payload.as_tool_call_completed().and_then(|p| {
+                if p.ticket.as_ref() != Some(ticket) {
+                    return None;
+                }
+                tool_calls = tool_calls.saturating_add(1);
+                Some(p.session.clone())
+            }),
+            EventKind::CommandCompleted => event.payload.as_command_completed().and_then(|p| {
+                if p.ticket.as_ref() != Some(ticket) {
+                    return None;
+                }
+                if !seen_commands.insert(p.command.clone()) {
+                    commands_rerun = commands_rerun.saturating_add(1);
+                }
+                Some(p.session.clone())
+            }),
+            _ => None,
+        };
+
+        let Some(matched_session) = matched_session else {
+            continue;
+        };
+        recorded_at = event.ts;
+        if session.is_none() {
+            session = matched_session.or_else(|| event.session.clone());
+        }
+    }
+
+    TicketMetrics {
+        ticket: ticket.clone(),
+        session: session.unwrap_or_else(placeholder_session),
+        harness_epoch: 0,
+        wall_seconds,
+        tokens_in,
+        tokens_out: 0,
+        dollars_micros,
+        tool_calls,
+        searches_before_first_relevant_hit: 0,
+        verification_failures: 0,
+        retries: 0,
+        context_bytes: 0,
+        commands_rerun,
+        human_interventions: 0,
+        recorded_at,
+    }
 }
 
 /// One session's metrics: identity plus the running totals over the tickets it touched.
@@ -210,6 +315,26 @@ impl EpochComparison {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tm_events::payload::{
+        CommandCompletedPayload, ToolCallCompletedPayload, UsageRecordedPayload,
+    };
+    use tm_events::Payload;
+    use tm_types::{Id, ParticipantId};
+
+    fn event(seq: u64, ts: u64, payload: Payload) -> Event {
+        Event {
+            seq,
+            ts: Timestamp::from_unix_nanos(ts as i128),
+            kind: payload.kind(),
+            subject: Id::none(),
+            actor: ParticipantId::system(),
+            session: None,
+            causation: None,
+            correlation: None,
+            payload,
+            hash: String::new(),
+        }
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn sample_ticket_metrics(
@@ -582,5 +707,171 @@ mod tests {
         let deserialized: AggregateMetrics = serde_json::from_str(&json).unwrap();
 
         assert_eq!(agg, deserialized);
+    }
+
+    #[test]
+    fn ticket_metrics_from_events_empty_input_gives_the_default() {
+        let ticket = TicketId::new("T-1").unwrap();
+
+        let metrics = ticket_metrics_from_events(&ticket, &[]);
+
+        assert_eq!(metrics.ticket, ticket);
+        assert_eq!(metrics.session, placeholder_session());
+        assert_eq!(metrics.harness_epoch, 0);
+        assert_eq!(metrics.wall_seconds, 0);
+        assert_eq!(metrics.tokens_in, 0);
+        assert_eq!(metrics.tokens_out, 0);
+        assert_eq!(metrics.dollars_micros, 0);
+        assert_eq!(metrics.tool_calls, 0);
+        assert_eq!(metrics.searches_before_first_relevant_hit, 0);
+        assert_eq!(metrics.verification_failures, 0);
+        assert_eq!(metrics.retries, 0);
+        assert_eq!(metrics.context_bytes, 0);
+        assert_eq!(metrics.commands_rerun, 0);
+        assert_eq!(metrics.human_interventions, 0);
+        assert_eq!(metrics.recorded_at, Timestamp::EPOCH);
+    }
+
+    #[test]
+    fn ticket_metrics_from_events_folds_an_exact_fixture() {
+        let ticket = TicketId::new("T-1").unwrap();
+        let other_ticket = TicketId::new("T-2").unwrap();
+        let session = SessionId::new("S-1").unwrap();
+
+        let events = vec![
+            // Other tickets' events are folded in first, to prove they get ignored regardless
+            // of position.
+            event(
+                1,
+                100,
+                Payload::from(UsageRecordedPayload {
+                    ticket: Some(other_ticket.clone()),
+                    session: Some(session.clone()),
+                    tokens: 999,
+                    dollars_micros: 999,
+                    wall_seconds: 999,
+                    provider: None,
+                    model: None,
+                }),
+            ),
+            event(
+                2,
+                200,
+                Payload::from(UsageRecordedPayload {
+                    ticket: Some(ticket.clone()),
+                    session: Some(session.clone()),
+                    tokens: 1500,
+                    dollars_micros: 4000,
+                    wall_seconds: 120,
+                    provider: Some("anthropic".into()),
+                    model: Some("claude".into()),
+                }),
+            ),
+            event(
+                3,
+                300,
+                Payload::from(ToolCallCompletedPayload {
+                    ticket: Some(ticket.clone()),
+                    session: Some(session.clone()),
+                    tool_name: "search".into(),
+                    duration_ms: 50,
+                    outcome: "ok".into(),
+                }),
+            ),
+            event(
+                4,
+                400,
+                Payload::from(ToolCallCompletedPayload {
+                    ticket: Some(ticket.clone()),
+                    session: Some(session.clone()),
+                    tool_name: "edit".into(),
+                    duration_ms: 80,
+                    outcome: "ok".into(),
+                }),
+            ),
+            event(
+                5,
+                500,
+                Payload::from(CommandCompletedPayload {
+                    command: "cargo test".into(),
+                    ticket: Some(ticket.clone()),
+                    session: Some(session.clone()),
+                    exit_code: 1,
+                    duration_ms: 1000,
+                }),
+            ),
+            // Same argv run again for this ticket: counts as a rerun.
+            event(
+                6,
+                600,
+                Payload::from(CommandCompletedPayload {
+                    command: "cargo test".into(),
+                    ticket: Some(ticket.clone()),
+                    session: Some(session.clone()),
+                    exit_code: 0,
+                    duration_ms: 900,
+                }),
+            ),
+            // A different argv for this ticket: not a rerun.
+            event(
+                7,
+                700,
+                Payload::from(CommandCompletedPayload {
+                    command: "cargo build".into(),
+                    ticket: Some(ticket.clone()),
+                    session: Some(session.clone()),
+                    exit_code: 0,
+                    duration_ms: 500,
+                }),
+            ),
+        ];
+
+        let metrics = ticket_metrics_from_events(&ticket, &events);
+
+        assert_eq!(
+            metrics,
+            TicketMetrics {
+                ticket: ticket.clone(),
+                session: session.clone(),
+                harness_epoch: 0,
+                wall_seconds: 120,
+                tokens_in: 1500,
+                tokens_out: 0,
+                dollars_micros: 4000,
+                tool_calls: 2,
+                searches_before_first_relevant_hit: 0,
+                verification_failures: 0,
+                retries: 0,
+                context_bytes: 0,
+                commands_rerun: 1,
+                human_interventions: 0,
+                recorded_at: Timestamp::from_unix_nanos(700),
+            }
+        );
+    }
+
+    #[test]
+    fn ticket_metrics_from_events_events_for_other_tickets_are_ignored() {
+        let ticket = TicketId::new("T-1").unwrap();
+        let other_ticket = TicketId::new("T-2").unwrap();
+        let session = SessionId::new("S-1").unwrap();
+
+        let events = vec![event(
+            1,
+            100,
+            Payload::from(UsageRecordedPayload {
+                ticket: Some(other_ticket),
+                session: Some(session),
+                tokens: 500,
+                dollars_micros: 500,
+                wall_seconds: 50,
+                provider: None,
+                model: None,
+            }),
+        )];
+
+        let metrics = ticket_metrics_from_events(&ticket, &events);
+
+        assert_eq!(metrics, ticket_metrics_from_events(&ticket, &[]));
     }
 }
