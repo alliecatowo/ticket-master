@@ -17,6 +17,12 @@
 //! against the same `tm_core::Store` the driver uses, between the `GraphCompilation` and
 //! `MaturityGate` stages, so that by the time the maturity gate evaluates real project state it
 //! reflects genuinely closed work rather than an empty project.
+//!
+//! **CLI-level provider resolution path**: These tests drive `GenesisDriver` in-process without
+//! going through the CLI's provider resolution (`project::resolve_genesis_provider`). The
+//! CLI-level path is regression-tested separately in `crates/tm-cli/tests/genesis_offline.rs`
+//! (`tm_genesis_runs_offline_end_to_end_through_the_real_binary`), which proves the real binary
+//! exercises the mock-provider check that was added in `genesis-cli-wire-mock-provider`.
 
 mod common;
 
