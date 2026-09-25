@@ -1055,7 +1055,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli && mise run test:crate -- tm-genesis`
   evidence: /tmp/tm-audit/genmock: genesis committed T-1/T-2 as `draft`. `tm sched plan` then printed "No scheduler actions planned" and `tm sched tick` printed "No work to do right now".
 
-- [ ] **u1-fabric-error-copy-not-configured** — Say "not configured (ANTHROPIC_API_KEY is not set)" instead of "provider not registered: anthropic"
+- [~] **u1-fabric-error-copy-not-configured** (needs the owner: this batch's editor died without reporting; its diff left an unresolved `use crate::providers::Registry;` import (should be `crate::Registry`) and did not compile, so it was reverted) — Say "not configured (ANTHROPIC_API_KEY is not set)" instead of "provider not registered: anthropic"
   model: haiku · severity: high · builds Rust: yes · area: providers · deps: u1-provider-table-follows-env
   files: `crates/tm-provider/src/fabric.rs`
   change: fabric.rs:406 and :485 (grep `provider not registered`) produce `no candidate can serve role coder.fast: provider not registered: anthropic`. Replace them with plain wording that names the missing credential env var when known (from `Registry::known_providers`), lists which candidates were tried, and ends with the fix: "Set ANTHROPIC_API_KEY, or run `tm provider reset` to route to a provider that is configured (devpass is ready)." Update any test asserting the old string.
@@ -1071,7 +1071,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-agent`
   evidence: Dogfood T-1 (/tmp/tm-audit/dogfood2.log) ran 18 tool calls in 253s, then failed with `something went wrong: model ended turn without submitting`, with no edits. Claude Code/Codex never lose a run's work to this: their loop ends on a text turn and the harness decides what happens next.
 
-- [~] **u1-run-progress-shows-args** (needs the owner: the editor died mid-edit without reporting; its partial `crates/tm-cli/src/agent.rs` diff was discarded to keep the batch green) — Show what each step did in `tm run`'s live output (the command, path or query), not "Ran a command"
+- [x] **u1-run-progress-shows-args** (landed 21829b3) — Show what each step did in `tm run`'s live output (the command, path or query), not "Ran a command"
   model: haiku · severity: high · builds Rust: yes · area: cli-ux · deps: none
   files: `crates/tm-cli/src/agent.rs`
   change: `tm run T --plain` prints lines like `* Ran a command`, `* Read a file`, `* Searched the code`, `* Read a file -> error: couldn't read or write a file`. The step printer is `plain_tool_action` (agent.rs:2280-2314, grep `"Ran a command"`) and include the salient argument, clipped to about 80 chars: the shell command, the file path (plus the line range for read_range), the search query, and for errors the path and error kind. It already receives the tool name; pass the call's `input` too, and keep the plain verb as the prefix.
@@ -1103,7 +1103,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-scheduler && mise run test:crate -- tm-e2e`
   evidence: `rg "store\.verify\(|TicketKind::Verification"` outside tests finds only routes.rs:846 and label/mirror code. Every "Ready for review" ticket today depends entirely on the model's own claim that it ran the tests.
 
-- [ ] **u1-dogfood-e2e-smoke** — Add a mise task that runs one real ticket against a scratch clone of this repo and reports submit/tokens/wall time
+- [x] **u1-dogfood-e2e-smoke** (landed e9967fe) — Add a mise task that runs one real ticket against a scratch clone of this repo and reports submit/tokens/wall time
   model: sonnet · severity: high · builds Rust: no · area: harness · deps: u1-agent-search-exact-limit, u1-context-pack-fit-sections, u1-worker-submit-nudge
   files: `scripts/dogfood-smoke.sh`, `mise.toml`, `CLAUDE.md`
   change: Add `scripts/dogfood-smoke.sh` (POSIX sh, as in disk-guard.sh): clone the primary checkout into `mktemp -d` via `git clone file://…`, `tm init`, `mise trust`, create a fixed small ticket (the doctor providers-warn fix), and run `tm run T-1 --plain --record <tmp>/cassette` under a wall-clock bound. Print the final state, `tm stats` tokens/tool calls, and `git diff --stat`, and exit non-zero unless the ticket reached Submitted. Use DevPass from `.env` only through `set -a; . .env` inside the script, never echoing it. Add `mise run dogfood` and a CLAUDE.md line. Not part of verify.
@@ -1111,7 +1111,7 @@ Gate: `mise run verify`
   test: `sh -n scripts/dogfood-smoke.sh && mise tasks | grep dogfood`
   evidence: Nothing in the repo measures "can tm work on itself". The audit's manual dogfood took about 6 calls to set up and exposed 4 critical bugs.
 
-- [ ] **u1-edit-anchor-by-text** — Let `edit.apply_patch` anchor on exact old text (search/replace) and reject byte ranges that don't split on line boundaries the model saw
+- [x] **u1-edit-anchor-by-text** (landed befd198) — Let `edit.apply_patch` anchor on exact old text (search/replace) and reject byte ranges that don't split on line boundaries the model saw
   model: sonnet · severity: high · builds Rust: yes · area: agent-tools · deps: u1-agent-search-exact-limit
   files: `crates/tm-agent/src/patch.rs`, `crates/tm-agent/src/tools.rs`
   change: The model edits with `{"edits":[{"byte_start","byte_end","replacement"}]}` (patch.rs `Edit`, around line 25-63). In dogfood T-2, a correct 3-line change to `provider_doctor_detail` also duplicated a phrase in the next doc comment (`a smell, not a regardless -- a 1x1 workflow is a smell, not a`), which is the classic off-by-N byte-offset failure. First check whether the edit-hash-fix track has landed a fix (`git log --oneline -- crates/tm-agent/src/patch.rs`); if it has, only add the regression test below. Otherwise add an `old_text` form (`{"path","old_text","new_text"}`, which must match exactly once, like Claude Code's Edit), make it the schema's preferred form, and keep byte ranges as a fallback that must also carry the `old_text` they replace, verified before applying.
@@ -1135,7 +1135,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-core && mise run test:crate -- tm-server && mise run test:crate -- tm-tui`
   evidence: store.rs:1205-1313 `accept`/`reject` both start with `step(t.state, Trigger::VerificationStarted)`, so they are only valid from Submitted.
 
-- [ ] **u1-genesis-maturity-without-verification-tickets** — Make the maturity gate's verification-pass-rate predicate use the verification evidence that actually exists
+- [x] **u1-genesis-maturity-without-verification-tickets** (landed 83b6d99) — Make the maturity gate's verification-pass-rate predicate use the verification evidence that actually exists
   model: sonnet · severity: medium · builds Rust: yes · area: genesis · deps: u1-automatic-verification-step
   files: `crates/tm-genesis/src/maturity.rs`
   change: `evaluate_predicate` (maturity.rs:86-159) filters `t.kind == TicketKind::Verification`, and no code path creates such tickets, so the pass rate is computed over nothing. Count the verification evidence/`ticket.verified`/`ticket.verification_failed` events on Work tickets in the window instead (keep counting Verification tickets too, for later). Define explicitly what an empty window means (fail, with the reason "no verified work yet") and test it.
@@ -1151,7 +1151,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
   evidence: The TUI trial (terminal-mcp, /tmp/tm-audit/chatgen): Tab from the tickets screen rendered only `Left/Right: columns ... draft (0) blocked (0) ready (0) leased (0) active (0)`.
 
-- [ ] **u1-chat-header-unusable-model** — Don't advertise a model the chat can't use: flag the header and welcome box when the default model has no credential
+- [x] **u1-chat-header-unusable-model** (landed d274642) — Don't advertise a model the chat can't use: flag the header and welcome box when the default model has no credential
   model: sonnet · severity: medium · builds Rust: yes · area: tui · deps: u1-provider-table-follows-env, u1-hub-board-display-labels
   files: `crates/tm-cli/src/tui.rs`, `crates/tm-tui/src/screens/chat.rs`
   change: Opening `tm` in a project whose default model is `anthropic/claude-sonnet-5`, with no ANTHROPIC_API_KEY, shows `model: anthropic/claude-sonnet-5` in the welcome box and status line with no warning. The first message then fails with `no usable model is configured for coder.fast`. At startup, check the effective chat model's availability (the same check `tm provider status` uses). When unavailable, show `model: anthropic/claude-sonnet-5 (not set up — /connect)` in the welcome box and a warning-coloured dot in the status line.
@@ -1159,7 +1159,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-tui && mise run test:crate -- tm-cli`
   evidence: The TUI trial in /tmp/tm-audit/chatgen without .env: the welcome box said `model: anthropic/claude-sonnet-5`, then `hi` gave `✗ The turn could not run: provider: no usable model is configured for coder.fast`.
 
-- [ ] **u1-ticket-kind-task-alias-api** — Accept `task` as an alias of `work` everywhere (HTTP API, MCP) since the CLI help advertises it
+- [x] **u1-ticket-kind-task-alias-api** (landed afd35c7) — Accept `task` as an alias of `work` everywhere (HTTP API, MCP) since the CLI help advertises it
   model: haiku · severity: medium · builds Rust: yes · area: server · deps: u1-provider-table-follows-env
   files: `crates/tm-core/src/ticket.rs`, `crates/tm-cli/src/args.rs`
   change: `tm ticket new --help` says `--kind <KIND> Ticket kind (task, investigation, verification, audit, recovery, ...) [default: task]`, but `POST /tickets {"kind":"task",...}` returns 400 `unknown variant \`task\`, expected one of \`work\`, ...`, and lists show `work`. Add `#[serde(alias = "task")]` on `TicketKind::Work` and make the args.rs help say `work (alias: task)` with default `work`.
@@ -1175,7 +1175,7 @@ Gate: `mise run verify`
   test: `mise run hygiene && mise run test:crate -- xtask && mise run test:crate -- tm-cli`
   evidence: The `tm doctor` output on /tmp/tm-audit/probe ends "...both target the active login session (SPEC.md §20.3)". `tm acp --help` first line.
 
-- [ ] **u1-doctor-providers-warn** — `tm doctor`'s providers row says `ok` while its detail says "no model provider is ready"; make it `warn`
+- [x] **u1-doctor-providers-warn** (landed cbad8eb) — `tm doctor`'s providers row says `ok` while its detail says "no model provider is ready"; make it `warn`
   model: haiku · severity: medium · builds Rust: yes · area: cli-ux · deps: none
   files: `crates/tm-cli/src/project.rs`
   change: In `doctor` (project.rs, grep `"providers"` near the doctor checks), set status `warn` when no provider is ready. Also reword the first-index detail `repaired incremental drift: 634 added ...` to `indexed 634 files (3146 chunks, 502 commits)` when the index was empty before, and in a repo with no commits, report `index-health` as `warn: no commits yet` instead of `FAIL git2: reference 'refs/heads/main' not found`.
