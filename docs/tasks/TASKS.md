@@ -1199,7 +1199,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- xtask`
   evidence: /tmp/tm-audit/h2h/results.txt: `opencode rc=124 wall=302.2s FAIL`, then the rerun with `< /dev/null`: `rc=0 wall=14s OK`.
 
-- [ ] **u1-init-builds-index**
+- [x] **u1-init-builds-index** (landed 505d253)
   model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: u1-wire-potion-embedder
   files: `crates/tm-cli/src/project.rs`
   change: `tm init` on this repo takes 0s and builds no index. The first `tm doctor` took 57s ("repaired incremental drift: 634 added ... 3146 chunks"), and a first `tm run` pays the same cost inside the attempt. After creating the project, run `update_incremental` with a one-line progress/summary ("Indexed 634 files in 41s"). Add `--no-index` to skip.
