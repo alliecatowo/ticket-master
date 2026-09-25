@@ -23,6 +23,8 @@
 //! - [`wiki`] — the `wiki generate` command (`SPEC.md` §26) over `tm-wiki`.
 //! - [`serve`] — the `serve` command.
 //! - [`mcp`] — the `mcp` command: the project as an MCP server for Claude Code.
+//! - [`acp`] — the `acp` command: the project as an ACP agent over stdio for an ACP-speaking
+//!   client (Zed).
 //! - [`agent`] — the bare-`tm` interactive coding client and its `tm -p` scriptable form.
 //! - [`tui`] — the bare-`tm` ratatui TUI mode (D-002) and the `should_launch` gate that decides
 //!   between it and [`agent`]'s plain loop.
@@ -37,6 +39,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod acp;
 pub mod agent;
 pub mod args;
 pub mod auth;

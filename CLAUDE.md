@@ -162,6 +162,15 @@ never drift between sessions:
   protocol). Stdout carries JSON-RPC only; log to stderr. `tm-mcp-server` (crate `tm-mcp`) is
   the older standalone form: explicit `--project-root`/`--state-dir`, `Content-Length` framing,
   no workers.
+- `tm acp` — the project as an ACP agent over stdio (newline-delimited JSON-RPC), so an
+  ACP-speaking client (Zed, or any other) can connect and hold a conversation against real
+  project state: `initialize`, `session/new`, `session/prompt`. The backend
+  (`tm_acp::ProjectAgentBackend`) answers a prompt with a live summary of the project's tickets
+  from the same already-open `tm_core::Store` every other subcommand shares — proving this is
+  wired to real state, not a full coding-agent turn (that richer backend is future work; see
+  `tm-acp`'s own doc comments for the seam it would plug into). It resolves the project the way
+  every other subcommand does, so pin one with `--project DIR` if none exists at the working
+  directory. Stdout carries JSON-RPC only; log to stderr.
 - `tm genesis` stops for work instead of spinning: once V0 or V1's milestone isn't closed yet
   (in practice this fires right after `Ignition` commits the Draft ticket graph, since nothing
   activates those tickets on its own), or after the maturity gate fails once, it prints the
