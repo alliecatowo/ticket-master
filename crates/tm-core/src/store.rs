@@ -188,13 +188,15 @@ pub struct DocRow {
 /// One row of the `mirror_links` table: the thin, single-adapter-per-ticket summary
 /// [`Store::link_mirror`]/[`Store::update_mirror_link`] persist.
 ///
-/// Unlike `tm_mirror::sync::MirrorLink`, this carries no `content_hash`/`degradations`/
-/// `last_pulled_at` -- `crate::schema`'s `mirror_links` table has no columns for them -- so a
-/// caller cannot recover push-idempotency-across-restarts or an incremental pull `since` cursor
-/// from this row alone. `mirror_links.ticket` is also the table's primary key, so a ticket
-/// mirrored to more than one adapter only has the most recently synced adapter's link visible
-/// here; this is a pre-existing `crate::schema` limitation, not something a caller can work
-/// around from this read API.
+/// Unlike `tm_mirror::sync::MirrorLink`, this carries no `degradations`/`last_pulled_at` --
+/// `crate::schema`'s `mirror_links` table has no columns for them -- so a caller cannot recover
+/// an incremental pull `since` cursor from this row alone. `content_hash` (mirror-persist-
+/// content-hash-for-idempotency) is the one exception: [`Store::set_mirror_content_hash`] writes
+/// it directly onto the row outside the normal event-replay path (see that method's doc
+/// comment), so it survives a process restart but not a `tm rebuild`/replay. `mirror_links.ticket`
+/// is also the table's primary key, so a ticket mirrored to more than one adapter only has the
+/// most recently synced adapter's link visible here; this is a pre-existing `crate::schema`
+/// limitation, not something a caller can work around from this read API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MirrorLinkRow {
     /// The linked ticket.
@@ -205,6 +207,13 @@ pub struct MirrorLinkRow {
     pub remote_system: String,
     /// When this link was last pushed or pulled.
     pub last_synced: Timestamp,
+    /// The content hash of the last projection successfully pushed to `remote_system`
+    /// (`tm_mirror::sync::SyncEngine::projection_hash`), used to reconstruct
+    /// `tm_mirror::sync::MirrorLink::content_hash` across process restarts so a no-op push
+    /// skips the tracker entirely. `None` until the first call to
+    /// [`Store::set_mirror_content_hash`] for this ticket/adapter -- in particular, right after
+    /// `tm mirror push` links a ticket but before the tracker call it wraps has completed once.
+    pub content_hash: Option<String>,
 }
 
 /// One row of the `harness_epochs` table: a promoted harness config snapshot.
@@ -3139,7 +3148,7 @@ impl Store {
         let conn = tm_events::schema::open_read_connection(self.log.path())?;
         let mut stmt = conn
             .prepare(
-                "SELECT ticket, remote_id, remote_system, last_synced FROM mirror_links ORDER BY ticket",
+                "SELECT ticket, remote_id, remote_system, last_synced, content_hash FROM mirror_links ORDER BY ticket",
             )
             .map_err(storage_err)?;
         let rows = stmt
@@ -3149,20 +3158,60 @@ impl Store {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             })
             .map_err(storage_err)?;
         let mut links = Vec::new();
         for row in rows {
-            let (ticket, remote_id, remote_system, last_synced) = row.map_err(storage_err)?;
+            let (ticket, remote_id, remote_system, last_synced, content_hash) =
+                row.map_err(storage_err)?;
             links.push(MirrorLinkRow {
                 ticket: TicketId::new(ticket)?,
                 remote_id,
                 remote_system,
                 last_synced: parse_ts(&last_synced)?,
+                content_hash,
             });
         }
         Ok(links)
+    }
+
+    /// Persist the content hash of the projection last pushed to `remote_system` for `ticket`,
+    /// so a later `tm mirror push` in a fresh process can reconstruct `tm_mirror::sync::
+    /// MirrorLink::content_hash` and skip a no-op re-push instead of always calling the
+    /// tracker. Written directly to `mirror_links`' raw `content_hash` column via
+    /// [`Store::transaction`], the same "cache column, not replay-derived state" exception
+    /// [`Store::register_workflow_def`]/[`Store::store_artifact`]'s module note documents --
+    /// see `crate::schema`'s `SCHEMA_VERSION` doc for schema version 6.
+    ///
+    /// A separate method from [`Store::update_mirror_link`] (rather than a new parameter on it)
+    /// because `update_mirror_link` appends a replayable `mirror.pushed`/`mirror.pulled` event
+    /// whose payload has no `content_hash` field; adding one would change those events' canonical
+    /// bytes for every existing caller of `update_mirror_link`, including outside this crate.
+    /// Call this after [`Store::update_mirror_link`] records the push, so a crash between the two
+    /// leaves `content_hash` unset rather than pointing at a push that never happened.
+    ///
+    /// No-op (not an error) if no `mirror_links` row exists yet for `(ticket, remote_system)` --
+    /// a caller racing [`Store::link_mirror`] should call that first.
+    pub fn set_mirror_content_hash(
+        &self,
+        ticket: &TicketId,
+        remote_system: &str,
+        content_hash: &str,
+    ) -> tm_types::Result<()> {
+        let ticket = ticket.clone();
+        let remote_system = remote_system.to_string();
+        let content_hash = content_hash.to_string();
+        self.transaction(move |tx| {
+            tx.raw()
+                .execute(
+                    "UPDATE mirror_links SET content_hash = ?1 WHERE ticket = ?2 AND remote_system = ?3",
+                    rusqlite::params![content_hash, ticket.as_str(), remote_system],
+                )
+                .map_err(storage_err)?;
+            Ok(())
+        })
     }
 
     /// Every promoted harness epoch, oldest first. The genesis epoch (number `0`) is never
@@ -5823,6 +5872,60 @@ mod tests {
                 actor(),
             )
             .expect("update_mirror_link pull");
+    }
+
+    #[test]
+    fn set_mirror_content_hash_persists_and_survives_a_fresh_read() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        store
+            .link_mirror(&ticket, "github".into(), actor())
+            .expect("link_mirror");
+        store
+            .update_mirror_link(
+                &ticket,
+                "github".into(),
+                "owner/repo#1".into(),
+                MirrorSyncDirection::Push,
+                actor(),
+            )
+            .expect("update_mirror_link push");
+
+        let links = store.mirror_links().expect("mirror_links before hash");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].content_hash, None);
+
+        store
+            .set_mirror_content_hash(&ticket, "github", "hash-1")
+            .expect("set_mirror_content_hash");
+
+        let links = store.mirror_links().expect("mirror_links after hash");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].content_hash, Some("hash-1".to_string()));
+        // A later, unrelated `update_mirror_link` (e.g. a subsequent pull) must not clobber the
+        // hash back to NULL -- its `ON CONFLICT DO UPDATE` in `materialize::apply` names only
+        // `remote_id`/`remote_system`/`last_synced`, never `content_hash`.
+        store
+            .update_mirror_link(
+                &ticket,
+                "github".into(),
+                "owner/repo#1".into(),
+                MirrorSyncDirection::Pull,
+                actor(),
+            )
+            .expect("update_mirror_link pull");
+        let links = store.mirror_links().expect("mirror_links after pull");
+        assert_eq!(links[0].content_hash, Some("hash-1".to_string()));
+    }
+
+    #[test]
+    fn set_mirror_content_hash_is_a_no_op_when_no_row_exists() {
+        let (_dir, store) = open_store();
+        let ticket = create_root_ticket(&store);
+        store
+            .set_mirror_content_hash(&ticket, "github", "hash-1")
+            .expect("set_mirror_content_hash on a ticket never linked must not error");
+        assert!(store.mirror_links().expect("mirror_links").is_empty());
     }
 
     #[test]

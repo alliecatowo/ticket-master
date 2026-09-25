@@ -2202,12 +2202,12 @@ fn mirror_zero_result_reason(
 /// `ProjectionPolicy`-filtered tickets; render pushed/degraded counts per adapter.
 ///
 /// `SyncEngine::push`'s `existing` parameter (the prior `tm_mirror::MirrorLink`, used for
-/// content-hash idempotency) is always passed `None`: `tm-core`'s persisted `mirror_links` row
-/// (see [`tm_core::MirrorLinkRow`]'s doc comment) carries no `content_hash`, so there is nothing
-/// to reconstruct it from across process restarts. Every `tm mirror push` therefore re-pushes
-/// every eligible ticket to every configured adapter rather than skipping unchanged ones — a
-/// real push each time, just not an idempotent-across-restarts one; that optimization needs a
-/// richer `mirror_links` schema (a B-05 follow-up, not something this command can work around).
+/// content-hash idempotency) is reconstructed from the persisted `mirror_links` row's
+/// `content_hash` (see [`tm_core::MirrorLinkRow`]'s doc comment) when one is already linked to
+/// this adapter, so a `tm mirror push` in a fresh process still recognizes an unchanged
+/// projection and skips the tracker call entirely rather than re-pushing every eligible ticket
+/// every time (mirror-persist-content-hash-for-idempotency). [`tm_core::Store::
+/// set_mirror_content_hash`] records the hash after a real push completes.
 ///
 /// Each ticket/adapter push is wrapped in a `SPEC.md` §21.5 idempotent-effect guard
 /// (`tm_core::Store::begin_effect`, audit B-11): the effect key is
@@ -2239,6 +2239,20 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
         project.ids.clone(),
         project.actor.clone(),
     );
+    // Keyed by (ticket, adapter name), so `SyncEngine::push` can be handed the prior push's
+    // content hash and skip a no-op re-push instead of always calling the tracker — see this
+    // function's doc comment.
+    let existing_links: BTreeMap<(String, String), tm_core::MirrorLinkRow> = project
+        .store
+        .mirror_links()?
+        .into_iter()
+        .map(|link| {
+            (
+                (link.ticket.as_str().to_string(), link.remote_system.clone()),
+                link,
+            )
+        })
+        .collect();
 
     let enabled_adapter_count = config.enabled_adapters().len();
     // Tickets that qualify to be mirrored at all, independent of whether any adapter's tracker
@@ -2315,11 +2329,48 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
             } else {
                 None
             };
-            let link_external = match external {
-                Some(external) => external,
+            // Reconstruct `SyncEngine::push`'s `existing` from the persisted row's
+            // `content_hash`, when there is one, so an unchanged projection is recognized as a
+            // no-op even across a process restart or a bumped `ticket.attempts` (which changes
+            // the effect-guard key above but not the projection itself).
+            let existing_link = existing_links
+                .get(&(ticket.id.as_str().to_string(), tracker.name().to_string()))
+                .and_then(|row| row.content_hash.as_ref().map(|hash| (row, hash)))
+                .map(|(row, hash)| tm_mirror::MirrorLink {
+                    ticket: ticket.id.clone(),
+                    adapter: tracker.name().to_string(),
+                    external: tm_mirror::ExternalRef {
+                        adapter: tracker.name().to_string(),
+                        external_id: row.remote_id.clone(),
+                        url: None,
+                    },
+                    degradations: Vec::new(),
+                    content_hash: hash.clone(),
+                    pushed_at: row.last_synced,
+                    last_pulled_at: None,
+                });
+            let (link_external, new_content_hash) = match external {
+                // The adapter confirmed the write already happened (a resumed guard), so this
+                // push's projection is now the one recorded externally -- record its hash too,
+                // the same as a fresh tracker call below.
+                Some(external) => (external, canonical_args.clone()),
                 None => {
-                    let (link, _draft) = engine.push(tracker.as_ref(), &projection, None).await?;
-                    link.external
+                    let (link, draft) = engine
+                        .push(tracker.as_ref(), &projection, existing_link.as_ref())
+                        .await?;
+                    if draft.is_none() {
+                        // `existing_link`'s content hash already matched `projection`'s hash:
+                        // `SyncEngine::push` returned it unchanged, appended no event, and never
+                        // called `tracker.push` -- the idempotency guarantee this reconstruction
+                        // exists for, reachable even when the effect guard above can't help (a
+                        // process restart, or a `ticket.attempts` bump between calls). Nothing
+                        // changed, so there is nothing new to re-link, re-record, or re-hash;
+                        // just close out the guard with the link this projection already has.
+                        already_synced += 1;
+                        guard.complete(&project.store, Some(&link.external.external_id))?;
+                        continue;
+                    }
+                    (link.external, link.content_hash)
                 }
             };
 
@@ -2335,6 +2386,9 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
                 tm_core::MirrorSyncDirection::Push,
                 project.actor.clone(),
             )?;
+            project
+                .store
+                .set_mirror_content_hash(&ticket.id, tracker.name(), &new_content_hash)?;
             guard.complete(&project.store, Some(&link_external.external_id))?;
             pushed += 1;
         }
@@ -2384,7 +2438,8 @@ pub async fn mirror_push(project: &Project, renderer: &Renderer) -> tm_types::Re
 ///
 /// The thin persisted [`tm_core::MirrorLinkRow`] carries no `last_pulled_at`, so every pull asks
 /// each tracker for changes since [`tm_types::Timestamp::EPOCH`] rather than incrementally since
-/// the last pull — the same documented B-05 schema limitation `mirror_push` notes for push.
+/// the last pull — a B-05 schema limitation `content_hash` (mirror-persist-content-hash-for-
+/// idempotency) does not address, since pull has no analogous content hash to reconstruct from.
 pub async fn mirror_pull(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let mirror_path = project.state_dir.join("mirror.toml");
     if !mirror_path.is_file() {
@@ -3086,6 +3141,84 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "completed");
+    }
+
+    #[tokio::test]
+    async fn mirror_push_reuses_the_persisted_content_hash_and_skips_the_tracker_call_after_the_effect_journal_is_cleared(
+    ) {
+        // mirror-persist-content-hash-for-idempotency: the effect guard above already makes a
+        // second `mirror_push` over unchanged state a no-op, but it does so by keying on
+        // `ticket.attempts`, which changes on a retry. Force exactly that gap open by deleting
+        // the journaled effect row between the two pushes (as if the effects table were pruned,
+        // or the ticket had a fresh attempt) while leaving `mirror_links` alone, so the second
+        // push cannot lean on the effect guard and must instead reconstruct
+        // `tm_mirror::sync::MirrorLink::content_hash` from the persisted row to recognize the
+        // unchanged projection and skip `Tracker::push` a second time.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let ticket_id = mirrorable_ticket(&project);
+
+        std::fs::write(
+            root.join(".tm").join("mirror.toml"),
+            "[adapters.testnull]\nkind = \"null\"\nenabled = true\n",
+        )
+        .unwrap();
+
+        let renderer = test_renderer();
+        mirror_push(&project, &renderer).await.expect("first push");
+
+        let db_path = root.join(".tm").join("project.db");
+        let raw = rusqlite::Connection::open(&db_path).unwrap();
+        raw.execute(
+            "DELETE FROM effects WHERE ticket = ?1 AND kind = 'mirror.push:testnull'",
+            [ticket_id.as_str()],
+        )
+        .unwrap();
+        let content_hash_before: Option<String> = raw
+            .query_row(
+                "SELECT content_hash FROM mirror_links WHERE ticket = ?1 AND remote_system = 'testnull'",
+                [ticket_id.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            content_hash_before.is_some(),
+            "the first push must have persisted a content hash"
+        );
+        drop(raw);
+
+        mirror_push(&project, &renderer)
+            .await
+            .expect("second push, with the effect journal cleared");
+
+        let conn = tm_events::schema::open_read_connection(&db_path).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM effects WHERE ticket = ?1 AND kind = 'mirror.push:testnull'",
+                [ticket_id.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "the second push journals a fresh effect row (the old one was deleted), not zero"
+        );
+        // The whole point: no `mirror.pushed` event landed for the second push, because
+        // `SyncEngine::push` recognized the unchanged content hash and returned no draft --
+        // `Tracker::push` (a `NullTracker` here, but the contract holds for any tracker) was
+        // never called a second time.
+        let pushed_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind = 'mirror.pushed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pushed_events, 1,
+            "a second push over an unchanged projection must not append another mirror.pushed event"
+        );
     }
 
     #[tokio::test]

@@ -41,7 +41,18 @@ use tm_types::TmError;
 /// invocations), so a doc's `DocState` (fresh/stale/reconciling/unverified) survives across
 /// process invocations instead of resetting to `Unverified` every time `tm docs` re-derives its
 /// in-memory registry. Same guarded-`ALTER TABLE` pattern as `4`'s `tickets.due`.
-pub const SCHEMA_VERSION: i64 = 5;
+///
+/// `6`: adds the `mirror_links.content_hash` column (mirror-persist-content-hash-for-
+/// idempotency), so `tm mirror push` can reconstruct the prior pushed projection's content hash
+/// across process restarts and skip a no-op re-push instead of always calling the tracker. Same
+/// guarded-`ALTER TABLE` pattern as `4`/`5`. Unlike those two, this column is not restored by
+/// [`drop_views`]/replay: `mirror.pushed`/`mirror.linked` events carry no content hash (see
+/// `crate::store::Store::set_mirror_content_hash`'s doc comment), so it is written directly to
+/// the row outside the event-replay path, the same "cache column, not replay-derived state"
+/// exception `workflows` documents above -- [`crate::store::Store::rebuild`] (which drops and
+/// replays every materialized table) costs at most one redundant re-push per ticket/adapter
+/// afterward, not a correctness problem.
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// One materialized table's name, paired with the `CREATE TABLE IF NOT EXISTS` DDL for it.
 pub struct TableDef {
@@ -286,7 +297,8 @@ pub const TABLES: &[TableDef] = &[
                 ticket TEXT PRIMARY KEY,
                 remote_id TEXT NOT NULL,
                 remote_system TEXT NOT NULL,
-                last_synced TEXT NOT NULL
+                last_synced TEXT NOT NULL,
+                content_hash TEXT
             )
         ",
     },
@@ -444,6 +456,22 @@ pub fn migrate(conn: &mut Connection, clock: &dyn tm_types::Clock) -> tm_types::
             > 0;
         if !has_last_verified_column {
             tx.execute_batch("ALTER TABLE docs ADD COLUMN last_verified TEXT")
+                .map_err(storage_err)?;
+        }
+
+        // Same reasoning as `due`/`state`/`last_verified` above: a `mirror_links` table
+        // predating schema version 6 has no `content_hash`, and `CREATE TABLE IF NOT EXISTS`
+        // cannot retrofit it.
+        let has_content_hash_column: bool = tx
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('mirror_links') WHERE name = 'content_hash'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(storage_err)?
+            > 0;
+        if !has_content_hash_column {
+            tx.execute_batch("ALTER TABLE mirror_links ADD COLUMN content_hash TEXT")
                 .map_err(storage_err)?;
         }
 
@@ -687,6 +715,72 @@ mod tests {
             .expect("existing row survives the ALTER TABLE with the new columns' defaults");
         assert_eq!(state, "unverified");
         assert_eq!(last_verified, None);
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM tm_core_schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query version after migrate");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_adds_mirror_links_content_hash_column_to_a_pre_v6_database() {
+        // Simulate a database migrated by a build before schema version 6: every table's DDL
+        // except `mirror_links`, which is created in its pre-6 shape (no `content_hash`).
+        let path = temp_db_path("test_upgrade_adds_mirror_links_content_hash_column");
+        let conn = rusqlite::Connection::open(&path).expect("create db");
+        for table in TABLES {
+            if table.name != "mirror_links" {
+                conn.execute_batch(table.create_sql).expect("create table");
+            }
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS mirror_links (
+                ticket TEXT PRIMARY KEY,
+                remote_id TEXT NOT NULL,
+                remote_system TEXT NOT NULL,
+                last_synced TEXT NOT NULL
+            )",
+        )
+        .expect("create pre-v6 mirror_links table");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tm_core_schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )",
+        )
+        .expect("create version table");
+        conn.execute(
+            "INSERT INTO tm_core_schema_version (version, applied_at) VALUES (5, '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("record version 5");
+        // A pre-v6 row, to confirm the retrofit is a genuine `ALTER TABLE` (preserving existing
+        // rows) rather than a table rebuild.
+        conn.execute(
+            "INSERT INTO mirror_links (ticket, remote_id, remote_system, last_synced)
+             VALUES ('T-1', 'gh-1', 'github', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("insert pre-v6 mirror_links row");
+
+        drop(conn);
+        let mut conn = rusqlite::Connection::open(&path).expect("reopen db");
+        migrate(&mut conn, &tm_types::FixedClock::epoch())
+            .expect("migrate an existing v5 database");
+
+        let (remote_id, content_hash): (String, Option<String>) = conn
+            .query_row(
+                "SELECT remote_id, content_hash FROM mirror_links WHERE ticket = 'T-1'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("existing row survives the ALTER TABLE with the new column's default");
+        assert_eq!(remote_id, "gh-1");
+        assert_eq!(content_hash, None);
 
         let version: i64 = conn
             .query_row(
