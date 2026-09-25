@@ -1422,7 +1422,7 @@ is based on.
   acceptance: A run transcript with multiple identical `fs.read` calls for one path renders a clear repeat indicator instead of an indistinguishable list, while different paths and `fs.read_range` ranges remain individually visible.
   test: `cargo test -p tm-cli format_tool_call`
   evidence: `/tmp/tm-trials/20260925-1314/pallets-click-3822/tm.log` lines 27–48 show repeated `Read src/click/types.py` progress entries and overlapping full-file/range reads; implementation and adjacent tests are in `crates/tm-cli/src/agent.rs` (`plain_tool_arg`, `plain_tool_action`, `format_tool_call_shows_the_call_s_salient_argument`).
-- [ ] **t20260925-1314-psf-requests-7432-terminal-failure-summary** — Make failed ticket runs explain whether any work was submitted
+- [~] **t20260925-1314-psf-requests-7432-terminal-failure-summary** — Make failed ticket runs explain whether any work was submitted (needs another pass: the worker made no changes)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: When `tm run` completes with a failed attempt such as “model ended turn without submitting,” render a concise terminal summary that says no patch/evidence was submitted, includes the failure reason, and points to the exact resume/retry command; preserve the current error exit status.
