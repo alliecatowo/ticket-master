@@ -119,20 +119,25 @@ pub fn should_launch(global: &GlobalOpts) -> bool {
 ///
 /// Every submitted prompt runs through the exact same turn logic the plain `tm`/`tm -p` loop uses
 /// (`AgentSession::run_turn_streaming`) — see [`App::spawn_turn`].
-pub async fn run(project: Arc<Project>, resumed: Option<AgentSession>) -> tm_types::Result<()> {
-    run_on(project, resumed, StartOn::Chat).await
+pub async fn run(
+    project: Arc<Project>,
+    resumed: Option<AgentSession>,
+    initial_prompt: Option<String>,
+) -> tm_types::Result<()> {
+    run_on(project, resumed, StartOn::Chat, initial_prompt).await
 }
 
 /// `tm tickets`: the same TUI, opened on the tickets screen (Claude Code's `claude agents`); Esc
 /// goes to a fresh chat.
 pub async fn run_tickets(project: Arc<Project>) -> tm_types::Result<()> {
-    run_on(project, None, StartOn::Tickets).await
+    run_on(project, None, StartOn::Tickets, None).await
 }
 
 async fn run_on(
     project: Arc<Project>,
     resumed: Option<AgentSession>,
     start: StartOn,
+    initial_prompt: Option<String>,
 ) -> tm_types::Result<()> {
     let view = project
         .store
@@ -238,6 +243,9 @@ async fn run_on(
 
     if start == StartOn::Tickets {
         app.open_tickets(now);
+    }
+    if let Some(prompt) = initial_prompt {
+        app.spawn_turn(prompt);
     }
 
     let result = runtime.run(&mut app).await.map_err(runtime_error);

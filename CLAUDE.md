@@ -393,7 +393,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   failed the task (`TmError::TurnFailed`), 4 when it ran out of budget, 64 when the command line
   itself is malformed (`args::usage_exit_code`, matching sysexits' `EX_USAGE`) — so a caller
   scripting against the exit code can tell a bad invocation (e.g. an unknown flag) apart from a
-  real failed turn. `-p`/`--prompt` is a boolean flag plus a trailing positional `TEXT`, not a
+  real failed turn. A bare trailing `TEXT` starts the chat with that message in a terminal and runs
+  one prompt to completion when input is not interactive. `-p`/`--prompt` remains the explicit
+  one-shot form. It is a boolean flag plus a trailing positional `TEXT`, not a
   value-taking option, so flag order doesn't matter (`tm -p --json "x"` and `tm --json -p "x"`
   both work) and `tm -p --help` prints help instead of erroring. `--json -p` prints one
   result object (outcome, text, model, tokens, steps). Chatting never creates a ticket (D-017).

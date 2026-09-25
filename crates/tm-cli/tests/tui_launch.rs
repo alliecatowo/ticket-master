@@ -138,6 +138,28 @@ fn bare_tm_with_piped_stdout_uses_the_plain_loop_not_the_tui() {
     );
 }
 
+#[test]
+fn bare_text_with_piped_stdio_runs_one_prompt_and_exits() {
+    let project = init_project();
+    let tm_home = tempfile::tempdir().expect("tempdir");
+    let output = run_tm(
+        project.path(),
+        tm_home.path(),
+        &["--project", project.path().to_str().unwrap(), "hello"],
+    );
+    assert!(
+        output.status.success(),
+        "positional text with piped stdio must run one prompt, got status {:?} stderr {:?}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.contains("--prompt required") && !stdout.contains("tm> "),
+        "a positional prompt must run once rather than error or enter the interactive loop, got {stdout:?}"
+    );
+}
+
 /// Run the real `tm` binary non-interactively (piped stdio, `TM_HOME` isolated to a tempdir) and
 /// wait for it to exit. Mirrors `tests/promotion.rs`'s `run_tm_in` convention; these three tests
 /// don't need a pty, only a spawned process and its captured output.

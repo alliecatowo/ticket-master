@@ -48,8 +48,8 @@ pub fn usage_exit_code(err: &clap::Error) -> i32 {
 /// `tm`: the Ticketmaster command line.
 ///
 /// With no subcommand, `tm` opens the interactive coding agent in the current project (walking
-/// up from the current directory for a `.tm` directory, per [`crate::project::locate`]). `tm -p
-/// <prompt>` runs that same agent non-interactively for one prompt, suitable for scripting.
+/// up from the current directory for a `.tm` directory, per [`crate::project::locate`]). A
+/// trailing prompt starts the chat with that message; use `-p` to run one prompt and exit.
 #[derive(Debug, Parser)]
 #[command(name = "tm", version, about, long_about = None, after_help = AFTER_HELP)]
 pub struct Cli {
@@ -66,11 +66,8 @@ pub struct Cli {
     #[arg(short = 'p', long = "prompt", requires = "prompt_text")]
     pub prompt: bool,
 
-    /// The prompt to run with `-p`.
-    // Requires `-p`: a bare positional with no `-p` must be a usage error, not a silently
-    // accepted no-op, so a mistyped subcommand (`tm tikcets`) still fails loudly instead of
-    // being swallowed as prompt text.
-    #[arg(value_name = "TEXT", requires = "prompt")]
+    /// Start the chat with TEXT, or run one prompt and exit when input is not interactive.
+    #[arg(value_name = "TEXT")]
     pub prompt_text: Option<String>,
 
     /// Continue the most recent conversation in this project.
@@ -1489,6 +1486,14 @@ mod tests {
     }
 
     #[test]
+    fn bare_text_starts_interactive_chat_with_initial_prompt() {
+        let cli = Cli::parse_from(["tm", "hello"]);
+        assert!(cli.command.is_none());
+        assert!(!cli.prompt);
+        assert_eq!(cli.prompt_text.as_deref(), Some("hello"));
+    }
+
+    #[test]
     fn prompt_flag_order_does_not_matter() {
         let a = Cli::parse_from(["tm", "-p", "--json", "fix it"]);
         assert!(a.prompt);
@@ -1511,9 +1516,9 @@ mod tests {
     }
 
     #[test]
-    fn mistyped_subcommand_is_a_usage_error_not_prompt_text() {
-        let err = Cli::try_parse_from(["tm", "tikcets"]).unwrap_err();
-        assert_eq!(usage_exit_code(&err), USAGE_EXIT_CODE);
+    fn bare_text_is_accepted_as_an_initial_chat_prompt() {
+        let cli = Cli::parse_from(["tm", "tikcets"]);
+        assert_eq!(cli.prompt_text.as_deref(), Some("tikcets"));
     }
 
     #[test]

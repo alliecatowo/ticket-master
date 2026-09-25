@@ -160,7 +160,7 @@ fn install_tracing() -> TracingGuard {
 /// [`project::resolve_scope`] against the real current directory, silently creating an empty
 /// project under `$TM_HOME` — never in the workspace, never by assimilating a git repo — the one
 /// time it resolves to global scope with nothing there yet) and either run one prompt to
-/// completion (`--prompt`), open the ratatui TUI (a real tty, per [`tui::should_launch`] — D-002:
+/// completion (`--prompt`, or a positional prompt without a TTY), open the ratatui TUI (a real tty, per [`tui::should_launch`] — D-002:
 /// "a mode of the existing binary, entered on the bare-`tm` TTY path"), or fall back to the plain
 /// interactive agent loop (`--plain`, `--json`, `--quiet`, `TERM=dumb`, or stdout/stdin not a
 /// tty). When `cli.command` is `Some`, delegate to the matching execution module -- every one of
@@ -198,7 +198,11 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
             }
 
             if tui::should_launch(&cli.global) {
-                tui::run(project, resumed).await
+                tui::run(project, resumed, cli.prompt_text).await
+            } else if let Some(prompt) = cli.prompt_text {
+                let mut session =
+                    resumed.unwrap_or_else(|| agent::AgentSession::new(project.clone(), *renderer));
+                session.run_prompt(&prompt).await
             } else {
                 let mut session =
                     resumed.unwrap_or_else(|| agent::AgentSession::new(project.clone(), *renderer));
