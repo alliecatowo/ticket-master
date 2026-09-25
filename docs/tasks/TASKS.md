@@ -986,7 +986,7 @@ Gate: `mise run verify`
   acceptance: After advance() runs, the project's event log, read the way tm events reads it, has one stage event per completed stage.
   test: `mise run test:crate -- tm-core && mise run test:crate -- tm-genesis`
 
-- [ ] **docs-wire-real-staleness-trigger** — Feed tm_docs::Assessor a real git ChangeSet so tm docs check can fail
+- [x] **docs-wire-real-staleness-trigger** (landed a24541c) — Feed tm_docs::Assessor a real git ChangeSet so tm docs check can fail
   model: sonnet · size: M · builds Rust: yes · area: docs (SPEC §9) · deps: docs-persist-state-across-invocations
   files: `crates/tm-cli/src/ops.rs`, `crates/tm-docs/src/assess.rs`, `crates/tm-docs/src/provenance.rs`
   change: In docs_check and docs_reconcile, build a ChangeSet from a git2 diff between each doc's last-verified commit (from doc_provenance, recorded at verify or attest time) and HEAD plus the working tree. Run it through Assessor::assess before Assessor::check, and persist the resulting state through the storage added in docs-persist-state-across-invocations. Update ops.rs's admission comment (146-149).
