@@ -483,8 +483,8 @@ pub struct TicketNewArgs {
     /// The ticket's objective, in natural language.
     #[arg(value_name = "OBJECTIVE")]
     pub objective: String,
-    /// Ticket kind (task, investigation, verification, audit, recovery, ...).
-    #[arg(long, default_value = "task")]
+    /// Ticket kind: work (alias: task), investigation, verification, audit, recovery, ...
+    #[arg(long, default_value = "work")]
     pub kind: String,
     /// Parent ticket id, if this is a child.
     #[arg(long, value_name = "TICKET")]

@@ -68,6 +68,7 @@ mod due_date {
 #[serde(rename_all = "snake_case")]
 pub enum TicketKind {
     /// Ordinary work: implement, fix, refactor.
+    #[serde(alias = "task")]
     Work,
     /// A verification node, checking another ticket's submission against its success predicates.
     Verification,
@@ -613,6 +614,13 @@ mod tests {
             let deserialized: TicketKind = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(kind, deserialized);
         }
+    }
+
+    #[test]
+    fn ticket_kind_task_alias_deserializes_to_work() {
+        let deserialized: TicketKind =
+            serde_json::from_str("\"task\"").expect("deserialize task alias");
+        assert_eq!(deserialized, TicketKind::Work);
     }
 
     #[test]
