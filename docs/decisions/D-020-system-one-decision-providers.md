@@ -1,6 +1,6 @@
 # D-020 — System One decision providers (Jev, Laya) as a new fabric provider kind
 
-**Status:** proposed · **Date:** 2026-09-23 · **Supersedes:** nothing (if accepted, amends SPEC.md §0 and §6.1)
+**Status:** accepted · **Date:** 2026-09-23 · **Supersedes:** nothing (amends SPEC.md §6.1; §0 not yet amended)
 
 ## Context
 
@@ -55,9 +55,13 @@ research, with sources and verified-versus-inferred tags, is in
 7. **Redaction before anything leaves the machine.** Add `redact_decide_request` through the
    existing `SessionRedactor` (D-011). No remote decision backend ships without it.
 
-If accepted, SPEC.md §0 gains "System One decisions" as an inference site, bounded by rules 3 to
-5, and §6.1 gains the `decider` role and the `DecisionProvider` trait. This decision edits
-neither yet.
+SPEC.md §6.1 now names the `decider` role and the `DecisionProvider` trait, landed at
+`crates/tm-provider/src/decide.rs` (`d20-decider-trait-and-mock`, 6a2f786) and wired into
+`tm-core`'s ticket creation as a shadow call through the injectable `TriageDecider` seam
+(`d20-shadow-triage-new-tickets`, 7b363a8; no `tm-cli` command path configures a real decider
+yet). SPEC.md §0 does not yet name "System One decisions" as an inference site; that amendment is
+out of this task's scope (`d20-flip-status-and-amend-spec` names only §6.1) and is left as a
+follow-up.
 
 ## Why
 

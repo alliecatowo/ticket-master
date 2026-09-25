@@ -469,8 +469,13 @@ advancing a `FixedClock` and asserting the emitted event sequence.
 vision.frontier  planner.frontier  architect.frontier
 coder.deep  coder.fast  explorer.cheap
 reviewer.semantic  auditor.semantic  synthesizer.long_context
-summarizer.cheap  embedder  computer_use
+summarizer.cheap  embedder  computer_use  decider
 ```
+
+`decider` (`Role::Decider`, D-020) is configured in `providers.toml` like any other role, but its
+candidates implement `DecisionProvider`, not `Provider`, and dispatch through
+`Registry::build_decider` directly rather than through `Fabric::route`/`execute` — see "System
+One decisions" below.
 
 `providers.toml` (project state, versioned) maps role → ordered candidate list:
 
@@ -486,6 +491,34 @@ model    = "claude-haiku-4-5-20251001"
 max_concurrency = 8
 degraded_ok = true
 ```
+
+**System One decisions (D-020).** A decider answers bounded, typed questions ("is this a
+question or a job", "which tool family", "is this command risky") with a calibrated,
+schema-valid answer instead of generating text — cheaper and faster than routing every bounded
+judgment through a frontier LLM. It is a separate trait from `Provider` rather than another
+method on it, since `complete`/`embed` stubs on a decider (or a `decide` stub on every LLM-backed
+provider) would put lies in the trait:
+
+```rust
+pub trait DecisionProvider: Send + Sync {
+    fn id(&self) -> &str;
+    fn limits(&self) -> DecideLimits; // max context tokens, max options, supported question kinds
+    async fn decide(&self, req: DecideRequest) -> Result<DecideResponse, ProviderError>;
+}
+```
+
+`DecideRequest` carries a `state` plus typed `Question`s (`Choice`, `Score`, `Noul`); `decide`
+returns `ProviderError` like any other provider call, so a decider can reuse the fabric's breaker
+and retry conventions without a parallel error type. `MockDecisionProvider` covers every test,
+same as `MockProvider` does for `Provider`. Every call is recorded as a `classify.decided` event
+(disposition `acted`/`fallback`/`abstained`/`shadow`) so replay reads the decision as data and
+never re-infers it. The first-landed slice wires this into `tm-core` through an injectable
+`TriageDecider` seam (`Store::with_decider`): when a decider is configured, `Store::create_ticket`
+calls it and appends `classify.decided(shadow)` alongside `ticket.created`, logging and
+continuing on any decider error rather than failing ticket creation; with no decider configured,
+or when nothing wires one up (no `tm-cli` command path does yet), ticket creation behaves exactly
+as before. See D-020 for the cascade that would let a calibrated decision actually act instead of
+only shadowing.
 
 ### 6.2 Fabric responsibilities
 
