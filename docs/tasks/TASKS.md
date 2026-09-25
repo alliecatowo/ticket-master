@@ -343,7 +343,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test_command: `mise run test:crate -- tm-mcp`
   evidence: `ticket_show` returned `"budget":{"dollars_micros":18446744073709551615,...}`; `symbol_def("NonExistentSymbol")` returned `{"content":[{"text":"null","type":"text"}],"isError":false}`; `symbol_def` kind used `format!("{:?}", sym.kind)` (line 405 of server.rs); `ticket_show` on a bad ID returned `parse: TicketId must look like T-<n>, V-<n> or A-<n>, got "NONEXISTENT"`.
 
-- [ ] **p1-genesis-fallback-tries-other-ready-providers** — Genesis provider fallback only probes local backends, ignoring an already-ready remote provider like devpass
+- [x] **p1-genesis-fallback-tries-other-ready-providers** (landed 8c18b0c) — Genesis provider fallback only probes local backends, ignoring an already-ready remote provider like devpass
   model: sonnet · severity: high · builds Rust: yes · area: genesis/providers · deps: genesis-cli-wire-mock-provider
   files: `crates/tm-cli/src/project.rs`
   change: In `resolve_genesis_provider` (~line 1172), when the `VisionFrontier` candidate's configured provider (e.g. `anthropic`) isn't configured, the fallback only tries the three entries in `tm_provider::LOCAL_PROVIDER_IDS` (ollama/lm-studio/llama-cpp) before erroring. It never checks whether any other role's candidate provider is already configured and reachable — e.g. `devpass`, which `tm provider list` reports `ready` for `coder.fast`. A user with a working DevPass credential and no Anthropic key or local model gets a hard "install Ollama" failure even though a ready remote provider already exists. Extend the fallback to also try any other configured/ready provider from the full role table before erroring.
@@ -511,7 +511,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise run hygiene`
   evidence: `docs/backlog.md`'s "## Ask the owner later" section currently contains the D-020 deferral entry dated 2026-09-23, now superseded by the owner's direct Jev/Laya request in this same session.
 
-- [~] **critic-b0-ci-green** (needs the owner: the clippy lint and the x11rb/toolchain build fixes landed at b01efda/3c7a690/ce2db32/7e791d3, but `test (ubuntu-latest)` in GitHub Actions still dies mid-`cargo test --workspace` -- three consecutive runs (35967995857 after fixing the identity_op lint, 35969031957 and its two `gh run rerun --failed` retries) all stop at the same spot, `tm-pty`'s lib tests just after `capability::tests::calling_a_tool_before_spawn_reports_not_found`, with the runner itself logging "The runner has received a shutdown signal" (the first attempt's step exited 143/SIGTERM). `crates/tm-pty/src/session.rs`'s `kill_process_group` shells out to `kill -TERM -{pid}` (negative-pid process-group kill), relying on `portable_pty` having called `setsid()` on the child so that group is only the child's -- if that assumption doesn't hold on this Linux runner, the same call could signal a wider group than intended. Not confirmed: this machine can't reproduce (`cargo test -p tm-pty --lib` passes clean on macOS, 24/24, including `kill_process_group_terminates_a_sleeping_child_and_its_descendants`), and there's no Linux box here to trace the real pid/pgid relationship on. Needs an owner with Linux CI access to `strace`/log the actual pgid `kill_process_group` targets, or to move the signal in a way that can't ever widen past the child's own group) — CI is red on main: fix the clippy lint and the Linux build before anything else lands
+- [x] **critic-b0-ci-green** (already satisfied) — CI is green on main (verified via `gh run view 36118529660`, sha c322641, both `test (ubuntu-latest)` and `test (macos-latest)` succeeded); the Linux SIGTERM/143 root cause was `crates/tm-pty/src/session.rs`'s `kill_process_group` (`kill -TERM -{pid}` without `--`), already fixed at commit 7ea4d4e
   model: sonnet · severity: critical · builds Rust: yes · area: ci · deps: none
   files: `crates/tm-codeintel/src/walk.rs`, `crates/tm-computer/src/linux.rs`, `rust-toolchain.toml`
   change: Two verified, independent CI failures block every other batch. (1) `clippy::for_kv_map` fails on both OSes (CI run 35917628490): `for (path, _hash) in previous_map.iter()` at walk.rs:279 iterates a map only for its keys; change it to `.keys()`. (2) `crates/tm-computer/src/linux.rs` does not compile against x11rb 0.14 on Linux (Release run 35883664234), which is also why the v0.1.0 release shipped only an aarch64 asset; fix the x11rb 0.14 API mismatch. (3) `rust-toolchain.toml` is `channel = "stable"` with no version pinned, while this machine has 1.95, so a local `mise run verify` pass is not proof CI will pass; pin an exact version matching what CI's dtolnay/rust-toolchain action resolves today. Run this before B1 starts, since every later batch's gate assumes CI is green.
@@ -527,7 +527,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `git log --oneline -1 origin/main`
   evidence: workflow wf_87a85411-848's critic result, "missing" item 2, cross-checked against this session's own note that odw-integrate can no longer fast-forward and has uncommitted edits in sched.rs/dispatch.rs/agent.rs/ops.rs/chat_ops.rs.
 
-- [ ] **critic-real-prices-and-price-unit** — Fix the price unit (sub-$1/M rounds to 0) and fill in real configured-model prices
+- [x] **critic-real-prices-and-price-unit** (landed f1cdba4) — Fix the price unit (sub-$1/M rounds to 0) and fill in real configured-model prices
   model: sonnet · severity: high · builds Rust: yes · area: providers/budget · deps: tel-completion-cost-field
   files: `crates/tm-provider/src/role_config.rs`, `crates/tm-provider/src/fabric.rs`, `crates/tm-provider/providers.toml`
   change: No non-test `RoleCandidate` has `price: Some` (only test fixtures at role_config.rs:685). Price is stored as an integer number of micros per token (role_config.rs:48), so any model priced under $1/M tokens (Jev is $0.042/M) truncates to 0 micros/token. That silently zeroes tel-completion-cost-field, `tm stats` dollars, budget tier-down and the bench cost column even after this session's telemetry batches land. Change the unit to micros per 1,000,000 tokens (or an equivalent fixed-point representation with enough precision for sub-cent-per-token models), update `cost_micros`'s math in fabric.rs to match, and fill in real prices for every model this project actually configures in providers.toml. Coordinate with the odw provider-overhaul work, which also owns role_config.rs/providers.toml (see critic-merge-odw-integrate-before-b1).
@@ -567,7 +567,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   test: `mise x aqua:rhysd/actionlint@latest -- actionlint .github/workflows/ci.yml`
   evidence: workflow wf_87a85411-848's critic result, "missing" item 14: `ci.yml` runs only Rust; `docs/tasks/README.md:12-13` requires the clients/web suite.
 
-- [ ] **critic-format-debug-strings-cleanup** — Sweep the remaining machine-speak `format!("{:?}", ...)` output outside s1-display-labels' scope
+- [x] **critic-format-debug-strings-cleanup** (landed 835e681) — Sweep the remaining machine-speak `format!("{:?}", ...)` output outside s1-display-labels' scope
   model: sonnet · severity: medium · builds Rust: yes · area: cli/copy · deps: s1-display-labels
   files: `crates/tm-cli/src/ops.rs`, `crates/tm-cli/src/tui.rs`, `crates/tm-cli/src/search.rs`, `crates/tm-cli/src/sched.rs`
   change: `s1-display-labels` fixes ticket/milestone state and kind formatting in tickets.rs, but there are 33 `format!("{:?}", ...)` sites in tm-cli in total, and several are outside that task's files. `tm events show` (ops.rs:2248) prints the Debug kind name (e.g. `TicketCreated`) instead of the wire string ("ticket.created") and omits the payload its own doc comment promises; also fix ops.rs:105-121. tui.rs:355-356 and search.rs:369/498 debug-format values a user reads directly on screen. Replace each with a purpose-built human string (reuse render.rs's label helpers from s1-display-labels where the type overlaps; add a small local formatter otherwise).
@@ -756,7 +756,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **genesis-cli-offline-integration-test** — Real-binary subprocess test: tm genesis runs offline end to end
+- [x] **genesis-cli-offline-integration-test** (landed 9c1e3a8) — Real-binary subprocess test: tm genesis runs offline end to end
   model: sonnet · size: M · builds Rust: yes · area: genesis · deps: genesis-stop-infinite-maturity-loop, genesis-cli-wire-mock-provider
   files: `crates/tm-cli/tests/genesis_offline.rs`
   change: Follow crates/tm-cli/tests/promotion.rs's pattern: Command::new(env!("CARGO_BIN_EXE_tm")) in a git-initialized tempdir, with TM_HOME set to a tempdir, TM_NOTIFY=0 and TM_TEST_MOCK_PROVIDER=1. Run `tm genesis --prompt ...` with a wall-clock timeout guard. Assert exit 0, that stdout reports the committed tickets and the next steps, and that `tm tickets --json --all` shows the committed Draft tickets.
@@ -817,7 +817,7 @@ Gate: `mise run verify`
   acceptance: Round-trip test: write a header plus three entries, read them back and get equal values. RecordingProvider over a scripted MockProvider writes two lines that read back matching. Replay serves entries in order, reports exactly one divergence when one recorded request is mutated, and returns Unscripted once exhausted. Two requests that differ only in the root path hash equal. Hygiene resolves [new decision: record/replay cassettes].
   test: `mise run test:crate -- tm-provider && mise run hygiene`
 
-- [ ] **tel-usage-payload-model-field** — Attribute usage.recorded to provider/model; create [new decision: telemetry and cost attribution]
+- [x] **tel-usage-payload-model-field** (landed a201af5) — Attribute usage.recorded to provider/model; create [new decision: telemetry and cost attribution]
   model: sonnet · size: M · builds Rust: yes · area: telemetry · deps: tel-completion-cost-field
   files: `crates/tm-events/src/payload.rs`, `crates/tm-core/src/store.rs`, `crates/tm-core/src/materialize.rs`, `crates/tm-agent/src/agent_loop.rs`, `docs/decisions/D-NNN-local-telemetry.md`
   change: Add provider: Option<String> and model: Option<String> to UsageRecordedPayload (payload.rs:342). They must be Option: the payload_kinds! macro cannot carry per-field serde attributes, serde treats a missing Option field as None, and the log is immutable and hash-chained, so old events must keep decoding. Add Store::record_usage_attributed(..., served_by: Option<(String, String)>) and have the existing record_usage delegate to it with None, so tm-core budget.rs's 11 call sites stay untouched. agent_loop passes the provider and model from completion.model. Create [new decision: telemetry and cost attribution] covering real dollars_micros (from tel-completion-cost-field) and these attribution fields, and state that FabricState/LedgerEntry stays process-local (link ops.rs's PROVIDER_LIVE_STATE_NOTE). Later tasks amend [new decision: telemetry and cost attribution].
@@ -925,14 +925,14 @@ Gate: `mise run verify && bash bench/tools/check-fixtures.sh`
   acceptance: A unit test renders a hand-built BenchmarkReport to the expected markdown, and `tm bench run --out r.json && tm bench report r.json` works in a tempdir.
   test: `mise run test:crate -- tm-cli`
 
-- [ ] **workflow-add-missing-starter-definitions** — Add the migrate-sites and research-and-synthesize SPEC §25 starter workflows
+- [x] **workflow-add-missing-starter-definitions** (landed fa074bb) — Add the migrate-sites and research-and-synthesize SPEC §25 starter workflows
   model: sonnet · size: S · builds Rust: yes · area: workflow (SPEC §25) · deps: none
   files: `crates/tm-workflow/fixtures/migrate-sites.toml`, `crates/tm-workflow/fixtures/research-and-synthesize.toml`, `crates/tm-workflow/tests/expand_snapshot.rs`
   change: Write two WorkflowDef fixtures against the existing schema in def.rs. migrate-sites uses a static for_each fan-out. research-and-synthesize uses a FromOutput for_each feeding a join with a merge rule. Add parse and expand tests in expand_snapshot.rs following the review-change and harness-benchmark pattern, including snapshot files if the test uses them.
   acceptance: Both fixtures parse, and expand() produces subgraphs that pass tm-core's invariant checks.
   test: `mise run test:crate -- tm-workflow`
 
-- [ ] **bench-swe-lite-fixture-ingestion** — Vendor 3-5 small hermetic bug-fix-with-failing-test bench tasks
+- [x] **bench-swe-lite-fixture-ingestion** (landed ab92a87) — Vendor 3-5 small hermetic bug-fix-with-failing-test bench tasks
   model: sonnet · size: M · builds Rust: no · area: bench · deps: bench-schema-repo-fixture-fields
   files: `bench/tasks/`, `bench/fixtures/`, `bench/solutions/`, `bench/tools/check-fixtures.sh`, `bench/tools/PROVENANCE.md`
   change: Pick 3 to 5 small, permissively licensed bug-fix tasks, each a few MB at most, runnable with toolchains already present: Python via stdlib `unittest` (not `uv run --with pytest`, which fetches pytest over the network on every fresh run, including every gate and every live bench task — hermetic means no network per SPEC §0), or single-crate Rust with no dependencies. Do not attempt the full SWE-bench corpus. For each task: a minimal repo snapshot in bench/fixtures/<id>/, a bench/tasks/<id>.toml using test_command/setup_commands, and a reference fix at bench/solutions/<id>.patch, which lives outside the fixture dir so it is never copied into an agent's workspace. Add check-fixtures.sh, which for each task copies the fixture to mktemp, asserts test_command fails, applies the solution patch, and asserts it passes. Record provenance and license per task in PROVENANCE.md. Do not name any file live-smoke; that name is reserved for B17.
