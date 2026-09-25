@@ -1661,6 +1661,53 @@ pub(crate) fn build_fabric_for_project_recording(
     build_fabric_with_table(table, clock, Some(recording))
 }
 
+/// What [`build_fabric_for_project_replay`] needs for one `tm run <ticket> --replay <path>`
+/// invocation (`replay-cli-replay-flag`, `docs/decisions/D-028-record-replay-harness.md`).
+pub(crate) struct ReplaySpec {
+    /// The ticket's own [`tm_core::ticket::ExecutorRequirements::role`] — same rule as
+    /// [`RecordingSpec::role`]: a single `tm run` dispatches one ticket, so one role covers the
+    /// whole replay.
+    pub(crate) role: Role,
+    /// The execution root the replayed request hashes are normalized against — the same root
+    /// used when the cassette was recorded (`--worktree`'s isolated checkout when passed, the
+    /// project root otherwise). Must match at replay time too, since [`tm_provider::Cassette`] entries are
+    /// hashed relative to a root.
+    pub(crate) root: std::path::PathBuf,
+    /// The cassette to replay, already read from disk.
+    pub(crate) cassette: tm_provider::Cassette,
+}
+
+/// The provider id every `tm run --replay <path>` invocation registers its sole
+/// [`tm_provider::MockProvider`] under. Never a real backend's id, so a cassette entry recorded
+/// from `anthropic`/`devpass`/etc. still replays: replay is ordered, not provider-matched (see
+/// [`tm_provider::MockProvider::script_from_cassette`]).
+const REPLAY_PROVIDER_ID: &str = "replay";
+
+/// Build a fabric for `tm run <ticket> --replay <path>` (`replay-cli-replay-flag`): `spec.role`'s
+/// only candidate is a fresh [`tm_provider::MockProvider`] loaded with
+/// [`tm_provider::MockProvider::script_from_cassette`], so every completion this run needs is
+/// served, in order, from `spec.cassette` — no other candidate is registered with the fabric, so
+/// no network call is reachable even if `spec.role`'s table entry still names a real provider.
+/// Returns the built fabric alongside the [`tm_provider::MockProvider`] handle itself, so the
+/// caller can read [`tm_provider::MockProvider::divergences`] once the run finishes.
+pub(crate) fn build_fabric_for_project_replay(
+    project: &Project,
+    clock: Arc<dyn Clock>,
+    spec: ReplaySpec,
+) -> tm_types::Result<(Arc<Fabric>, Arc<tm_provider::MockProvider>)> {
+    let mut table = crate::ops::load_role_table(Some(project))?;
+    table.prefer(spec.role, REPLAY_PROVIDER_ID, "cassette");
+    let fabric = Fabric::new(table, clock.clone());
+    let provider = Arc::new(tm_provider::MockProvider::new(
+        REPLAY_PROVIDER_ID,
+        ModelId::new(REPLAY_PROVIDER_ID, "cassette"),
+        clock,
+    ));
+    provider.script_from_cassette(&spec.cassette, &spec.root);
+    fabric.register_provider(provider.clone());
+    Ok((Arc::new(fabric), provider))
+}
+
 /// Shared across every provider one `tm run --record <path>` invocation's fabric registers
 /// (`RecordingSpec::sink`), so a run that falls through more than one candidate mid-run still
 /// records one ordered cassette instead of splitting across several private ones the way

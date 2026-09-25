@@ -308,6 +308,37 @@ pub(crate) fn build_dispatcher_with_recording(
     build_dispatcher_with_fabric(project, handle, exec_root, steps, fabric, human)
 }
 
+/// [`build_dispatcher`], but `role`'s only candidate is a [`tm_provider::MockProvider`] replaying
+/// `cassette` in order — used only by `tm run <ticket> --replay <path>` (`replay-cli-replay-flag`,
+/// `docs/decisions/D-028-record-replay-harness.md`) for an offline, network-free rerun of a
+/// previously recorded ticket. Returns the [`tm_provider::MockProvider`] handle alongside the
+/// dispatcher so the caller can read `MockProvider::divergences()` once the run finishes.
+pub(crate) fn build_dispatcher_with_replay(
+    project: &Project,
+    handle: tokio::runtime::Handle,
+    exec_root: Option<&Path>,
+    steps: Option<tokio::sync::mpsc::UnboundedSender<tm_agent::StepRecord>>,
+    role: Role,
+    cassette: tm_provider::Cassette,
+) -> tm_types::Result<(Arc<ExecutorDispatcher>, Arc<tm_provider::MockProvider>)> {
+    let root = execution_root(&project.root, exec_root).to_path_buf();
+    let (fabric, mock) = crate::agent::build_fabric_for_project_replay(
+        project,
+        project.clock.clone(),
+        crate::agent::ReplaySpec {
+            role,
+            root,
+            cassette,
+        },
+    )?;
+    let human = Arc::new(StdinApprovalSink {
+        store: project.store.clone(),
+    });
+    let dispatcher =
+        build_dispatcher_with_fabric(project, handle, exec_root, steps, fabric, human)?;
+    Ok((dispatcher, mock))
+}
+
 /// [`build_dispatcher`] over an already-built `fabric` instead of the one
 /// [`crate::agent::build_fabric_for_project`] would pick from the project's own configuration —
 /// the seam an in-process test uses to run the real dispatcher against a provider it controls.

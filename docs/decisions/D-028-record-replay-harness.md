@@ -101,3 +101,37 @@ to close there. Recording it anyway would only grow every cassette file for no r
   `fabric.register_provider(provider)`.
 - `tm run --replay <path>` (offline ordered replay against a recorded cassette) is a separate,
   later task (`replay-cli-replay-flag`) — this only covers recording.
+
+## Implemented: `tm run <ticket> --replay <path>`
+
+`replay-cli-replay-flag` wires offline ordered replay into the CLI (`crates/tm-cli/src/args.rs`'s
+`RunArgs`, `crates/tm-cli/src/dispatch.rs`, `crates/tm-cli/src/agent.rs`, `crates/tm-cli/src/sched.rs`):
+
+- `tm run <ticket> --replay <path>` reads `<path>` as a `Cassette` and dispatches through
+  `crate::dispatch::build_dispatcher_with_replay` instead of `build_dispatcher`/
+  `build_dispatcher_with_recording`: the ticket's own `ExecutorRequirements::role` gets exactly
+  one candidate, a fresh `tm_provider::MockProvider` loaded via
+  `MockProvider::script_from_cassette(&cassette, &root)` — no other provider is registered with
+  the fabric at all, so no network call is reachable regardless of what `providers.toml` still
+  names for that role. `root` is the same execution root `--record` normalizes against
+  (`--worktree`'s isolated checkout when passed, the project root otherwise), so a cassette
+  recorded in one tempdir/project still replays against a different one without diverging on the
+  tempdir path alone (`normalize_request`'s whole point — see "Decision" above).
+- `--replay` conflicts with `--record` (`args.rs`'s `conflicts_with`) — replaying and recording
+  the same run at once makes no sense — and combines with `--worktree` the same way `--record`
+  does.
+- `--strict-replay` (only meaningful alongside `--replay`): once the run leaves
+  `Leased`/`Running`, `sched::report_replay_divergences` reads `MockProvider::divergences()` and
+  compares `MockProvider::call_log().len()` against the cassette's own recorded entry count to
+  count calls that ran past the cassette's end (exhaustion — each one already fell through to
+  `ProviderError::Unscripted` and failed on its own). If `--strict-replay` was passed and either
+  count is nonzero, `run_ticket` turns the run's own outcome into a hard error — even when the
+  replayed ticket itself otherwise reached a forward-progress state (an exhausted call already
+  fails the attempt on its own either way; `--strict-replay` additionally makes a *divergence* —
+  which `MockProvider` still serves, not fail — a hard error too). Without `--strict-replay`,
+  both are reported but never turned into a hard error by this function itself.
+- Once the run finishes, `report_replay_divergences` reports the divergence count, the first
+  divergent entry's `seq`, and the unscripted-call count as one `ReplayReport` JSON object under
+  `--json` (`Renderer::emit`), or a one-line human summary otherwise.
+- Without `--replay`, behavior is unchanged: `run_ticket` only takes this path when `args.replay`
+  is `Some`.

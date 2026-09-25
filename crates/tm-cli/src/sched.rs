@@ -464,6 +464,19 @@ const WORKTREE_COMPLETION_GRACE: Duration = Duration::from_secs(30);
 /// cassette written to `path` and stored as the ticket's `ArtifactKind::Transcript` artifact once
 /// the run finishes (see [`write_recording_cassette`]). Without `--record`, behavior is
 /// unchanged.
+///
+/// `--replay <path>` (`docs/decisions/D-028-record-replay-harness.md`, `replay-cli-replay-flag`)
+/// dispatches through [`crate::dispatch::build_dispatcher_with_replay`] instead: the ticket's own
+/// role gets one [`tm_provider::MockProvider`] scripted with
+/// [`tm_provider::MockProvider::script_from_cassette`] and no other candidate is registered, so
+/// the run reaches its outcome purely from `path`'s recorded completions — no network call is
+/// reachable. `--replay` conflicts with `--record` (replaying and recording the same run makes
+/// no sense) and combines with `--worktree` the same way `--record` does. Once the run finishes,
+/// [`report_replay_divergences`] reports how many served requests didn't hash-match what was
+/// recorded at their position, the first such divergence's `seq`, and how many calls ran past the
+/// cassette's last entry (exhaustion); under `--strict-replay`, either one turns the run's own
+/// outcome into a hard error, even when the replayed ticket itself otherwise reached a
+/// forward-progress state.
 pub async fn run_ticket(
     args: &RunArgs,
     project: &Project,
@@ -505,21 +518,45 @@ pub async fn run_ticket(
 
     let (step_tx, mut step_rx) = tokio::sync::mpsc::unbounded_channel();
     let cassette_sink: crate::agent::CassetteSink = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let dispatcher = match &args.record {
-        Some(_) => crate::dispatch::build_dispatcher_with_recording(
+    // `Some((mock, recorded))` under `--replay`: `recorded` is the cassette's own entry count,
+    // read before the cassette is moved into the dispatcher, so `report_replay_divergences` can
+    // tell an exhausted replay (more calls served than `recorded`) from a merely divergent one.
+    let mut replay_mock: Option<(Arc<tm_provider::MockProvider>, usize)> = None;
+    let dispatcher = if let Some(replay_path) = &args.replay {
+        let cassette = Cassette::read_jsonl(replay_path).map_err(|e| {
+            tm_types::TmError::Io(format!(
+                "couldn't read the cassette at {}: {e}",
+                replay_path.display()
+            ))
+        })?;
+        let recorded = cassette.entries.len();
+        let (dispatcher, mock) = crate::dispatch::build_dispatcher_with_replay(
             project,
             tokio::runtime::Handle::current(),
             exec_root,
             Some(step_tx),
             ticket_state.executor.role,
-            cassette_sink.clone(),
-        )?,
-        None => crate::dispatch::build_dispatcher(
-            project,
-            tokio::runtime::Handle::current(),
-            exec_root,
-            Some(step_tx),
-        )?,
+            cassette,
+        )?;
+        replay_mock = Some((mock, recorded));
+        dispatcher
+    } else {
+        match &args.record {
+            Some(_) => crate::dispatch::build_dispatcher_with_recording(
+                project,
+                tokio::runtime::Handle::current(),
+                exec_root,
+                Some(step_tx),
+                ticket_state.executor.role,
+                cassette_sink.clone(),
+            )?,
+            None => crate::dispatch::build_dispatcher(
+                project,
+                tokio::runtime::Handle::current(),
+                exec_root,
+                Some(step_tx),
+            )?,
+        }
     };
     let ttl_seconds = u32::try_from(ticket_state.budget.wall_seconds)
         .unwrap_or(u32::MAX)
@@ -592,6 +629,12 @@ pub async fn run_ticket(
         write_recording_cassette(project, &ticket, path, &cassette_sink, renderer)?;
     }
 
+    let mut replay_error = None;
+    if let Some((mock, recorded)) = &replay_mock {
+        replay_error =
+            report_replay_divergences(&ticket, mock, *recorded, args.strict_replay, renderer)?;
+    }
+
     if let Some(worktree) = worktree {
         finish_worktree_run(
             worktree,
@@ -607,10 +650,16 @@ pub async fn run_ticket(
     match outcome {
         Some(Ok(message)) => {
             renderer.note(&message);
-            Ok(())
+            match replay_error {
+                Some(err) => Err(err),
+                None => Ok(()),
+            }
         }
         Some(Err(err)) => Err(err),
-        None => Ok(()),
+        None => match replay_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        },
     }
 }
 
@@ -664,6 +713,83 @@ fn write_recording_cassette(
         path.display()
     ));
     Ok(())
+}
+
+/// The divergence summary `tm run <ticket> --replay <path>` reports once the run finishes —
+/// [`Renderer::emit`]'s JSON payload under `--json`.
+#[derive(Debug, Clone, Serialize)]
+struct ReplayReport {
+    /// The ticket that was replayed.
+    ticket: String,
+    /// How many served requests didn't hash-match what the cassette recorded at their position.
+    divergence_count: usize,
+    /// The recorded [`tm_provider::CassetteEntry::seq`] of the first divergence, if any.
+    first_divergent_seq: Option<u64>,
+    /// How many calls the run made past the cassette's last recorded entry — each one exhausted
+    /// the ordered replay and fell through to `ProviderError::Unscripted`.
+    unscripted_calls: usize,
+}
+
+/// `tm run <ticket> --replay <path>`'s tail: reports how many requests `mock` served diverged
+/// from what the cassette recorded (`MockProvider::divergences`), and how many ran past the
+/// cassette's `recorded` entries into unscripted territory (`mock.call_log().len() - recorded`,
+/// since every `complete()` call is logged whether it was served from the cassette or fell
+/// through to `Unscripted`), as JSON under `--json` (`ReplayReport`) or a one-line human summary
+/// otherwise.
+///
+/// Returns `Some(TmError)` when `strict` is set and either count is nonzero —
+/// `run_ticket` turns that into a hard error even when the replayed ticket itself otherwise
+/// reached a forward-progress state, per `docs/decisions/D-028-record-replay-harness.md`'s
+/// `--strict-replay` contract ("any divergence or exhaustion is a hard error"). Without `strict`,
+/// both are reported but never fail this function's own return — though an exhausted call still
+/// fails on its own, since `MockProvider` returns a real `Err` for it either way; only a
+/// *diverging* (still-served) call needs `strict` to turn into a failure at all.
+fn report_replay_divergences(
+    ticket: &TicketId,
+    mock: &tm_provider::MockProvider,
+    recorded: usize,
+    strict: bool,
+    renderer: &Renderer,
+) -> tm_types::Result<Option<tm_types::TmError>> {
+    let divergences = mock.divergences();
+    let unscripted_calls = mock.call_log().len().saturating_sub(recorded);
+    let report = ReplayReport {
+        ticket: ticket.to_string(),
+        divergence_count: divergences.len(),
+        first_divergent_seq: divergences.first().map(|d| d.seq),
+        unscripted_calls,
+    };
+    let human = if divergences.is_empty() && unscripted_calls == 0 {
+        format!("Replay of {ticket} matched the recording: no divergences.")
+    } else {
+        let mut parts = Vec::new();
+        if !divergences.is_empty() {
+            parts.push(format!(
+                "differed from the recording at {} call(s) (first at recorded call {})",
+                report.divergence_count,
+                report.first_divergent_seq.unwrap_or_default()
+            ));
+        }
+        if unscripted_calls > 0 {
+            parts.push(format!(
+                "ran {unscripted_calls} call(s) past the end of the recording"
+            ));
+        }
+        format!(
+            "Replay of {ticket} {}. Re-record with `tm run {ticket} --record <path>`, or drop \
+             `--strict-replay` to continue anyway.",
+            parts.join("; ")
+        )
+    };
+    renderer.emit(&report, &human)?;
+    if strict && (!divergences.is_empty() || unscripted_calls > 0) {
+        return Ok(Some(tm_types::TmError::Conflict(format!(
+            "--strict-replay: replay of {ticket} differed from the recording at {} call(s) and \
+             ran {} call(s) past its end",
+            report.divergence_count, unscripted_calls
+        ))));
+    }
+    Ok(None)
 }
 
 /// How one `tm run` attempt ended, read from the ticket once it left `Leased`/`Running`: a
@@ -1599,5 +1725,230 @@ mod tests {
             }
         };
         assert_eq!(stored_bytes, cassette_bytes);
+    }
+
+    // ---- `tm run --replay`: `replay-cli-replay-flag` ----
+
+    /// Records a cassette for `objective` the same way
+    /// `record_writes_a_cassette_and_stores_it_as_a_transcript_artifact` does, writes it to
+    /// `path`, and returns the recorded ticket's role — the caller replays against the same role.
+    async fn record_cassette_for_test(
+        project: &Project,
+        objective: &str,
+        path: &std::path::Path,
+    ) -> tm_types::Role {
+        let ticket = queued_ticket(project, objective);
+        let ticket_state = project.store.view().expect("view").tickets[&ticket].clone();
+        let cassette_sink: crate::agent::CassetteSink = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dispatcher = {
+            let _guard = record_test_env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            std::env::set_var(crate::agent::TEST_MOCK_PROVIDER_ENV, "1");
+            let dispatcher = crate::dispatch::build_dispatcher_with_recording(
+                project,
+                tokio::runtime::Handle::current(),
+                None,
+                None,
+                ticket_state.executor.role,
+                cassette_sink.clone(),
+            );
+            std::env::remove_var(crate::agent::TEST_MOCK_PROVIDER_ENV);
+            dispatcher.expect("dispatcher")
+        };
+        dispatcher
+            .dispatch(&ticket, &ticket_state, 30, project.actor.clone())
+            .expect("dispatch");
+        for _ in 0..500 {
+            let view = project.store.view().expect("view");
+            if !matches!(
+                view.tickets[&ticket].state,
+                tm_core::TicketState::Leased | tm_core::TicketState::Running
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let renderer = Renderer::new(false, true, true, false);
+        write_recording_cassette(project, &ticket, path, &cassette_sink, &renderer)
+            .expect("write recording cassette");
+        ticket_state.executor.role
+    }
+
+    /// `replay-cli-replay-flag`'s acceptance check, first half: record a mock run in tempdir A,
+    /// then replay it (via [`crate::dispatch::build_dispatcher_with_replay`]) against a fresh
+    /// ticket in tempdir B. The replayed run reaches a forward-progress state and
+    /// [`tm_provider::MockProvider::divergences`] is empty — the cassette's path-normalized
+    /// requests still match a freshly built prompt against different tempdir state.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_reruns_a_cassette_with_zero_divergences() {
+        let dir_a = tempfile::tempdir().expect("tempdir a");
+        let project_a = test_project(dir_a.path());
+        let cassette_path = dir_a.path().join("cassette.jsonl");
+        let role =
+            record_cassette_for_test(&project_a, "write the changelog", &cassette_path).await;
+
+        let dir_b = tempfile::tempdir().expect("tempdir b");
+        let project_b = test_project(dir_b.path());
+        let replay_ticket = queued_ticket(&project_b, "write the changelog");
+        let replay_state = project_b.store.view().expect("view").tickets[&replay_ticket].clone();
+        assert_eq!(replay_state.executor.role, role);
+
+        let cassette = Cassette::read_jsonl(&cassette_path).expect("read cassette");
+        let (dispatcher, mock) = crate::dispatch::build_dispatcher_with_replay(
+            &project_b,
+            tokio::runtime::Handle::current(),
+            None,
+            None,
+            role,
+            cassette,
+        )
+        .expect("replay dispatcher");
+        dispatcher
+            .dispatch(&replay_ticket, &replay_state, 30, project_b.actor.clone())
+            .expect("dispatch");
+        for _ in 0..500 {
+            let view = project_b.store.view().expect("view");
+            if !matches!(
+                view.tickets[&replay_ticket].state,
+                tm_core::TicketState::Leased | tm_core::TicketState::Running
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(
+            mock.divergences().is_empty(),
+            "a same-scenario replay should diverge on nothing: {:?}",
+            mock.divergences()
+        );
+    }
+
+    /// `replay-cli-replay-flag`'s acceptance check, second half: a cassette with one mutated
+    /// entry (its `request_hash` no longer matches what will actually be served at that
+    /// position) reports the divergence via [`report_replay_divergences`], and under
+    /// `--strict-replay` that divergence becomes a hard error.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_reports_and_strict_replay_fails_on_a_mutated_cassette_entry() {
+        let dir_a = tempfile::tempdir().expect("tempdir a");
+        let project_a = test_project(dir_a.path());
+        let cassette_path = dir_a.path().join("cassette.jsonl");
+        let role =
+            record_cassette_for_test(&project_a, "write the changelog", &cassette_path).await;
+
+        let mut cassette = Cassette::read_jsonl(&cassette_path).expect("read cassette");
+        assert!(!cassette.entries.is_empty(), "expected a recorded entry");
+        cassette.entries[0].request_hash ^= 1;
+        let recorded = cassette.entries.len();
+
+        let dir_b = tempfile::tempdir().expect("tempdir b");
+        let project_b = test_project(dir_b.path());
+        let replay_ticket = queued_ticket(&project_b, "write the changelog");
+        let replay_state = project_b.store.view().expect("view").tickets[&replay_ticket].clone();
+
+        let (dispatcher, mock) = crate::dispatch::build_dispatcher_with_replay(
+            &project_b,
+            tokio::runtime::Handle::current(),
+            None,
+            None,
+            role,
+            cassette,
+        )
+        .expect("replay dispatcher");
+        dispatcher
+            .dispatch(&replay_ticket, &replay_state, 30, project_b.actor.clone())
+            .expect("dispatch");
+        for _ in 0..500 {
+            let view = project_b.store.view().expect("view");
+            if !matches!(
+                view.tickets[&replay_ticket].state,
+                tm_core::TicketState::Leased | tm_core::TicketState::Running
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert_eq!(
+            mock.divergences().len(),
+            1,
+            "the mutated entry should be the sole divergence"
+        );
+
+        let renderer = Renderer::new(false, true, true, false);
+        let lenient = report_replay_divergences(&replay_ticket, &mock, recorded, false, &renderer)
+            .expect("report divergences");
+        assert!(
+            lenient.is_none(),
+            "without --strict-replay, a divergence is reported, not a hard error"
+        );
+
+        let strict = report_replay_divergences(&replay_ticket, &mock, recorded, true, &renderer)
+            .expect("report divergences");
+        assert!(
+            strict.is_some(),
+            "--strict-replay must turn a recorded divergence into a hard error"
+        );
+    }
+
+    /// `replay-cli-replay-flag`'s acceptance check, exhaustion half: a cassette with its entries
+    /// dropped (every call runs "past the end of the recording") reports `unscripted_calls > 0`
+    /// via [`report_replay_divergences`], and under `--strict-replay` that becomes a hard error
+    /// too, matching D-028's "any divergence or exhaustion is a hard error" `--strict-replay`
+    /// contract.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn replay_reports_and_strict_replay_fails_on_cassette_exhaustion() {
+        let dir_a = tempfile::tempdir().expect("tempdir a");
+        let project_a = test_project(dir_a.path());
+        let cassette_path = dir_a.path().join("cassette.jsonl");
+        let role =
+            record_cassette_for_test(&project_a, "write the changelog", &cassette_path).await;
+
+        let mut cassette = Cassette::read_jsonl(&cassette_path).expect("read cassette");
+        assert!(!cassette.entries.is_empty(), "expected a recorded entry");
+        cassette.entries.clear();
+        let recorded = cassette.entries.len();
+
+        let dir_b = tempfile::tempdir().expect("tempdir b");
+        let project_b = test_project(dir_b.path());
+        let replay_ticket = queued_ticket(&project_b, "write the changelog");
+        let replay_state = project_b.store.view().expect("view").tickets[&replay_ticket].clone();
+
+        let (dispatcher, mock) = crate::dispatch::build_dispatcher_with_replay(
+            &project_b,
+            tokio::runtime::Handle::current(),
+            None,
+            None,
+            role,
+            cassette,
+        )
+        .expect("replay dispatcher");
+        dispatcher
+            .dispatch(&replay_ticket, &replay_state, 30, project_b.actor.clone())
+            .expect("dispatch");
+        for _ in 0..500 {
+            let view = project_b.store.view().expect("view");
+            if !matches!(
+                view.tickets[&replay_ticket].state,
+                tm_core::TicketState::Leased | tm_core::TicketState::Running
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        assert!(
+            !mock.call_log().is_empty(),
+            "the run should have made at least one provider call"
+        );
+
+        let renderer = Renderer::new(false, true, true, false);
+        let strict = report_replay_divergences(&replay_ticket, &mock, recorded, true, &renderer)
+            .expect("report divergences");
+        assert!(
+            strict.is_some(),
+            "--strict-replay must turn cassette exhaustion into a hard error"
+        );
     }
 }
