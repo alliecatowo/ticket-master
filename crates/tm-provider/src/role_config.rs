@@ -41,14 +41,101 @@ impl Limits {
     }
 }
 
-/// Price per token, in micro-dollars, matching [`tm_types::Budget`]'s `dollars_micros` unit.
+/// Price per 1,000,000 tokens, in micro-dollars (matching [`tm_types::Budget`]'s
+/// `dollars_micros` unit) -- **not** per token (`critic-real-prices-and-price-unit`). A
+/// per-token micro-dollar unit floor-divides any sub-$1/M-token rate to 0 once multiplied by a
+/// single token's usage (e.g. $0.20/M = 0.2 micro-dollars/token truncates to 0 in an integer
+/// micros-per-token field), which silently zeroes `tel-completion-cost-field`, `tm stats`
+/// dollars, and budget tier-down for exactly the cheap models this project actually wants
+/// costed. Per-million gives enough fixed-point precision for realistic model prices without
+/// needing a float. [`crate::fabric::cost_micros`] divides back down by 1,000,000 against real
+/// token counts.
+///
+/// Deserializes via [`PriceToml`], which also accepts the old (pre-`critic-real-prices-and-
+/// price-unit`) `input_micros_per_token`/`output_micros_per_token` field names, scaled up by
+/// 1,000,000 — so a `providers.toml`/test fixture written against the old unit still parses to
+/// the same real price instead of erroring or silently misreading; see [`PriceToml`]'s own doc
+/// comment. Serialization (round-tripping a parsed table back to TOML) always emits only the new,
+/// per-million field names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "PriceToml")]
 pub struct Price {
-    /// Micro-dollars per input token.
-    pub input_micros_per_token: u64,
-    /// Micro-dollars per output token.
-    pub output_micros_per_token: u64,
+    /// Micro-dollars per 1,000,000 input tokens.
+    pub input_micros_per_million_tokens: u64,
+    /// Micro-dollars per 1,000,000 output tokens.
+    pub output_micros_per_million_tokens: u64,
 }
+
+/// The on-the-wire shape of a `price` table: either the current per-million field names, or the
+/// legacy per-token names this project used before `critic-real-prices-and-price-unit` (accepted
+/// so an old `providers.toml`/fixture keeps parsing, scaled up by 1,000,000 to the same real
+/// price rather than being silently reinterpreted at the wrong magnitude). Mixing the two families
+/// — or omitting both — is a [`RoleConfigError::InvalidToml`], not a silent default, since a
+/// partial price is worse than none.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PriceToml {
+    #[serde(default)]
+    input_micros_per_million_tokens: Option<u64>,
+    #[serde(default)]
+    output_micros_per_million_tokens: Option<u64>,
+    #[serde(default)]
+    input_micros_per_token: Option<u64>,
+    #[serde(default)]
+    output_micros_per_token: Option<u64>,
+}
+
+impl TryFrom<PriceToml> for Price {
+    type Error = String;
+
+    fn try_from(t: PriceToml) -> Result<Self, Self::Error> {
+        match (
+            t.input_micros_per_million_tokens,
+            t.output_micros_per_million_tokens,
+            t.input_micros_per_token,
+            t.output_micros_per_token,
+        ) {
+            (Some(input), Some(output), None, None) => Ok(Price {
+                input_micros_per_million_tokens: input,
+                output_micros_per_million_tokens: output,
+            }),
+            (None, None, Some(input), Some(output)) => Ok(Price {
+                input_micros_per_million_tokens: input.saturating_mul(1_000_000),
+                output_micros_per_million_tokens: output.saturating_mul(1_000_000),
+            }),
+            _ => Err(
+                "price must set exactly one of (input_micros_per_million_tokens, \
+                 output_micros_per_million_tokens) or the legacy \
+                 (input_micros_per_token, output_micros_per_token), never a mix of both \
+                 families or only one field"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// `claude-opus-5-5`'s published per-1,000,000-token rate ($4 input / $20 output), used to seed
+/// [`RoleTable::default_table_with`] so a project that never hand-edits `providers.toml` still
+/// gets real dollar figures out of `tel-completion-cost-field`/`tm stats`/budget tier-down. A
+/// real `providers.toml` can override it per candidate.
+const OPUS_5_5_PRICE: Price = Price {
+    input_micros_per_million_tokens: 4_000_000,
+    output_micros_per_million_tokens: 20_000_000,
+};
+
+/// `claude-sonnet-5`'s published per-1,000,000-token rate ($2 input / $10 output). See
+/// [`OPUS_5_5_PRICE`]'s doc comment.
+const SONNET_5_PRICE: Price = Price {
+    input_micros_per_million_tokens: 2_000_000,
+    output_micros_per_million_tokens: 10_000_000,
+};
+
+/// `claude-haiku-4-5`'s published per-1,000,000-token rate ($1 input / $5 output). See
+/// [`OPUS_5_5_PRICE`]'s doc comment.
+const HAIKU_4_5_PRICE: Price = Price {
+    input_micros_per_million_tokens: 1_000_000,
+    output_micros_per_million_tokens: 5_000_000,
+};
 
 /// One entry in a role's ordered candidate list: a concrete `(provider, model)` plus its
 /// operating envelope for this role.
@@ -64,7 +151,8 @@ pub struct RoleCandidate {
     /// Whether routing to this candidate counts as a degrade (see [`crate::route::RouteDecision`]).
     #[serde(default)]
     pub degraded_ok: bool,
-    /// Price per token, if known. `None` means cost is not tracked for this candidate.
+    /// Price per 1,000,000 tokens, if known. `None` means cost is not tracked for this
+    /// candidate.
     #[serde(default)]
     pub price: Option<Price>,
     /// Rate/volume limits for this candidate.
@@ -434,9 +522,13 @@ impl RoleTable {
     ///
     /// Provides one primary Anthropic candidate per role (frontier roles use Opus, cheap/fast
     /// roles use Haiku, standard roles use Sonnet). For non-Strict-by-default roles, adds a
-    /// fallback candidate with `degraded_ok = true`. Embedder gets a single embedding-model candidate.
-    /// All candidates use unlimited rate/volume limits and no pricing (pricing is configured
-    /// separately in a real `providers.toml`).
+    /// fallback candidate with `degraded_ok = true`. Embedder gets a single embedding-model
+    /// candidate. All candidates use unlimited rate/volume limits and real per-model pricing
+    /// ([`OPUS_5_5_PRICE`]/[`SONNET_5_PRICE`]/[`HAIKU_4_5_PRICE`], plus a `text-embedding-3-small`
+    /// rate for the embedder), so `tel-completion-cost-field`/`tm stats`/budget tier-down have
+    /// real dollar figures for a project that never hand-edits `providers.toml`
+    /// (`critic-real-prices-and-price-unit`). A project-scoped `providers.toml` can still
+    /// override any of these per candidate.
     ///
     /// **DevPass default preference:** when [`DevPassProvider::preferred_model`] returns
     /// `Some(model)` (all three `DEVPASS_*` env vars set and non-empty), [`Role::CoderFast`]'s
@@ -491,12 +583,17 @@ impl RoleTable {
                 Role::Embedder => {
                     // Anthropic has no embedding endpoint. Use a provider whose declared
                     // capabilities match this role instead of advertising a fictitious model.
+                    // OpenAI's published rate for `text-embedding-3-small` is $0.02 per
+                    // 1,000,000 input tokens; embeddings have no output tokens to price.
                     vec![RoleCandidate {
                         provider: "openai".to_string(),
                         model: "text-embedding-3-small".to_string(),
                         max_concurrency: 100,
                         degraded_ok: false,
-                        price: None,
+                        price: Some(Price {
+                            input_micros_per_million_tokens: 20_000,
+                            output_micros_per_million_tokens: 0,
+                        }),
                         limits: Limits::unlimited(),
                     }]
                 }
@@ -507,7 +604,7 @@ impl RoleTable {
                         model: "claude-haiku-4-5".to_string(),
                         max_concurrency: 50,
                         degraded_ok: false,
-                        price: None,
+                        price: Some(HAIKU_4_5_PRICE),
                         limits: Limits::unlimited(),
                     };
 
@@ -522,7 +619,7 @@ impl RoleTable {
                                 model: "claude-haiku-4-5".to_string(),
                                 max_concurrency: 25,
                                 degraded_ok: true,
-                                price: None,
+                                price: Some(HAIKU_4_5_PRICE),
                                 limits: Limits::unlimited(),
                             },
                         ]
@@ -535,7 +632,7 @@ impl RoleTable {
                         model: "claude-haiku-4-5".to_string(),
                         max_concurrency: 100,
                         degraded_ok: false,
-                        price: None,
+                        price: Some(HAIKU_4_5_PRICE),
                         limits: Limits::unlimited(),
                     };
 
@@ -553,12 +650,16 @@ impl RoleTable {
                         model: "claude-sonnet-5".to_string(),
                         max_concurrency: 20,
                         degraded_ok: false,
-                        price: None,
+                        price: Some(SONNET_5_PRICE),
                         limits: Limits::unlimited(),
                     };
                     if let Some(model) = devpass_model {
                         primary.provider = "devpass".to_string();
                         primary.model = model.to_string();
+                        // DevPass's own rate isn't a published per-token price (it's a
+                        // subscription pass-through), so leave it unpriced rather than
+                        // misreporting Anthropic's direct-API rate for a different provider.
+                        primary.price = None;
                     }
 
                     if tolerance == Tolerance::Strict {
@@ -571,7 +672,7 @@ impl RoleTable {
                                 model: "claude-haiku-4-5".to_string(),
                                 max_concurrency: 50,
                                 degraded_ok: true,
-                                price: None,
+                                price: Some(HAIKU_4_5_PRICE),
                                 limits: Limits::unlimited(),
                             },
                         ]
@@ -584,7 +685,7 @@ impl RoleTable {
                         model: "claude-opus-5-5".to_string(),
                         max_concurrency: 10,
                         degraded_ok: false,
-                        price: None,
+                        price: Some(OPUS_5_5_PRICE),
                         limits: Limits::unlimited(),
                     };
 
@@ -598,7 +699,7 @@ impl RoleTable {
                                 model: "claude-sonnet-5".to_string(),
                                 max_concurrency: 20,
                                 degraded_ok: true,
-                                price: None,
+                                price: Some(SONNET_5_PRICE),
                                 limits: Limits::unlimited(),
                             },
                         ]
@@ -611,7 +712,7 @@ impl RoleTable {
                         model: "claude-sonnet-5".to_string(),
                         max_concurrency: 20,
                         degraded_ok: false,
-                        price: None,
+                        price: Some(SONNET_5_PRICE),
                         limits: Limits::unlimited(),
                     };
 
@@ -625,7 +726,7 @@ impl RoleTable {
                                 model: "claude-haiku-4-5".to_string(),
                                 max_concurrency: 50,
                                 degraded_ok: true,
-                                price: None,
+                                price: Some(HAIKU_4_5_PRICE),
                                 limits: Limits::unlimited(),
                             },
                         ]
@@ -878,7 +979,7 @@ candidates = [
         let toml = r#"
 [coder.fast]
 candidates = [
-  { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 10, degraded_ok = true, price = { input_micros_per_token = 1, output_micros_per_token = 2 } }
+  { provider = "anthropic", model = "claude-sonnet-5", max_concurrency = 10, degraded_ok = true, price = { input_micros_per_million_tokens = 1000000, output_micros_per_million_tokens = 2000000 } }
 ]
 "#;
         let table = RoleTable::parse(toml).expect("valid TOML");
@@ -1150,5 +1251,55 @@ candidates = [
                 token_env: Some("JEV_TOKEN".to_string()),
             }
         );
+    }
+
+    // ---- `Price`'s per-million unit and legacy per-token compat (critic-real-prices-and-price-unit) ----
+
+    #[test]
+    fn price_parses_the_legacy_per_token_field_names_scaled_up_by_a_million() {
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1, price = { input_micros_per_token = 42, output_micros_per_token = 84 } }]\n",
+        )
+        .expect("legacy per-token price field names still parse");
+        let price = table.candidates_for(Role::CoderFast)[0]
+            .price
+            .expect("price present");
+        assert_eq!(
+            price,
+            Price {
+                input_micros_per_million_tokens: 42_000_000,
+                output_micros_per_million_tokens: 84_000_000,
+            },
+            "a legacy per-token value scales up by 1,000,000 to the same real price"
+        );
+    }
+
+    #[test]
+    fn price_rejects_mixing_legacy_and_current_field_names() {
+        let err = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1, price = { input_micros_per_token = 42, output_micros_per_million_tokens = 84000000 } }]\n",
+        )
+        .expect_err("mixing legacy and current price field names must not silently pick one");
+        assert!(matches!(err, RoleConfigError::InvalidToml(_)));
+    }
+
+    #[test]
+    fn price_serializes_only_the_current_per_million_field_names() {
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1, price = { input_micros_per_token = 42, output_micros_per_token = 84 } }]\n",
+        )
+        .expect("legacy per-token price field names still parse");
+        let serialized = table.to_toml_string().expect("serializes");
+        assert!(
+            serialized.contains("input_micros_per_million_tokens"),
+            "round-tripped TOML uses the current field name: {serialized}"
+        );
+        assert!(
+            !serialized.contains("input_micros_per_token ")
+                && !serialized.contains("input_micros_per_token="),
+            "round-tripped TOML must not resurrect the legacy field name: {serialized}"
+        );
+        let reparsed = RoleTable::parse(&serialized).expect("round-tripped TOML reparses");
+        assert_eq!(table, reparsed);
     }
 }

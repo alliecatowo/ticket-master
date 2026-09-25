@@ -176,7 +176,10 @@ fn admit(
     }
 
     if let (Some(ceiling), Some(price)) = (need.max_cost_micros, candidate.price) {
-        let estimated_cost = need.estimated_tokens as u64 * price.output_micros_per_token;
+        // `Price` is per 1,000,000 tokens, not per token (`critic-real-prices-and-price-unit`).
+        let estimated_cost = (need.estimated_tokens as u128
+            * price.output_micros_per_million_tokens as u128
+            / 1_000_000) as u64;
         if estimated_cost > ceiling {
             return Admission::PermanentlyBlocked("over price ceiling");
         }

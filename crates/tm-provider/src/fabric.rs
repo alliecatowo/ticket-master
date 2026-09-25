@@ -106,15 +106,23 @@ pub enum FabricRecord {
     },
 }
 
-/// The real priced cost of a completion, in micro-dollars, given the candidate's per-token
-/// [`Price`] and the [`Completion`]'s actual token [`Usage`] (`tel-completion-cost-field`).
-/// Cache tokens are not separately priced (no candidate configures a cache rate today), so only
-/// `input_tokens`/`output_tokens` count. Saturating rather than wrapping: an absurd token count
-/// from a misbehaving provider should clamp to `u64::MAX`, not silently wrap around to a tiny
-/// number that would then under-charge the ticket's budget.
+/// The real priced cost of a completion, in micro-dollars, given the candidate's
+/// per-1,000,000-token [`Price`] and the [`Completion`]'s actual token [`Usage`]
+/// (`tel-completion-cost-field`). Cache tokens are not separately priced (no candidate configures
+/// a cache rate today), so only `input_tokens`/`output_tokens` count.
+///
+/// [`Price`] is denominated per 1,000,000 tokens, not per token
+/// (`critic-real-prices-and-price-unit`): a per-token micro-dollar unit truncates to 0 for any
+/// model priced under $1/M tokens, silently zeroing this for exactly the cheap models this repo
+/// actually wants costed. The intermediate multiply runs in `u128` (a `u64 * u64` product can
+/// itself already approach `u64::MAX` for a large token count against a normal price) before
+/// dividing back down by 1,000,000, and the final result saturates to `u64::MAX` rather than
+/// wrapping, so an absurd token count from a misbehaving provider clamps instead of silently
+/// wrapping around to a tiny number that would then under-charge the ticket's budget.
 pub fn cost_micros(price: &Price, usage: &Usage) -> u64 {
-    (usage.input_tokens as u64).saturating_mul(price.input_micros_per_token)
-        + (usage.output_tokens as u64).saturating_mul(price.output_micros_per_token)
+    let input = (usage.input_tokens as u128) * (price.input_micros_per_million_tokens as u128);
+    let output = (usage.output_tokens as u128) * (price.output_micros_per_million_tokens as u128);
+    ((input + output) / 1_000_000).min(u64::MAX as u128) as u64
 }
 
 /// A registered provider plus the [`crate::role_config::RoleCandidate`] metadata it was
@@ -600,7 +608,7 @@ mod tests {
         let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
         let table = table_with_candidates(
             "coder_fast",
-            r#"{ provider = "mock", model = "m1", max_concurrency = 1, price = { input_micros_per_token = 42, output_micros_per_token = 84 } }"#,
+            r#"{ provider = "mock", model = "m1", max_concurrency = 1, price = { input_micros_per_million_tokens = 42000000, output_micros_per_million_tokens = 84000000 } }"#,
         );
         let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
 
@@ -617,8 +625,34 @@ mod tests {
             .execute_priced(Role::CoderFast, req())
             .await
             .expect("call succeeds");
-        // completion()'s scripted usage is 10 input + 5 output tokens: 10*42 + 5*84 = 840.
+        // completion()'s scripted usage is 10 input + 5 output tokens:
+        // (10*42_000_000 + 5*84_000_000) / 1_000_000 = 840.
         assert_eq!(cost_micros, Some(840));
+    }
+
+    /// `critic-real-prices-and-price-unit`: a sub-$1/M-token model priced over a realistic token
+    /// count must produce a nonzero cost. A per-token micro-dollar unit would have floored this
+    /// to 0 for any single-token usage, silently zeroing `tel-completion-cost-field`/`tm
+    /// stats`/budget tier-down for exactly the cheap models this repo actually wants costed.
+    #[test]
+    fn cost_micros_prices_a_sub_dollar_per_million_model_over_realistic_usage() {
+        let price = Price {
+            input_micros_per_million_tokens: 42_000,
+            output_micros_per_million_tokens: 84_000,
+        };
+        let usage = Usage {
+            input_tokens: 1_500,
+            output_tokens: 400,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        // (1500*42_000 + 400*84_000) / 1_000_000 = (63_000_000 + 33_600_000) / 1_000_000 = 96.
+        let priced = cost_micros(&price, &usage);
+        assert_eq!(priced, 96);
+        assert!(
+            priced > 0,
+            "a sub-$1/M model over realistic usage must not truncate to zero"
+        );
     }
 
     #[tokio::test]

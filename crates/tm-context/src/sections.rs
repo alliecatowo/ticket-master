@@ -203,9 +203,14 @@ pub fn build_budget(ticket: &Ticket, roles: &RoleTable) -> RawSection {
         match candidate.price {
             None => lines.push(format!("  {label}: subscription/unmetered capacity")),
             Some(price) => {
+                // `Price` is per 1,000,000 tokens, not per token
+                // (`critic-real-prices-and-price-unit`), so divide back down after the
+                // nominal-tokens multiply.
                 let call_micros = NOMINAL_CALL_TOKENS
-                    * (price.input_micros_per_token + price.output_micros_per_token)
-                    / 2;
+                    * (price.input_micros_per_million_tokens
+                        + price.output_micros_per_million_tokens)
+                    / 2
+                    / 1_000_000;
                 if call_micros == 0 {
                     lines.push(format!("  {label}: effectively free"));
                 } else if budget.dollars_micros == u64::MAX {
@@ -1221,7 +1226,7 @@ mod tests {
         let mut ticket = minimal_ticket("T-1", "Task");
         ticket.budget = Budget::new(u64::MAX, 10_000_000, u64::MAX);
         let table = RoleTable::parse(
-            "[coder_fast]\ncandidates = [{ provider = \"anthropic\", model = \"claude\", max_concurrency = 1, price = { input_micros_per_token = 10, output_micros_per_token = 10 } }]\n",
+            "[coder_fast]\ncandidates = [{ provider = \"anthropic\", model = \"claude\", max_concurrency = 1, price = { input_micros_per_million_tokens = 10000000, output_micros_per_million_tokens = 10000000 } }]\n",
         )
         .expect("valid table");
 
