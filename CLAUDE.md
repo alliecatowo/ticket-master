@@ -84,6 +84,10 @@ never drift between sessions:
   `/board`, `/milestones`, `/timeline`, `/deps` (jump straight to that tab of the tickets hub;
   Esc returns to the chat), `/ticket <T>` (prints the ticket's summary inline), `/run <T>`
   (activates and queues it);
+  `/stats` (the `tm stats` per-ticket usage table), `/bench [task]` (lists benchmark tasks, or
+  runs the matching ones), `/events` (the last 20 events), `/replay <path>` (reruns the attached
+  ticket offline from a saved cassette, like `tm run <T> --replay`), `/genesis <prompt>` (starts
+  `tm genesis` in the background);
   quit is Ctrl+C twice, Ctrl+D on an
   empty prompt, or `/exit`. The
   tickets screen is Claude Code's `claude agents` view with tickets as rows
@@ -192,6 +196,14 @@ never drift between sessions:
   cost, tool calls and wall time. Prints to stdout by default; `--out` writes the markdown to a
   file instead. The rendering (`crates/tm-cli/src/bench_report.rs`) is a pure function of the
   parsed report.
+- `tm bench run --live` drives each matched task through a real ticket run instead of replaying a
+  fixed script: it copies the task's fixture into a scratch directory with a fresh git history,
+  creates and activates a worker ticket, runs it through the same dispatcher `tm run` uses, then
+  scores the task by actually running its `test_command`. A cassette is recorded next to the
+  run's own report, and real cost/tool-call/token numbers replace the scripted path's
+  byte-length proxy. Slower, non-deterministic, and a real provider call unless
+  `TM_TEST_MOCK_PROVIDER=1` is set; never part of `mise run verify`. See
+  `docs/decisions/D-032-live-benchmark-mode.md`.
 
 `tm-codeintel`'s semantic search can now use real Potion static embeddings
 (`minishlab/potion-code-16M-v2`, via `model2vec-rs`) instead of the hash stand-in, but only
