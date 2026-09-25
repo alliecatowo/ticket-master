@@ -15,7 +15,7 @@ use tm_types::{Clock, Result};
 
 use crate::chunk::Chunker;
 use crate::embed::{Embedder, LocalHashEmbedder};
-use crate::exact::{ExactSearch, ExactSearchResult};
+use crate::exact::{ExactSearch, ExactSearchResult, SearchOptions};
 use crate::history::HistoryIndex;
 use crate::hybrid::{
     hybrid, semantic_ranking, Query, RankedHit, RetrievalContext, Signal, SignalRanking,
@@ -354,6 +354,27 @@ impl CodeIntel {
     /// Regex search. Thin pass-through to [`ExactSearch`].
     pub fn search_regex(&self, pattern: &str) -> Result<ExactSearchResult> {
         ExactSearch::new(&self.project_root).regex(pattern)
+    }
+
+    /// Literal substring search bounded by `options` (a result-count limit and optional
+    /// `path_glob`), for callers that hand results to a model rather than a human — an agent
+    /// tool or the MCP server — where an unbounded [`CodeIntel::search_exact`] can be tens of
+    /// thousands of tokens of `line_text` for one query on a real repo.
+    pub fn search_exact_with(
+        &self,
+        needle: &str,
+        options: &SearchOptions,
+    ) -> Result<ExactSearchResult> {
+        ExactSearch::new(&self.project_root).literal_with(needle, options)
+    }
+
+    /// Regex search bounded by `options`. See [`CodeIntel::search_exact_with`].
+    pub fn search_regex_with(
+        &self,
+        pattern: &str,
+        options: &SearchOptions,
+    ) -> Result<ExactSearchResult> {
+        ExactSearch::new(&self.project_root).regex_with(pattern, options)
     }
 
     /// Semantic vector search over the current index. Thin pass-through to

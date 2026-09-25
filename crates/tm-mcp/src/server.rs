@@ -80,12 +80,13 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "search_exact",
-            "description": "Literal substring search over the project's tracked files.",
+            "description": "Literal substring search over the project's tracked files. Returns at most `limit` hits (default 20, max 200); when truncated, narrow the query or pass path_glob.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1}
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "path_glob": {"type": "string", "description": "Only search files whose path matches this glob, e.g. \"crates/tm-cli/**\"."}
                 },
                 "required": ["query"]
             }
@@ -104,12 +105,13 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "search_regex",
-            "description": "Regex search over the project's tracked files.",
+            "description": "Regex search over the project's tracked files. Returns at most `limit` hits (default 20, max 200); when truncated, narrow the query or pass path_glob.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "A regular expression."},
-                    "limit": {"type": "integer", "minimum": 1}
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "path_glob": {"type": "string", "description": "Only search files whose path matches this glob, e.g. \"crates/tm-cli/**\"."}
                 },
                 "required": ["query"]
             }
@@ -283,6 +285,45 @@ fn get_limit(args: &Value) -> usize {
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(DEFAULT_LIMIT)
+}
+
+/// Build a `search_exact`/`search_regex` options struct from MCP call args: `limit` (default
+/// [`DEFAULT_LIMIT`], clamped to `tm_codeintel::MAX_RESULT_LIMIT`) and `path_glob`.
+fn exact_search_options(args: &Value) -> tm_codeintel::SearchOptions {
+    tm_codeintel::SearchOptions {
+        limit: get_limit(args).min(tm_codeintel::MAX_RESULT_LIMIT),
+        path_glob: args
+            .get("path_glob")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
+/// Render a `search_exact`/`search_regex` result the way this server hands it back over MCP:
+/// capped hits, plus a hint when truncated so the caller knows to narrow the query or pass
+/// `path_glob` rather than assume it saw everything.
+fn exact_search_result_json(result: &tm_codeintel::ExactSearchResult) -> Value {
+    let hits: Vec<Value> = result
+        .hits
+        .iter()
+        .map(|h| {
+            json!({
+                "path": h.path,
+                "line": h.line,
+                "col": h.col,
+                "line_text": h.line_text,
+            })
+        })
+        .collect();
+    let mut value = json!({
+        "hits": hits,
+        "truncated": result.truncated,
+        "total_seen": result.total_seen,
+    });
+    if result.truncated {
+        value["hint"] = json!("narrow the query or pass path_glob");
+    }
+    value
 }
 
 fn get_str<'a>(args: &'a Value, field: &str) -> Result<&'a str> {
@@ -560,23 +601,10 @@ impl McpServer {
 
     fn search_exact(&self, args: &Value) -> Result<Value> {
         let query = get_str(args, "query")?;
-        let limit = get_limit(args);
+        let options = exact_search_options(args);
         let code_intel = self.code_intel()?;
-        let result = code_intel.search_exact(query)?;
-        let hits: Vec<Value> = result
-            .hits
-            .iter()
-            .take(limit)
-            .map(|h| {
-                json!({
-                    "path": h.path,
-                    "line": h.line,
-                    "col": h.col,
-                    "line_text": h.line_text,
-                })
-            })
-            .collect();
-        Ok(json!({ "hits": hits, "truncated": result.truncated }))
+        let result = code_intel.search_exact_with(query, &options)?;
+        Ok(exact_search_result_json(&result))
     }
 
     fn search_hybrid(&self, args: &Value) -> Result<Value> {
@@ -649,23 +677,10 @@ impl McpServer {
 
     fn search_regex(&self, args: &Value) -> Result<Value> {
         let pattern = get_str(args, "query")?;
-        let limit = get_limit(args);
+        let options = exact_search_options(args);
         let code_intel = self.code_intel()?;
-        let result = code_intel.search_regex(pattern)?;
-        let hits: Vec<Value> = result
-            .hits
-            .iter()
-            .take(limit)
-            .map(|h| {
-                json!({
-                    "path": h.path,
-                    "line": h.line,
-                    "col": h.col,
-                    "line_text": h.line_text,
-                })
-            })
-            .collect();
-        Ok(json!({ "hits": hits, "truncated": result.truncated }))
+        let result = code_intel.search_regex_with(pattern, &options)?;
+        Ok(exact_search_result_json(&result))
     }
 
     fn search_semantic(&self, args: &Value) -> Result<Value> {
@@ -1360,6 +1375,50 @@ mod tests {
             hits.iter().any(|h| h["path"] == "lib.rs"),
             "expected a match in lib.rs: {out}"
         );
+    }
+
+    #[test]
+    fn search_exact_honors_limit_and_reports_truncation() {
+        let (server, workspace, _state_dir) = open_git_test_server();
+        for i in 0..30 {
+            std::fs::write(
+                workspace.path().join(format!("f{i}.txt")),
+                "mcp_cap_marker\n",
+            )
+            .expect("write fixture file");
+        }
+        let result = call(
+            &server,
+            "search_exact",
+            json!({"query": "mcp_cap_marker", "limit": 5}),
+        );
+        assert_eq!(result["isError"], false, "{result}");
+        let out = payload(&result);
+        assert_eq!(out["hits"].as_array().expect("hits array").len(), 5);
+        assert_eq!(out["truncated"], json!(true));
+        assert_eq!(out["total_seen"], json!(30));
+        assert!(out["hint"].as_str().unwrap().contains("path_glob"));
+    }
+
+    #[test]
+    fn search_exact_path_glob_filters_hits() {
+        let (server, workspace, _state_dir) = open_git_test_server();
+        std::fs::create_dir_all(workspace.path().join("nested")).expect("mkdir");
+        std::fs::write(workspace.path().join("nested/marker.txt"), "glob_marker\n")
+            .expect("write nested fixture");
+        std::fs::write(workspace.path().join("root_marker.txt"), "glob_marker\n")
+            .expect("write root fixture");
+
+        let result = call(
+            &server,
+            "search_exact",
+            json!({"query": "glob_marker", "path_glob": "nested/**"}),
+        );
+        assert_eq!(result["isError"], false, "{result}");
+        let out = payload(&result);
+        let hits = out["hits"].as_array().expect("hits array");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["path"], "nested/marker.txt");
     }
 
     #[test]

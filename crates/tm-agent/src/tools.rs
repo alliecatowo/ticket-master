@@ -44,7 +44,10 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use tm_codeintel::semantic::SemanticSearchOptions;
-use tm_codeintel::{CodeIntel, Query, Reference, RetrievalContext, SignalWeights, Symbol};
+use tm_codeintel::{
+    CodeIntel, Query, Reference, RetrievalContext, SearchOptions as ExactSearchOptions,
+    SignalWeights, Symbol, DEFAULT_RESULT_LIMIT, MAX_RESULT_LIMIT,
+};
 use tm_context::command::{
     self, ArtifactStream, CommandCache, CommandExecutor, CommandSpec, Query as CommandQuery,
     QueryAnswer,
@@ -490,6 +493,33 @@ fn get_u64_or(input: &Value, field: &str, default: u64) -> u64 {
 
 fn get_bool_or(input: &Value, field: &str, default: bool) -> bool {
     input.get(field).and_then(Value::as_bool).unwrap_or(default)
+}
+
+/// Build a [`ExactSearchOptions`] for `search.exact`/`search.regex` from tool input: `limit`
+/// (default [`DEFAULT_RESULT_LIMIT`], clamped to [`MAX_RESULT_LIMIT`]) and `path_glob`.
+fn exact_search_options_from(input: &Value) -> ExactSearchOptions {
+    let limit = get_u64_or(input, "limit", DEFAULT_RESULT_LIMIT as u64) as usize;
+    ExactSearchOptions {
+        limit: limit.min(MAX_RESULT_LIMIT),
+        path_glob: get_opt_string(input, "path_glob"),
+    }
+}
+
+/// Render an [`tm_codeintel::ExactSearchResult`] the way `search.exact`/`search.regex` hand it
+/// to the model: capped, clipped `line_text`, plus a hint when the result was cut so the model
+/// knows to narrow the query rather than assume it saw everything.
+fn exact_search_result_json(result: &tm_codeintel::ExactSearchResult) -> Value {
+    let mut value = json!({
+        "truncated": result.truncated,
+        "total_seen": result.total_seen,
+        "hits": result.hits.iter().map(|h| json!({
+            "path": h.path, "line": h.line, "col": h.col, "line_text": h.line_text,
+        })).collect::<Vec<_>>(),
+    });
+    if result.truncated {
+        value["hint"] = json!("narrow the query or pass path_glob");
+    }
+    value
 }
 
 fn get_string_vec(input: &Value, field: &str) -> Result<Vec<String>> {
@@ -994,23 +1024,15 @@ impl BuiltinCapability {
             }
             ToolName::SearchExact => {
                 let needle = get_str(input, "query")?;
-                let result = self.ci.search_exact(needle)?;
-                Ok(json!({
-                    "truncated": result.truncated,
-                    "hits": result.hits.iter().map(|h| json!({
-                        "path": h.path, "line": h.line, "col": h.col, "line_text": h.line_text,
-                    })).collect::<Vec<_>>(),
-                }))
+                let options = exact_search_options_from(input);
+                let result = self.ci.search_exact_with(needle, &options)?;
+                Ok(exact_search_result_json(&result))
             }
             ToolName::SearchRegex => {
                 let pattern = get_str(input, "pattern")?;
-                let result = self.ci.search_regex(pattern)?;
-                Ok(json!({
-                    "truncated": result.truncated,
-                    "hits": result.hits.iter().map(|h| json!({
-                        "path": h.path, "line": h.line, "col": h.col, "line_text": h.line_text,
-                    })).collect::<Vec<_>>(),
-                }))
+                let options = exact_search_options_from(input);
+                let result = self.ci.search_regex_with(pattern, &options)?;
+                Ok(exact_search_result_json(&result))
             }
             ToolName::SearchHybrid => {
                 let text = get_string(input, "query")?;
@@ -1549,10 +1571,14 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::SearchExact.as_str(),
-                description: "Literal substring search over the working tree.",
+                description: "Literal substring search over the working tree. Returns at most `limit` hits (default 50, max 200); when truncated, narrow the query or pass path_glob.",
                 input_schema: json!({
                     "type": "object",
-                    "properties": {"query": {"type": "string"}},
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer", "description": "Max hits to return (default 50, max 200)."},
+                        "path_glob": {"type": "string", "description": "Only search files whose path matches this glob, e.g. \"crates/tm-cli/**\"."}
+                    },
                     "required": ["query"]
                 }),
                 cost: CostClass::Cheap,
@@ -1560,10 +1586,14 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::SearchRegex.as_str(),
-                description: "Regular-expression search over the working tree.",
+                description: "Regular-expression search over the working tree. Returns at most `limit` hits (default 50, max 200); when truncated, narrow the query or pass path_glob.",
                 input_schema: json!({
                     "type": "object",
-                    "properties": {"pattern": {"type": "string"}},
+                    "properties": {
+                        "pattern": {"type": "string"},
+                        "limit": {"type": "integer", "description": "Max hits to return (default 50, max 200)."},
+                        "path_glob": {"type": "string", "description": "Only search files whose path matches this glob, e.g. \"crates/tm-cli/**\"."}
+                    },
                     "required": ["pattern"]
                 }),
                 cost: CostClass::Cheap,
@@ -3587,6 +3617,64 @@ mod tests {
         match outcome {
             ToolOutcome::Completed { result, .. } => {
                 assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn search_exact_caps_hits_at_default_limit_and_reports_truncation() {
+        let h = Harness::new();
+        for i in 0..80 {
+            std::fs::write(h.root().join(format!("f{i}.txt")), "needle_for_cap_test\n").unwrap();
+        }
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("search.exact", json!({"query": "needle_for_cap_test"})),
+                &h.ctx(),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Completed { result, .. } => {
+                assert_eq!(
+                    result["hits"].as_array().unwrap().len(),
+                    DEFAULT_RESULT_LIMIT
+                );
+                assert_eq!(result["truncated"], json!(true));
+                assert_eq!(result["total_seen"], json!(80));
+                assert!(result["hint"].as_str().unwrap().contains("path_glob"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn search_exact_honors_limit_and_path_glob() {
+        let h = Harness::new();
+        std::fs::create_dir_all(h.root().join("crates/tm-cli")).unwrap();
+        std::fs::create_dir_all(h.root().join("crates/tm-core")).unwrap();
+        std::fs::write(h.root().join("crates/tm-cli/a.rs"), "provider_marker\n").unwrap();
+        std::fs::write(h.root().join("crates/tm-core/b.rs"), "provider_marker\n").unwrap();
+
+        let outcome = h
+            .registry
+            .dispatch(
+                &call(
+                    "search.exact",
+                    json!({"query": "provider_marker", "limit": 10, "path_glob": "crates/tm-cli/**"}),
+                ),
+                &h.ctx(),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Completed { result, .. } => {
+                let hits = result["hits"].as_array().unwrap();
+                assert_eq!(hits.len(), 1);
+                assert!(hits[0]["path"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("crates/tm-cli/"));
             }
             other => panic!("expected Completed, got {other:?}"),
         }

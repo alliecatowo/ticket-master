@@ -63,7 +63,9 @@ pub mod api;
 pub use api::CodeIntel;
 pub use chunk::{Chunk, ChunkRange, Chunker};
 pub use embed::{cosine_similarity, Embedder, LocalHashEmbedder};
-pub use exact::{ExactSearch, Hit};
+pub use exact::{
+    ExactSearch, ExactSearchResult, Hit, SearchOptions, DEFAULT_RESULT_LIMIT, MAX_RESULT_LIMIT,
+};
 pub use history::{CoChange, HistoryIndex, WhyAnswer};
 pub use hybrid::{Query, RankedHit, RetrievalContext, SignalContribution, SignalWeights};
 pub use semantic::{ScoredChunk, SemanticSearch};
