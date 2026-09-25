@@ -1191,7 +1191,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: A mis-quoted subcommand (`tm "acp --help"`) returned `error: the following required arguments were not provided: --prompt  Usage: tm --prompt <TEXT>`, which is confusing wording for the most natural invocation.
 
-- [~] **u1-bench-cross-stdin-closed** — Cross-tool bench: run external CLIs with stdin closed; report tm's tokens and each tool's model (needs another pass: the worker made no changes)
+- [ ] **u1-bench-cross-stdin-closed**
   model: sonnet · severity: medium · builds Rust: yes · area: bench · deps: none
   files: `crates/xtask/src/bench_cross.rs`
   change: `opencode run` hung for the full 300s timeout when stdin was an open pipe, and passed in 14s with `< /dev/null`. `claude -p` printed "no stdin data received in 3s". In each `ToolAdapter::run`, spawn with `Stdio::null()` for stdin. Also record per-tool `model` and `tokens`/`cost` where the tool reports them (claude `--output-format json` usage/total_cost_usd, tm `--json -p` tokens), so the report isn't model-confounded without saying so.
@@ -1199,7 +1199,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- xtask`
   evidence: /tmp/tm-audit/h2h/results.txt: `opencode rc=124 wall=302.2s FAIL`, then the rerun with `< /dev/null`: `rc=0 wall=14s OK`.
 
-- [~] **u1-init-builds-index** — Build the code index during `tm init` (with a progress line) so the first search/doctor/run isn't a silent 60s stall (needs another pass: the worker made no changes)
+- [ ] **u1-init-builds-index**
   model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: u1-wire-potion-embedder
   files: `crates/tm-cli/src/project.rs`
   change: `tm init` on this repo takes 0s and builds no index. The first `tm doctor` took 57s ("repaired incremental drift: 634 added ... 3146 chunks"), and a first `tm run` pays the same cost inside the attempt. After creating the project, run `update_incremental` with a one-line progress/summary ("Indexed 634 files in 41s"). Add `--no-index` to skip.
@@ -1207,7 +1207,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/self: `init took 0s`, `doctor 57s`.
 
-- [~] **u1-context-cost-report** — Show per-step context size in `tm stats --by tool`/`tm ticket show` so context blowups are visible (needs another pass: the worker made no changes)
+- [ ] **u1-context-cost-report**
   model: sonnet · severity: medium · builds Rust: yes · area: telemetry · deps: u1-worker-submit-nudge
   files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-events/src/payload.rs`, `crates/tm-cli/src/stats.rs`
   change: `tool_call.completed` records the tool name and duration but not the result size, so finding which tool call blew the context up needed a manual correlation with `usage.recorded`. Add `result_bytes` (and `truncated: bool`) to the `tool_call.completed` payload (an optional field, so old logs still replay), and add a `Result KB` column and a `Max request tokens` column to `tm stats --by tool`/`--by ticket`.
@@ -1215,7 +1215,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-events && mise run test:crate -- tm-cli`
   evidence: The dogfood forensics needed `sqlite3 .tm/project.db` to see that 18 calls cost 1.03M tokens. `tm stats` only showed `T-1 S-2 18 1025330 not priced 203`.
 
-- [~] **u1-record-flush-incremental** — `tm run --record` must write the cassette incrementally so a killed or timed-out run still leaves one (needs another pass: the worker made no changes)
+- [ ] **u1-record-flush-incremental**
   model: sonnet · severity: medium · builds Rust: yes · area: replay · deps: none
   files: `crates/tm-provider/src/cassette.rs`
   change: `tm run T-2 --record /tmp/x.cassette` killed by SIGTERM at a 580s bound left no file at all. Make the recording provider append each entry as it happens (JSONL, header first, fsync per entry or per N entries), and have the reader accept a cassette without a footer or with a truncated last line (treat it as ended at the last complete entry). Keep the file format backward compatible for reading.
@@ -1223,7 +1223,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-provider`
   evidence: /tmp/tm-audit/dogfood3.log ends `TIMEOUT after 580s / EXIT 124`, and `ls /tmp/tm-audit/dog2.cassette` gives No such file.
 
-- [~] **u1-run-sigterm-releases-lease** — On SIGINT/SIGTERM, `tm run` should release its lease and record an interrupted attempt instead of leaving the ticket `active` (needs another pass: the worker made no changes)
+- [ ] **u1-run-sigterm-releases-lease**
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: u1-run-progress-shows-args
   files: `crates/tm-cli/src/agent.rs`, `crates/tm-cli/src/sched.rs`
   change: After `tm run T-2` was killed with SIGTERM, `tm ticket list` still shows `T-2 work active`. Install a signal handler (tokio::signal) for the foreground run. On the first signal, cancel the agent loop, append an attempt failure (`interrupted by user`), release the lease (so the ticket returns to Ready through the existing retry path), and exit 130. On a second signal, exit immediately. Confirm first where the foreground run loop lives (grep `fn run_ticket` in crates/tm-cli/src) and adjust `files:` if it's elsewhere.
@@ -1231,7 +1231,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: The dogfood T-2 kill left `T-2 work active 0 - In crates/tm-cli/src/project.rs, ...` in `tm ticket list`.
 
-- [~] **u1-hub-shortcuts-panel-tabs** — List Tab/Shift+Tab (switch view) in the tickets screen's `?` panel, and fix the misleading "enter to collapse" footer hint (needs another pass: the worker made no changes)
+- [ ] **u1-hub-shortcuts-panel-tabs**
   model: haiku · severity: low · builds Rust: yes · area: tui · deps: u1-hub-board-display-labels
   files: `crates/tm-tui/src/screens/tickets.rs`
   change: The tickets screen's `?` panel lists `ctrl+b open the Kanban board`, but not Tab/Shift+Tab, which `tab_cycle_key` (crates/tm-cli/src/tui.rs:618) binds to cycle Tickets/Board/Milestones/Timeline/Graph. The footer says "enter to collapse" while the dispatch input has focus and there are no tickets. Add a `tab / shift+tab  switch view` row, and make the footer hint depend on focus ("enter to dispatch" when the input is non-empty or the list is empty).
@@ -1239,7 +1239,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-tui`
   evidence: The TUI trial: the `?` panel on the tickets screen had no Tab row, and the footer said `enter to collapse · esc to go back` on an empty list.
 
-- [~] **u1-tui-overlay-swallows-quit** — Ctrl+C twice must quit from any overlay (shortcuts panel, peek), as it does from the base screen (needs another pass: the worker made no changes)
+- [ ] **u1-tui-overlay-swallows-quit**
   model: haiku · severity: low · builds Rust: yes · area: tui · deps: u1-chat-header-unusable-model
   files: `crates/tm-cli/src/tui.rs`
   change: With the tickets screen's `?` panel open, Ctrl+C, Ctrl+C left the TUI running with the panel still open. Route Ctrl+C to the app-level quit handler (first press closes the overlay and arms quit, second press quits) before overlay key handling.
@@ -1247,7 +1247,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: The TUI trial: after `?` then Ctrl+C twice, `getContent` still showed the Shortcuts panel. Later, after Esc from the board back to the chat, Ctrl+C twice also left the chat open, and only Ctrl+D quit.
 
-- [~] **u1-history-why-no-commits-copy** — `tm history why <file>` says "repository may be corrupted" for an untracked file or a repo with no history (needs another pass: the worker made no changes)
+- [ ] **u1-history-why-no-commits-copy**
   model: haiku · severity: low · builds Rust: yes · area: cli-ux · deps: u1-wire-potion-embedder
   files: `crates/tm-codeintel/src/history.rs`, `crates/tm-cli/src/search.rs`
   change: Map the "file has no commits / unborn HEAD / untracked" cases to "todo.py has no git history yet (it isn't committed)". Keep "may be corrupted" only for real git2 corruption errors.
@@ -1255,7 +1255,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-codeintel && mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/chatgen: `tm history why todo.py` gave `error: storage: Unable to read file history — repository may be corrupted.`
 
-- [~] **u1-genesis-resume-checks-snapshot-first** — `tm genesis --resume` with no snapshot should say so before demanding a provider (needs another pass: the worker made no changes)
+- [ ] **u1-genesis-resume-checks-snapshot-first**
   model: haiku · severity: low · builds Rust: yes · area: genesis · deps: u1-genesis-activates-its-graph
   files: `crates/tm-cli/src/project.rs`
   change: `tm genesis --resume` in a project that never ran genesis errors with `provider: ANTHROPIC_API_KEY is not set ... no local model provider is reachable`. Resolve the snapshot first and fail with "No stopped genesis run to resume here. Start one with `tm genesis --prompt \"…\"`."
@@ -1263,7 +1263,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/chatgen: `tm genesis --resume` gave the provider error.
 
-- [~] **u1-mcp-protocol-version** — `tm mcp` should negotiate the client's protocol version (2025-06-18) rather than always answering 2024-11-05 (needs another pass: the worker made no changes)
+- [ ] **u1-mcp-protocol-version**
   model: haiku · severity: low · builds Rust: yes · area: mcp · deps: u1-wire-potion-embedder
   files: `crates/tm-mcp/src/server.rs`
   change: `PROTOCOL_VERSION` is hard-coded to "2024-11-05" (tm-mcp server.rs:53; client.rs:23 and capability.rs:178 are the client side, leave them). `initialize` with `protocolVersion:"2025-06-18"` got `"protocolVersion":"2024-11-05"` back. Echo the client's version when it is one tm supports (2024-11-05, 2025-03-26, 2025-06-18); otherwise answer the latest supported. Keep newline-delimited framing.
@@ -1271,7 +1271,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: The `tm mcp` stdio trial, first response line.
 
-- [~] **u1-workflow-list-copy** — `tm workflow list` header `NAME NODES PARAMS 1X1?` and empty state; `tm templates list` empty state (needs another pass: the worker made no changes)
+- [ ] **u1-workflow-list-copy**
   model: haiku · severity: low · builds Rust: yes · area: cli-ux · deps: u1-provider-table-follows-env, u1-hygiene-spec-refs-in-user-strings
   files: `crates/tm-cli/src/workflow.rs`, `crates/tm-cli/src/ops.rs`
   change: With no workflows, print "No workflows yet. Starters: `tm workflow new --from <starter>`" (list the real starters) instead of a bare header, and rename the `1X1?` column to `Single-ticket`. `tm templates list` prints `No templates declared in /…/templates.toml`. Instead, list the built-in template catalog (B21) and say where to add project templates.
@@ -1279,7 +1279,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/chatgen outputs of `tm workflow list` and `tm templates list`.
 
-- [~] **u1-cli-help-global-flags-once** — Stop repeating the 5 global flags in every subcommand's `--help` (needs another pass: the worker made no changes)
+- [ ] **u1-cli-help-global-flags-once**
   model: sonnet · severity: low · builds Rust: yes · area: cli-ux · deps: u1-bare-text-starts-chat
   files: `crates/tm-cli/src/args.rs`
   change: Every subcommand help (`tm ticket new --help`, `tm run --help`, ...) lists `--json --quiet --no-color --plain --project` with their full paragraphs, pushing the command's own options off screen. Keep them `global = true`, but put them under a separate `help_heading = "Global options"` and shorten their text (e.g. `--project <PATH>  Use this project root`), with the long form only in `tm --help`.
@@ -1287,7 +1287,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: `tm run --help` / `tm ticket new --help` output in the audit: the global flags' 2-3 line paragraphs are mixed in with `--worktree`/`--record`.
 
-- [~] **u1-fix-false-codeintel-docs** — Correct the doc comments and docs that claim Potion is used on real paths (needs another pass: the worker made no changes)
+- [ ] **u1-fix-false-codeintel-docs**
   model: haiku · severity: low · builds Rust: yes · area: docs · deps: u1-wire-potion-embedder
   files: `crates/tm-codeintel/src/embed.rs`, `crates/tm-codeintel/src/lib.rs`, `docs/decisions/D-025-potion-semantic-embedder.md`
   change: After u1-wire-potion-embedder lands, reconcile embed.rs:222 ("which real command paths use"), lib.rs:12, and D-025's "What this costs" with the new call sites and the embedder-id re-embed behaviour.
@@ -1295,7 +1295,7 @@ Gate: `mise run verify`
   test: `mise run hygiene`
   evidence: embed.rs:222 claims real command paths use `open_auto`, but no caller exists.
 
-- [~] **u1-bench-cross-permission-flags** — Cross-tool bench: run each competitor headless with its no-prompt mode, only inside the throwaway task copy (needs another pass: the worker made no changes)
+- [ ] **u1-bench-cross-permission-flags**
   model: sonnet · severity: high · builds Rust: yes · area: bench · deps: u1-bench-cross-stdin-closed
   files: `crates/xtask/src/bench_cross.rs`
   change: The claude/codex/opencode adapters pass no permission flags, so headless runs stall or get refused and tm wins by default. Add `--permission-mode bypassPermissions` to `claude -p`, `--sandbox workspace-write` to `codex exec`, and OpenCode's non-interactive auto-approve flag (check `opencode run --help`). Always set the working dir to the per-task scratch copy, never the repo.
@@ -1303,7 +1303,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- xtask`
   evidence: docs/audits/2026-09-25-bench-plan.md "Required fixes", item 0.
 
-- [~] **u1-bench-cross-model-timeout-cost** — Cross-tool bench: pin one model per cohort across tools, a per-task timeout and a cost cap (needs another pass: the worker made no changes)
+- [ ] **u1-bench-cross-model-timeout-cost**
   model: sonnet · severity: high · builds Rust: yes · area: bench · deps: u1-bench-cross-permission-flags
   files: `crates/xtask/src/bench_cross.rs`
   change: Add `--model <provider/model>` passthrough (claude `--model`, codex `-m`, opencode `-m`, tm via a scratch `providers.toml` role candidate), `--task-timeout <secs>` (kill the process group; mark TIMEOUT) and `--max-cost-usd` (stop scheduling new tasks once reported spend reaches it). Record the tool versions (`--version`) in the report.
@@ -1311,7 +1311,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- xtask`
   evidence: docs/audits/2026-09-25-bench-plan.md "Required fixes", items 1-3.
 
-- [~] **u1-bench-polyglot-subset** — Vendor a 20-exercise Aider Polyglot subset as bench tasks (needs another pass: the worker made no changes)
+- [ ] **u1-bench-polyglot-subset**
   model: sonnet · severity: medium · builds Rust: no · area: bench · deps: none
   files: `bench/tasks/polyglot-*.toml`, `bench/fixtures/polyglot-*/`
   change: Per docs/audits/2026-09-25-bench-plan.md Track A: 20 exercises across Python/JS/Go/Rust, each fixture with the stub and the tests and a task TOML in the existing bench/tasks format (copy py-binary-search-bound.toml's shape). Record the upstream commit and licence in a bench/fixtures/POLYGLOT-SOURCE.md.
@@ -1401,42 +1401,42 @@ is based on.
 
 ## V — Found by trials and audits
 
-- [~] **t20260925-1314-BurntSushi-ripgrep-3376-recover-without-repeating-agent-investigation** — Preserve findings and vary strategy when a model ends without submitting (needs another pass: the worker made no changes)
+- [ ] **t20260925-1314-BurntSushi-ripgrep-3376-recover-without-repeating-agent-investigation**
   model: sonnet · severity: high · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/executor.rs`, `crates/tm-agent/src/agent_loop.rs`
   change: When a ticketed model turn ends without submission, include concise prior findings in the retry context and detect repeated tool/file reads; after a repeated no-progress attempt, ask for a targeted reproduction or produce a specific diagnosis instead of restarting the same investigation.
   acceptance: A simulated no-submit ticket whose next attempt repeats the same file reads is steered to a different action or stops with a user-actionable explanation, while normal retries continue to work.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260925-1314/BurntSushi-ripgrep-3376/tm.log` lines 5-37 and 58-82 show repeated reads of `walk.rs`/`dir.rs` followed by the identical no-submit failure; `tm events tail --from 0` shows two sessions and retry scheduling (events 164-176, 287-294).
-- [~] **t20260925-1314-gohugoio-hugo-15360-actionable-tool-errors** — Make tool-call error messages actionable during `tm run` (needs another pass: the worker made no changes)
+- [ ] **t20260925-1314-gohugoio-hugo-15360-actionable-tool-errors**
   model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/agent.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: Extend `plain_tool_error` and its progress rendering to preserve a concise safe diagnostic and identify an actionable recovery step, especially for invariant and parse failures, instead of reducing them to generic phrases.
   acceptance: When a tool call fails with an invariant or parse error, `tm run` output names the failed operation and suggests a concrete next action, while detailed diagnostics remain available in logs; add focused tests for both cases.
   test: `cargo test -p tm-cli plain_tool_error`
   evidence: `/tmp/tm-trials/20260925-1314/gohugoio-hugo-15360/tm.log` lines 96-98: “Submitted the ticket -> error: hit an unexpected internal problem”, “Saved a result -> error: got a response it couldn't understand”, then “Saved a result” and “Submitted the ticket”.
-- [~] **t20260925-1314-pallets-click-3822-summarize-repeated-file-reads** — Make repeated file reads distinguishable in `tm run` progress (needs another pass: the worker made no changes)
+- [ ] **t20260925-1314-pallets-click-3822-summarize-repeated-file-reads**
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/agent.rs`
   change: Update tool progress rendering so consecutive repeated reads of the same path are compacted or explicitly counted, while preserving distinct path/range reads as separate actions; include a final repeat count so users can tell whether the agent is stuck rereading context.
   acceptance: A run transcript with multiple identical `fs.read` calls for one path renders a clear repeat indicator instead of an indistinguishable list, while different paths and `fs.read_range` ranges remain individually visible.
   test: `cargo test -p tm-cli format_tool_call`
   evidence: `/tmp/tm-trials/20260925-1314/pallets-click-3822/tm.log` lines 27–48 show repeated `Read src/click/types.py` progress entries and overlapping full-file/range reads; implementation and adjacent tests are in `crates/tm-cli/src/agent.rs` (`plain_tool_arg`, `plain_tool_action`, `format_tool_call_shows_the_call_s_salient_argument`).
-- [~] **t20260925-1314-psf-requests-7432-terminal-failure-summary** — Make failed ticket runs explain whether any work was submitted (needs another pass: the worker made no changes)
+- [ ] **t20260925-1314-psf-requests-7432-terminal-failure-summary**
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: When `tm run` completes with a failed attempt such as “model ended turn without submitting,” render a concise terminal summary that says no patch/evidence was submitted, includes the failure reason, and points to the exact resume/retry command; preserve the current error exit status.
   acceptance: A ticket run that ends without submission prints a final summary distinguishing this from a test failure and gives an actionable recovery command; a successful run's output remains unchanged.
   test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
   evidence: `/private/tmp/tm-trials/20260925-1314/psf-requests-7432/tm.log:170` — “model ended turn without submitting. Run `tm run T-1` again to retry.” after 1,063.43 seconds, followed by `ticket.retry_scheduled` at line 172.
-- [~] **t20260925-1314-sindresorhus-ky-878-provider-retry-guidance** — Give actionable recovery for provider configuration failures (needs another pass: the worker made no changes)
+- [ ] **t20260925-1314-sindresorhus-ky-878-provider-retry-guidance**
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/sched.rs`, `crates/tm-provider/src/fabric.rs`
   change: In `run_outcome`, distinguish an unregistered provider/no-candidate configuration failure from transient provider unavailability. Do not recommend rerunning `tm run <ticket>` with unchanged configuration; explain that the configured provider is not registered and point to the real provider setup/validation command.
   acceptance: A test for the `provider not registered: <name>` failure verifies the user receives a concrete provider-configuration recovery step and is not told to retry unchanged settings; transient provider failures retain retry guidance.
   test: `cargo test -p tm-cli run_outcome`
   evidence: `/tmp/tm-trials/20260925-1314/sindresorhus-ky-878/tm.log:7` — `provider was unavailable: provider: no candidate can serve role coder.fast: provider not registered: devpass. Run tm run T-1 again to retry.`; source: `crates/tm-cli/src/sched.rs:818-830` currently recommends the same retry for every `Ready`/`Blocked` failure.
-- [~] **t20260925-1314-spf13-cobra-2257-step-limit-submit-recovery** — Recover cleanly when a completed run hits the step limit before submitting (needs another pass: the worker made no changes)
+- [ ] **t20260925-1314-spf13-cobra-2257-step-limit-submit-recovery**
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: When the worker approaches `max_steps`, surface an explicit finalization/recovery path and preserve completion evidence if `ticket.submit` fails at the limit; replace generic retry guidance with the actual failure reason and safe next action.
