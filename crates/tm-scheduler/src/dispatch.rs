@@ -537,8 +537,8 @@ fn verification_commands(t: &Ticket) -> Vec<Vec<String>> {
 /// [`verification_commands`] finds in `t.success`, directly (never through a shell), in
 /// `repo_root`, as [`ParticipantId::system`] (`SPEC.md:721-724`'s "verification separation" —
 /// this is deterministic machinery, not a worker certifying its own work). A pass is recorded as
-/// [`EvidenceKind::CommandOutput`] evidence and the ticket is left `Submitted` (so
-/// `Store::accept`/`Store::reject` still work exactly as before); a failure is routed through
+/// [`EvidenceKind::CommandOutput`] evidence and moves a passing ticket through `Verifying` into
+/// `Auditing`; a failure is routed through
 /// [`Store::fail_automatic_verification`], which sends the ticket back through the same
 /// `Submitted -> Verifying -> Recovery -> retry` path a human's `tm ticket reject` uses.
 ///
@@ -546,9 +546,9 @@ fn verification_commands(t: &Ticket) -> Vec<Vec<String>> {
 /// or when `repo_root` is `None` — there is no checked-out workspace to run a command in (e.g. a
 /// test harness with no real git working tree).
 ///
-/// This does not call [`Store::verify`]: that takes a verifier [`TicketId`] and is subject to
-/// `AuditorMustDiffer`, which needs a real Verification-ticket path
-/// (`u1-verification-state-and-review`) this task deliberately leaves alone.
+/// Until separate verification tickets exist, deterministic system machinery records the
+/// verification against the work ticket itself. The subsequent human audit remains distinct from
+/// the worker that submitted it.
 async fn run_automatic_verification(
     store: &Store,
     ticket: &TicketId,
@@ -614,16 +614,19 @@ async fn run_automatic_verification(
     };
 
     if let Some(id) = &artifact_id {
-        let summary = if all_passed {
-            "automatic verification passed".to_string()
-        } else {
-            "automatic verification failed".to_string()
-        };
         if let Err(e) = store.attach_evidence(
             ticket,
             EvidenceKind::CommandOutput,
             id,
-            summary,
+            format!(
+                "checks {}: {}",
+                if all_passed { "passed" } else { "failed" },
+                commands
+                    .iter()
+                    .map(|c| c.join(" "))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
             ParticipantId::system(),
         ) {
             tracing::warn!(%ticket, error = %e, "couldn't attach automatic verification evidence");
@@ -631,6 +634,17 @@ async fn run_automatic_verification(
     }
 
     if all_passed {
+        if let Err(e) = store.transition(
+            ticket,
+            tm_core::Trigger::VerificationStarted,
+            ParticipantId::system(),
+        ) {
+            tracing::warn!(%ticket, error = %e, "couldn't start automatic verification");
+            return;
+        }
+        if let Err(e) = store.verify(ticket, ticket, true, None, ParticipantId::system()) {
+            tracing::warn!(%ticket, error = %e, "couldn't record automatic verification pass");
+        }
         return;
     }
 
@@ -845,7 +859,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_passing_verification_command_leaves_the_ticket_submitted_and_accept_still_works() {
+    async fn a_passing_verification_command_moves_the_ticket_to_auditing_and_accept_works() {
         let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
         let (dir, store) = open_store(clock);
         let ticket = create_ready_ticket_with_success(
@@ -868,8 +882,8 @@ mod tests {
         let t = view.tickets.get(&ticket).expect("ticket exists");
         assert_eq!(
             t.state,
-            TicketState::Submitted,
-            "a passing automatic check must leave the ticket Submitted, not drive it further"
+            TicketState::Auditing,
+            "a passing automatic check must move the ticket through verification"
         );
         let verification_artifact = view
             .artifacts
@@ -887,7 +901,7 @@ mod tests {
         let human = ParticipantId::new("human:tester").expect("valid participant");
         store
             .accept(&ticket, None, human)
-            .expect("tm ticket accept must still work from Submitted after a passing check");
+            .expect("tm ticket accept must still work from Auditing after a passing check");
         let view = store.view().expect("view");
         assert_eq!(
             view.tickets.get(&ticket).expect("ticket exists").state,

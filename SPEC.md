@@ -305,8 +305,11 @@ enumerates `TicketState × Trigger`):
    (attempt count already incremented at lease time, so a crashed worker cannot loop for free).
 5. `Running -> Submitted` on `Submit(evidence)`. A submission **must** carry evidence; a worker
    cannot mark itself verified.
-6. `Submitted -> Verifying` automatically; `Verifying -> Auditing` on `VerificationPassed`;
-   `Verifying -> Recovery` on `VerificationFailed`.
+6. When a submitted ticket names runnable `CommandSucceeds` checks, the scheduler runs them and
+   records their output. A pass moves `Submitted -> Verifying -> Auditing`; a failure moves
+   `Submitted -> Verifying -> Recovery`. The system records the mechanical result on the work
+   ticket itself. Separate `V-*` verification tickets and `A-*` semantic-audit tickets remain
+   future work. Submissions without such checks remain `Submitted` for review.
 7. `Auditing -> Closed` on `AuditPassed`; `-> Rework` on `AuditRejectedMinor`;
    `-> Replan` on `AuditRejectedStructural`.
 8. `Recovery` applies `RetryPolicy`: `-> Ready` while `attempts < max_attempts` and budget
@@ -719,9 +722,12 @@ a retry has to go back through `fs.read` (or `fs.stat`) first. The loop enforces
 provider call and stops cleanly with `AgentOutcome::BudgetExhausted` rather than mid-edit.
 
 **Verification separation** (non-negotiable): the agent that produced a change may not run its
-own audit. `submit` attaches evidence; a distinct verification ticket (`V-*`) runs mechanical
-checks; a distinct audit ticket (`A-*`) with a different lease and a `reviewer.semantic` role
-judges intent satisfaction. Enforced in `tm-core` (`AuditorMustDiffer` invariant).
+own audit. `submit` attaches evidence; configured `CommandSucceeds` checks run as deterministic
+system work and their command and output are attached as evidence. A passing check moves the work
+ticket to `Auditing`, where a human can accept or reject it; the audit actor must differ from the
+worker. Separate verification (`V-*`) and semantic-audit (`A-*`) tickets, including a
+`reviewer.semantic` role, remain future work. The distinct-auditor rule is enforced in `tm-core`
+(`AuditorMustDiffer`).
 
 ---
 

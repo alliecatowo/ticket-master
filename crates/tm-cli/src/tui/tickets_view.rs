@@ -80,7 +80,7 @@ fn row(o: &TicketOverview, now: Timestamp) -> TicketRow {
 /// What the peek offers for `o`, numbered in this order.
 fn choices(o: &TicketOverview) -> Vec<Choice> {
     match o.state.as_str() {
-        "submitted" => vec![Choice::Accept, Choice::Reject],
+        "submitted" | "verifying" | "auditing" => vec![Choice::Accept, Choice::Reject],
         "escalated" => vec![Choice::Retry, Choice::RetryWithGuidance],
         "draft" => vec![Choice::Queue],
         _ => Vec::new(),

@@ -101,7 +101,8 @@ never drift between sessions:
   (`docs/decisions/D-019-claude-code-parity-shell.md` §2 and its "Implemented: tickets screen"):
   groups Needs input / Working / Ready for review / Queued / Completed, a dispatch input at the
   bottom (Enter creates and queues a ticket), Space peeks, Enter/→ attaches the chat, Ctrl+X twice
-  cancels, Space opens a peek whose numbered options `1`/`2` accept/reject a submission, retry an
+  cancels, Space opens a peek that includes submitted evidence and check results; its numbered
+  options `1`/`2` accept/reject a submission (including one in verification or review), retry an
   escalated ticket (with or without guidance), or queue a draft, Ctrl+B the Kanban board, `?` shortcuts,
   Esc back (no plain letter is a shortcut: typing always goes to the dispatch input). While
   the TUI is open a scheduler runs in-process (`sched::spawn_background_runner`), so dispatched

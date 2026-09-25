@@ -1223,21 +1223,62 @@ impl Store {
                 machine::transition(from, trigger)
                     .map_err(|e| TmError::InvalidTransition(e.to_string()))
             };
-            let verifying = step(t.state, Trigger::VerificationStarted)?;
-            let auditing = step(verifying, Trigger::VerificationPassed)?;
+            let (auditing, drafts) = match t.state {
+                TicketState::Submitted => {
+                    let verifying = step(t.state, Trigger::VerificationStarted)?;
+                    let auditing = step(verifying, Trigger::VerificationPassed)?;
+                    (
+                        auditing,
+                        vec![
+                            state_changed_draft(&ticket, t.state, verifying, actor.clone()),
+                            state_changed_draft(&ticket, verifying, auditing, actor.clone()),
+                            EventDraft::new(
+                                actor.clone(),
+                                Id::from(ticket.clone()),
+                                Payload::from(TicketVerifiedPayload {
+                                    ticket: ticket.clone(),
+                                    verifier: ticket.clone(),
+                                }),
+                            ),
+                        ],
+                    )
+                }
+                TicketState::Verifying => {
+                    let auditing = step(t.state, Trigger::VerificationPassed)?;
+                    (
+                        auditing,
+                        vec![
+                            state_changed_draft(&ticket, t.state, auditing, actor.clone()),
+                            EventDraft::new(
+                                actor.clone(),
+                                Id::from(ticket.clone()),
+                                Payload::from(TicketVerifiedPayload {
+                                    ticket: ticket.clone(),
+                                    verifier: ticket.clone(),
+                                }),
+                            ),
+                        ],
+                    )
+                }
+                TicketState::Auditing => (t.state, vec![]),
+                _ => {
+                    return Err(TmError::InvalidTransition(
+                        machine::transition(t.state, Trigger::VerificationStarted)
+                            .err()
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "invalid verification transition".into()),
+                    ));
+                }
+            };
             let closed = step(auditing, Trigger::AuditPassed)?;
-            Ok(vec![
-                state_changed_draft(&ticket, t.state, verifying, actor.clone()),
-                state_changed_draft(&ticket, verifying, auditing, actor.clone()),
-                EventDraft::new(
-                    actor.clone(),
-                    Id::from(ticket.clone()),
-                    Payload::from(TicketVerifiedPayload {
-                        ticket: ticket.clone(),
-                        verifier: ticket.clone(),
-                    }),
-                ),
-                state_changed_draft(&ticket, auditing, closed, actor.clone()),
+            let mut drafts = drafts;
+            drafts.push(state_changed_draft(
+                &ticket,
+                auditing,
+                closed,
+                actor.clone(),
+            ));
+            drafts.extend([
                 EventDraft::new(
                     actor.clone(),
                     Id::from(ticket.clone()),
@@ -1254,7 +1295,8 @@ impl Store {
                         reason: note.clone(),
                     }),
                 ),
-            ])
+            ]);
+            Ok(drafts)
         })
     }
 
@@ -1278,6 +1320,11 @@ impl Store {
         let reason = rejection_reason(ticket, &reason)?;
         let id = ticket.clone();
         let failure_reason = reason.clone();
+        let auditing_rejection = self
+            .view()?
+            .tickets
+            .get(&id)
+            .is_some_and(|t| t.state == TicketState::Auditing);
         let mut events = self.run_command(move |view| {
             let t = view
                 .tickets
@@ -1287,11 +1334,52 @@ impl Store {
                 machine::transition(from, trigger)
                     .map_err(|e| TmError::InvalidTransition(e.to_string()))
             };
-            let verifying = step(t.state, Trigger::VerificationStarted)?;
-            let recovery = step(verifying, Trigger::VerificationFailed)?;
-            Ok(vec![
-                state_changed_draft(&id, t.state, verifying, actor.clone()),
-                state_changed_draft(&id, verifying, recovery, actor.clone()),
+            let (mut drafts, auditing_rejection) = match t.state {
+                TicketState::Submitted => {
+                    let verifying = step(t.state, Trigger::VerificationStarted)?;
+                    let recovery = step(verifying, Trigger::VerificationFailed)?;
+                    (
+                        vec![
+                            state_changed_draft(&id, t.state, verifying, actor.clone()),
+                            state_changed_draft(&id, verifying, recovery, actor.clone()),
+                        ],
+                        false,
+                    )
+                }
+                TicketState::Verifying => {
+                    let recovery = step(t.state, Trigger::VerificationFailed)?;
+                    (
+                        vec![state_changed_draft(&id, t.state, recovery, actor.clone())],
+                        false,
+                    )
+                }
+                TicketState::Auditing => {
+                    let rework = step(t.state, Trigger::AuditRejectedMinor)?;
+                    (
+                        vec![state_changed_draft(&id, t.state, rework, actor.clone())],
+                        true,
+                    )
+                }
+                _ => {
+                    return Err(TmError::InvalidTransition(
+                        machine::transition(t.state, Trigger::VerificationStarted)
+                            .err()
+                            .map(|e| e.to_string())
+                            .unwrap_or_else(|| "invalid verification transition".into()),
+                    ));
+                }
+            };
+            drafts.push(if auditing_rejection {
+                EventDraft::new(
+                    actor.clone(),
+                    Id::from(id.clone()),
+                    Payload::from(TicketAuditRejectedPayload {
+                        ticket: id.clone(),
+                        auditor: id.clone(),
+                        reason: reason.clone(),
+                    }),
+                )
+            } else {
                 EventDraft::new(
                     actor.clone(),
                     Id::from(id.clone()),
@@ -1300,15 +1388,18 @@ impl Store {
                         verifier: id.clone(),
                         reason: reason.clone(),
                     }),
-                ),
-            ])
+                )
+            });
+            Ok(drafts)
         })?;
-        events.extend(self.record_failure(
-            ticket,
-            FailureClass::VerificationFailed,
-            failure_reason,
-            ParticipantId::system(),
-        )?);
+        if !auditing_rejection {
+            events.extend(self.record_failure(
+                ticket,
+                FailureClass::VerificationFailed,
+                failure_reason,
+                ParticipantId::system(),
+            )?);
+        }
         Ok(events)
     }
 
