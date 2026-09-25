@@ -47,6 +47,8 @@ pub enum Language {
     JavaScript,
     /// Python source (`.py`).
     Python,
+    /// Swift source (`.swift`).
+    Swift,
     /// Any other recognized-but-unparsed text extension (markdown, toml, json, ...).
     Other,
 }
@@ -63,6 +65,7 @@ impl Language {
             "tsx" => Some(Language::Tsx),
             "js" | "jsx" | "mjs" | "cjs" => Some(Language::JavaScript),
             "py" => Some(Language::Python),
+            "swift" => Some(Language::Swift),
             "md" | "toml" | "json" | "yaml" | "yml" | "txt" | "proto" | "sql" | "sh" | "css"
             | "html" => Some(Language::Other),
             _ => None,
@@ -350,6 +353,12 @@ mod tests {
     fn language_from_extension_python() {
         assert_eq!(Language::from_extension("py"), Some(Language::Python));
         assert_eq!(Language::from_extension("PY"), Some(Language::Python));
+    }
+
+    #[test]
+    fn language_from_extension_swift() {
+        assert_eq!(Language::from_extension("swift"), Some(Language::Swift));
+        assert_eq!(Language::from_extension("SWIFT"), Some(Language::Swift));
     }
 
     #[test]

@@ -201,6 +201,7 @@ pub(crate) fn language_to_str(lang: Option<Language>) -> Option<String> {
         Language::Tsx => "tsx".to_string(),
         Language::JavaScript => "javascript".to_string(),
         Language::Python => "python".to_string(),
+        Language::Swift => "swift".to_string(),
         Language::Other => "other".to_string(),
     })
 }
@@ -214,6 +215,7 @@ fn str_to_language(s: Option<String>) -> Option<Language> {
         "tsx" => Some(Language::Tsx),
         "javascript" => Some(Language::JavaScript),
         "python" => Some(Language::Python),
+        "swift" => Some(Language::Swift),
         "other" => Some(Language::Other),
         _ => None,
     })
@@ -697,6 +699,14 @@ mod tests {
         assert_eq!(
             str_to_language(language_to_str(Some(Language::Python))),
             Some(Language::Python)
+        );
+    }
+
+    #[test]
+    fn test_language_swift_roundtrip() {
+        assert_eq!(
+            str_to_language(language_to_str(Some(Language::Swift))),
+            Some(Language::Swift)
         );
     }
 

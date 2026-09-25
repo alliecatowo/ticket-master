@@ -25,6 +25,7 @@ tree-sitter-go = "0.25"
 tree-sitter-typescript = "0.23"
 tree-sitter-javascript = "0.25"
 tree-sitter-python = "0.25"
+tree-sitter-swift = "0.7"
 dirs = { workspace = true }
 # Pure-Rust, CPU-only static-embedding inference (MinishLab's `model2vec-rs`, D-025). Default
 # features off: the crate's default `onig` feature pulls in Oniguruma, a C regex engine, which

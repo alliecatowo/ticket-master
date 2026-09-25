@@ -1,4 +1,4 @@
-//! Owns tree-sitter parsing for rust, go, typescript, tsx, javascript and python: symbol and
+//! Owns tree-sitter parsing for rust, go, typescript, tsx, javascript, python and swift: symbol and
 //! reference extraction via per-language queries, resolution (same-file scope, then
 //! same-package, then workspace-wide with an ambiguity flag), and outline generation.
 //!
@@ -239,6 +239,22 @@ fn symbol_kind(lang: Language, node: tree_sitter::Node) -> SymbolKind {
         Language::Python => match node.kind() {
             "function_definition" => SymbolKind::Function,
             "class_definition" => SymbolKind::Struct,
+            _ => SymbolKind::Variable,
+        },
+        Language::Swift => match node.kind() {
+            "function_declaration" => SymbolKind::Function,
+            "protocol_declaration" => SymbolKind::Interface,
+            "class_declaration" => match node
+                .child_by_field_name("declaration_kind")
+                .map(|n| n.kind())
+            {
+                // Swift's grammar folds class/struct/actor/extension into one node kind,
+                // disambiguated only by this keyword field; `extension` attaches members to an
+                // existing type, the same role `impl_item` plays for Rust.
+                Some("extension") => SymbolKind::Impl,
+                Some("enum") => SymbolKind::Enum,
+                _ => SymbolKind::Struct,
+            },
             _ => SymbolKind::Variable,
         },
         Language::Other => SymbolKind::Variable,
@@ -520,6 +536,7 @@ impl SymbolIndex {
             Language::Tsx => Some(tree_sitter_typescript::LANGUAGE_TSX.into()),
             Language::JavaScript => Some(tree_sitter_javascript::LANGUAGE.into()),
             Language::Python => Some(tree_sitter_python::LANGUAGE.into()),
+            Language::Swift => Some(tree_sitter_swift::LANGUAGE.into()),
             Language::Other => None,
         }
     }
@@ -919,6 +936,15 @@ impl SymbolIndex {
                 "(function_definition name: (_) @name) @definition
                  (class_definition name: (_) @name) @definition"
             }
+            Language::Swift => {
+                // `function_declaration`'s `name` field also accepts `custom_operator` and
+                // several type-node kinds (per the grammar's own node-types.json); narrowed to
+                // `simple_identifier` so an operator overload doesn't produce a second,
+                // oddly-named match for the same function.
+                "(function_declaration name: (simple_identifier) @name) @definition
+                 (class_declaration name: (_) @name) @definition
+                 (protocol_declaration name: (_) @name) @definition"
+            }
             Language::Other => unreachable!("parse_file rejects Language::Other before querying"),
         }
     }
@@ -944,6 +970,10 @@ impl SymbolIndex {
                  (shorthand_property_identifier) @reference"
             }
             Language::Python => "(identifier) @reference",
+            Language::Swift => {
+                "(simple_identifier) @reference
+                 (type_identifier) @reference"
+            }
             Language::Other => unreachable!("parse_file rejects Language::Other before querying"),
         }
     }
@@ -1289,6 +1319,69 @@ mod tests {
     }
 
     #[test]
+    fn swift_symbol_query_extracts_functions_structs_enums_protocols_and_extensions() {
+        let mut idx = SymbolIndex::new();
+        idx.parse_file(
+            "Shape.swift",
+            "protocol Shape {\n    func area() -> Double\n}\nstruct Square: Shape {\n    var side: Double\n    func area() -> Double { return side * side }\n}\nenum Kind {\n    case round\n}\nextension Int {\n    func doubled() -> Int { return self * 2 }\n}\n",
+            Language::Swift,
+        )
+        .unwrap();
+        assert_eq!(
+            idx.definition("Shape", "Shape.swift").unwrap().kind,
+            SymbolKind::Interface
+        );
+        assert_eq!(
+            idx.definition("Square", "Shape.swift").unwrap().kind,
+            SymbolKind::Struct
+        );
+        assert_eq!(
+            idx.definition("Kind", "Shape.swift").unwrap().kind,
+            SymbolKind::Enum
+        );
+        assert_eq!(
+            idx.definition("area", "Shape.swift").unwrap().kind,
+            SymbolKind::Function
+        );
+        let outline = idx.outline("Shape.swift");
+        assert!(
+            outline.iter().any(|e| e.rendered.starts_with("extension ")),
+            "outline should list the extension on Int: {outline:?}"
+        );
+        assert_eq!(
+            idx.definition("doubled", "Shape.swift").unwrap().kind,
+            SymbolKind::Function
+        );
+    }
+
+    #[test]
+    fn swift_outline_lists_the_function_def_resolves_it_and_refs_finds_the_call_site() {
+        let mut idx = SymbolIndex::new();
+        idx.parse_file(
+            "Greeter.swift",
+            "func greet(name: String) -> String {\n    return \"Hello, \\(name)\"\n}\nfunc run() {\n    print(greet(name: \"World\"))\n}\n",
+            Language::Swift,
+        )
+        .unwrap();
+
+        let outline = idx.outline("Greeter.swift");
+        assert!(
+            outline.iter().any(|e| e.rendered.contains("func greet")),
+            "outline should list the greet function: {outline:?}"
+        );
+
+        let greet = idx
+            .definition("greet", "Greeter.swift")
+            .expect("greet defined");
+        assert_eq!(greet.kind, SymbolKind::Function);
+
+        let refs = idx.references(greet.id);
+        assert_eq!(refs.len(), 1, "expected exactly the call site: {refs:?}");
+        assert_eq!(refs[0].path, "Greeter.swift");
+        assert_eq!(refs[0].range.line_start, 5);
+    }
+
+    #[test]
     fn every_language_symbol_and_reference_query_compiles_against_its_grammar() {
         for lang in [
             Language::Rust,
@@ -1297,6 +1390,7 @@ mod tests {
             Language::Tsx,
             Language::JavaScript,
             Language::Python,
+            Language::Swift,
         ] {
             let grammar = SymbolIndex::grammar_for(lang).expect("grammar exists");
             tree_sitter::Query::new(&grammar, SymbolIndex::symbol_query_source(lang))
