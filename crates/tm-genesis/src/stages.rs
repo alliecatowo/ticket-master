@@ -11,12 +11,12 @@
 //!
 //! A note on persistence: the driver below persists every stage artifact, and a full
 //! [`GenesisState`] snapshot after every [`GenesisDriver::advance`] call, via
-//! `tm_core::Store::store_artifact`. `tm_core::Store` (finished, not this crate's to extend)
-//! exposes no accessor for its project root or its underlying `tm_events::EventLog`, so this
-//! module cannot append bespoke `genesis.*` events the way the module-level design note
-//! originally sketched; instead each snapshot *is* the resumability contract; [`GenesisDriver::resume`]
-//! finds the most recently updated one by scanning `Store::view`'s artifacts, which is the
-//! read path `tm_core` does expose.
+//! `tm_core::Store::store_artifact`. Each snapshot *is* the resumability contract;
+//! [`GenesisDriver::resume`] finds the most recently updated one by scanning `Store::view`'s
+//! artifacts. Separately, `advance` also appends a `genesis.stage_completed` event per stage it
+//! runs, via the narrow `tm_core::Store::record_genesis_stage` — visible through `tm events`
+//! independent of the snapshot artifacts above, which are read back by `resume`, not by anything
+//! event-log-shaped.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -384,6 +384,9 @@ impl<'a> GenesisDriver<'a> {
     ) -> TmResult<GenesisState> {
         let mut next_state = state.clone();
         let illegal = |e: IllegalTransition| TmError::invariant(e.to_string());
+        // Set inside the arms below that persist an artifact for this stage, so the
+        // `genesis.stage_completed` event recorded after the match can name it as its subject.
+        let mut stage_artifact: Option<ArtifactId> = None;
 
         let next_stage = match state.stage {
             Stage::Seed => {
@@ -391,7 +394,8 @@ impl<'a> GenesisDriver<'a> {
                     crate::seed::analyze_prompt(state.project.clone(), self.provider, self.clock)
                         .await?;
                 let id = self.persist_field(&seed, "seed", actor.clone())?;
-                next_state.seed = Some(id);
+                next_state.seed = Some(id.clone());
+                stage_artifact = Some(id);
                 transition(state.stage, &StageEvent::SeedCreated(seed)).map_err(illegal)?
             }
             Stage::Vision => {
@@ -405,7 +409,8 @@ impl<'a> GenesisDriver<'a> {
                     crate::vision::compile_vision(&seed, self.provider, self.clock).await?;
                 vision.source_seed = Some(seed_id);
                 let id = self.persist_field(&vision, "vision", actor.clone())?;
-                next_state.vision = Some(id);
+                next_state.vision = Some(id.clone());
+                stage_artifact = Some(id);
                 transition(state.stage, &StageEvent::VisionCompiled(vision)).map_err(illegal)?
             }
             Stage::Spec => {
@@ -419,7 +424,8 @@ impl<'a> GenesisDriver<'a> {
                     crate::spec::compile_spec(&vision, self.provider, self.clock).await?;
                 spec.source_vision = Some(vision_id);
                 let id = self.persist_field(&spec, "spec", actor.clone())?;
-                next_state.spec = Some(id);
+                next_state.spec = Some(id.clone());
+                stage_artifact = Some(id);
                 transition(state.stage, &StageEvent::SpecCompiled(spec)).map_err(illegal)?
             }
             Stage::GraphCompilation => {
@@ -451,7 +457,8 @@ impl<'a> GenesisDriver<'a> {
                     selected_template: outcome.selected_template.clone(),
                 };
                 let id = self.persist_field(&summary, "graph", actor.clone())?;
-                next_state.graph = Some(id);
+                next_state.graph = Some(id.clone());
+                stage_artifact = Some(id);
                 transition(state.stage, &StageEvent::GraphCommitted(outcome)).map_err(illegal)?
             }
             Stage::Ignition => {
@@ -527,6 +534,12 @@ impl<'a> GenesisDriver<'a> {
                 transition(state.stage, &StageEvent::SteadyStateEntered).map_err(illegal)?
             }
         };
+
+        // Record `state.stage` (the stage this call just finished, not `next_stage`) as
+        // completed, so `tm events` shows one `genesis.stage_completed` per stage the driver
+        // actually ran, independent of the resumable snapshot above.
+        self.store
+            .record_genesis_stage(state.stage.as_str(), stage_artifact, actor.clone())?;
 
         next_state.stage = next_stage;
         next_state.updated = self.clock.now();
@@ -928,6 +941,16 @@ mod tests {
             .expect("advance past seed");
         assert_eq!(advanced.stage, Stage::Vision);
         assert!(advanced.seed.is_some());
+
+        // `advance` appended one `genesis.stage_completed` event for the Seed stage, naming the
+        // seed artifact it just persisted as the event's subject (`genesis-emit-lifecycle-events`).
+        let seed_id = advanced.seed.clone().expect("seed artifact id");
+        assert_eq!(
+            store
+                .event_count_for(&tm_types::Id::from(seed_id))
+                .expect("event_count_for"),
+            2 // ArtifactCreated (from persist_field) + GenesisStageCompleted.
+        );
 
         let resumed = GenesisDriver::resume(&store).expect("resume after advance");
         assert_eq!(resumed, advanced);

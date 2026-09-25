@@ -43,15 +43,15 @@ use tm_events::payload::{
     CommandCompletedPayload, CommandStartedPayload, DecisionCreatedPayload,
     DecisionSupersededPayload, DocInvalidatedPayload, DocReconciledPayload, DocRegisteredPayload,
     EffectCompletedPayload, EffectFailedPayload, EffectJournaledPayload,
-    GoalClaimedCompletePayload, GoalReorientedPayload, GoalSetPayload, GoalStepAddedPayload,
-    GoalStepCompletedPayload, HarnessPromotedPayload, MilestoneClosedPayload,
-    MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload, MirrorPulledPayload,
-    MirrorPushedPayload, SessionEndedPayload, SessionJoinedPayload, SessionStartedPayload,
-    TicketAuditRejectedPayload, TicketAuditedPayload, TicketBudgetExhaustedPayload,
-    TicketBudgetHandoffPayload, TicketCancelledPayload, TicketChildAddedPayload,
-    TicketClosedPayload, TicketCreatedPayload, TicketDependencyAddedPayload,
-    TicketDependencyRemovedPayload, TicketEscalatedPayload, TicketFailedPayload,
-    TicketForkedPayload, TicketHeartbeatPayload, TicketLeaseExpiredPayload,
+    GenesisStageCompletedPayload, GoalClaimedCompletePayload, GoalReorientedPayload,
+    GoalSetPayload, GoalStepAddedPayload, GoalStepCompletedPayload, HarnessPromotedPayload,
+    MilestoneClosedPayload, MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload,
+    MirrorPulledPayload, MirrorPushedPayload, SessionEndedPayload, SessionJoinedPayload,
+    SessionStartedPayload, TicketAuditRejectedPayload, TicketAuditedPayload,
+    TicketBudgetExhaustedPayload, TicketBudgetHandoffPayload, TicketCancelledPayload,
+    TicketChildAddedPayload, TicketClosedPayload, TicketCreatedPayload,
+    TicketDependencyAddedPayload, TicketDependencyRemovedPayload, TicketEscalatedPayload,
+    TicketFailedPayload, TicketForkedPayload, TicketHeartbeatPayload, TicketLeaseExpiredPayload,
     TicketLeaseReleasedPayload, TicketLeasedPayload, TicketReopenedPayload,
     TicketRetryScheduledPayload, TicketStateChangedPayload, TicketSubmittedPayload,
     TicketUpdatedPayload, TicketVerificationFailedPayload, TicketVerifiedPayload,
@@ -2030,6 +2030,33 @@ impl Store {
                 Ok(())
             },
         )
+    }
+
+    /// Append a `genesis.stage_completed` event marking `stage` (e.g. `"seed"`, `"vision"`) as
+    /// finished. Narrow and event-only, unlike [`Store::store_artifact`]: it writes no row of its
+    /// own, just an [`EventDraft`] through [`Store::run_command`]. Intended for
+    /// `tm_genesis::GenesisDriver::advance`, called once per stage it runs, so `tm events` shows
+    /// Genesis's real progress independent of the resumable state snapshot Genesis persists
+    /// separately.
+    ///
+    /// `artifact`, when the stage just persisted one (most stages do; `Stage::V0`/`Evaluation`/
+    /// `V1`/etc. don't), becomes the event's subject so a reader can resolve straight to it;
+    /// `None` uses [`Id::none`], the same empty-subject convention other subject-less events use.
+    pub fn record_genesis_stage(
+        &self,
+        stage: impl Into<String>,
+        artifact: Option<ArtifactId>,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        let stage = stage.into();
+        let subject = artifact.map(Id::from).unwrap_or_else(Id::none);
+        self.run_command(move |_view| {
+            Ok(vec![EventDraft::new(
+                actor,
+                subject,
+                Payload::from(GenesisStageCompletedPayload { stage }),
+            )])
+        })
     }
 
     /// Attach an evidence record linking `ticket` to `artifact`.
@@ -4516,6 +4543,55 @@ mod tests {
             .expect("artifact materialized");
         assert_eq!(artifact.bytes_len, 5);
         assert!(matches!(artifact.storage, ArtifactStorage::Inline(_)));
+    }
+
+    #[test]
+    fn record_genesis_stage_appends_a_stage_completed_event_naming_its_artifact() {
+        let (_dir, store) = open_store();
+        let artifact_events = store
+            .store_artifact(
+                ArtifactKind::Report,
+                "application/json".into(),
+                b"{}".to_vec(),
+                serde_json::json!({}),
+                None,
+                actor(),
+            )
+            .expect("store_artifact");
+        let artifact_id = ArtifactId::new(artifact_events[0].subject.as_str()).unwrap();
+
+        let events = store
+            .record_genesis_stage("seed", Some(artifact_id.clone()), actor())
+            .expect("record_genesis_stage");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].subject, Id::from(artifact_id.clone()));
+        assert_eq!(
+            events[0]
+                .payload
+                .as_genesis_stage_completed()
+                .expect("genesis_stage_completed payload"),
+            &GenesisStageCompletedPayload {
+                stage: "seed".to_string(),
+            }
+        );
+        // Both the artifact's own creation and the stage-completed event above name it as their
+        // subject.
+        assert_eq!(
+            store
+                .event_count_for(&Id::from(artifact_id))
+                .expect("event_count_for"),
+            2
+        );
+    }
+
+    #[test]
+    fn record_genesis_stage_with_no_artifact_uses_the_empty_subject() {
+        let (_dir, store) = open_store();
+        let events = store
+            .record_genesis_stage("v0", None, actor())
+            .expect("record_genesis_stage");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].subject.is_empty());
     }
 
     /// The regression gate for M-04's "secret redaction ... an event": a real
