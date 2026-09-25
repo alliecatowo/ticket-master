@@ -1,7 +1,7 @@
 //! The `docs`, `provider`, `harness`, `bench`, `mirror`, `templates`, and `events` command
 //! groups: project operations that sit beside the ticket graph rather than inside it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::sync::Arc;
 
@@ -15,6 +15,7 @@ use crate::bench_report;
 use crate::project::Project;
 use crate::render::{Renderer, Table};
 use crate::replay_diff;
+use tm_genesis::attach::AttachReport;
 use tm_types::Role;
 
 /// Dispatch one [`DocsCommand`].
@@ -3394,6 +3395,103 @@ pub fn events_verify(project: &Project, renderer: &Renderer) -> tm_types::Result
     Ok(())
 }
 
+/// Format an `AttachReport` as a human-readable string with plain language instead of jargon,
+/// and deduplicate documents by case-insensitive path.
+///
+/// Replaces internal implementation details (chunks, symbol graph build status) with
+/// user-friendly descriptions of what was accomplished.
+pub fn format_attach_report(report: &AttachReport) -> String {
+    let mut sections = vec![
+        format!("attached {}", report.project_root.display()),
+        format!("root ticket: {}", report.root_ticket),
+    ];
+
+    // Format the index status with plain language instead of jargon
+    let file_word = if report.files_indexed == 1 {
+        "file"
+    } else {
+        "files"
+    };
+    let commit_word = if report.commits_ingested == 1 {
+        "commit"
+    } else {
+        "commits"
+    };
+    let nav_status = if report.symbol_graph_built {
+        "Code navigation is ready."
+    } else {
+        "Code navigation is not yet available."
+    };
+    sections.push(format!(
+        "Indexed {} {} with {}. {}",
+        report.files_indexed, file_word, commit_word, nav_status
+    ));
+
+    if !report.docs.is_empty() {
+        // Deduplicate documents by case-insensitive path to avoid showing
+        // the same file multiple times on case-insensitive filesystems
+        let mut seen_paths = BTreeSet::new();
+        let rows = report
+            .docs
+            .iter()
+            .filter_map(|d| {
+                let path_lower = d.path.to_lowercase();
+                if seen_paths.insert(path_lower) {
+                    Some(vec![d.path.clone(), doc_kind_label(d.kind).to_string()])
+                } else {
+                    None
+                }
+            })
+            .collect();
+        sections.push(Table::new(vec!["doc".to_string(), "kind".to_string()], rows).render());
+    }
+
+    if !report.build_systems.is_empty() {
+        let rows = report
+            .build_systems
+            .iter()
+            .map(|b| vec![b.name.clone(), b.manifest_path.clone()])
+            .collect();
+        sections.push(
+            Table::new(
+                vec!["build system".to_string(), "manifest".to_string()],
+                rows,
+            )
+            .render(),
+        );
+    }
+
+    for t in &report.external_trackers {
+        sections.push(format!("external tracker: {} ({})", t.name, t.evidence));
+    }
+
+    for c in &report.conventions {
+        sections.push(format!("convention: {} ({})", c.text, c.evidence));
+    }
+
+    let blocking = report.blocking_open_questions();
+    if !blocking.is_empty() {
+        sections.push(format!(
+            "{} open question(s) need a human before proceeding",
+            blocking.len()
+        ));
+    }
+
+    sections.join("\n\n")
+}
+
+/// A short, human-readable label for a [`tm_genesis::attach::DocKind`], for `tm attach`'s
+/// discovered-docs table — plain words instead of the enum variant's `{:?}` debug form.
+fn doc_kind_label(kind: tm_genesis::attach::DocKind) -> &'static str {
+    match kind {
+        tm_genesis::attach::DocKind::Readme => "readme",
+        tm_genesis::attach::DocKind::Contributing => "contributing guide",
+        tm_genesis::attach::DocKind::Architecture => "architecture doc",
+        tm_genesis::attach::DocKind::Changelog => "changelog",
+        tm_genesis::attach::DocKind::Directory => "docs directory",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5190,6 +5288,127 @@ tests_pass = {}
         assert_eq!(
             registry.get("architecture").unwrap().state,
             tm_docs::DocState::Reconciling
+        );
+    }
+
+    #[test]
+    fn format_attach_report_uses_plain_language() {
+        use std::path::PathBuf;
+        use tm_genesis::attach::{AttachReport, DiscoveredDoc, DocKind};
+        use tm_types::TicketId;
+
+        let report = AttachReport {
+            project_root: PathBuf::from("/tmp/test"),
+            root_ticket: TicketId::new("T-1").unwrap(),
+            files_indexed: 1,
+            chunks_indexed: 1,
+            commits_ingested: 1,
+            symbol_graph_built: true,
+            docs: vec![],
+            build_systems: vec![],
+            external_trackers: vec![],
+            conventions: vec![],
+            open_questions: vec![],
+        };
+
+        let formatted = format_attach_report(&report);
+
+        // Verify no jargon terminology is present
+        assert!(
+            !formatted.contains("chunks"),
+            "Output should not contain 'chunks' jargon"
+        );
+        assert!(
+            !formatted.contains("symbol graph"),
+            "Output should not contain 'symbol graph' jargon"
+        );
+
+        // Verify plain language is present
+        assert!(
+            formatted.contains("Indexed 1 file"),
+            "Output should contain 'Indexed 1 file'"
+        );
+        assert!(
+            formatted.contains("1 commit"),
+            "Output should contain '1 commit'"
+        );
+        assert!(
+            formatted.contains("Code navigation is ready"),
+            "Output should indicate code navigation is ready"
+        );
+    }
+
+    #[test]
+    fn format_attach_report_deduplicates_docs_by_case_insensitive_path() {
+        use std::path::PathBuf;
+        use tm_genesis::attach::{AttachReport, DiscoveredDoc, DocKind};
+        use tm_types::TicketId;
+
+        let report = AttachReport {
+            project_root: PathBuf::from("/tmp/test"),
+            root_ticket: TicketId::new("T-1").unwrap(),
+            files_indexed: 1,
+            chunks_indexed: 1,
+            commits_ingested: 1,
+            symbol_graph_built: true,
+            docs: vec![
+                DiscoveredDoc {
+                    path: "README.md".to_string(),
+                    kind: DocKind::Readme,
+                },
+                DiscoveredDoc {
+                    path: "readme.md".to_string(),
+                    kind: DocKind::Readme,
+                },
+            ],
+            build_systems: vec![],
+            external_trackers: vec![],
+            conventions: vec![],
+            open_questions: vec![],
+        };
+
+        let formatted = format_attach_report(&report);
+
+        // Count how many times "README.md" appears - should be exactly once
+        let readme_count =
+            formatted.matches("README.md").count() + formatted.matches("readme.md").count();
+        assert_eq!(
+            readme_count, 1,
+            "Doc table should list README/readme only once, not both variants. Got: {}",
+            formatted
+        );
+    }
+
+    #[test]
+    fn format_attach_report_pluralizes_correctly() {
+        use std::path::PathBuf;
+        use tm_genesis::attach::AttachReport;
+        use tm_types::TicketId;
+
+        // Test with multiple files and commits
+        let report = AttachReport {
+            project_root: PathBuf::from("/tmp/test"),
+            root_ticket: TicketId::new("T-1").unwrap(),
+            files_indexed: 5,
+            chunks_indexed: 10,
+            commits_ingested: 3,
+            symbol_graph_built: true,
+            docs: vec![],
+            build_systems: vec![],
+            external_trackers: vec![],
+            conventions: vec![],
+            open_questions: vec![],
+        };
+
+        let formatted = format_attach_report(&report);
+
+        assert!(
+            formatted.contains("5 files"),
+            "Should pluralize 'files' when count > 1"
+        );
+        assert!(
+            formatted.contains("3 commits"),
+            "Should pluralize 'commits' when count > 1"
         );
     }
 }
