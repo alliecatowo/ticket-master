@@ -1119,7 +1119,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-agent`
   evidence: /tmp/tm-audit/self `git diff` after T-2: the second hunk corrupts the doc comment at project.rs:~2134.
 
-- [ ] **u1-decider-provider-status** — Show the decider role correctly in `tm provider list/status/test` (not "not-configured" for the mock) and add `tm provider test decider`
+- [x] **u1-decider-provider-status** — Show the decider role correctly in `tm provider list/status/test` (not "not-configured" for the mock) and add `tm provider test decider` (landed 4ed98ed)
   model: haiku · severity: medium · builds Rust: yes · area: providers (D-020) · deps: u1-decider-wire-shadow-triage
   files: `crates/tm-cli/src/ops.rs`
   change: `tm provider list` prints `decider  mock  mock-decider  1  not-configured`. Report the mock as `offline (mock)`, and a systemone candidate as `ready`/`missing AI_GATEWAY_API_KEY`. Extend `tm provider test` so `tm provider test decider` sends one triage `DecideRequest` through the configured decider and prints the answers with confidences.
