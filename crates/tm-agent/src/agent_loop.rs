@@ -502,7 +502,8 @@ impl AgentLoop {
     }
 
     /// Debit `spend` against `task.ticket` (and its ancestor scopes) via
-    /// [`tm_core::Store::record_usage`], and record it durably as `usage.recorded`.
+    /// [`tm_core::Store::record_usage_attributed`], and record it durably as `usage.recorded`,
+    /// attributed to `served_by` (`tel-usage-payload-model-field`).
     ///
     /// A [`TmError::BudgetExhausted`] from the store is deliberately swallowed here rather than
     /// propagated: [`AgentLoop::drive`]'s own `effective_budget` tracking (updated by the caller
@@ -521,12 +522,18 @@ impl AgentLoop {
     /// can_afford`] still surface as `AgentOutcome::BudgetExhausted`, now itself backed by a
     /// second, defensive call to [`tm_core::Store::budget_handoff`] — see
     /// [`AgentLoop::budget_handoff_outcome`]).
-    fn record_usage(&self, task: &AgentTask, spend: Spend) -> Result<()> {
-        match self.store.record_usage(
+    fn record_usage(
+        &self,
+        task: &AgentTask,
+        spend: Spend,
+        served_by: &tm_provider::ModelId,
+    ) -> Result<()> {
+        match self.store.record_usage_attributed(
             task.ticket.as_ref(),
             Some(&task.session),
             spend,
             self.actor.clone(),
+            Some((served_by.provider.clone(), served_by.model.clone())),
         ) {
             Ok(_events) => Ok(()),
             Err(TmError::BudgetExhausted(_)) => Ok(()),
@@ -954,7 +961,7 @@ impl AgentLoop {
             if effective_budget.try_spend(step_spend).is_err() {
                 effective_budget.spent = effective_budget.spent.plus(step_spend);
             }
-            self.record_usage(task, step_spend)?;
+            self.record_usage(task, step_spend, &completion.model)?;
 
             let assistant_text = {
                 let texts: Vec<&str> = candidate
@@ -2068,6 +2075,10 @@ mod tests {
         // 100 * 42 + 50 * 84 = 4200 + 4200 = 8400 micro-dollars -- the completion's actual
         // spend, priced, not the hardcoded 0 this test caught before `tel-completion-cost-field`.
         assert_eq!(payload.dollars_micros, 8400);
+        // `tel-usage-payload-model-field`: attributed to the completion's actual served-by
+        // model, `mock/m1`, not hardcoded or dropped.
+        assert_eq!(payload.provider.as_deref(), Some("mock"));
+        assert_eq!(payload.model.as_deref(), Some("m1"));
     }
 
     #[tokio::test]

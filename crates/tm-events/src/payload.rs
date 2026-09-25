@@ -346,6 +346,16 @@ payload_kinds! {
         tokens: u64,
         dollars_micros: u64,
         wall_seconds: u64,
+        // `provider`/`model` attribute this usage to the backend that actually served it
+        // (`tel-usage-payload-model-field`, `docs/decisions/D-030-local-telemetry.md`). Both must
+        // be `Option`: `payload_kinds!` cannot carry
+        // per-field serde attributes, so there is nowhere to hang `#[serde(default)]` on just
+        // these two fields, and the event log is immutable and hash-chained, so an
+        // already-recorded old-shape `usage.recorded` event (with no `provider`/`model` keys at
+        // all) must still decode — serde's derive treats a missing `Option<T>` field as `None`
+        // without needing `#[serde(default)]`.
+        provider: Option<String>,
+        model: Option<String>,
     };
     "Payload for `doc.registered`.", DocRegisteredPayload, DocRegistered, DocRegistered, as_doc_registered, {
         path: String,
@@ -760,6 +770,8 @@ mod tests {
             tokens: 1000,
             dollars_micros: 50000,
             wall_seconds: 30,
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-5".to_string()),
         });
 
         let json = original.to_json().unwrap();
@@ -769,6 +781,29 @@ mod tests {
         assert_eq!(inner.tokens, 1000);
         assert_eq!(inner.dollars_micros, 50000);
         assert_eq!(inner.wall_seconds, 30);
+        assert_eq!(inner.provider.as_deref(), Some("anthropic"));
+        assert_eq!(inner.model.as_deref(), Some("claude-sonnet-5"));
+    }
+
+    /// `tel-usage-payload-model-field`: an already-recorded, pre-attribution `usage.recorded`
+    /// event has no `provider`/`model` keys at all (the hash-chained log never rewrites old
+    /// events to backfill new fields) — it must still decode, with both defaulting to `None`.
+    #[test]
+    fn usage_recorded_old_shape_without_provider_model_still_decodes() {
+        let old_shape = serde_json::json!({
+            "ticket": null,
+            "session": null,
+            "tokens": 1000,
+            "dollars_micros": 50000,
+            "wall_seconds": 30,
+        });
+
+        let restored = Payload::from_json(EventKind::UsageRecorded, old_shape).unwrap();
+
+        let inner = restored.as_usage_recorded().unwrap();
+        assert_eq!(inner.tokens, 1000);
+        assert_eq!(inner.provider, None);
+        assert_eq!(inner.model, None);
     }
 
     #[test]

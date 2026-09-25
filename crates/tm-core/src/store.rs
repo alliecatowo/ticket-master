@@ -2082,6 +2082,29 @@ impl Store {
         amount: Spend,
         actor: ParticipantId,
     ) -> tm_types::Result<Vec<Event>> {
+        self.record_usage_attributed(ticket, session, amount, actor, None)
+    }
+
+    /// Same as [`Store::record_usage`], but also attributes the `usage.recorded` event to the
+    /// `(provider, model)` that actually served the call (`tel-usage-payload-model-field`).
+    /// `served_by: None` is exactly [`Store::record_usage`]'s old, unattributed behavior, so every
+    /// existing caller of `record_usage` (`tm-core`'s own budget tests included) keeps working
+    /// untouched.
+    ///
+    /// # Errors
+    /// Same as [`Store::record_usage`].
+    pub fn record_usage_attributed(
+        &self,
+        ticket: Option<&TicketId>,
+        session: Option<&SessionId>,
+        amount: Spend,
+        actor: ParticipantId,
+        served_by: Option<(String, String)>,
+    ) -> tm_types::Result<Vec<Event>> {
+        let (provider, model) = match served_by {
+            Some((provider, model)) => (Some(provider), Some(model)),
+            None => (None, None),
+        };
         let ticket_id = ticket.cloned();
         let session_id = session.cloned();
         let mut exhausted: Option<BudgetScope> = None;
@@ -2117,6 +2140,8 @@ impl Store {
                     tokens: amount.tokens,
                     dollars_micros: amount.dollars_micros,
                     wall_seconds: amount.wall_seconds,
+                    provider: provider.clone(),
+                    model: model.clone(),
                 }),
             )];
 
@@ -4178,6 +4203,48 @@ mod tests {
              log -- ticket.budget_exhausted specifically is read by tm-cli's status digest as \
              blocked work, which a clean handoff must not be"
         );
+    }
+
+    /// `tel-usage-payload-model-field`: `record_usage_attributed` attaches the served-by
+    /// `(provider, model)` to the emitted `usage.recorded` event, and `record_usage` (the
+    /// existing 11-call-site delegate) still emits the old, unattributed shape.
+    #[test]
+    fn record_usage_attributed_names_the_serving_provider_and_model() {
+        let (_dir, store) = open_store();
+        let ticket_id = create_root_ticket(&store);
+        store.activate(&ticket_id, actor()).expect("activate");
+
+        let events = store
+            .record_usage_attributed(
+                Some(&ticket_id),
+                None,
+                Spend::tokens(10),
+                actor(),
+                Some(("anthropic".to_string(), "claude-sonnet-5".to_string())),
+            )
+            .expect("record_usage_attributed");
+        let usage = events
+            .iter()
+            .find(|e| e.kind == tm_events::EventKind::UsageRecorded)
+            .expect("usage.recorded event")
+            .payload
+            .as_usage_recorded()
+            .expect("usage.recorded payload");
+        assert_eq!(usage.provider.as_deref(), Some("anthropic"));
+        assert_eq!(usage.model.as_deref(), Some("claude-sonnet-5"));
+
+        let unattributed = store
+            .record_usage(Some(&ticket_id), None, Spend::tokens(10), actor())
+            .expect("record_usage");
+        let usage = unattributed
+            .iter()
+            .find(|e| e.kind == tm_events::EventKind::UsageRecorded)
+            .expect("usage.recorded event")
+            .payload
+            .as_usage_recorded()
+            .expect("usage.recorded payload");
+        assert_eq!(usage.provider, None);
+        assert_eq!(usage.model, None);
     }
 
     /// `SPEC.md` §31.3/§29, `docs/audit-2026-09-18-fable.md` B-10's "done looks like": a budget

@@ -593,13 +593,13 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
         }
         EventKind::ProviderSelected => {
             if let Some(p) = event.payload.as_provider_selected() {
-                // `provider_usage`'s primary key is `(provider, model)`, but the only catalogued
-                // event naming both together is `provider.selected` (`role`/`provider`/`model`);
-                // `usage.recorded` (below) carries `tokens`/`dollars_micros` but no
-                // `provider`/`model` to attribute them to, so no event this crate materializes
-                // can roll a selection's later spend into this table's `tokens_used`/
-                // `dollars_micros` columns without inventing state `tm_events` doesn't carry.
-                // `provider.selected` therefore seeds/refreshes an identity row per
+                // `provider_usage`'s primary key is `(provider, model)`. `usage.recorded` (below)
+                // does now carry optional `provider`/`model` attribution
+                // (`tel-usage-payload-model-field`), but rolling its `tokens`/`dollars_micros`
+                // into this table's running counters is deliberately out of that task's scope —
+                // see the `UsageRecorded` arm below for why this table stays a freshness table,
+                // not a precise spend ledger, for now. `provider.selected` therefore seeds/
+                // refreshes an identity row per
                 // `(provider, model)` pair with zeroed counters rather than a running total; real
                 // spend accounting already happens per ticket/session via `budgets`
                 // (`Store::record_usage` -> `crate::budget::BudgetLedger::record_usage`), which is
@@ -617,11 +617,15 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
             }
         }
         EventKind::UsageRecorded => {
-            // Deliberate no-op against `provider_usage`, per the `provider.selected` arm's doc
-            // comment above: this payload names no `provider`/`model` to key a row on. Nothing is
-            // silently dropped that matters — the budget debit this event accompanies already
-            // happened synchronously at the call site before the event was even built (see
-            // `store.rs`'s `record_usage`).
+            // Deliberate no-op against `provider_usage`, even though the payload can now name
+            // `provider`/`model` (`tel-usage-payload-model-field`): rolling per-event spend into
+            // this table's running `tokens_used`/`dollars_micros` counters, keyed and aggregated
+            // correctly across concurrent writers, is a separate task, not a side effect to sneak
+            // into a field-addition. Nothing is silently dropped that matters in the meantime —
+            // the budget debit this event accompanies already happened synchronously at the call
+            // site before the event was even built (see `store.rs`'s `record_usage`), and the
+            // attribution itself is preserved verbatim in the immutable event log for a future
+            // reader (or task) to fold.
         }
         EventKind::HarnessChanged => {
             // A field-level harness config diff (`field`/`from`/`to`) has no dedicated table:
@@ -1753,6 +1757,8 @@ mod tests {
                 tokens: 100,
                 dollars_micros: 5,
                 wall_seconds: 1,
+                provider: None,
+                model: None,
             });
             let event = draft_event(1, EK::UsageRecorded, payload);
             assert!(apply(tx, &event).is_ok());
