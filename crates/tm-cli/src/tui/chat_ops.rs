@@ -997,6 +997,7 @@ impl App {
             }
             CommandId::Compact => self.compact(&arg, now),
             CommandId::Model => self.switch_model(&arg),
+            CommandId::Level => self.switch_level(&arg),
             CommandId::Connect => self.connect_provider(&arg),
             CommandId::Provider => self.show_provider(),
             CommandId::Config => self.config_cmd(&arg),
@@ -1028,6 +1029,38 @@ impl App {
         }
         self.handle_chat_actions(now);
         self.refresh(now);
+    }
+
+    fn switch_level(&mut self, arg: &str) {
+        let role = match arg.trim().to_ascii_lowercase().as_str() {
+            "fast" => tm_types::Role::CoderFast,
+            "deep" => tm_types::Role::CoderDeep,
+            _ => {
+                return self
+                    .chat
+                    .push_notice(NoticeLevel::Warning, "Usage: /level fast|deep")
+            }
+        };
+        let Ok(mut session) = self.agent_session.try_lock() else {
+            return self.chat.push_notice(
+                NoticeLevel::Warning,
+                "A turn is running; change level once it finishes.",
+            );
+        };
+        match session.set_role(role) {
+            Ok(()) => {
+                let model = session.model().ok().flatten().map(|m| m.to_string());
+                drop(session);
+                if let Some(model) = model {
+                    self.chat.show_model(model);
+                }
+                self.chat.push_notice(
+                    NoticeLevel::Success,
+                    format!("Chat level set to {}.", arg.trim().to_ascii_lowercase()),
+                );
+            }
+            Err(e) => self.chat.push_notice(NoticeLevel::Warning, e.to_string()),
+        }
     }
 
     fn open_resume_picker(&mut self, now: Timestamp) {
@@ -1231,12 +1264,17 @@ impl App {
             NoticeLevel::Info,
             format_auth_instructions(info.display_name, &descriptions, &rows),
         );
-        if rows.iter().filter(|r| r.required).all(|r| r.configured) {
+        if tm_provider::LOCAL_PROVIDER_IDS.contains(&info.id) {
+            self.chat.push_notice(
+                NoticeLevel::Info,
+                format!("{} is a local backend; no model/server probe was run. Configure its concrete model and verify the local endpoint before selecting it.", info.display_name),
+            );
+        } else if rows.iter().filter(|r| r.required).all(|r| r.configured) {
             self.chat.push_notice(
                 NoticeLevel::Success,
                 format!(
-                    "{} is already connected. Run `tm provider test {}` to check it \
-                     (one small billed call).",
+                    "{} has its required settings present; connectivity is not verified. \
+                     Check with `tm provider test {}` (one tiny billed call).",
                     info.display_name, info.id
                 ),
             );

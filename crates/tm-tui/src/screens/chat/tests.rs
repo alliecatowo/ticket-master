@@ -475,6 +475,8 @@ fn new_commands_reach_the_application() {
         ("/compact", CommandId::Compact, ""),
         ("/model", CommandId::Model, ""),
         ("/model devpass/x", CommandId::Model, "devpass/x"),
+        ("/level fast", CommandId::Level, "fast"),
+        ("/level deep", CommandId::Level, "deep"),
         ("/connect", CommandId::Connect, ""),
         ("/connect anthropic", CommandId::Connect, "anthropic"),
         ("/provider", CommandId::Provider, ""),

@@ -175,7 +175,7 @@ pub fn docs_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()>
             vec!["Id".to_string(), "Mode".to_string(), "State".to_string()],
             rows,
         );
-        renderer.emit(&(), &table.render())?;
+        renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
         if newly_registered > 0 {
             renderer.note(&format!(
                 "Registered {newly_registered} doc(s) into the project store"
@@ -709,7 +709,7 @@ pub fn templates_list(project: &Project, renderer: &Renderer) -> tm_types::Resul
             ],
             rows,
         );
-        renderer.emit(&(), &table.render())?;
+        renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
     }
     Ok(())
 }
@@ -791,7 +791,7 @@ pub fn templates_show(
                 ],
                 rows,
             );
-            renderer.emit(&(), &table.render())?;
+            renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
         }
     }
     Ok(())
@@ -1109,7 +1109,7 @@ pub async fn provider_list(project: Option<&Project>, renderer: &Renderer) -> tm
             ],
             rows,
         );
-        renderer.emit(&(), &table.render())?;
+        renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
     }
     Ok(())
 }
@@ -1186,7 +1186,7 @@ pub async fn provider_detect(renderer: &Renderer) -> tm_types::Result<()> {
             ],
             rows,
         );
-        renderer.emit(&(), &table.render())?;
+        renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
     }
     Ok(())
 }
@@ -1789,7 +1789,7 @@ pub fn harness_epochs(project: &Project, renderer: &Renderer) -> tm_types::Resul
             ],
             rows,
         );
-        renderer.emit(&(), &table.render())?;
+        renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
     }
     Ok(())
 }
@@ -2153,7 +2153,7 @@ pub fn bench_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()
             .map(|t| vec![t.id.clone(), t.fixture.description.clone()])
             .collect();
         let table = Table::new(vec!["Id".to_string(), "Description".to_string()], rows);
-        renderer.emit(&(), &table.render())?;
+        renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
     }
     Ok(())
 }
@@ -2251,7 +2251,7 @@ pub async fn bench_run(
             ],
             rows,
         );
-        renderer.emit(&(), &table.render())?;
+        renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
         renderer.note(&format!(
             "Benchmark run completed: {} task(s), aggregate score {:.2} (report: {})",
             report.tasks.len(),
@@ -3002,7 +3002,7 @@ pub fn mirror_status(project: &Project, renderer: &Renderer) -> tm_types::Result
                 ],
                 rows,
             );
-            renderer.emit(&(), &table.render())?;
+            renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
         }
         if links.is_empty() {
             renderer.note("No active mirror links");
@@ -3027,7 +3027,7 @@ pub fn mirror_status(project: &Project, renderer: &Renderer) -> tm_types::Result
                 ],
                 rows,
             );
-            renderer.emit(&(), &table.render())?;
+            renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
         }
     }
     Ok(())

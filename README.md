@@ -160,7 +160,8 @@ mise run build            # build just the `tm` binary
 </details>
 
 `/level` is an interactive chat command only; there is no noninteractive CLI tier-setting
-command. Use `/level fast` or `/level deep` in chat. `tm ticket dispatch "..."` creates
+command. Use `/level fast` or `/level deep` in chat; deep requires a configured `coder.deep`
+provider/model route and reports an actionable error when none exists. `tm ticket dispatch "..."` creates
 and activates a worker ticket; `tm ticket new` alone creates a draft, which must be activated.
 
 <details>
@@ -192,7 +193,7 @@ tm provider test devpass  # one tiny billed smoke test
 (provider role routing). `tm harness set` validates and persists a candidate; promote the resulting
 harness epoch to apply it. Chat model defaults are stored separately in `default-model.json`.
 Sessions and background workers use the same project provider table;
-local backends can be selected explicitly with `/model ollama/<pulled-model>`.
+local backends require a concrete model route in `providers.toml`; tm does not guess a local model.
 `tm provider list` reports configured routing candidates, not whether credentials are present
 or a model can answer; use `tm provider detect` for environment availability and `tm provider test`
 for a real (potentially billed) round trip. Saving a default model does not verify service access.

@@ -393,7 +393,7 @@ pub fn ticket_list(
             })
             .collect();
         let table = Table::new(headers, rows);
-        renderer.emit(&overviews, &table.render())?;
+        renderer.emit(&overviews, &table.render_colored(renderer.color_enabled()))?;
     }
 
     Ok(())
@@ -1282,7 +1282,10 @@ pub fn milestone_list(project: &Project, renderer: &Renderer) -> tm_types::Resul
             })
             .collect();
         let table = Table::new(headers, rows);
-        renderer.emit(&milestone_views, &table.render())?;
+        renderer.emit(
+            &milestone_views,
+            &table.render_colored(renderer.color_enabled()),
+        )?;
     }
 
     Ok(())
@@ -1514,7 +1517,10 @@ pub fn decision_list(project: &Project, renderer: &Renderer) -> tm_types::Result
             })
             .collect();
         let table = Table::new(headers, rows);
-        renderer.emit(&decision_views, &table.render())?;
+        renderer.emit(
+            &decision_views,
+            &table.render_colored(renderer.color_enabled()),
+        )?;
     }
 
     Ok(())

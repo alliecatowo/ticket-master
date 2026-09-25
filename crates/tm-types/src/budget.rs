@@ -173,6 +173,13 @@ impl Budget {
     /// Check a spend without recording it.
     pub fn check(&self, s: Spend) -> Result<(), BudgetError> {
         let r = self.remaining();
+        if self.tokens != u64::MAX && self.spent.tokens > self.tokens {
+            return Err(BudgetError::Tokens {
+                spent: self.spent.tokens,
+                limit: self.tokens,
+                requested: s.tokens,
+            });
+        }
         if s.tokens > r.tokens {
             return Err(BudgetError::Tokens {
                 spent: self.spent.tokens,
@@ -180,14 +187,18 @@ impl Budget {
                 requested: s.tokens,
             });
         }
-        if s.dollars_micros > r.dollars_micros {
+        if (self.dollars_micros != u64::MAX && self.spent.dollars_micros > self.dollars_micros)
+            || s.dollars_micros > r.dollars_micros
+        {
             return Err(BudgetError::Dollars {
                 spent: self.spent.dollars_micros,
                 limit: self.dollars_micros,
                 requested: s.dollars_micros,
             });
         }
-        if s.wall_seconds > r.wall_seconds {
+        if (self.wall_seconds != u64::MAX && self.spent.wall_seconds > self.wall_seconds)
+            || s.wall_seconds > r.wall_seconds
+        {
             return Err(BudgetError::Time {
                 spent: self.spent.wall_seconds,
                 limit: self.wall_seconds,
