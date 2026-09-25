@@ -48,6 +48,18 @@ const TICKET_SUBMIT: &str = "ticket.submit";
 /// non-terminating tool-call loop even when budget alone hasn't tripped yet.
 pub const DEFAULT_MAX_STEPS: u32 = 64;
 
+/// How many times [`AgentLoop::drive`] nudges a ticketed run that ended a turn with plain text
+/// and no `ticket.submit` call, instead of failing it immediately (`u1-worker-submit-nudge`):
+/// Claude Code/Codex-style harnesses give the model one more chance to either submit or keep
+/// working rather than losing the run's progress to a turn that just stopped talking. See
+/// [`AgentLoop::with_max_submit_nudges`] to change it per loop.
+pub const DEFAULT_MAX_SUBMIT_NUDGES: u32 = 1;
+
+/// The user message appended after a ticketed run's text-only turn, once per nudge budgeted by
+/// [`AgentLoop::max_submit_nudges`] (see [`DEFAULT_MAX_SUBMIT_NUDGES`]).
+const SUBMIT_NUDGE_TEXT: &str = "You ended your turn without calling ticket.submit. If the work \
+     is done and verified, call ticket.submit with evidence now; if not, continue working.";
+
 /// Upper bound on the total number of events recorded against one ticket's subject before
 /// [`AgentLoop::drive`] force-stops with [`AgentOutcome::Failed`] (`FailureClass::Other`),
 /// regardless of `tm_core::CycleBudget`/[`AgentLoop::max_steps`] state — the project-wide "dumb
@@ -280,6 +292,9 @@ pub struct AgentLoop {
     role: Role,
     actor: ParticipantId,
     max_steps: u32,
+    /// How many times a ticketed run's text-only turn gets nudged instead of failed outright;
+    /// see [`DEFAULT_MAX_SUBMIT_NUDGES`] and [`AgentLoop::with_max_submit_nudges`].
+    max_submit_nudges: u32,
     /// How long one provider call may wait for fabric capacity; see [`DEFAULT_CAPACITY_WAIT`].
     capacity_wait: std::time::Duration,
     /// The [`DEFAULT_MAX_EVENTS_PER_TICKET`]-shaped backstop this loop enforces; see that
@@ -339,6 +354,7 @@ impl AgentLoop {
             role,
             actor,
             max_steps: DEFAULT_MAX_STEPS,
+            max_submit_nudges: DEFAULT_MAX_SUBMIT_NUDGES,
             capacity_wait: DEFAULT_CAPACITY_WAIT,
             max_events_per_ticket: DEFAULT_MAX_EVENTS_PER_TICKET,
             store,
@@ -350,6 +366,14 @@ impl AgentLoop {
     /// [`DEFAULT_CAPACITY_WAIT`]). `Duration::ZERO` restores fail-fast behavior.
     pub fn with_capacity_wait(mut self, wait: std::time::Duration) -> Self {
         self.capacity_wait = wait;
+        self
+    }
+
+    /// Override how many times a ticketed run's text-only turn gets nudged before this loop
+    /// fails the attempt with "model ended turn without submitting" (see
+    /// [`DEFAULT_MAX_SUBMIT_NUDGES`]). `0` restores the old fail-immediately behavior.
+    pub fn with_max_submit_nudges(mut self, max_submit_nudges: u32) -> Self {
+        self.max_submit_nudges = max_submit_nudges;
         self
     }
 
@@ -1089,6 +1113,13 @@ impl AgentLoop {
         // every resumption.
         self.ensure_goal_set(task)?;
 
+        // How many of `steps`' *already-recorded* text-only turns were nudges
+        // (`u1-worker-submit-nudge`): a text-only step (no tool calls) could only have ended up
+        // in `steps` non-terminally because it was nudged and the run kept going (an un-nudged
+        // one returns `AgentOutcome::Failed` right there — see below), so this count is exact
+        // even across a suspend/resume boundary, without any extra state of its own.
+        let mut nudges_sent: u32 = steps.iter().filter(|s| s.tool_calls.is_empty()).count() as u32;
+
         loop {
             if steps.len() as u32 >= self.max_steps {
                 return Ok(AgentOutcome::Failed {
@@ -1313,6 +1344,27 @@ impl AgentLoop {
                         text: reply.unwrap_or_default(),
                         steps,
                     });
+                }
+                // A ticketed task (no `conversation`) that ends a turn with plain text and no
+                // tool call gets one nudge — a fresh user message asking it to either submit
+                // with evidence or keep working — before this loop gives up on the attempt
+                // (`u1-worker-submit-nudge`). Bounded by `max_submit_nudges` (default
+                // [`DEFAULT_MAX_SUBMIT_NUDGES`]) so a model that just keeps talking still fails
+                // the attempt instead of looping forever.
+                // Also refuse to nudge into a step that would immediately hit the step limit
+                // (`steps` already includes the text-only step just pushed above): otherwise the
+                // next loop iteration would report "step limit reached" instead of the more
+                // honest "model ended turn without submitting" for a run that was already out of
+                // room.
+                if nudges_sent < self.max_submit_nudges && (steps.len() as u32) < self.max_steps {
+                    nudges_sent += 1;
+                    tracing::debug!(
+                        step = step_index,
+                        nudges_sent,
+                        max_submit_nudges = self.max_submit_nudges,
+                        "nudged a text-only turn to call ticket.submit instead of failing the attempt"
+                    );
+                    continue;
                 }
                 return Ok(AgentOutcome::Failed {
                     steps,
@@ -1576,14 +1628,19 @@ pub(crate) fn rebuild_conversation(
 ) -> Vec<Message> {
     let mut messages = Vec::new();
     match conversation {
+        // A ticketed task (`u1-worker-submit-nudge`): a text-only step anywhere in `steps` can
+        // only mean `AgentLoop::drive` nudged it and kept going (a text-only step that wasn't
+        // nudged ends the run terminally right there, so it could never end up embedded inside a
+        // later turn's rebuilt `steps`) -- so replaying it re-derives the same nudge instead of
+        // needing it carried separately. See `push_step_messages`'s own doc comment.
         None => {
             push_user_text(&mut messages, task_prompt.to_string());
-            push_step_messages(&mut messages, steps);
+            push_step_messages(&mut messages, steps, true);
         }
         Some(conversation) => {
             for turn in &conversation.prior_turns {
                 push_user_text(&mut messages, turn.user_message.clone());
-                push_step_messages(&mut messages, &turn.steps);
+                push_step_messages(&mut messages, &turn.steps, false);
             }
             let current = if task_prompt.trim().is_empty() {
                 conversation.user_message.clone()
@@ -1591,7 +1648,7 @@ pub(crate) fn rebuild_conversation(
                 format!("{task_prompt}\n# Message\n{}", conversation.user_message)
             };
             push_user_text(&mut messages, current);
-            push_step_messages(&mut messages, steps);
+            push_step_messages(&mut messages, steps, false);
         }
     }
     messages
@@ -1615,7 +1672,19 @@ fn push_user_text(messages: &mut Vec<Message>, text: String) {
 
 /// Append the assistant/tool-result message pairs for `steps`, rendered from
 /// `pruning::working_set(steps)` (see [`rebuild_messages`]'s doc comment for why).
-fn push_step_messages(messages: &mut Vec<Message>, steps: &[StepRecord]) {
+///
+/// `nudge_text_only_steps` is `true` only for a ticketed task's own steps
+/// (`rebuild_conversation`'s `None` branch): when set, a text-only step (assistant text, no tool
+/// calls) gets [`SUBMIT_NUDGE_TEXT`] appended as a trailing user message right after it, exactly
+/// reproducing what `AgentLoop::drive` sent the model on the turn that followed
+/// (`u1-worker-submit-nudge`) -- derived fresh from `steps` on every rebuild rather than carried
+/// as separate state, so a request built for turn N always matches the request `drive` actually
+/// sent for turn N, including across a suspend/resume boundary.
+fn push_step_messages(
+    messages: &mut Vec<Message>,
+    steps: &[StepRecord],
+    nudge_text_only_steps: bool,
+) {
     let working_set = pruning::working_set(steps);
     for step_ref in &working_set.steps {
         let step = step_ref.step;
@@ -1631,6 +1700,15 @@ fn push_step_messages(messages: &mut Vec<Message>, steps: &[StepRecord]) {
             });
         }
         if assistant_content.is_empty() {
+            // A completion with neither text nor a tool call (e.g. a reasoning-only reply) also
+            // takes `AgentLoop::drive`'s "no tool call" nudge branch, with nothing to render as
+            // an assistant message here -- but the nudge itself must still be replayed, folded
+            // into the preceding user message via `push_user_text` (valid on the wire: two
+            // consecutive user turns collapse into one, same as any other back-to-back user
+            // text).
+            if nudge_text_only_steps {
+                push_user_text(messages, SUBMIT_NUDGE_TEXT.to_string());
+            }
             continue;
         }
         messages.push(Message {
@@ -1638,30 +1716,35 @@ fn push_step_messages(messages: &mut Vec<Message>, steps: &[StepRecord]) {
             content: assistant_content,
         });
 
-        if !step.tool_calls.is_empty() {
-            let result_blocks = step
-                .tool_calls
-                .iter()
-                .zip(&step_ref.tool_call_states)
-                .map(|(tc, state)| {
-                    let (text, is_error) = match state {
-                        pruning::ToolCallState::Full => tool_result_text(&tc.resolution),
-                        pruning::ToolCallState::Superseded { by_step } => {
-                            (format!("[superseded by step {by_step}]"), false)
-                        }
-                    };
-                    ContentBlock::ToolResult {
-                        tool_use_id: tc.tool_use_id.clone(),
-                        content: vec![ContentBlock::Text { text }],
-                        is_error,
-                    }
-                })
-                .collect();
-            messages.push(Message {
-                role: MessageRole::User,
-                content: result_blocks,
-            });
+        if step.tool_calls.is_empty() {
+            if nudge_text_only_steps {
+                push_user_text(messages, SUBMIT_NUDGE_TEXT.to_string());
+            }
+            continue;
         }
+
+        let result_blocks = step
+            .tool_calls
+            .iter()
+            .zip(&step_ref.tool_call_states)
+            .map(|(tc, state)| {
+                let (text, is_error) = match state {
+                    pruning::ToolCallState::Full => tool_result_text(&tc.resolution),
+                    pruning::ToolCallState::Superseded { by_step } => {
+                        (format!("[superseded by step {by_step}]"), false)
+                    }
+                };
+                ContentBlock::ToolResult {
+                    tool_use_id: tc.tool_use_id.clone(),
+                    content: vec![ContentBlock::Text { text }],
+                    is_error,
+                }
+            })
+            .collect();
+        messages.push(Message {
+            role: MessageRole::User,
+            content: result_blocks,
+        });
     }
 }
 
@@ -2401,6 +2484,10 @@ mod tests {
         ));
         fabric.register_provider(provider.clone());
 
+        // `.with_max_submit_nudges(0)`: this test is about usage recording on a plain text-only
+        // failure, not the `u1-worker-submit-nudge` retry itself (covered by its own tests
+        // below) -- disabling the nudge keeps this exactly the single scripted request it always
+        // was.
         let mut agent_loop = AgentLoop::new(
             fabric,
             h.tools(),
@@ -2411,7 +2498,8 @@ mod tests {
             Role::CoderFast,
             h.actor.clone(),
             h.store.clone(),
-        );
+        )
+        .with_max_submit_nudges(0);
         let task = h.task();
         let request = expected_request(&agent_loop, &task);
         provider.script_response(
@@ -2721,7 +2809,11 @@ mod tests {
             Role::CoderFast,
             h.actor.clone(),
             h.store.clone(),
-        );
+        )
+        // Not testing `u1-worker-submit-nudge` here: a text-only reply should end the run as
+        // `Failed` directly, so the session-bracket assertions below are about exactly one
+        // provider turn.
+        .with_max_submit_nudges(0);
         let task = h.task();
         let request = expected_request(&agent_loop, &task);
         provider.script_response(
@@ -2873,7 +2965,11 @@ mod tests {
             Role::CoderFast,
             h.actor.clone(),
             h.store.clone(),
-        );
+        )
+        // Not testing `u1-worker-submit-nudge` here: turn 3's text-only reply should end the run
+        // as `Failed` directly, matching this test's own doc comment above about what an
+        // unscripted turn 4 would mean.
+        .with_max_submit_nudges(0);
         let task = h.task();
         // A path that does not exist under this test process's CWD, so `fs.stat` completes
         // deterministically with `exists: false` regardless of where `cargo test` runs from.
@@ -3037,7 +3133,11 @@ mod tests {
             Role::CoderFast,
             h.actor.clone(),
             h.store.clone(),
-        );
+        )
+        // Not testing `u1-worker-submit-nudge` here: a nudge would reorient a third time before
+        // the (deliberately unscripted) turn-3 request errors, breaking this test's exact
+        // `at_steps == vec![1, 2]` assertion below.
+        .with_max_submit_nudges(0);
         let task = h.task();
 
         // Before the run: no goal exists yet.
@@ -3314,6 +3414,347 @@ mod tests {
         assert!(find_events(&events, EventKind::TicketVerificationFailed).is_empty());
     }
 
+    // ---- submit nudge (`u1-worker-submit-nudge`) ----
+
+    /// A ticketed run's turn 1 ends with plain text and no tool call; instead of failing right
+    /// there, `AgentLoop::drive` appends [`SUBMIT_NUDGE_TEXT`] as a fresh user message and gives
+    /// the model one more turn, which this test scripts as a real `ticket.submit` -- reaching
+    /// `AgentOutcome::Submitted` where the pre-nudge behavior would have reached `Failed` on
+    /// turn 1 alone. Turn 2's request is predicted by `expected_request_after`, which (via
+    /// `rebuild_messages`) already derives the nudge from step 1 being text-only -- exactly what
+    /// `AgentLoop::drive` itself rebuilds -- so an unscripted (mismatched) request here would
+    /// fail this test with a provider error instead of quietly passing for the wrong reason.
+    #[tokio::test]
+    async fn drive_nudges_a_text_only_turn_then_reaches_submitted() {
+        let h = LiveHarness::new();
+        h.store
+            .activate(&h.ticket, h.actor.clone())
+            .expect("activate");
+        h.store
+            .acquire_lease(
+                &h.ticket,
+                h.actor.clone(),
+                Authority::none(),
+                vec![],
+                60,
+                h.actor.clone(),
+            )
+            .expect("acquire_lease");
+        h.store
+            .transition(&h.ticket, tm_core::Trigger::WorkStarted, h.actor.clone())
+            .expect("work started");
+        let evidence_events = h
+            .store
+            .store_artifact(
+                tm_core::ArtifactKind::Patch,
+                "text/plain".to_string(),
+                b"diff --git a/x b/x\n".to_vec(),
+                serde_json::json!({}),
+                None,
+                h.actor.clone(),
+            )
+            .expect("store_artifact");
+        let evidence_id = evidence_events[0]
+            .payload
+            .as_artifact_created()
+            .expect("artifact.created payload")
+            .artifact
+            .clone();
+
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+        let task = h.task();
+
+        // Turn 1: plain text, no tool call.
+        let turn1_request = expected_request(&agent_loop, &task);
+        let turn1_completion = text_only_completion(model.clone(), &h.clock);
+        provider.script_response(&turn1_request, turn1_completion.clone());
+        let step1 = StepRecord {
+            index: 1,
+            served_by: model.to_string(),
+            assistant_text: Some("looked around, not done yet".to_string()),
+            tool_calls: Vec::new(),
+            spend: step_spend_of(&turn1_completion),
+            at: h.clock.now(),
+        };
+
+        // Turn 2: the nudged request (step 1's transcript, with the nudge already derived by
+        // `expected_request_after`/`rebuild_messages` since step 1 has no tool calls), scripted
+        // with a real `ticket.submit`.
+        let turn2_request =
+            expected_request_after(&agent_loop, &task, std::slice::from_ref(&step1));
+        let submit_input = serde_json::json!({
+            "summary": "goal met",
+            "evidence": [evidence_id.as_str()],
+        });
+        provider.script_response(
+            &turn2_request,
+            tool_call_completion(
+                model.clone(),
+                &h.clock,
+                "call-2",
+                "ticket.submit",
+                submit_input,
+            ),
+        );
+
+        let outcome = agent_loop.run(task).await.expect("run completes");
+        assert!(
+            matches!(outcome, AgentOutcome::Submitted { .. }),
+            "a nudged text-only turn 1 followed by a real submit should reach Submitted, \
+             not fail on turn 1 alone: {outcome:?}"
+        );
+        assert_eq!(
+            outcome.steps().len(),
+            2,
+            "both the nudged text-only turn and the submitting turn should be recorded"
+        );
+    }
+
+    /// Two consecutive text-only turns still fail with the original message: the nudge is a
+    /// one-shot second chance (`DEFAULT_MAX_SUBMIT_NUDGES`), not an unbounded retry loop.
+    #[tokio::test]
+    async fn drive_fails_after_two_consecutive_text_only_turns() {
+        let h = LiveHarness::new();
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+        let task = h.task();
+
+        let turn1_request = expected_request(&agent_loop, &task);
+        let turn1_completion = text_only_completion(model.clone(), &h.clock);
+        provider.script_response(&turn1_request, turn1_completion.clone());
+        let step1 = StepRecord {
+            index: 1,
+            served_by: model.to_string(),
+            assistant_text: Some("looked around, not done yet".to_string()),
+            tool_calls: Vec::new(),
+            spend: step_spend_of(&turn1_completion),
+            at: h.clock.now(),
+        };
+
+        let turn2_request =
+            expected_request_after(&agent_loop, &task, std::slice::from_ref(&step1));
+        provider.script_response(
+            &turn2_request,
+            text_only_completion(model.clone(), &h.clock),
+        );
+
+        let outcome = agent_loop.run(task).await.expect("run completes");
+        match outcome {
+            AgentOutcome::Failed {
+                steps,
+                class,
+                detail,
+            } => {
+                assert_eq!(class, FailureClass::Other);
+                assert_eq!(detail, "model ended turn without submitting");
+                assert_eq!(
+                    steps.len(),
+                    2,
+                    "both text-only turns (the nudged one and the one after it) should be recorded"
+                );
+            }
+            other => panic!("expected Failed after two consecutive text-only turns: {other:?}"),
+        }
+    }
+
+    /// The nudge is not just a one-off reply: after it, the model can keep doing real work
+    /// (a tool call) before eventually submitting, and the transcript rebuilt for that later
+    /// turn must still carry the nudge from step 1 -- proving [`push_step_messages`] re-derives
+    /// it from `steps` correctly rather than only handling the immediate-next-turn case the two
+    /// tests above cover.
+    #[tokio::test]
+    async fn drive_nudges_then_keeps_working_before_submitting() {
+        let h = LiveHarness::new();
+        h.store
+            .activate(&h.ticket, h.actor.clone())
+            .expect("activate");
+        h.store
+            .acquire_lease(
+                &h.ticket,
+                h.actor.clone(),
+                Authority::none(),
+                vec![],
+                60,
+                h.actor.clone(),
+            )
+            .expect("acquire_lease");
+        h.store
+            .transition(&h.ticket, tm_core::Trigger::WorkStarted, h.actor.clone())
+            .expect("work started");
+        let evidence_events = h
+            .store
+            .store_artifact(
+                tm_core::ArtifactKind::Patch,
+                "text/plain".to_string(),
+                b"diff --git a/x b/x\n".to_vec(),
+                serde_json::json!({}),
+                None,
+                h.actor.clone(),
+            )
+            .expect("store_artifact");
+        let evidence_id = evidence_events[0]
+            .payload
+            .as_artifact_created()
+            .expect("artifact.created payload")
+            .artifact
+            .clone();
+
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+        let task = h.task();
+
+        // Turn 1: plain text, no tool call -- gets nudged.
+        let turn1_request = expected_request(&agent_loop, &task);
+        let turn1_completion = text_only_completion(model.clone(), &h.clock);
+        provider.script_response(&turn1_request, turn1_completion.clone());
+        let step1 = StepRecord {
+            index: 1,
+            served_by: model.to_string(),
+            assistant_text: Some("looked around, not done yet".to_string()),
+            tool_calls: Vec::new(),
+            spend: step_spend_of(&turn1_completion),
+            at: h.clock.now(),
+        };
+
+        // Turn 2 (the nudged turn): a real tool call, not a submit -- the model keeps working.
+        let stat_input =
+            serde_json::json!({"path": "nonexistent-u1-worker-submit-nudge-fixture.rs"});
+        let turn2_request =
+            expected_request_after(&agent_loop, &task, std::slice::from_ref(&step1));
+        let turn2_completion = tool_call_completion(
+            model.clone(),
+            &h.clock,
+            "call-2",
+            "fs.stat",
+            stat_input.clone(),
+        );
+        provider.script_response(&turn2_request, turn2_completion.clone());
+
+        let root = project_root();
+        let effective_authority = agent_loop.authority().intersect(&task.authority);
+        let ctx = CallContext {
+            authority: &effective_authority,
+            ticket: task.ticket.as_ref(),
+            session: &task.session,
+            actor: &h.actor,
+            clock: h.clock.as_ref(),
+            ids: h.ids.as_ref(),
+            root: &root,
+        };
+        let resolution2 = agent_loop
+            .tools()
+            .dispatch(
+                &ToolCall {
+                    id: "call-2".to_string(),
+                    name: "fs.stat".to_string(),
+                    input: stat_input.clone(),
+                },
+                &ctx,
+            )
+            .await;
+        let step2 = StepRecord {
+            index: 2,
+            served_by: model.to_string(),
+            assistant_text: None,
+            tool_calls: vec![ToolCallRecord {
+                tool_use_id: "call-2".to_string(),
+                tool_name: "fs.stat".to_string(),
+                input: stat_input.clone(),
+                resolution: resolution2,
+            }],
+            spend: step_spend_of(&turn2_completion),
+            at: h.clock.now(),
+        };
+
+        // Turn 3: a real submit. Its request must still carry step 1's nudge -- the assertion
+        // this test exists for.
+        let turn3_request =
+            expected_request_after(&agent_loop, &task, &[step1.clone(), step2.clone()]);
+        let submit_input = serde_json::json!({
+            "summary": "goal met",
+            "evidence": [evidence_id.as_str()],
+        });
+        provider.script_response(
+            &turn3_request,
+            tool_call_completion(
+                model.clone(),
+                &h.clock,
+                "call-3",
+                "ticket.submit",
+                submit_input,
+            ),
+        );
+
+        let outcome = agent_loop.run(task).await.expect("run completes");
+        assert!(
+            matches!(outcome, AgentOutcome::Submitted { .. }),
+            "nudge -> real tool call -> submit should reach Submitted, not an infra error \
+             (an infra error here means turn 3's request didn't match what was scripted -- the \
+             nudge wasn't re-derived correctly for a turn beyond the immediate next one): \
+             {outcome:?}"
+        );
+        assert_eq!(
+            outcome.steps().len(),
+            3,
+            "all three turns should be recorded"
+        );
+    }
+
     /// `tel-tool-call-event-kind`: a step that dispatches two tool calls -- one that completes
     /// (`fs.stat`, unaffected by `shell.enabled`) and one an authority restriction denies
     /// (`shell.run`, with `shell.enabled = false`) -- appends exactly one `tool_call.completed`
@@ -3346,7 +3787,11 @@ mod tests {
             Role::CoderFast,
             h.actor.clone(),
             h.store.clone(),
-        );
+        )
+        // Not testing `u1-worker-submit-nudge` here: turn 2's text-only reply should end the run
+        // as `Failed` directly, so the event-count assertions below are about exactly the two
+        // dispatched calls from turn 1.
+        .with_max_submit_nudges(0);
         let task = h.task();
         let stat_input = serde_json::json!({"path": "nonexistent-tool-call-event-fixture.rs"});
         let shell_input = serde_json::json!({"argv": ["echo", "hi"]});
@@ -3739,7 +4184,10 @@ mod tests {
             Role::CoderFast,
             h.actor.clone(),
             h.store.clone(),
-        );
+        )
+        // Not testing `u1-worker-submit-nudge` here: turn 2's text-only reply should end the run
+        // as `Failed` directly, matching this test's own comment below.
+        .with_max_submit_nudges(0);
         let task = h.task();
         let stat_input = serde_json::json!({"path": "nonexistent-tool-replay-fixture.rs"});
 
@@ -3824,6 +4272,7 @@ mod tests {
             h.actor.clone(),
             h.store.clone(),
         )
+        .with_max_submit_nudges(0)
         .with_replay_tool_source(ReplayToolSource::from_steps(recorded_outcome.steps()));
 
         // Belt and suspenders on top of the "same schema hashes the same" reasoning above: script
