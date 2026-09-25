@@ -52,6 +52,17 @@ pub trait ToolAdapter {
     /// scores that as a failed task rather than propagating the error and aborting the whole
     /// suite, so one tool's outage does not stop every other tool's run.
     fn run(&self, task: &BenchTask, workdir: &Path) -> Result<AdapterOutcome>;
+
+    /// Human-readable description of the permission/sandbox posture this adapter runs its tool
+    /// under (e.g. Claude Code's `--permission-mode bypassPermissions`, Codex's `--sandbox
+    /// workspace-write`). Reported in `CrossToolReport::header` so a reader can confirm every
+    /// tool ran under a comparable posture, rather than `tm` "winning" every task simply because
+    /// the others couldn't edit files or run commands at all --
+    /// `docs/audits/2026-09-25-bench-plan.md`'s "Required fixes" item 0. `mod tests`'s
+    /// `FakeAdapter` keeps this default.
+    fn permission_posture(&self) -> &str {
+        "unspecified"
+    }
 }
 
 /// One tool's result for one task, mirroring `tm_harness::TaskResult`'s externally visible
@@ -72,10 +83,21 @@ pub struct CrossTaskResult {
     pub model: Option<String>,
 }
 
-/// The full comparison: every `(tool, task)` pair that ran, in run order.
+/// The full comparison: every `(tool, task)` pair that ran, in run order, plus the run-level
+/// metadata (permission posture, tool versions, the pinned model and any caps) needed to read
+/// the numbers as a fair comparison rather than an unlabeled one.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct CrossToolReport {
+    pub header: ReportHeader,
     pub results: Vec<CrossTaskResult>,
+}
+
+/// Run-level metadata rendered once, above the per-task table.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ReportHeader {
+    /// `(tool name, permission/sandbox posture)`, in adapter order -- see
+    /// `ToolAdapter::permission_posture`.
+    pub permission_postures: Vec<(String, String)>,
 }
 
 /// Score of 1.0 while `actual` stays at or under `ceiling`, degrading toward 0.0 past it. A
@@ -222,6 +244,14 @@ pub fn run_comparison(
     adapters: &[(&str, &dyn ToolAdapter)],
     workdir_root: &Path,
 ) -> Result<CrossToolReport> {
+    let permission_postures = adapters
+        .iter()
+        .map(|&(name, adapter)| (name.to_string(), adapter.permission_posture().to_string()))
+        .collect();
+    let header = ReportHeader {
+        permission_postures,
+    };
+
     let mut results = Vec::with_capacity(tasks.len() * adapters.len());
     for task in tasks {
         for &(tool_name, adapter) in adapters {
@@ -280,7 +310,7 @@ pub fn run_comparison(
             });
         }
     }
-    Ok(CrossToolReport { results })
+    Ok(CrossToolReport { header, results })
 }
 
 /// Render `report` as markdown: one table, grouped by task, each row a `(tool, task)` pair --
@@ -288,10 +318,12 @@ pub fn run_comparison(
 /// `render_report_markdown` renders for a single-tool `BenchmarkReport`, with a leading `Tool`
 /// column since this report always compares more than one.
 pub fn render_markdown(report: &CrossToolReport) -> String {
-    if report.results.is_empty() {
-        return "# Cross-tool benchmark report\n\nNo tasks ran.\n".to_string();
-    }
     let mut out = String::from("# Cross-tool benchmark report\n\n");
+    out.push_str(&render_header(&report.header));
+    if report.results.is_empty() {
+        out.push_str("No tasks ran.\n");
+        return out;
+    }
     out.push_str(
         "| Tool | Task | Model | Result | Score | Cost | Tokens | Tool calls | Wall time |\n",
     );
@@ -312,6 +344,21 @@ pub fn render_markdown(report: &CrossToolReport) -> String {
             r.wall_seconds,
         ));
     }
+    out
+}
+
+/// Render the run-level metadata block (currently: each tool's permission/sandbox posture) that
+/// precedes the per-task table, so a reader sees *how* each tool ran before the numbers, not
+/// just the numbers. Empty when there is nothing to report (e.g. `CrossToolReport::default()`).
+fn render_header(header: &ReportHeader) -> String {
+    if header.permission_postures.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("| Tool | Permission posture |\n| --- | --- |\n");
+    for (tool, posture) in &header.permission_postures {
+        out.push_str(&format!("| {tool} | {posture} |\n"));
+    }
+    out.push('\n');
     out
 }
 
@@ -404,26 +451,58 @@ impl ToolAdapter for TmAdapter {
             None => Ok(AdapterOutcome::default()),
         }
     }
+
+    fn permission_posture(&self) -> &str {
+        "n/a -- runs entirely inside the scratch project's own ticket/attempt loop; no external \
+         sandbox flag applies"
+    }
 }
 
-/// Shells Claude Code's own scriptable one-shot turn: `claude -p <task> --output-format json`.
-/// Real-Claude auth (the metered Anthropic API, or an interactive subscription session) is never
-/// the accidental default -- per `docs/backlog.md`'s "A head-to-head benchmark" section, this
-/// adapter is only ever constructed by `run` when `--real-claude-auth` was passed explicitly;
-/// see that function's doc comment for the gate itself.
+/// Shells Claude Code's own scriptable one-shot turn: `claude -p <task> --output-format json
+/// --permission-mode bypassPermissions`. `bypassPermissions` (not `dontAsk`, which denies rather
+/// than approves every prompt -- confirmed against Claude Code's own `--help`, see
+/// `docs/audits/2026-09-25-bench-plan.md`'s "Required fixes" item 0) auto-approves Edit/Write/Bash
+/// so a headless run can actually touch the fixture; it is only ever pointed at `workdir`, a
+/// disposable per-task scratch copy (see `prepare_workdir`), never the primary checkout. Real-
+/// Claude auth (the metered Anthropic API, or an interactive subscription session) is never the
+/// accidental default -- per `docs/backlog.md`'s "A head-to-head benchmark" section, this adapter
+/// is only ever constructed by `run` when `--real-claude-auth` was passed explicitly; see that
+/// function's doc comment for the gate itself.
 pub struct ClaudeAdapter {
     pub binary: String,
+    /// Model id passed through to `--model` verbatim, when the caller pinned one. `None` here
+    /// today (`run()` never sets it yet); model passthrough itself lands in a follow-up task.
+    pub model: Option<String>,
+}
+
+impl ClaudeAdapter {
+    /// Build the `Command` this adapter would run for `task` in `workdir`, without spawning it --
+    /// factored out so a unit test can inspect the argv (`Command::get_args`) directly instead of
+    /// needing a real `claude` binary on `$PATH`.
+    fn build_command(&self, task: &BenchTask, workdir: &Path) -> Command {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("-p")
+            .arg(&task.task)
+            .arg("--output-format")
+            .arg("json")
+            .arg("--permission-mode")
+            .arg("bypassPermissions");
+        if let Some(model) = &self.model {
+            cmd.arg("--model").arg(model);
+        }
+        cmd.current_dir(workdir);
+        // Closed, not just unpiped: `claude -p` probes stdin for piped input and prints "no
+        // stdin data received in 3s" then hangs when it's an open pipe with nothing written to
+        // it (the real failure this fixes -- see this module's own doc comment).
+        cmd.stdin(Stdio::null());
+        cmd
+    }
 }
 
 impl ToolAdapter for ClaudeAdapter {
     fn run(&self, task: &BenchTask, workdir: &Path) -> Result<AdapterOutcome> {
-        let output = Command::new(&self.binary)
-            .args(["-p", &task.task, "--output-format", "json"])
-            .current_dir(workdir)
-            // Closed, not just unpiped: `claude -p` probes stdin for piped input and prints
-            // "no stdin data received in 3s" then hangs when it's an open pipe with nothing
-            // written to it (the real failure this fixes -- see this module's own doc comment).
-            .stdin(Stdio::null())
+        let output = self
+            .build_command(task, workdir)
             .output()
             .context("failed to run `claude -p`")?;
         // Best-effort: `claude -p --output-format json` prints one JSON result object with a
@@ -434,45 +513,104 @@ impl ToolAdapter for ClaudeAdapter {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(parse_best_effort_usage(&stdout))
     }
+
+    fn permission_posture(&self) -> &str {
+        "--permission-mode bypassPermissions (auto-approves Edit/Write/Bash except rm/rmdir on a \
+         handful of critical paths)"
+    }
 }
 
-/// Shells `opencode run <task> --format json` (OpenCode's non-interactive mode).
+/// Shells `opencode run <task> --format json --auto` (OpenCode's non-interactive mode; `--auto`
+/// auto-approves any permission request not explicitly denied, confirmed against `opencode run
+/// --help`).
 pub struct OpencodeAdapter {
     pub binary: String,
+    /// `provider/model`-shaped id passed to `-m`, when the caller pinned one.
+    pub model: Option<String>,
+}
+
+impl OpencodeAdapter {
+    /// Build the `Command` this adapter would run, without spawning it -- see
+    /// `ClaudeAdapter::build_command`'s doc comment for why.
+    fn build_command(&self, task: &BenchTask, workdir: &Path) -> Command {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("run")
+            .arg(&task.task)
+            .arg("--format")
+            .arg("json")
+            .arg("--auto");
+        if let Some(model) = &self.model {
+            cmd.arg("-m").arg(model);
+        }
+        cmd.current_dir(workdir);
+        // `opencode run` hung for the full timeout against an open stdin pipe and finished in
+        // 14s against `/dev/null` (docs/audits/2026-09-25-bench-plan.md's evidence) -- close it
+        // explicitly rather than inheriting whatever the caller's stdin is.
+        cmd.stdin(Stdio::null());
+        cmd
+    }
 }
 
 impl ToolAdapter for OpencodeAdapter {
     fn run(&self, task: &BenchTask, workdir: &Path) -> Result<AdapterOutcome> {
-        let output = Command::new(&self.binary)
-            .args(["run", &task.task, "--format", "json"])
-            .current_dir(workdir)
-            // `opencode run` hung for the full timeout against an open stdin pipe and finished
-            // in 14s against `/dev/null` (docs/audits/2026-09-25-bench-plan.md's evidence) --
-            // close it explicitly rather than inheriting whatever the caller's stdin is.
-            .stdin(Stdio::null())
+        let output = self
+            .build_command(task, workdir)
             .output()
             .context("failed to run `opencode run`")?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(parse_best_effort_usage(&stdout))
     }
+
+    fn permission_posture(&self) -> &str {
+        "--auto (auto-approves any permission request not explicitly denied)"
+    }
 }
 
-/// Shells `codex exec <task> --json` (Codex CLI's non-interactive mode; streams newline-delimited
-/// JSON events to stdout, one per state change).
+/// Shells `codex exec <task> --json --sandbox workspace-write` (Codex CLI's non-interactive
+/// mode; streams newline-delimited JSON events to stdout, one per state change).
+/// `workspace-write` is the minimum sandbox posture that lets Codex actually edit files and run
+/// commands inside `workdir` headlessly -- Codex's default "never approve" policy otherwise
+/// leaves it unable to touch the fixture at all (docs/audits/2026-09-25-bench-plan.md's
+/// "Required fixes" item 0); the fully-open `--dangerously-bypass-approvals-and-sandbox` is
+/// deliberately not used here since this adapter runs against a real scratch directory on this
+/// machine, not a disposable container.
 pub struct CodexAdapter {
     pub binary: String,
+    /// `provider/model`-shaped id passed to `-m`, when the caller pinned one.
+    pub model: Option<String>,
+}
+
+impl CodexAdapter {
+    /// Build the `Command` this adapter would run, without spawning it -- see
+    /// `ClaudeAdapter::build_command`'s doc comment for why.
+    fn build_command(&self, task: &BenchTask, workdir: &Path) -> Command {
+        let mut cmd = Command::new(&self.binary);
+        cmd.arg("exec")
+            .arg(&task.task)
+            .arg("--json")
+            .arg("--sandbox")
+            .arg("workspace-write");
+        if let Some(model) = &self.model {
+            cmd.arg("-m").arg(model);
+        }
+        cmd.current_dir(workdir);
+        cmd.stdin(Stdio::null());
+        cmd
+    }
 }
 
 impl ToolAdapter for CodexAdapter {
     fn run(&self, task: &BenchTask, workdir: &Path) -> Result<AdapterOutcome> {
-        let output = Command::new(&self.binary)
-            .args(["exec", &task.task, "--json"])
-            .current_dir(workdir)
-            .stdin(Stdio::null())
+        let output = self
+            .build_command(task, workdir)
             .output()
             .context("failed to run `codex exec`")?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(parse_best_effort_usage(&stdout))
+    }
+
+    fn permission_posture(&self) -> &str {
+        "--sandbox workspace-write (never-approve policy, sandboxed to the scratch working dir)"
     }
 }
 
@@ -573,12 +711,15 @@ pub fn run(args: &[String]) -> Result<()> {
     };
     let claude_adapter = ClaudeAdapter {
         binary: "claude".to_string(),
+        model: None,
     };
     let opencode_adapter = OpencodeAdapter {
         binary: "opencode".to_string(),
+        model: None,
     };
     let codex_adapter = CodexAdapter {
         binary: "codex".to_string(),
+        model: None,
     };
 
     let mut adapters: Vec<(&str, &dyn ToolAdapter)> = Vec::new();
@@ -745,6 +886,12 @@ mod tests {
     #[test]
     fn render_markdown_includes_a_tool_column_and_every_result() {
         let report = CrossToolReport {
+            header: ReportHeader {
+                permission_postures: vec![
+                    ("tm".to_string(), "n/a (local ticket run)".to_string()),
+                    ("opencode".to_string(), "--auto".to_string()),
+                ],
+            },
             results: vec![
                 CrossTaskResult {
                     tool: "tm".to_string(),
@@ -771,6 +918,8 @@ mod tests {
             ],
         };
         let markdown = render_markdown(&report);
+        assert!(markdown.contains("| Tool | Permission posture |"));
+        assert!(markdown.contains("| opencode | --auto |"));
         assert!(markdown.contains("| Tool | Task | Model |"));
         assert!(markdown.contains("Tokens"));
         assert!(markdown.contains("| tm | live-smoke | claude-sonnet-5 | pass"));
@@ -816,5 +965,118 @@ mod tests {
         let filtered = discover_bench_tasks(&bench_root, Some("live-smoke")).expect("discover");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "live-smoke");
+    }
+
+    /// `[program, args...]` from a not-yet-spawned `Command`, for asserting on the built argv
+    /// without a real binary on `$PATH` -- see each `*Adapter::build_command`'s own doc comment.
+    fn argv(cmd: &Command) -> Vec<String> {
+        std::iter::once(cmd.get_program())
+            .chain(cmd.get_args())
+            .map(|s| s.to_string_lossy().to_string())
+            .collect()
+    }
+
+    fn contains_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn claude_adapter_command_includes_bypass_permissions_and_the_scratch_workdir() {
+        let task = live_smoke_task();
+        let adapter = ClaudeAdapter {
+            binary: "claude".to_string(),
+            model: None,
+        };
+        let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
+        let cmd = adapter.build_command(&task, workdir);
+        let args = argv(&cmd);
+
+        assert_eq!(args[0], "claude");
+        assert!(
+            contains_pair(&args, "--permission-mode", "bypassPermissions"),
+            "{args:?}"
+        );
+        assert!(contains_pair(&args, "--output-format", "json"), "{args:?}");
+        assert_eq!(cmd.get_current_dir(), Some(workdir));
+        assert!(!args.iter().any(|a| a == "--model"), "{args:?}");
+    }
+
+    #[test]
+    fn claude_adapter_command_passes_a_pinned_model() {
+        let task = live_smoke_task();
+        let adapter = ClaudeAdapter {
+            binary: "claude".to_string(),
+            model: Some("claude-sonnet-5".to_string()),
+        };
+        let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
+        let args = argv(&adapter.build_command(&task, workdir));
+        assert!(
+            contains_pair(&args, "--model", "claude-sonnet-5"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn opencode_adapter_command_includes_auto_and_the_scratch_workdir() {
+        let task = live_smoke_task();
+        let adapter = OpencodeAdapter {
+            binary: "opencode".to_string(),
+            model: None,
+        };
+        let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
+        let cmd = adapter.build_command(&task, workdir);
+        let args = argv(&cmd);
+
+        assert_eq!(args[0], "opencode");
+        assert!(args.iter().any(|a| a == "--auto"), "{args:?}");
+        assert!(contains_pair(&args, "--format", "json"), "{args:?}");
+        assert_eq!(cmd.get_current_dir(), Some(workdir));
+    }
+
+    #[test]
+    fn opencode_adapter_command_passes_a_pinned_model() {
+        let task = live_smoke_task();
+        let adapter = OpencodeAdapter {
+            binary: "opencode".to_string(),
+            model: Some("anthropic/claude-sonnet-5".to_string()),
+        };
+        let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
+        let args = argv(&adapter.build_command(&task, workdir));
+        assert!(
+            contains_pair(&args, "-m", "anthropic/claude-sonnet-5"),
+            "{args:?}"
+        );
+    }
+
+    #[test]
+    fn codex_adapter_command_includes_workspace_write_sandbox_and_the_scratch_workdir() {
+        let task = live_smoke_task();
+        let adapter = CodexAdapter {
+            binary: "codex".to_string(),
+            model: None,
+        };
+        let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
+        let cmd = adapter.build_command(&task, workdir);
+        let args = argv(&cmd);
+
+        assert_eq!(args[0], "codex");
+        assert!(
+            contains_pair(&args, "--sandbox", "workspace-write"),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|a| a == "--json"), "{args:?}");
+        assert_eq!(cmd.get_current_dir(), Some(workdir));
+    }
+
+    #[test]
+    fn codex_adapter_command_passes_a_pinned_model() {
+        let task = live_smoke_task();
+        let adapter = CodexAdapter {
+            binary: "codex".to_string(),
+            model: Some("gpt-5-codex".to_string()),
+        };
+        let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
+        let args = argv(&adapter.build_command(&task, workdir));
+        assert!(contains_pair(&args, "-m", "gpt-5-codex"), "{args:?}");
     }
 }
