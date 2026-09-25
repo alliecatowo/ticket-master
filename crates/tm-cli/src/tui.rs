@@ -278,6 +278,24 @@ fn configured_model() -> String {
     }
 }
 
+/// Whether [`configured_model`] actually has a credential to answer with — the same
+/// env-var-presence check `tm provider status`'s `env_vars_present` column reports
+/// ([`tm_provider::providers::ProviderInfo::is_configured`]), not a network probe, so this stays
+/// cheap enough to call on every render/refresh. `u1-chat-header-unusable-model`: without this,
+/// opening `tm` with no credential for the default model shows it plainly in the welcome box and
+/// status line, and the first message then fails with "no usable model is configured".
+fn model_available() -> bool {
+    if std::env::var_os("TM_TEST_MOCK_PROVIDER").is_some() {
+        return true;
+    }
+    let model = configured_model();
+    let provider_id = model.split_once('/').map_or(model.as_str(), |(id, _)| id);
+    tm_provider::Registry::known_providers()
+        .into_iter()
+        .find(|info| info.id == provider_id)
+        .is_none_or(|info| info.is_configured())
+}
+
 /// `path` with the home directory shortened to `~`.
 fn display_path(path: &Path) -> String {
     let shown = path.display().to_string();
@@ -350,6 +368,7 @@ fn base_status(
         global_scope: project.scope == Scope::Global,
         ticket: ticket.map(|t| t.to_string()),
         open_tickets: view.tickets.values().filter(|t| is_open(t.state)).count(),
+        model_available: model_available(),
         ..StatusInfo::default()
     }
 }

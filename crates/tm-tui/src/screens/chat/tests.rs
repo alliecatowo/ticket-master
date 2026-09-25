@@ -955,6 +955,33 @@ fn the_welcome_box_reads_like_claude_codes() {
 }
 
 #[test]
+fn the_welcome_box_flags_an_unavailable_model() {
+    let env = Env::new();
+    let chat = ChatScreen::new(
+        ComponentId::new("test.chat"),
+        SessionId::new("S-1").expect("S-1 is a valid SessionId"),
+        StatusInfo {
+            model: "anthropic/claude-sonnet-5".to_string(),
+            cwd: "~/proj".to_string(),
+            branch: Some("main".to_string()),
+            model_available: false,
+            ..StatusInfo::default()
+        },
+    );
+    let text = screen_text(&render(&chat, &env, 80, 24));
+    assert!(
+        text.contains("model: anthropic/claude-sonnet-5 (not set up — /connect)"),
+        "{text}"
+    );
+
+    // The default (available) case stays plain, with no hint appended.
+    let plain = screen();
+    let plain_text = screen_text(&render(&plain, &env, 80, 24));
+    assert!(plain_text.contains("model: mock/m1"), "{plain_text}");
+    assert!(!plain_text.contains("not set up"), "{plain_text}");
+}
+
+#[test]
 fn the_status_line_shows_shortcuts_left_and_model_right() {
     let env = Env::new();
     let chat = screen();

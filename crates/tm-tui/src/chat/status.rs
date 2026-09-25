@@ -23,7 +23,7 @@ pub enum TurnState {
 }
 
 /// The facts the status bar shows, supplied by the application.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusInfo {
     /// The model that most recently answered, else the configured one (`provider/model`).
     pub model: String,
@@ -41,6 +41,27 @@ pub struct StatusInfo {
     pub tokens: u64,
     /// How many tokens the conversation's context took on the last turn (0: not known yet).
     pub context_tokens: u64,
+    /// Whether `model` currently has a credential/route to answer with (u1-chat-header-
+    /// unusable-model): `false` flags the header and welcome box instead of silently advertising
+    /// a model the first turn will fail against. Defaults to `true` so a caller that never
+    /// checked (most tests, and any construction predating this field) still renders plainly.
+    pub model_available: bool,
+}
+
+impl Default for StatusInfo {
+    fn default() -> Self {
+        StatusInfo {
+            model: String::new(),
+            cwd: String::new(),
+            branch: None,
+            global_scope: false,
+            ticket: None,
+            open_tickets: 0,
+            tokens: 0,
+            context_tokens: 0,
+            model_available: true,
+        }
+    }
 }
 
 /// One status-bar segment.
@@ -73,6 +94,11 @@ pub fn segments(
 ) -> Vec<Segment> {
     let muted = Style::default().fg(theme.muted);
     let (glyph, glyph_style) = match state {
+        // An unusable model gets the same warning-coloured dot a running/failed turn would
+        // otherwise reserve, since the very first turn is about to fail against it anyway.
+        TurnState::Idle if !info.model_available => {
+            (glyphs.dot, Style::default().fg(theme.warning))
+        }
         TurnState::Idle => (glyphs.dot, Style::default().fg(theme.success)),
         TurnState::Running => (spinner_frame, Style::default().fg(theme.accent)),
         TurnState::Failed => (glyphs.dot, Style::default().fg(theme.danger)),
@@ -296,6 +322,7 @@ mod tests {
             open_tickets: 3,
             tokens: 12_345,
             context_tokens: 0,
+            model_available: true,
         }
     }
 
@@ -354,6 +381,35 @@ mod tests {
         assert_eq!(format_tokens(999), "999");
         assert_eq!(format_tokens(1_234), "1.2k");
         assert_eq!(format_tokens(2_500_000), "2.5M");
+    }
+
+    #[test]
+    fn an_unavailable_model_gets_the_warning_coloured_dot_only_when_idle() {
+        let theme = Theme::dark();
+        let mut i = info();
+        i.model_available = false;
+        let dot_style = |i: &StatusInfo, state: TurnState| -> Style {
+            segments(i, state, "*", &theme, &Glyphs::UNICODE)[0].spans[0].style
+        };
+        assert_eq!(
+            dot_style(&i, TurnState::Idle),
+            Style::default().fg(theme.warning)
+        );
+        // A running/failed turn already has its own colour and is not further overridden.
+        assert_eq!(
+            dot_style(&i, TurnState::Running),
+            Style::default().fg(theme.accent)
+        );
+        assert_eq!(
+            dot_style(&i, TurnState::Failed),
+            Style::default().fg(theme.danger)
+        );
+
+        i.model_available = true;
+        assert_eq!(
+            dot_style(&i, TurnState::Idle),
+            Style::default().fg(theme.success)
+        );
     }
 
     #[test]

@@ -1554,6 +1554,7 @@ impl ChatScreen {
         let accent = Style::default()
             .fg(theme.accent)
             .add_modifier(Modifier::BOLD);
+        let warning = Style::default().fg(theme.warning);
         let mut place = self.status.cwd.clone();
         if let Some(branch) = &self.status.branch {
             place.push_str(&format!(" ({branch})"));
@@ -1580,10 +1581,16 @@ impl ChatScreen {
                 Span::new("  cwd: ", muted),
                 Span::new(place, Style::default()),
             ]),
-            Line::from_spans(vec![
-                Span::new("  model: ", muted),
-                Span::new(self.model().to_string(), Style::default()),
-            ]),
+            {
+                let mut spans = vec![
+                    Span::new("  model: ", muted),
+                    Span::new(self.model().to_string(), Style::default()),
+                ];
+                if !self.status.model_available {
+                    spans.push(Span::new(" (not set up — /connect)", warning));
+                }
+                Line::from_spans(spans)
+            },
         ];
         let content_width = card.iter().map(Line::width).max().unwrap_or(0);
         let box_width = ((content_width + 4).max(50) as u16).min(area.width);
@@ -1956,6 +1963,10 @@ impl Component for ChatScreen {
                 &StatusInfo {
                     model: self.model().to_string(),
                     tokens: self.total_tokens(),
+                    // A turn that actually served proves the model works, even if it was flagged
+                    // unavailable at startup (e.g. `/connect` ran since, or `served_by` differs
+                    // from the originally configured model).
+                    model_available: self.status.model_available || self.served_by.is_some(),
                     ..self.status.clone()
                 },
                 self.turn_state(),
