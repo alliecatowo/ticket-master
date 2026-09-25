@@ -1429,7 +1429,7 @@ is based on.
   acceptance: A ticket run that ends without submission prints a final summary distinguishing this from a test failure and gives an actionable recovery command; a successful run's output remains unchanged.
   test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
   evidence: `/private/tmp/tm-trials/20260925-1314/psf-requests-7432/tm.log:170` — “model ended turn without submitting. Run `tm run T-1` again to retry.” after 1,063.43 seconds, followed by `ticket.retry_scheduled` at line 172.
-- [ ] **t20260925-1314-sindresorhus-ky-878-provider-retry-guidance** — Give actionable recovery for provider configuration failures
+- [~] **t20260925-1314-sindresorhus-ky-878-provider-retry-guidance** — Give actionable recovery for provider configuration failures (needs another pass: the worker made no changes)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/sched.rs`, `crates/tm-provider/src/fabric.rs`
   change: In `run_outcome`, distinguish an unregistered provider/no-candidate configuration failure from transient provider unavailability. Do not recommend rerunning `tm run <ticket>` with unchanged configuration; explain that the configured provider is not registered and point to the real provider setup/validation command.
