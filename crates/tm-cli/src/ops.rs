@@ -184,27 +184,98 @@ pub fn docs_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()>
     Ok(())
 }
 
+/// Build a real [`tm_docs::ChangeSet`] from the project's git state: every path that differs
+/// between `HEAD`'s tree and the current working tree (staged, unstaged, and untracked), relative
+/// to `project.root`. This is `M-14`'s "nothing triggers staleness" gap closed for real —
+/// previously nothing computed a live `ChangeSet` at all, so `docs_check`/`docs_reconcile` could
+/// only ever see whatever state a prior call had already persisted.
+///
+/// `docs-wire-real-staleness-trigger`'s own task text describes diffing each doc's individual
+/// *last-verified commit* (from a per-doc provenance record written at verify/attest time); no
+/// such record exists yet — `docs.last_verified` (`docs-persist-state-across-invocations`) is a
+/// timestamp, not a commit id, and `tm docs attest` (`docs-wire-attestation-cli-path`) that would
+/// populate one hasn't landed. Diffing `HEAD` against the working tree for every doc uniformly is
+/// the real, buildable subset of that: it still makes an uncommitted edit to a `derived_from` path
+/// flip that doc `Stale` (this task's acceptance check), just without yet narrowing the diff range
+/// per doc. A doc that is not in a git repository (or a repository with no commits yet) gets an
+/// empty `ChangeSet` rather than an error — `tm docs check` must still run in a non-git project,
+/// just with nothing live driving staleness there.
+///
+/// The real limit of this approximation: on a clean checkout (nothing uncommitted — the common
+/// case in CI, or right after a fresh clone) this is always an empty `ChangeSet`, so a
+/// `derived_from` edit that was already committed before any `tm docs check` ran against it is
+/// invisible here. Closing that gap for real needs a persisted per-doc last-verified commit sha
+/// (a `Store` method/schema change in `crates/tm-core/src/store.rs`, outside this task's owned
+/// files) to diff against instead of `HEAD`.
+fn git_changeset(project: &Project) -> tm_types::Result<tm_docs::ChangeSet> {
+    let Ok(repo) = git2::Repository::open(&project.root) else {
+        return Ok(tm_docs::ChangeSet::empty());
+    };
+    // An "unborn" HEAD (`git init` with no commits yet) has no tree to diff against at all --
+    // `peel_to_tree` errors, and diffing against `None` here (rather than returning empty) would
+    // diff against an *empty* tree instead, which (with `include_untracked` below) would mark
+    // every file in the working tree "changed", flipping every glob-matching doc Stale on a
+    // repo's very first `tm docs check`. Treat that the same as "not a git repo": nothing live to
+    // diff yet.
+    let Ok(head_tree) = repo.head().and_then(|h| h.peel_to_tree()) else {
+        return Ok(tm_docs::ChangeSet::empty());
+    };
+
+    let mut diff_opts = git2::DiffOptions::new();
+    diff_opts
+        .include_untracked(true)
+        .recurse_untracked_dirs(true);
+    let diff = repo
+        .diff_tree_to_workdir_with_index(Some(&head_tree), Some(&mut diff_opts))
+        .map_err(|e| tm_types::TmError::storage(format!("Failed to diff git working tree: {e}")))?;
+
+    let mut changed_paths = Vec::new();
+    diff.foreach(
+        &mut |delta, _| {
+            if let Some(path) = delta.new_file().path().or_else(|| delta.old_file().path()) {
+                changed_paths.push(path.to_string_lossy().into_owned());
+            }
+            true
+        },
+        None,
+        None,
+        None,
+    )
+    .map_err(|e| tm_types::TmError::storage(format!("Failed to walk git diff: {e}")))?;
+
+    Ok(tm_docs::ChangeSet {
+        changed_paths,
+        superseded_decisions: Vec::new(),
+    })
+}
+
 /// `tm docs check`: exit non-zero when any doc is `Stale`.
 ///
 /// # IMPL
-/// Build a `tm_docs::assess::Assessor` over the registry and provenance index, run
-/// `Assessor::check()`; on `Err`, this command's exit code must be non-zero — return the
-/// `TmError` unchanged so `main.rs`'s exit-code mapping (domain failure, code 1) applies, this
-/// function does not catch and swallow it.
+/// Build a `tm_docs::assess::Assessor` over the registry and provenance index, feed it a real
+/// [`git_changeset`] and run `Assessor::assess` before `Assessor::check()`; on `Err`, this
+/// command's exit code must be non-zero — return the `TmError` unchanged so `main.rs`'s exit-code
+/// mapping (domain failure, code 1) applies, this function does not catch and swallow it.
 ///
-/// No caller yet feeds this a real `ChangeSet` from a commit/index-update hook (`M-14`'s "nothing
-/// triggers staleness" gap remains open), so a freshly discovered doc still starts `Unverified`
-/// and this genuinely passes for it — not vacuously (the registry is real, non-empty, and would
-/// fail the moment a doc were marked `Stale`), just with nothing yet driving that transition
-/// automatically. An already-registered doc now reads back whatever state `Store::invalidate_doc`
-/// (or a prior `tm docs reconcile`) persisted (docs-persist-state-across-invocations), so a doc
-/// marked `Stale` by some other path does fail this check on a later invocation, even with no
-/// live `ChangeSet` computed here yet.
+/// A doc `assess` moves into `Stale` this call is persisted through `Store::invalidate_doc`
+/// (`docs-persist-state-across-invocations`), via `Assessor::invalidation_events` — the same
+/// `doc.invalidated` payload shape `tm-core`'s materializer already understands — so a fresh `tm
+/// docs check` in a later invocation reads that `Stale` state back without needing to recompute
+/// the same `ChangeSet` again (see `git_changeset`'s own doc comment for the one gap: this diffs
+/// `HEAD` against the working tree uniformly, not per doc from its own last-verified commit).
 pub fn docs_check(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let (registry, _) = load_and_sync_doc_registry(project)?;
     let records: Vec<tm_docs::DocRecord> = registry.list().into_iter().cloned().collect();
     let provenance = tm_docs::ProvenanceIndex::build(&records)?;
-    let assessor = tm_docs::Assessor::new(registry, provenance);
+    let mut assessor = tm_docs::Assessor::new(registry, provenance);
+
+    let changes = git_changeset(project)?;
+    let assessments = assessor.assess(&changes);
+    for payload in tm_docs::Assessor::invalidation_events(&assessments, assessor.registry()) {
+        project
+            .store
+            .invalidate_doc(payload.path, payload.reason, project.actor.clone())?;
+    }
 
     match assessor.check() {
         Ok(()) => {
@@ -249,7 +320,23 @@ fn reconciliation_kind_label(kind: tm_docs::reconcile::ReconciliationKind) -> &'
 
 /// Handle `tm docs reconcile`
 pub fn docs_reconcile(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
-    let (mut registry, _) = load_and_sync_doc_registry(project)?;
+    let (registry, _) = load_and_sync_doc_registry(project)?;
+    let records: Vec<tm_docs::DocRecord> = registry.list().into_iter().cloned().collect();
+    let provenance = tm_docs::ProvenanceIndex::build(&records)?;
+    let mut assessor = tm_docs::Assessor::new(registry, provenance);
+
+    // Same real `ChangeSet` `docs_check` feeds `Assessor::assess` — an uncommitted edit to a
+    // `derived_from` path must be able to open a reconciliation ticket in the same invocation
+    // that discovers it, not only on a later `tm docs check` run first.
+    let changes = git_changeset(project)?;
+    let assessments = assessor.assess(&changes);
+    for payload in tm_docs::Assessor::invalidation_events(&assessments, assessor.registry()) {
+        project
+            .store
+            .invalidate_doc(payload.path, payload.reason, project.actor.clone())?;
+    }
+
+    let mut registry = assessor.registry().clone();
     let stale_ids: Vec<String> = registry
         .list()
         .iter()
@@ -4638,5 +4725,188 @@ tests_pass = {}
             .await
             .expect_err("unknown kind must be rejected");
         assert!(err.to_string().contains("not.a.real.kind"));
+    }
+
+    /// Initialize a git repo with one empty commit at `path`, mirroring
+    /// `tm_wiki`/`tm_codeintel`'s own `init_git_repo` test fixture -- `docs-wire-real-staleness-
+    /// trigger`'s tests below need a real `HEAD` for `git_changeset` to diff the working tree
+    /// against.
+    fn init_git_repo(path: &std::path::Path) {
+        let repo = git2::Repository::init(path).expect("git init");
+        let sig = git2::Signature::new("Test", "test@example.com", &git2::Time::new(0, 0))
+            .expect("signature");
+        let tree_id = {
+            let mut index = repo.index().expect("repo index");
+            index.write_tree().expect("write tree")
+        };
+        let tree = repo.find_tree(tree_id).expect("find tree");
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .expect("initial commit");
+    }
+
+    /// `docs-wire-real-staleness-trigger` acceptance: "Editing a file matched by a doc's
+    /// derived_from glob makes tm docs check exit 1 and name that doc Stale."
+    #[test]
+    fn docs_check_fails_when_a_derived_from_file_is_edited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_git_repo(root);
+        let project = test_project(root);
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs").join(tm_docs::registry::TMDOCS_TOML),
+            "[[doc]]\npath = \"docs/architecture.md\"\nid = \"architecture\"\nmode = \"generated\"\nderived_from = [\"crates/tm-core/src/**\"]\n",
+        )
+        .unwrap();
+        let renderer = test_renderer();
+
+        // Registering the doc alone (nothing touched yet) must not fail the check.
+        docs_check(&project, &renderer).expect("freshly registered doc is not stale");
+
+        // Editing a file matched by the doc's derived_from glob must flip it Stale.
+        std::fs::create_dir_all(root.join("crates/tm-core/src")).unwrap();
+        std::fs::write(root.join("crates/tm-core/src/lib.rs"), "// changed").unwrap();
+
+        let err = docs_check(&project, &renderer).expect_err("a matched edit must fail the check");
+        assert!(
+            err.to_string().contains("architecture"),
+            "the failure must name the stale doc: {err}"
+        );
+
+        // The Stale state persists across a fresh load, per docs-persist-state-across-invocations.
+        let (registry, _) = load_and_sync_doc_registry(&project).unwrap();
+        assert_eq!(
+            registry.get("architecture").unwrap().state,
+            tm_docs::DocState::Stale
+        );
+    }
+
+    /// `docs-wire-real-staleness-trigger` acceptance: "Editing an unrelated file exits 0."
+    #[test]
+    fn docs_check_passes_when_an_unrelated_file_is_edited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_git_repo(root);
+        let project = test_project(root);
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs").join(tm_docs::registry::TMDOCS_TOML),
+            "[[doc]]\npath = \"docs/architecture.md\"\nid = \"architecture\"\nmode = \"generated\"\nderived_from = [\"crates/tm-core/src/**\"]\n",
+        )
+        .unwrap();
+        let renderer = test_renderer();
+        docs_check(&project, &renderer).expect("freshly registered doc is not stale");
+
+        std::fs::create_dir_all(root.join("crates/tm-cli/src")).unwrap();
+        std::fs::write(root.join("crates/tm-cli/src/unrelated.rs"), "// changed").unwrap();
+
+        docs_check(&project, &renderer).expect("an unmatched edit must not fail the check");
+    }
+
+    /// `git_changeset` must not error against a project root that is not a git repository at all
+    /// -- `tm docs check` still has to work outside a repo, just with nothing live triggering
+    /// staleness.
+    #[test]
+    fn git_changeset_is_empty_outside_a_git_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let changes = git_changeset(&project).expect("no git repo must not error");
+        assert!(changes.changed_paths.is_empty());
+    }
+
+    /// A repo with `git init` but no commits yet ("unborn" `HEAD`) must also give an empty
+    /// `ChangeSet`, not one that treats every file in the working tree as "changed" (diffing
+    /// against an empty tree would do exactly that, with `include_untracked` set).
+    #[test]
+    fn git_changeset_is_empty_with_an_unborn_head() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git2::Repository::init(root).expect("git init");
+        let project = test_project(root);
+        std::fs::create_dir_all(root.join("crates/tm-core/src")).unwrap();
+        std::fs::write(root.join("crates/tm-core/src/lib.rs"), "not yet committed").unwrap();
+
+        let changes = git_changeset(&project).expect("unborn HEAD must not error");
+        assert!(
+            changes.changed_paths.is_empty(),
+            "an unborn HEAD must not treat every untracked file as changed: {:?}",
+            changes.changed_paths
+        );
+    }
+
+    /// `docs_reconcile` must also see the live `ChangeSet` in the same invocation that discovers
+    /// the edit, not only on a subsequent `docs_check` call.
+    #[test]
+    fn docs_reconcile_opens_a_ticket_for_a_doc_made_stale_by_a_real_git_diff() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_git_repo(root);
+        let project = test_project(root);
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs").join(tm_docs::registry::TMDOCS_TOML),
+            "[[doc]]\npath = \"docs/architecture.md\"\nid = \"architecture\"\nmode = \"generated\"\nderived_from = [\"crates/tm-core/src/**\"]\n",
+        )
+        .unwrap();
+        load_and_sync_doc_registry(&project).unwrap();
+
+        std::fs::create_dir_all(root.join("crates/tm-core/src")).unwrap();
+        std::fs::write(root.join("crates/tm-core/src/lib.rs"), "// changed").unwrap();
+
+        let renderer = test_renderer();
+        docs_reconcile(&project, &renderer).expect("reconcile against a real diff");
+
+        let (registry, _) = load_and_sync_doc_registry(&project).unwrap();
+        assert_eq!(
+            registry.get("architecture").unwrap().state,
+            tm_docs::DocState::Reconciling
+        );
+    }
+
+    /// `git_changeset` re-diffs `HEAD` against the working tree on every call, so a still-
+    /// uncommitted edit is seen again on a second `tm docs reconcile`. That must not reopen a
+    /// second reconciliation ticket for a doc already `Reconciling` (`assess.rs`'s
+    /// `reconciling_doc_is_left_reconciling_not_reflagged_stale` is the unit-level proof this
+    /// relies on; this is the integration-level one through the real CLI path).
+    #[test]
+    fn docs_reconcile_run_twice_over_the_same_uncommitted_edit_opens_only_one_ticket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        init_git_repo(root);
+        let project = test_project(root);
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs").join(tm_docs::registry::TMDOCS_TOML),
+            "[[doc]]\npath = \"docs/architecture.md\"\nid = \"architecture\"\nmode = \"generated\"\nderived_from = [\"crates/tm-core/src/**\"]\n",
+        )
+        .unwrap();
+        load_and_sync_doc_registry(&project).unwrap();
+        std::fs::create_dir_all(root.join("crates/tm-core/src")).unwrap();
+        std::fs::write(root.join("crates/tm-core/src/lib.rs"), "// changed").unwrap();
+
+        let renderer = test_renderer();
+        docs_reconcile(&project, &renderer).expect("first reconcile");
+        docs_reconcile(&project, &renderer).expect("second reconcile over the same edit");
+
+        let docs = project.store.docs().unwrap();
+        let arch = docs
+            .iter()
+            .find(|d| d.id == "docs/architecture.md")
+            .expect("doc row exists");
+        assert_eq!(
+            arch.provenance_tickets.len(),
+            1,
+            "a doc already Reconciling must not get a second reconciliation ticket: {:?}",
+            arch.provenance_tickets
+        );
+
+        // A `docs_check` right after must still read `Reconciling`, not have been pushed back to
+        // `Stale` by the second reconcile's own diff.
+        let (registry, _) = load_and_sync_doc_registry(&project).unwrap();
+        assert_eq!(
+            registry.get("architecture").unwrap().state,
+            tm_docs::DocState::Reconciling
+        );
     }
 }

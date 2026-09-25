@@ -100,7 +100,12 @@ impl Assessor {
     ///   in the result at all.
     /// - A touched doc already in [`DocState::Stale`] is left `Stale` (no-op transition, still
     ///   reported with `previous_state == new_state == Stale`) — this is the "must not thrash"
-    ///   rule: no second `doc.invalidated` for a flag that is already raised.
+    ///   rule: no second `doc.invalidated` for a flag that is already raised. A touched doc in
+    ///   [`DocState::Reconciling`] is left `Reconciling` for the same reason: a caller that diffs
+    ///   an uncommitted edit against `HEAD` on every invocation (a real `ChangeSet` source that
+    ///   has no "already assessed this exact change" memory of its own) must not re-flag a doc
+    ///   `Stale` — opening a second regeneration/review ticket — just because the edit that opened
+    ///   its still-open reconciliation ticket hasn't been committed yet.
     /// - A touched doc with a live [`Dismissal`] (recorded via [`Assessor::dismiss`]) transitions
     ///   to [`DocState::Unverified`] instead of `Stale`, is reported with `dismissed: true`, and
     ///   the dismissal is then consumed (removed from `self.dismissals`) so it does not silently
@@ -149,13 +154,14 @@ impl Assessor {
             let live_dismissal = self.dismissals.remove(&doc_id);
             let dismissed = live_dismissal.is_some();
 
-            let new_state = if previous_state == DocState::Stale {
-                DocState::Stale
-            } else if dismissed {
-                DocState::Unverified
-            } else {
-                DocState::Stale
-            };
+            let new_state =
+                if previous_state == DocState::Stale || previous_state == DocState::Reconciling {
+                    previous_state
+                } else if dismissed {
+                    DocState::Unverified
+                } else {
+                    DocState::Stale
+                };
 
             if let Some(record) = self.registry.get_mut(&doc_id) {
                 record.state = new_state;
@@ -311,6 +317,40 @@ mod tests {
         // `invalidation_events` over the second batch must be empty.
         let events = Assessor::invalidation_events(&second, a.registry());
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn reconciling_doc_is_left_reconciling_not_reflagged_stale() {
+        // A caller like `ops.rs::git_changeset` diffs an uncommitted edit against `HEAD` on
+        // every invocation, with no memory of "already assessed this exact change" of its own.
+        // A doc already `Reconciling` (a regeneration/review ticket is already open against it)
+        // must not be pushed back to `Stale` -- and must not get a second `doc.invalidated` --
+        // just because the same still-uncommitted edit is seen again.
+        let mut a = assessor(vec![doc(
+            "arch",
+            DocMode::Maintained,
+            &["crates/tm-core/**"],
+        )]);
+        a.registry_mut().get_mut("arch").unwrap().state = DocState::Reconciling;
+
+        let changes = ChangeSet {
+            changed_paths: vec!["crates/tm-core/src/lib.rs".to_string()],
+            superseded_decisions: vec![],
+        };
+        let assessments = a.assess(&changes);
+        assert_eq!(assessments.len(), 1);
+        assert_eq!(assessments[0].previous_state, DocState::Reconciling);
+        assert_eq!(assessments[0].new_state, DocState::Reconciling);
+        assert_eq!(
+            a.registry().get("arch").unwrap().state,
+            DocState::Reconciling
+        );
+
+        let events = Assessor::invalidation_events(&assessments, a.registry());
+        assert!(
+            events.is_empty(),
+            "a touched Reconciling doc must not produce a doc.invalidated"
+        );
     }
 
     #[test]
