@@ -9,6 +9,37 @@ use crate::args::{
 use crate::project::Project;
 use crate::render::{Renderer, Table};
 
+/// Human/JSON label for a [`tm_codeintel::symbols::SymbolKind`], purpose-built so this module
+/// never has to `{:?}`-debug-format a symbol kind directly at a user-facing or JSON call site.
+fn symbol_kind_label(kind: tm_codeintel::symbols::SymbolKind) -> &'static str {
+    use tm_codeintel::symbols::SymbolKind;
+    match kind {
+        SymbolKind::Function => "function",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Interface => "interface",
+        SymbolKind::Impl => "impl",
+        SymbolKind::Module => "module",
+        SymbolKind::Variable => "variable",
+        SymbolKind::TypeAlias => "type alias",
+    }
+}
+
+/// Human/JSON label for a [`tm_codeintel::hybrid::Signal`], same reasoning as
+/// [`symbol_kind_label`]: `Signal`'s own variant names (e.g. `SymbolProximity`) are internal
+/// shorthand, not something a user reading a search explanation should see verbatim.
+fn signal_label(signal: tm_codeintel::hybrid::Signal) -> &'static str {
+    use tm_codeintel::hybrid::Signal;
+    match signal {
+        Signal::Semantic => "semantic",
+        Signal::Lexical => "lexical",
+        Signal::SymbolProximity => "symbol proximity",
+        Signal::PathAffinity => "path affinity",
+        Signal::EditRecency => "edit recency",
+        Signal::CoChange => "co-change",
+    }
+}
+
 /// Wrapper for JSON serialization of a search hit from exact/regex search.
 #[derive(Debug, Clone, Serialize)]
 struct ExactSearchHit {
@@ -311,7 +342,7 @@ pub fn search(args: &SearchArgs, project: &Project, renderer: &Renderer) -> tm_t
                         .explain
                         .iter()
                         .map(|sc| SignalBreakdown {
-                            signal: format!("{:?}", sc.signal),
+                            signal: signal_label(sc.signal).to_string(),
                             rank: sc.rank,
                             weighted_score: sc.weighted_score,
                         })
@@ -389,7 +420,7 @@ pub fn symbol_def(
         Some(sym) => {
             let info = SymbolInfo {
                 name: sym.name.clone(),
-                kind: format!("{:?}", sym.kind),
+                kind: symbol_kind_label(sym.kind).to_string(),
                 path: sym.path.clone(),
                 line_start: sym.range.line_start,
                 line_end: sym.range.line_end,
@@ -503,7 +534,7 @@ pub fn symbol_callers(
             .iter()
             .map(|s| SymbolInfo {
                 name: s.name.clone(),
-                kind: format!("{:?}", s.kind),
+                kind: symbol_kind_label(s.kind).to_string(),
                 path: s.path.clone(),
                 line_start: s.range.line_start,
                 line_end: s.range.line_end,
@@ -563,7 +594,7 @@ pub fn symbol_callees(
             .iter()
             .map(|s| SymbolInfo {
                 name: s.name.clone(),
-                kind: format!("{:?}", s.kind),
+                kind: symbol_kind_label(s.kind).to_string(),
                 path: s.path.clone(),
                 line_start: s.range.line_start,
                 line_end: s.range.line_end,
@@ -869,6 +900,24 @@ mod tests {
         let json = serde_json::to_string(&hit).expect("should serialize");
         assert!(json.contains("\"path\":\"src/main.rs\""));
         assert!(json.contains("\"line\":42"));
+    }
+
+    #[test]
+    fn symbol_kind_label_is_lowercase_words_not_debug_output() {
+        // critic-format-debug-strings-cleanup: `symbol_def`/`symbol_callers`/`symbol_callees`
+        // must render a `SymbolKind` as plain text, not `{:?}` debug output (e.g. `TypeAlias`).
+        use tm_codeintel::symbols::SymbolKind;
+        assert_eq!(symbol_kind_label(SymbolKind::Function), "function");
+        assert_eq!(symbol_kind_label(SymbolKind::TypeAlias), "type alias");
+        assert!(!symbol_kind_label(SymbolKind::TypeAlias).contains("TypeAlias"));
+    }
+
+    #[test]
+    fn signal_label_is_plain_text_not_debug_output() {
+        // Same reasoning for `tm search`'s signal-breakdown explain output.
+        use tm_codeintel::hybrid::Signal;
+        assert_eq!(signal_label(Signal::SymbolProximity), "symbol proximity");
+        assert!(!signal_label(Signal::SymbolProximity).contains("SymbolProximity"));
     }
 
     #[test]

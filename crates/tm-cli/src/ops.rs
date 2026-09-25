@@ -86,6 +86,29 @@ fn load_and_sync_doc_registry(
     Ok((registry, newly_registered))
 }
 
+/// Human/JSON label for a [`tm_docs::registry::DocMode`], purpose-built so `tm docs list` never
+/// `{:?}`-debug-formats it directly.
+fn doc_mode_label(mode: tm_docs::registry::DocMode) -> &'static str {
+    use tm_docs::registry::DocMode;
+    match mode {
+        DocMode::Generated => "generated",
+        DocMode::Maintained => "maintained",
+        DocMode::Human => "human",
+    }
+}
+
+/// Human/JSON label for a [`tm_docs::registry::DocState`], same reasoning as
+/// [`doc_mode_label`].
+fn doc_state_label(state: tm_docs::registry::DocState) -> &'static str {
+    use tm_docs::registry::DocState;
+    match state {
+        DocState::Fresh => "fresh",
+        DocState::Stale => "stale",
+        DocState::Reconciling => "reconciling",
+        DocState::Unverified => "unverified",
+    }
+}
+
 /// `tm docs list`
 ///
 /// # IMPL
@@ -102,8 +125,8 @@ pub fn docs_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()>
             .map(|record| {
                 serde_json::json!({
                     "id": record.id,
-                    "mode": format!("{:?}", record.mode),
-                    "state": format!("{:?}", record.state),
+                    "mode": doc_mode_label(record.mode),
+                    "state": doc_state_label(record.state),
                     "path": record.path,
                 })
             })
@@ -117,8 +140,8 @@ pub fn docs_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()>
         for record in registry.list() {
             rows.push(vec![
                 record.id.clone(),
-                format!("{:?}", record.mode),
-                format!("{:?}", record.state),
+                doc_mode_label(record.mode).to_string(),
+                doc_state_label(record.state).to_string(),
             ]);
         }
         let table = Table::new(
@@ -184,6 +207,17 @@ pub fn docs_check(project: &Project, renderer: &Renderer) -> tm_types::Result<()
 /// crates — the same B-05/A-02 gap the audit names). Calling both would mint two different ids
 /// for one ticket, so this creates the ticket via `Store::create_ticket` first and builds the
 /// `ReconciliationKind`/state transition inline instead of calling `open_reconciliation`.
+/// Human/JSON label for a [`tm_docs::reconcile::ReconciliationKind`], purpose-built so `tm docs
+/// reconcile --json` never `{:?}`-debug-formats it directly.
+fn reconciliation_kind_label(kind: tm_docs::reconcile::ReconciliationKind) -> &'static str {
+    use tm_docs::reconcile::ReconciliationKind;
+    match kind {
+        ReconciliationKind::Regeneration => "regeneration",
+        ReconciliationKind::Review => "review",
+    }
+}
+
+/// Handle `tm docs reconcile`
 pub fn docs_reconcile(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let (mut registry, _) = load_and_sync_doc_registry(project)?;
     let stale_ids: Vec<String> = registry
@@ -232,7 +266,7 @@ pub fn docs_reconcile(project: &Project, renderer: &Renderer) -> tm_types::Resul
 
         opened.push(serde_json::json!({
             "doc": doc_id,
-            "kind": format!("{kind:?}"),
+            "kind": reconciliation_kind_label(kind),
             "ticket": ticket_id.map(|t| t.to_string()),
         }));
     }
@@ -330,6 +364,17 @@ pub fn templates_list(project: &Project, renderer: &Renderer) -> tm_types::Resul
     Ok(())
 }
 
+/// Human/JSON label for a [`tm_templates::manifest::ParamType`], purpose-built so `tm templates
+/// show` never `{:?}`-debug-formats it directly.
+fn param_type_label(param_type: tm_templates::manifest::ParamType) -> &'static str {
+    use tm_templates::manifest::ParamType;
+    match param_type {
+        ParamType::String => "string",
+        ParamType::Bool => "bool",
+        ParamType::Integer => "integer",
+    }
+}
+
 /// `tm templates show <id>`
 ///
 /// # IMPL
@@ -356,7 +401,7 @@ pub fn templates_show(
                 "checksum": manifest.checksum,
                 "params": manifest.params.iter().map(|p| serde_json::json!({
                     "name": p.name,
-                    "type": format!("{:?}", p.param_type),
+                    "type": param_type_label(p.param_type),
                     "default": p.default,
                     "description": p.description,
                 })).collect::<Vec<_>>(),
@@ -379,7 +424,7 @@ pub fn templates_show(
                 .map(|p| {
                     vec![
                         p.name.clone(),
-                        format!("{:?}", p.param_type),
+                        param_type_label(p.param_type).to_string(),
                         p.default
                             .clone()
                             .unwrap_or_else(|| "(required)".to_string()),
@@ -2675,7 +2720,7 @@ fn tail_backlog(
 /// subject` in human mode.
 fn emit_event(renderer: &Renderer, event: &tm_events::Event) -> tm_types::Result<()> {
     if renderer.is_json() {
-        println!("{}", serde_json::to_string(&event_show_json(event))?);
+        println!("{}", serde_json::to_string(&event_show_json(event)?)?);
     } else {
         println!("{}", event_tail_human(event));
     }
@@ -2710,30 +2755,64 @@ pub fn events_show(
 
     let event = &events[0];
     if renderer.is_json() {
-        renderer.emit(&event_show_json(event), "")?;
+        renderer.emit(&event_show_json(event)?, "")?;
     } else {
-        renderer.emit(&(), &event_show_human(event))?;
+        renderer.emit(&(), &event_show_human(event)?)?;
     }
     Ok(())
 }
 
 /// Pure formatter for `tm events show`'s human output, kept separate from [`events_show`] so the
 /// wording (field labels, event-kind Display vs. debug) is unit-testable without a renderer.
-fn event_show_human(event: &tm_events::Event) -> String {
-    format!(
-        "Sequence: {}\nType: {}\nRelated to: {}\nWhen: {}",
-        event.seq, event.kind, event.subject, event.ts
-    )
+/// Renders `event.payload` as `field: value` pairs rather than `{:?}`-debug-printing the typed
+/// [`tm_events::payload::Payload`] enum, per this module's `events_show` doc comment's promise
+/// that the payload is included.
+fn event_show_human(event: &tm_events::Event) -> tm_types::Result<String> {
+    let payload = event.payload.to_json()?;
+    Ok(format!(
+        "Sequence: {}\nType: {}\nRelated to: {}\nWhen: {}\nDetails: {}",
+        event.seq,
+        event.kind,
+        event.subject,
+        event.ts,
+        format_payload_human(&payload)
+    ))
+}
+
+/// Render a payload's JSON object as a comma-separated, plain-English `field: value` list
+/// (`"none"` for a field with no value) instead of raw JSON syntax — used only in human mode;
+/// `--json` gets the real JSON via [`event_show_json`].
+fn format_payload_human(payload: &serde_json::Value) -> String {
+    match payload.as_object() {
+        Some(fields) if !fields.is_empty() => fields
+            .iter()
+            .map(|(name, value)| format!("{name}: {}", format_payload_field_human(value)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "none".to_string(),
+    }
+}
+
+/// One payload field's plain-text rendering: a JSON string prints unquoted, `null` prints
+/// `"none"`, and anything else (a number, bool, or nested object/array) falls back to compact
+/// JSON syntax for just that one value.
+fn format_payload_field_human(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => "none".to_string(),
+        other => other.to_string(),
+    }
 }
 
 /// Pure formatter for `tm events show --json`'s payload.
-fn event_show_json(event: &tm_events::Event) -> serde_json::Value {
-    serde_json::json!({
+fn event_show_json(event: &tm_events::Event) -> tm_types::Result<serde_json::Value> {
+    Ok(serde_json::json!({
         "seq": event.seq,
         "kind": event.kind.to_string(),
         "subject": event.subject.to_string(),
         "ts": event.ts.to_string(),
-    })
+        "payload": event.payload.to_json()?,
+    }))
 }
 
 /// `tm events replay`
@@ -3626,7 +3705,7 @@ mod tests {
         let event = &events[0];
         assert_eq!(event.kind, tm_events::EventKind::TicketCreated);
 
-        let human = event_show_human(event);
+        let human = event_show_human(event).expect("format human");
         assert!(
             human.contains("Type: ticket.created"),
             "expected dotted event kind in output, got: {human}"
@@ -3635,9 +3714,40 @@ mod tests {
         assert!(human.starts_with("Sequence: "), "got: {human}");
         assert!(human.contains("Related to: "), "got: {human}");
         assert!(human.contains("When: "), "got: {human}");
+        assert!(
+            human.contains("Details: "),
+            "expected the payload to be rendered, got: {human}"
+        );
+        assert!(
+            !human.contains("Payload("),
+            "payload should be plain field:value pairs, not a Debug enum repr: {human}"
+        );
 
-        let json = event_show_json(event);
+        let json = event_show_json(event).expect("format json");
         assert_eq!(json["kind"], "ticket.created");
+        assert!(
+            json["payload"].is_object(),
+            "expected a structured payload object, got: {json}"
+        );
+    }
+
+    #[test]
+    fn param_type_label_is_not_debug_formatted() {
+        // critic-format-debug-strings-cleanup: `tm templates show` must render a param's type as
+        // plain text ("string"/"bool"/"integer"), not `{:?}` debug output (which happens to match
+        // here, but the point is this call site no longer depends on the enum's Debug spelling).
+        assert_eq!(
+            param_type_label(tm_templates::manifest::ParamType::String),
+            "string"
+        );
+        assert_eq!(
+            param_type_label(tm_templates::manifest::ParamType::Bool),
+            "bool"
+        );
+        assert_eq!(
+            param_type_label(tm_templates::manifest::ParamType::Integer),
+            "integer"
+        );
     }
 
     #[test]

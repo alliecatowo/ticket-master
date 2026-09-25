@@ -631,7 +631,7 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
 }
 
 /// Plain-English description of a failure class for user-facing messages.
-fn failure_class_description(class: tm_core::FailureClass) -> &'static str {
+pub(crate) fn failure_class_description(class: tm_core::FailureClass) -> &'static str {
     use tm_core::FailureClass;
     match class {
         FailureClass::ExecutorCrash => "executor crashed",
@@ -642,6 +642,22 @@ fn failure_class_description(class: tm_core::FailureClass) -> &'static str {
         FailureClass::AuthorityDenied => "authority denied",
         FailureClass::ResourceConflict => "resource conflict",
         FailureClass::Other => "something went wrong",
+    }
+}
+
+/// Plain-English description of an [`tm_scheduler::EscalationReason`] for `tm sched plan`'s
+/// human output, purpose-built so it never `{:?}`-debug-formats the enum directly.
+fn escalation_reason_description(reason: tm_scheduler::EscalationReason) -> String {
+    use tm_scheduler::EscalationReason;
+    match reason {
+        EscalationReason::AttemptsExhausted => "ran out of retry attempts".to_string(),
+        EscalationReason::TokensExhausted => "ran out of token budget".to_string(),
+        EscalationReason::DollarsExhausted => "ran out of dollar budget".to_string(),
+        EscalationReason::WallSecondsExhausted => "ran out of wall-clock time budget".to_string(),
+        EscalationReason::CycleIterationsExhausted => "ran out of cycle iterations".to_string(),
+        EscalationReason::NonRetryable(class) => {
+            format!("won't retry: {}", failure_class_description(class))
+        }
     }
 }
 
@@ -744,7 +760,7 @@ fn action_to_summary(action: &tm_scheduler::SchedulerAction) -> ActionSummary {
         },
         SchedulerAction::Escalate { ticket, reason } => ActionSummary {
             kind: "Escalate".to_string(),
-            target: format!("{}: {:?}", ticket, reason),
+            target: format!("{}: {}", ticket, escalation_reason_description(*reason)),
         },
         SchedulerAction::OpenRecovery(ticket) => ActionSummary {
             kind: "OpenRecovery".to_string(),
@@ -825,6 +841,20 @@ mod tests {
         let summary = action_to_summary(&action);
         assert_eq!(summary.kind, "MarkBlocked");
         assert_eq!(summary.target, "T-2");
+    }
+
+    #[test]
+    fn action_summary_escalate_uses_plain_english_reason_not_debug_output() {
+        // critic-format-debug-strings-cleanup: `tm sched plan`'s human output must not
+        // `{:?}`-debug-format an `EscalationReason` (e.g. "AttemptsExhausted").
+        let ticket = TicketId::new("T-3").unwrap();
+        let action = tm_scheduler::SchedulerAction::Escalate {
+            ticket: ticket.clone(),
+            reason: tm_scheduler::EscalationReason::AttemptsExhausted,
+        };
+        let summary = action_to_summary(&action);
+        assert_eq!(summary.target, "T-3: ran out of retry attempts");
+        assert!(!summary.target.contains("AttemptsExhausted"));
     }
 
     #[test]

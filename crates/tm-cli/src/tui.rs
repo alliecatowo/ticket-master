@@ -64,7 +64,7 @@ use tokio::sync::{Mutex, Notify};
 use crate::agent::{self, AgentSession};
 use crate::args::GlobalOpts;
 use crate::project::{Project, Scope};
-use crate::render::{state_label, Renderer};
+use crate::render::{kind_label, milestone_state_label, state_label, Renderer};
 
 /// How close together two Ctrl+C presses must be to quit.
 const QUIT_WINDOW_MILLIS: i64 = 1_200;
@@ -391,7 +391,7 @@ fn build_milestone_rows(view: &tm_core::ProjectView) -> Vec<MilestoneRow> {
             MilestoneRow::new(
                 milestone.id.to_string(),
                 milestone.title.clone(),
-                format!("{:?}", milestone.state),
+                milestone_state_label(milestone.state).to_string(),
                 done,
                 total,
                 None,
@@ -519,8 +519,8 @@ fn build_detail_screen(
         ComponentId::new("tm.detail.fields"),
         vec![
             Field::read_only("ID", ticket.id.to_string()),
-            Field::read_only("State", format!("{:?}", ticket.state)),
-            Field::read_only("Kind", format!("{:?}", ticket.kind)),
+            Field::read_only("State", state_label(ticket.state).to_string()),
+            Field::read_only("Kind", kind_label(ticket.kind).to_string()),
             Field::read_only("Objective", ticket.objective.clone()),
             Field::read_only("Priority", ticket.priority.to_string()),
             Field::read_only("Attempts", ticket.attempts.to_string()),
@@ -548,8 +548,10 @@ fn build_detail_screen(
     }
     for failure in &ticket.failures {
         activity.push(format!(
-            "attempt {}: {:?} — {}",
-            failure.attempt, failure.class, failure.detail
+            "attempt {}: {} — {}",
+            failure.attempt,
+            crate::sched::failure_class_description(failure.class),
+            failure.detail
         ));
     }
     if activity.is_empty() {
@@ -1647,6 +1649,51 @@ mod tests {
     }
 
     #[test]
+    fn build_detail_screen_renders_a_failure_class_as_plain_english_not_debug_output() {
+        // critic-format-debug-strings-cleanup: the detail screen's activity log must not
+        // `{:?}`-debug-format a `FailureClass` (e.g. "VerificationFailed").
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Store::open(tmp.path()).expect("open store");
+        let ticket_id = create_real_ticket(&store, "flaky verification");
+        let actor = ParticipantId::new("human:tester").unwrap();
+        store.activate(&ticket_id, actor.clone()).expect("activate");
+        let worker = ParticipantId::new("agent:builtin/worker").unwrap();
+        store
+            .acquire_lease(
+                &ticket_id,
+                worker.clone(),
+                Authority::none(),
+                vec![],
+                60,
+                actor.clone(),
+            )
+            .expect("lease");
+        store
+            .transition(&ticket_id, tm_core::Trigger::WorkStarted, worker)
+            .expect("work started");
+        store
+            .record_failure(
+                &ticket_id,
+                tm_core::FailureClass::VerificationFailed,
+                "assertion mismatch".to_string(),
+                actor,
+            )
+            .expect("record_failure");
+
+        let view = store.view().expect("view");
+        let screen = build_detail_screen(&view, &ticket_id).expect("ticket must still be in view");
+        let rendered = format!("{screen:?}");
+        assert!(
+            rendered.contains("verification failed"),
+            "expected plain-English failure description, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("VerificationFailed"),
+            "activity log must not debug-format the enum variant, got: {rendered}"
+        );
+    }
+
+    #[test]
     fn build_milestone_rows_over_an_empty_project_has_no_rows() {
         let view = tm_core::ProjectView::empty();
         assert!(build_milestone_rows(&view).is_empty());
@@ -1683,7 +1730,7 @@ mod tests {
             .iter()
             .find(|r| r.title == "Beta")
             .expect("Beta milestone row");
-        assert_eq!(beta.state, "Open");
+        assert_eq!(beta.state, "open");
         assert_eq!(
             (beta.done, beta.total),
             (1, 2),
