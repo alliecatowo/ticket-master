@@ -1208,11 +1208,15 @@ impl BuiltinCapability {
                 }
             }
             // `expected_hash` stays mandatory here (the schema requires it, and the patch engine
-            // refuses an existing file edited without one). Unlike a unified-diff hunk, these
-            // edits carry no context lines to re-anchor against: they are bare byte offsets, so a
-            // file that changed since the read would take the splice at the wrong bytes, silently.
-            // The hash is the only drift detection this tool has, and fs.read now hands it over,
-            // so requiring it costs the model nothing.
+            // refuses an existing file edited without one). The preferred anchor is
+            // `old_text`/`new_text`: an exact, unique run of text, matched wherever it now lives
+            // in the file, so a stale read never lands a splice at the wrong place. The
+            // `byte_start`/`byte_end`/`replacement` form is kept as a fallback for edits an
+            // `old_text` match can't express uniquely, but it must also carry the `old_text` it
+            // believes occupies that range: the patch engine checks that against the file's
+            // actual current content before applying, so an off-by-N byte offset is caught as a
+            // clear conflict instead of silently corrupting the file (the failure mode this tool
+            // hit in dogfood T-2).
             ToolName::EditApplyPatch => {
                 let path = get_string(input, "path")?;
                 let mut expected_hash = get_opt_string(input, "expected_hash");
@@ -1222,25 +1226,43 @@ impl BuiltinCapability {
                     .ok_or_else(|| missing("edits"))?;
                 let mut applied = Vec::new();
                 for e in edits {
-                    let byte_start =
-                        e.get("byte_start")
+                    let old_text = get_opt_string(e, "old_text");
+                    let new_text = get_opt_string(e, "new_text");
+                    let edit = if let (Some(old_text), Some(new_text)) = (&old_text, &new_text) {
+                        Edit::TextReplace {
+                            path: path.clone(),
+                            old_text: old_text.clone(),
+                            new_text: new_text.clone(),
+                            expected_hash: expected_hash.clone(),
+                        }
+                    } else {
+                        let byte_start = e
+                            .get("byte_start")
                             .and_then(Value::as_u64)
-                            .ok_or_else(|| missing("byte_start"))? as usize;
-                    let byte_end =
-                        e.get("byte_end")
+                            .ok_or_else(|| missing("byte_start"))?
+                            as usize;
+                        let byte_end = e
+                            .get("byte_end")
                             .and_then(Value::as_u64)
-                            .ok_or_else(|| missing("byte_end"))? as usize;
-                    let replacement = e
-                        .get("replacement")
-                        .and_then(Value::as_str)
-                        .ok_or_else(|| missing("replacement"))?
-                        .to_string();
-                    let edit = Edit::RangeReplace {
-                        path: path.clone(),
-                        byte_start,
-                        byte_end,
-                        replacement,
-                        expected_hash: expected_hash.clone(),
+                            .ok_or_else(|| missing("byte_end"))?
+                            as usize;
+                        let replacement = e
+                            .get("replacement")
+                            .and_then(Value::as_str)
+                            .ok_or_else(|| missing("replacement"))?
+                            .to_string();
+                        // The byte-range fallback must also carry the `old_text` it believes
+                        // occupies that range, so the patch engine can verify it against the
+                        // file's actual current content before applying.
+                        let old_text = old_text.ok_or_else(|| missing("old_text"))?;
+                        Edit::RangeReplace {
+                            path: path.clone(),
+                            byte_start,
+                            byte_end,
+                            replacement,
+                            old_text: Some(old_text),
+                            expected_hash: expected_hash.clone(),
+                        }
                     };
                     match patch_engine.apply(&edit) {
                         Ok(patch) => {
@@ -1773,7 +1795,7 @@ impl CapabilityProvider for BuiltinCapability {
             },
             ToolSchema {
                 name: ToolName::EditApplyPatch.as_str(),
-                description: "Replace byte ranges in an existing file. Offsets are byte offsets into the content fs.read returned. Edits apply in order, each against the file as the previous edit left it, so list them from the end of the file backwards to keep the earlier offsets valid. Requires `expected_hash` from fs.read.",
+                description: "Edit an existing file by search/replace. Preferred form: give `old_text` (the exact text to find, copied verbatim from fs.read, including whitespace) and `new_text` to replace it with; `old_text` must match exactly once in the file. Fallback form: `byte_start`/`byte_end`/`replacement` (byte offsets into the content fs.read returned) plus the `old_text` you believe occupies that range, verified against the file's actual current content before the edit is applied. Edits apply in order, each against the file as the previous edit left it, so list byte-range edits from the end of the file backwards to keep earlier offsets valid. Requires `expected_hash` from fs.read.",
                 input_schema: json!({
                     "type": "object",
                     "properties": {
@@ -1783,18 +1805,29 @@ impl CapabilityProvider for BuiltinCapability {
                             "items": {
                                 "type": "object",
                                 "properties": {
+                                    "old_text": {
+                                        "type": "string",
+                                        "description": "The exact text to replace; must occur exactly once in the file. Preferred over byte_start/byte_end.",
+                                    },
+                                    "new_text": {
+                                        "type": "string",
+                                        "description": "The text to replace old_text with (used with old_text).",
+                                    },
                                     "byte_start": {"type": "integer"},
                                     "byte_end": {"type": "integer"},
-                                    "replacement": {"type": "string"}
+                                    "replacement": {
+                                        "type": "string",
+                                        "description": "The text to splice into [byte_start, byte_end) (used with byte_start/byte_end).",
+                                    }
                                 },
-                                "required": ["byte_start", "byte_end", "replacement"]
                             }
                         },
                         "expected_hash": {
                             "type": "string",
                             "description": expected_hash_description(
-                                "Required: these edits are bare byte offsets, and the hash is what \
-                                 stops them landing on the wrong bytes."
+                                "Required: even old_text anchoring can't tell an edit against a file \
+                                 that changed since you read it apart from one against the file you \
+                                 saw, and the hash is what stops that."
                             ),
                         }
                     },
@@ -3444,7 +3477,8 @@ mod tests {
             "edit.apply_patch",
             json!({
                 "path": "calc.py",
-                "edits": [{"byte_start": start, "byte_end": start + 5, "replacement": "b - a"}],
+                "edits": [{"byte_start": start, "byte_end": start + 5, "replacement": "b - a",
+                           "old_text": "a - b"}],
                 "expected_hash": hash,
             }),
         )
@@ -3494,7 +3528,8 @@ mod tests {
             (
                 "edit.apply_patch",
                 json!({"path": "calc.py", "expected_hash": stale,
-                       "edits": [{"byte_start": 0, "byte_end": 3, "replacement": "six"}]}),
+                       "edits": [{"byte_start": 0, "byte_end": 3, "replacement": "six",
+                                  "old_text": "one"}]}),
             ),
             (
                 "edit.write_file",
@@ -3538,7 +3573,8 @@ mod tests {
             &h,
             "edit.apply_patch",
             json!({"path": "calc.py",
-                   "edits": [{"byte_start": 0, "byte_end": 3, "replacement": "six"}]}),
+                   "edits": [{"byte_start": 0, "byte_end": 3, "replacement": "six",
+                              "old_text": "one"}]}),
         )
         .await;
         let edit = &result["edits"][0];

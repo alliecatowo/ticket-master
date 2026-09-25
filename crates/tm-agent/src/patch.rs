@@ -47,7 +47,11 @@ pub enum Edit {
         /// Hash of the content last observed at this path.
         expected_hash: Option<String>,
     },
-    /// Replace a byte range within a file, leaving the rest untouched.
+    /// Replace a byte range within a file, leaving the rest untouched. Byte offsets are the
+    /// fallback anchor form (prefer [`Edit::TextReplace`]); when `old_text` is present it is
+    /// checked against the file's current content at `[byte_start, byte_end)` before the
+    /// replacement is applied, so a byte range computed against stale content is caught as a
+    /// conflict instead of silently splicing at the wrong bytes.
     RangeReplace {
         /// Path relative to the project root.
         path: String,
@@ -57,6 +61,22 @@ pub enum Edit {
         byte_end: usize,
         /// Replacement text for the range.
         replacement: String,
+        /// The text the caller believes occupies `[byte_start, byte_end)`. When present, it must
+        /// match exactly or the edit is refused as a conflict rather than applied.
+        old_text: Option<String>,
+        /// Hash of the full file content last observed.
+        expected_hash: Option<String>,
+    },
+    /// Replace an exact, unique run of text within a file, without the caller having to compute
+    /// byte offsets at all — the preferred anchor form (mirrors Claude Code's own `Edit` tool).
+    /// `old_text` must occur in the file's current content exactly once.
+    TextReplace {
+        /// Path relative to the project root.
+        path: String,
+        /// The exact text to find; must be present exactly once in the current content.
+        old_text: String,
+        /// The text to replace it with.
+        new_text: String,
         /// Hash of the full file content last observed.
         expected_hash: Option<String>,
     },
@@ -69,7 +89,8 @@ impl Edit {
             Edit::Create { path, .. }
             | Edit::Write { path, .. }
             | Edit::Delete { path, .. }
-            | Edit::RangeReplace { path, .. } => path,
+            | Edit::RangeReplace { path, .. }
+            | Edit::TextReplace { path, .. } => path,
         }
     }
 }
@@ -249,6 +270,7 @@ impl PatchEngine {
                 byte_start,
                 byte_end,
                 replacement,
+                old_text,
                 expected_hash,
             } => {
                 check_expectation(p, existing.as_deref(), expected_hash)?;
@@ -267,12 +289,69 @@ impl PatchEngine {
                         byte_end: *byte_end,
                     });
                 }
+                if let Some(expected) = old_text {
+                    let actual = &before[*byte_start..*byte_end];
+                    if actual != expected {
+                        return Err(PatchError::Conflict {
+                            path: p.clone(),
+                            detail: format!(
+                                "old_text does not match at that range: expected {expected:?} \
+                                 but found {actual:?} at bytes [{byte_start}, {byte_end}) of \
+                                 {p}. The file likely changed, or the offsets were computed \
+                                 wrong. Re-read the file with fs.read and either recompute the \
+                                 byte range or switch to edit.apply_patch's old_text/new_text \
+                                 form, which needs no offsets at all."
+                            ),
+                        });
+                    }
+                }
                 let mut after = String::with_capacity(
                     before.len() - (byte_end - byte_start) + replacement.len(),
                 );
                 after.push_str(&before[..*byte_start]);
                 after.push_str(replacement);
                 after.push_str(&before[*byte_end..]);
+                self.write_atomic(&abs, path, after.as_bytes())?;
+                let diff = TextDiff::from_lines(before.as_str(), after.as_str());
+                Ok(Patch {
+                    path: p.clone(),
+                    unified_diff: unified_diff_text(&diff, p),
+                    hash_before: Some(hash_bytes(before.as_bytes())),
+                    hash_after: Some(hash_bytes(after.as_bytes())),
+                    summary: diff_summary(&diff, false, false),
+                })
+            }
+            Edit::TextReplace {
+                path: p,
+                old_text,
+                new_text,
+                expected_hash,
+            } => {
+                check_expectation(p, existing.as_deref(), expected_hash)?;
+                let before = existing.ok_or_else(|| PatchError::Conflict {
+                    path: p.clone(),
+                    detail: NOTHING_TO_EDIT.to_string(),
+                })?;
+                let match_count = before.matches(old_text.as_str()).count();
+                if match_count == 0 {
+                    return Err(PatchError::Conflict {
+                        path: p.clone(),
+                        detail: format!(
+                            "old_text was not found in {p}. Re-read the file with fs.read and \
+                             copy the exact text to replace, including whitespace."
+                        ),
+                    });
+                }
+                if match_count > 1 {
+                    return Err(PatchError::Conflict {
+                        path: p.clone(),
+                        detail: format!(
+                            "old_text matches {match_count} times in {p}, but must match exactly \
+                             once. Include more surrounding context in old_text to make it unique."
+                        ),
+                    });
+                }
+                let after = before.replacen(old_text.as_str(), new_text.as_str(), 1);
                 self.write_atomic(&abs, path, after.as_bytes())?;
                 let diff = TextDiff::from_lines(before.as_str(), after.as_str());
                 Ok(Patch {
@@ -616,6 +695,7 @@ mod tests {
                 byte_start: 2,
                 byte_end: 4,
                 replacement: "XY".to_string(),
+                old_text: None,
                 expected_hash: Some(hash_bytes(b"abcdef")),
             })
             .unwrap();
@@ -624,6 +704,128 @@ mod tests {
             std::fs::read_to_string(dir.path().join("r.txt")).unwrap(),
             "abXYef"
         );
+    }
+
+    /// Replays the T-2 dogfood shape: a byte range computed off by several bytes, with
+    /// `old_text` supplied. Before this, the engine trusted the offsets blindly and spliced at
+    /// the wrong place, corrupting an unrelated doc comment. Now it must refuse with a clear
+    /// "old_text does not match" conflict instead of touching the file.
+    #[test]
+    fn range_replace_with_a_stale_offset_and_old_text_is_a_clear_conflict_not_corruption() {
+        let dir = tempfile::tempdir().unwrap();
+        let content =
+            "// a smell, not a regardless -- a 1x1 workflow is a smell, not a\nfn f() {}\n";
+        std::fs::write(dir.path().join("doc.rs"), content).unwrap();
+        let engine = full_access_engine(dir.path());
+        // Off by several bytes from where "smell" actually is.
+        let err = engine
+            .apply(&Edit::RangeReplace {
+                path: "doc.rs".to_string(),
+                byte_start: 3,
+                byte_end: 8,
+                replacement: "thing".to_string(),
+                old_text: Some("smell".to_string()),
+                expected_hash: Some(hash_bytes(content.as_bytes())),
+            })
+            .unwrap_err();
+        let PatchError::Conflict { detail, .. } = &err else {
+            panic!("expected a conflict, got {err:?}");
+        };
+        assert!(
+            detail.contains("old_text does not match at that range"),
+            "{detail}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("doc.rs")).unwrap(),
+            content,
+            "the file must be untouched on a stale-offset conflict"
+        );
+    }
+
+    #[test]
+    fn range_replace_with_matching_old_text_applies_normally() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("r.txt"), "abcdef").unwrap();
+        let engine = full_access_engine(dir.path());
+        let patch = engine
+            .apply(&Edit::RangeReplace {
+                path: "r.txt".to_string(),
+                byte_start: 2,
+                byte_end: 4,
+                replacement: "XY".to_string(),
+                old_text: Some("cd".to_string()),
+                expected_hash: Some(hash_bytes(b"abcdef")),
+            })
+            .unwrap();
+        assert_eq!(patch.hash_after, Some(hash_bytes(b"abXYef")));
+    }
+
+    #[test]
+    fn text_replace_with_a_unique_match_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "def sub(a, b):\n    return a - b\n";
+        std::fs::write(dir.path().join("calc.py"), content).unwrap();
+        let engine = full_access_engine(dir.path());
+        let patch = engine
+            .apply(&Edit::TextReplace {
+                path: "calc.py".to_string(),
+                old_text: "a - b".to_string(),
+                new_text: "b - a".to_string(),
+                expected_hash: Some(hash_bytes(content.as_bytes())),
+            })
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("calc.py")).unwrap(),
+            "def sub(a, b):\n    return b - a\n"
+        );
+        assert_eq!(
+            patch.hash_after,
+            Some(hash_bytes(b"def sub(a, b):\n    return b - a\n"))
+        );
+    }
+
+    #[test]
+    fn text_replace_with_an_ambiguous_match_fails_with_the_match_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "foo\nfoo\n";
+        std::fs::write(dir.path().join("dup.txt"), content).unwrap();
+        let engine = full_access_engine(dir.path());
+        let err = engine
+            .apply(&Edit::TextReplace {
+                path: "dup.txt".to_string(),
+                old_text: "foo".to_string(),
+                new_text: "bar".to_string(),
+                expected_hash: Some(hash_bytes(content.as_bytes())),
+            })
+            .unwrap_err();
+        let PatchError::Conflict { detail, .. } = &err else {
+            panic!("expected a conflict, got {err:?}");
+        };
+        assert!(detail.contains("matches 2 times"), "{detail}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("dup.txt")).unwrap(),
+            content
+        );
+    }
+
+    #[test]
+    fn text_replace_with_no_match_fails_clearly() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "hello\n";
+        std::fs::write(dir.path().join("h.txt"), content).unwrap();
+        let engine = full_access_engine(dir.path());
+        let err = engine
+            .apply(&Edit::TextReplace {
+                path: "h.txt".to_string(),
+                old_text: "goodbye".to_string(),
+                new_text: "hi".to_string(),
+                expected_hash: Some(hash_bytes(content.as_bytes())),
+            })
+            .unwrap_err();
+        let PatchError::Conflict { detail, .. } = &err else {
+            panic!("expected a conflict, got {err:?}");
+        };
+        assert!(detail.contains("was not found"), "{detail}");
     }
 
     #[test]
@@ -637,6 +839,7 @@ mod tests {
                 byte_start: 1,
                 byte_end: 10,
                 replacement: "z".to_string(),
+                old_text: None,
                 expected_hash: Some(hash_bytes(b"abc")),
             })
             .unwrap_err();
@@ -654,6 +857,7 @@ mod tests {
                 byte_start: 2,
                 byte_end: 1,
                 replacement: "z".to_string(),
+                old_text: None,
                 expected_hash: Some(hash_bytes(b"abc")),
             })
             .unwrap_err();
