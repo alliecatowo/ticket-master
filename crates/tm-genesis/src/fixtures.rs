@@ -2,6 +2,15 @@
 //!
 //! These fixtures are extracted from `crates/tm-e2e/tests/genesis_e2e.rs` and can be used
 //! to feed a `MockProvider` with [`offline_sequence`] when testing Genesis offline.
+//!
+//! [`graph_compilation`] in particular is built from the real
+//! [`crate::compile::ProposedTicket`]/[`crate::compile::ProposedMilestone`] types and serialized
+//! with `serde_json` rather than hand-written as a JSON literal -- a hand-written literal here
+//! previously drifted out of sync with `TicketKind`/`Role`/`Tolerance`'s `#[serde(rename_all =
+//! "snake_case")]` (it used PascalCase variant names) and `Budget`'s real field shape (it used a
+//! `{"kind": "Unlimited"}` shape that was never this type's actual representation), so
+//! `tm_genesis::compile::propose_graph`'s real deserializer rejected it outright. Building it from
+//! the real types makes that class of drift a compile error instead of a silent runtime failure.
 
 /// Minimal seed response: an empty JSON object, satisfying `analyze_prompt`'s schema.
 pub fn seed() -> &'static str {
@@ -52,8 +61,69 @@ pub fn spec() -> &'static str {
 }
 
 /// Graph compilation stage fixture: a minimal ticket graph with one milestone.
-pub fn graph_compilation() -> &'static str {
-    r#"{"tickets":[{"ticket_ref":"core","kind":"Work","objective":"implement the core ticket loop","parent_ref":null,"milestone_ref":"v1","authority":{"repository":{},"git":{},"tickets":{},"project":{},"shell":{}},"resources":[],"executor":{"role":"CoderFast","human_required":false,"min_capability":"Any"},"context_refs":[],"success":[],"verification":"None","budget":{"kind":"Unlimited"},"retry":{"max_attempts":3,"base_delay_seconds":1,"backoff_multiplier":2.0,"max_delay_seconds":60},"priority":0},{"ticket_ref":"polish","kind":"Work","objective":"polish the CLI output","parent_ref":null,"milestone_ref":"v1","authority":{"repository":{},"git":{},"tickets":{},"project":{},"shell":{}},"resources":[],"executor":{"role":"CoderFast","human_required":false,"min_capability":"Any"},"context_refs":[],"success":[],"verification":"None","budget":{"kind":"Unlimited"},"retry":{"max_attempts":3,"base_delay_seconds":1,"backoff_multiplier":2.0,"max_delay_seconds":60},"priority":0}],"dependencies":[],"milestones":[{"milestone_ref":"v1","title":"v1","ticket_refs":[]}],"authority_domains":[]}"#
+///
+/// Built from the real [`crate::compile::ProposedTicket`]/[`crate::compile::ProposedMilestone`]
+/// types and serialized with `serde_json`, so it can never drift from what
+/// `tm_genesis::compile::propose_graph`'s deserializer actually accepts (see this module's doc
+/// comment). Mirrors `crates/tm-e2e/tests/genesis_e2e.rs`'s `graph_compilation_response`: two
+/// independent `Work` tickets under one milestone titled `"v1"`.
+pub fn graph_compilation() -> String {
+    use tm_core::ticket::{
+        ExecutorRequirements, RetryPolicy, TicketKind, VerificationPolicy as VerifPolicy,
+    };
+    use tm_types::{Authority, Budget, Role, Tolerance};
+
+    use crate::compile::{ProposedMilestone, ProposedTicket};
+
+    fn retry() -> RetryPolicy {
+        RetryPolicy {
+            max_attempts: 3,
+            base_delay_seconds: 1,
+            backoff_multiplier: 2.0,
+            max_delay_seconds: 60,
+        }
+    }
+
+    fn ticket(ticket_ref: &str, objective: &str) -> ProposedTicket {
+        ProposedTicket {
+            ticket_ref: ticket_ref.to_string(),
+            kind: TicketKind::Work,
+            objective: objective.to_string(),
+            parent_ref: None,
+            milestone_ref: Some("v1".to_string()),
+            authority: Authority::root(),
+            resources: vec![],
+            executor: ExecutorRequirements {
+                role: Role::CoderFast,
+                human_required: false,
+                min_capability: Tolerance::Any,
+            },
+            context_refs: vec![],
+            success: vec![],
+            verification: VerifPolicy::Single,
+            budget: Budget::unlimited(),
+            retry: retry(),
+            priority: 0,
+        }
+    }
+
+    let tickets = vec![
+        ticket("core", "implement the core ticket loop"),
+        ticket("polish", "polish the CLI output"),
+    ];
+    let milestones = vec![ProposedMilestone {
+        milestone_ref: "v1".to_string(),
+        title: "v1".to_string(),
+        ticket_refs: vec![],
+    }];
+
+    serde_json::json!({
+        "tickets": tickets,
+        "dependencies": Vec::<serde_json::Value>::new(),
+        "milestones": milestones,
+        "authority_domains": Vec::<serde_json::Value>::new(),
+    })
+    .to_string()
 }
 
 /// Maturity gate fixture: a passing maturity judgment.
@@ -74,7 +144,7 @@ pub fn offline_sequence() -> Vec<String> {
         seed().to_string(),
         vision().to_string(),
         spec().to_string(),
-        graph_compilation().to_string(),
+        graph_compilation(),
         maturity().to_string(),
     ]
 }
@@ -90,7 +160,7 @@ mod tests {
         assert!(serde_json::from_str::<Value>(seed()).is_ok());
         assert!(serde_json::from_str::<Value>(vision()).is_ok());
         assert!(serde_json::from_str::<Value>(spec()).is_ok());
-        assert!(serde_json::from_str::<Value>(graph_compilation()).is_ok());
+        assert!(serde_json::from_str::<Value>(&graph_compilation()).is_ok());
         assert!(serde_json::from_str::<Value>(maturity()).is_ok());
     }
 
@@ -147,7 +217,7 @@ mod tests {
     #[test]
     fn graph_compilation_deserializes_correctly() {
         let json = graph_compilation();
-        let parsed: Result<Value, _> = serde_json::from_str(json);
+        let parsed: Result<Value, _> = serde_json::from_str(&json);
         assert!(
             parsed.is_ok(),
             "graph_compilation fixture should deserialize"
