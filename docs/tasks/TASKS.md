@@ -1311,7 +1311,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- xtask`
   evidence: docs/audits/2026-09-25-bench-plan.md "Required fixes", items 1-3.
 
-- [ ] **u1-bench-polyglot-subset** — Vendor a 20-exercise Aider Polyglot subset as bench tasks
+- [~] **u1-bench-polyglot-subset** — Vendor a 20-exercise Aider Polyglot subset as bench tasks (needs another pass: the worker made no changes)
   model: sonnet · severity: medium · builds Rust: no · area: bench · deps: none
   files: `bench/tasks/polyglot-*.toml`, `bench/fixtures/polyglot-*/`
   change: Per docs/audits/2026-09-25-bench-plan.md Track A: 20 exercises across Python/JS/Go/Rust, each fixture with the stub and the tests and a task TOML in the existing bench/tasks format (copy py-binary-search-bound.toml's shape). Record the upstream commit and licence in a bench/fixtures/POLYGLOT-SOURCE.md.
