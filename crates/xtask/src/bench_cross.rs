@@ -431,7 +431,15 @@ pub fn run_comparison(
 
             let passed =
                 adapter_ran && !timed_out && run_test_command(&workdir, task).unwrap_or(false);
-            let score = score_task(task, passed, cost_micros, wall_seconds, tool_calls);
+            // A killed run reports `cost_micros`/`tool_calls` as `0` (nothing was actually
+            // measured, not "measured and found to be zero"), which `score_task` would otherwise
+            // read as full cost/tool-count credit -- score it `0.0` outright instead, the same
+            // way the "adapter failed to even start" path above already does.
+            let score = if timed_out {
+                0.0
+            } else {
+                score_task(task, passed, cost_micros, wall_seconds, tool_calls)
+            };
 
             results.push(CrossTaskResult {
                 tool: tool_name.to_string(),
@@ -1386,6 +1394,14 @@ mod tests {
         assert_eq!(report.results.len(), 1, "{report:?}");
         assert!(report.results[0].timed_out, "{:?}", report.results[0]);
         assert!(!report.results[0].passed, "{:?}", report.results[0]);
+        // A killed run's cost/tool-calls report as 0 because nothing was measured, not because
+        // they were measured and found to be 0 -- `score_task` would otherwise read that as full
+        // credit on those dimensions. A TIMEOUT must never outscore a real failure.
+        assert_eq!(
+            report.results[0].score, 0.0,
+            "a timed-out run must not get scoring credit: {:?}",
+            report.results[0]
+        );
         assert!(
             start.elapsed() < Duration::from_secs(3),
             "should return promptly after killing the sleeping process, not wait out its full \

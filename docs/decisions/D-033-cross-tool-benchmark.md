@@ -120,6 +120,14 @@ column, since this report always compares more than one tool for the same task; 
   running when the cap is reached still finishes and its cost still counts toward the cap; only
   pairs not yet started are skipped. There is no way to abort a single tool call mid-flight based
   on its own eventual cost, since cost is only known once that call reports it.
+- **With `--model`, the `tm` arm's pinned `coder.fast` candidate has no `price`.**
+  `TmAdapter::pin_model` writes a bare `{provider, model, max_concurrency}` candidate, not the
+  full `docs/providers.md`-documented shape that also carries a `price`. `tm`'s own cost
+  accounting (D-030) reports `0` for an unpriced candidate rather than erroring, so a `--model`
+  run's `tm` row always shows `$0` regardless of real spend, and that `$0` never contributes
+  toward `--max-cost-usd`'s cumulative check. A follow-up wanting real cost parity for the `tm`
+  arm under `--model` needs to look up (or accept as a flag) that model's real price and include
+  it in the written candidate.
 - **Scoring logic is duplicated, not shared.** `tm_harness::bench`'s ceiling-subscore formula is
   private, so `bench_cross.rs` re-derives its own copy (`ceiling_subscore`/`score_task`), matching
   this repo's own established convention (`tm-cli/src/bench_live.rs`'s `copy_dir_recursive` doc
