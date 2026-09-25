@@ -141,26 +141,9 @@ Return ONLY the JSON object, with no markdown formatting or code fences.",
         model: None,
     };
 
-    // Call the provider.
-    let completion = provider
-        .complete(req)
-        .await
-        .map_err(|e| tm_types::TmError::Provider(format!("Couldn't compile the vision: {}", e)))?;
-
-    // Extract the text content from the first candidate.
-    let response_text = if completion.candidates.is_empty() {
-        return Err(tm_types::TmError::Parse(
-            "The model didn't return a vision. Try again.".to_string(),
-        ));
-    } else {
-        let mut text_parts = Vec::new();
-        for block in &completion.candidates[0].content {
-            if let tm_provider::ContentBlock::Text { text } = block {
-                text_parts.push(text.as_str());
-            }
-        }
-        text_parts.join("")
-    };
+    // Call the provider, tolerant of a reasoning model that spends its whole `max_tokens`
+    // budget on hidden reasoning and comes back with no text (see `complete_text`'s docs).
+    let response_text = crate::compile::complete_text(provider, req).await?;
 
     // Parse the JSON response.
     let parsed: serde_json::Value = serde_json::from_str(&response_text).map_err(|e| {
@@ -609,7 +592,7 @@ mod tests {
         assert!(result.is_err());
         match result {
             Err(tm_types::TmError::Parse(msg)) => {
-                assert!(msg.contains("didn't return a vision"));
+                assert!(msg.contains("reply was empty"));
             }
             _ => panic!("expected Parse error"),
         }

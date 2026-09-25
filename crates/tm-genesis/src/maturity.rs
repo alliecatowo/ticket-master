@@ -258,24 +258,9 @@ markdown formatting or code fences.",
         model: None,
     };
 
-    let completion = provider
-        .complete(req)
-        .await
-        .map_err(|e| tm_types::TmError::Provider(format!("maturity judgment failed: {e}")))?;
-
-    let response_text = completion
-        .candidates
-        .first()
-        .map(|c| {
-            c.content
-                .iter()
-                .filter_map(|b| match b {
-                    tm_provider::ContentBlock::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<String>()
-        })
-        .ok_or_else(|| tm_types::TmError::parse("maturity judgment returned no candidates"))?;
+    // Tolerant of a reasoning model that spends its whole `max_tokens` budget on hidden
+    // reasoning and comes back with no text (see `complete_text`'s docs).
+    let response_text = crate::compile::complete_text(provider, req).await?;
 
     let parsed: serde_json::Value = serde_json::from_str(&response_text)
         .map_err(|e| tm_types::TmError::parse(format!("malformed maturity judgment JSON: {e}")))?;

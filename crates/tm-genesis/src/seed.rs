@@ -204,23 +204,9 @@ pub async fn analyze_prompt(
         model: None,
     };
 
-    // Call the provider with SummarizerCheap role.
-    let completion = provider
-        .complete(req)
-        .await
-        .map_err(|e| TmError::Provider(e.to_string()))?;
-
-    // Extract text from the first candidate.
-    let response_text = completion
-        .candidates
-        .first()
-        .and_then(|c| {
-            c.content.iter().find_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-        })
-        .ok_or_else(|| TmError::Parse("completion has no text content".into()))?;
+    // Call the provider with SummarizerCheap role, tolerant of a reasoning model that spends its
+    // whole budget on hidden reasoning and comes back with no text (see `complete_text`'s docs).
+    let response_text = crate::compile::complete_text(provider, req).await?;
 
     // Parse the JSON response. Use a helper to extract JSON from potential markdown blocks.
     let json_text = extract_json_block(&response_text)

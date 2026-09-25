@@ -324,6 +324,77 @@ fn first_text_block(completion: &tm_provider::Completion) -> TmResult<String> {
         .ok_or_else(|| TmError::parse("the provider's response didn't include any text"))
 }
 
+/// The floor every Genesis stage requests, regardless of what it asked for before this helper
+/// existed. A reasoning model (e.g. devpass's `muse-spark-1.3-contributor`) spends output tokens
+/// on hidden reasoning before it ever emits the text block Genesis actually reads, so a
+/// small, structural-extraction-sized budget (the pre-existing 1024-4096 range across stages)
+/// runs out before any visible text is produced at all.
+pub(crate) const GENESIS_MIN_MAX_TOKENS: u32 = 16_384;
+
+/// Run one completion for a Genesis stage, tolerant of a reasoning model that spends its whole
+/// `max_tokens` budget on hidden reasoning and returns no text at all.
+///
+/// Every Genesis stage (`seed`, `vision`, `spec`, `compile`, `maturity`) should route its
+/// `provider.complete` call through this helper instead of calling `provider.complete` directly:
+/// it raises `req.max_tokens` to at least [`GENESIS_MIN_MAX_TOKENS`], and if the completion comes
+/// back with [`tm_provider::StopReason::MaxTokens`] and no text content, retries exactly once
+/// with double the token budget before giving up.
+///
+/// # Errors
+/// `TmError::Provider` on completion failure (network, auth, etc. — never retried here). On
+/// final failure to get any text back (from either attempt), a plain `TmError::Parse` naming
+/// `req.model` (or "the configured model" when unset) and stating whether the reply was empty or
+/// truncated.
+pub async fn complete_text(
+    provider: &dyn tm_provider::Provider,
+    mut req: tm_provider::CompletionRequest,
+) -> TmResult<String> {
+    if req.max_tokens < GENESIS_MIN_MAX_TOKENS {
+        req.max_tokens = GENESIS_MIN_MAX_TOKENS;
+    }
+
+    let model_name = || {
+        req.model
+            .clone()
+            .unwrap_or_else(|| "the configured model".to_string())
+    };
+
+    let completion = provider
+        .complete(req.clone())
+        .await
+        .map_err(|e| TmError::Provider(e.to_string()))?;
+
+    if let Ok(text) = first_text_block(&completion) {
+        return Ok(text);
+    }
+
+    let truncated = completion
+        .candidates
+        .first()
+        .is_some_and(|c| c.stop_reason == tm_provider::StopReason::MaxTokens);
+
+    if !truncated {
+        return Err(TmError::parse(format!(
+            "{}'s reply was empty (no text content, and not a max-tokens truncation)",
+            model_name()
+        )));
+    }
+
+    // Retry once with double the token budget.
+    req.max_tokens = req.max_tokens.saturating_mul(2);
+    let retry_completion = provider
+        .complete(req.clone())
+        .await
+        .map_err(|e| TmError::Provider(e.to_string()))?;
+
+    first_text_block(&retry_completion).map_err(|_| {
+        TmError::parse(format!(
+            "{}'s reply was empty or truncated even after retrying with a doubled token budget",
+            model_name()
+        ))
+    })
+}
+
 /// Ask `planner.frontier` to propose a [`GraphCompilation`] for `spec`. `attempt` and
 /// `prior_violations` are empty/`1` on a first try; [`compile_with_retry`] fills them in on
 /// retries so the model can see exactly what was wrong last time.
@@ -338,11 +409,7 @@ pub async fn propose_graph(
     provider: &dyn tm_provider::Provider,
 ) -> TmResult<GraphCompilation> {
     let request = build_compile_request(spec, prior_violations);
-    let completion = provider
-        .complete(request)
-        .await
-        .map_err(|e| TmError::Provider(e.to_string()))?;
-    let text = first_text_block(&completion)?;
+    let text = complete_text(provider, request).await?;
     let payload: ProposedGraphPayload = serde_json::from_str(&text).map_err(|e| {
         TmError::parse(format!(
             "couldn't understand the provider's ticket graph response: {e}"
@@ -1281,7 +1348,10 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
         let provider = MockProvider::new("mock", ModelId::new("mock", "mock-1"), clock);
         let spec = spec_fixture();
-        let request = build_compile_request(&spec, &[]);
+        // `complete_text` raises `max_tokens` to its genesis floor before sending, so the
+        // scripted request has to match what actually goes out over the wire.
+        let mut request = build_compile_request(&spec, &[]);
+        request.max_tokens = GENESIS_MIN_MAX_TOKENS;
         let payload = ProposedGraphPayload {
             tickets: vec![ticket("t1", None)],
             dependencies: vec![],
@@ -1303,7 +1373,8 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
         let provider = MockProvider::new("mock", ModelId::new("mock", "mock-1"), clock);
         let spec = spec_fixture();
-        let request = build_compile_request(&spec, &[]);
+        let mut request = build_compile_request(&spec, &[]);
+        request.max_tokens = GENESIS_MIN_MAX_TOKENS;
         let payload = ProposedGraphPayload {
             tickets: vec![ticket("t1", Some("ghost"))],
             dependencies: vec![],
@@ -1321,7 +1392,8 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
         let provider = MockProvider::new("mock", ModelId::new("mock", "mock-1"), clock);
         let spec = spec_fixture();
-        let request = build_compile_request(&spec, &[]);
+        let mut request = build_compile_request(&spec, &[]);
+        request.max_tokens = GENESIS_MIN_MAX_TOKENS;
         provider.script_response(&request, completion_with("not json"));
 
         let err = propose_graph(&spec, &[], 1, &provider).await.unwrap_err();
@@ -1333,7 +1405,8 @@ mod tests {
         let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
         let provider = MockProvider::new("mock", ModelId::new("mock", "mock-1"), clock);
         let spec = spec_fixture();
-        let request = build_compile_request(&spec, &[]);
+        let mut request = build_compile_request(&spec, &[]);
+        request.max_tokens = GENESIS_MIN_MAX_TOKENS;
         provider.script_failure(
             &request,
             ScriptedFailure {
@@ -1356,7 +1429,8 @@ mod tests {
         let provider = MockProvider::new("mock", ModelId::new("mock", "mock-1"), clock.clone());
         let spec = spec_fixture();
 
-        let request = build_compile_request(&spec, &[]);
+        let mut request = build_compile_request(&spec, &[]);
+        request.max_tokens = GENESIS_MIN_MAX_TOKENS;
         let payload = ProposedGraphPayload {
             tickets: vec![ticket("t1", None)],
             dependencies: vec![],
@@ -1390,7 +1464,8 @@ mod tests {
 
         let mut bad_child = ticket("child", Some("parent"));
         bad_child.authority = Authority::root();
-        let first_request = build_compile_request(&spec, &[]);
+        let mut first_request = build_compile_request(&spec, &[]);
+        first_request.max_tokens = GENESIS_MIN_MAX_TOKENS;
         let bad_payload = ProposedGraphPayload {
             tickets: vec![ticket("parent", None), bad_child],
             dependencies: vec![],
@@ -1406,7 +1481,8 @@ mod tests {
             &store.view().unwrap(),
         );
         assert!(!first_violations.is_empty());
-        let second_request = build_compile_request(&spec, &first_violations);
+        let mut second_request = build_compile_request(&spec, &first_violations);
+        second_request.max_tokens = GENESIS_MIN_MAX_TOKENS;
         let good_payload = ProposedGraphPayload {
             tickets: vec![ticket("t1", None)],
             dependencies: vec![],
@@ -1444,7 +1520,8 @@ mod tests {
 
         let mut prior: Vec<Violation> = Vec::new();
         for _ in 0..policy.max_attempts {
-            let request = build_compile_request(&spec, &prior);
+            let mut request = build_compile_request(&spec, &prior);
+            request.max_tokens = GENESIS_MIN_MAX_TOKENS;
             let mut bad_child = ticket("child", Some("parent"));
             bad_child.authority = Authority::root();
             let bad_payload = ProposedGraphPayload {
@@ -1473,5 +1550,136 @@ mod tests {
 
         let view = store.view().unwrap();
         assert_eq!(view.decisions.len(), 1);
+    }
+
+    // -- complete_text --------------------------------------------------------------------------
+
+    fn truncated_completion() -> Completion {
+        Completion {
+            model: ModelId::new("mock", "mock-1"),
+            candidates: vec![Candidate {
+                content: vec![],
+                stop_reason: StopReason::MaxTokens,
+            }],
+            usage: Usage::default(),
+            latency: Duration::from_millis(0),
+            received_at: Timestamp::EPOCH,
+        }
+    }
+
+    fn empty_end_turn_completion() -> Completion {
+        Completion {
+            model: ModelId::new("mock", "mock-1"),
+            candidates: vec![Candidate {
+                content: vec![],
+                stop_reason: StopReason::EndTurn,
+            }],
+            usage: Usage::default(),
+            latency: Duration::from_millis(0),
+            received_at: Timestamp::EPOCH,
+        }
+    }
+
+    fn genesis_request() -> tm_provider::CompletionRequest {
+        tm_provider::CompletionRequest {
+            system: None,
+            messages: vec![tm_provider::Message {
+                role: tm_provider::MessageRole::User,
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_string(),
+                }],
+            }],
+            tools: vec![],
+            max_tokens: 1024,
+            temperature: None,
+            stop_sequences: vec![],
+            stream: false,
+            n: 1,
+            model: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_text_returns_the_first_candidate_s_text() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let provider = MockProvider::new("mock", ModelId::new("mock", "mock-1"), clock);
+
+        provider.script_sequence(vec![completion_with("hello back")]);
+
+        let text = complete_text(&provider, genesis_request())
+            .await
+            .expect("text comes back");
+        assert_eq!(text, "hello back");
+    }
+
+    #[tokio::test]
+    async fn complete_text_raises_a_small_max_tokens_to_the_genesis_floor() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let provider = MockProvider::new("mock", ModelId::new("mock", "mock-1"), clock);
+        provider.script_sequence(vec![completion_with("ok")]);
+
+        complete_text(&provider, genesis_request())
+            .await
+            .expect("text comes back");
+
+        let sent = provider.call_log();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].max_tokens, GENESIS_MIN_MAX_TOKENS);
+    }
+
+    #[tokio::test]
+    async fn complete_text_retries_once_after_a_truncated_empty_reply() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let provider = MockProvider::new("mock", ModelId::new("mock", "mock-1"), clock);
+
+        // First call: truncated with no text at all (the reasoning-model failure mode this
+        // helper exists for). Second call: a real reply.
+        provider.script_sequence(vec![
+            truncated_completion(),
+            completion_with("finally, some text"),
+        ]);
+
+        let text = complete_text(&provider, genesis_request())
+            .await
+            .expect("recovers on the retry");
+        assert_eq!(text, "finally, some text");
+
+        let sent = provider.call_log();
+        assert_eq!(sent.len(), 2, "should have retried exactly once");
+        assert_eq!(sent[0].max_tokens, GENESIS_MIN_MAX_TOKENS);
+        assert_eq!(sent[1].max_tokens, GENESIS_MIN_MAX_TOKENS * 2);
+    }
+
+    #[tokio::test]
+    async fn complete_text_fails_plainly_when_both_attempts_come_back_empty() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let provider = MockProvider::new("mock", ModelId::new("mock", "mock-1"), clock);
+        provider.script_sequence(vec![truncated_completion(), truncated_completion()]);
+
+        let mut req = genesis_request();
+        req.model = Some("muse-spark-1.3-contributor".to_string());
+        let err = complete_text(&provider, req).await.unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("muse-spark-1.3-contributor"));
+        assert!(message.contains("empty") || message.contains("truncat"));
+        assert_eq!(provider.call_log().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn complete_text_does_not_retry_a_non_truncated_empty_reply() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let provider = MockProvider::new("mock", ModelId::new("mock", "mock-1"), clock);
+        provider.script_sequence(vec![empty_end_turn_completion()]);
+
+        let err = complete_text(&provider, genesis_request())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, TmError::Parse(_)));
+        assert_eq!(
+            provider.call_log().len(),
+            1,
+            "an empty-but-not-truncated reply should not be retried"
+        );
     }
 }

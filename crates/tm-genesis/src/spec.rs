@@ -7,7 +7,6 @@
 //! stage down, which turns a `Specification` into an actual ticket graph.
 
 use serde::{Deserialize, Serialize};
-use tm_provider::types::ContentBlock;
 use tm_types::{ArtifactId, Clock, Predicate, Result as TmResult, Timestamp, TmError};
 
 use crate::vision::Vision;
@@ -208,26 +207,9 @@ pub async fn compile_spec(
 ) -> TmResult<Specification> {
     let req = build_spec_request(vision);
 
-    let completion = provider
-        .complete(req)
-        .await
-        .map_err(|e| TmError::Provider(format!("Couldn't reach the model to draft a spec: {e}")))?;
-
-    if completion.candidates.is_empty() {
-        return Err(TmError::Parse(
-            "The model didn't return a specification. Try again.".to_string(),
-        ));
-    }
-
-    let candidate = &completion.candidates[0];
-    let response_text = match candidate.content.first() {
-        Some(ContentBlock::Text { text }) => text,
-        _ => {
-            return Err(TmError::Parse(
-                "The model's response wasn't readable text. Try again.".to_string(),
-            ))
-        }
-    };
+    // Tolerant of a reasoning model that spends its whole `max_tokens` budget on hidden
+    // reasoning and comes back with no text (see `complete_text`'s docs).
+    let response_text = crate::compile::complete_text(provider, req).await?;
 
     // Parse the JSON response into an intermediate structure for deserialization
     #[derive(serde::Deserialize)]
@@ -245,8 +227,8 @@ pub async fn compile_spec(
         v1: ReleaseDefinition,
     }
 
-    let spec_response: SpecResponse =
-        serde_json::from_str::<SpecResponse>(response_text).map_err(|e| {
+    let spec_response: SpecResponse = serde_json::from_str::<SpecResponse>(&response_text)
+        .map_err(|e| {
             TmError::Parse(format!(
                 "Couldn't make sense of the model's specification: {e}"
             ))
@@ -385,7 +367,10 @@ mod tests {
             received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
-        let req = build_spec_request(&vision);
+        // `complete_text` raises `max_tokens` to its genesis floor before sending, so the
+        // scripted request has to match what actually goes out over the wire.
+        let mut req = build_spec_request(&vision);
+        req.max_tokens = crate::compile::GENESIS_MIN_MAX_TOKENS;
         mock.script_response(&req, scripted_completion);
 
         let spec = compile_spec(&vision, &mock, clock.as_ref())
@@ -461,7 +446,10 @@ mod tests {
             received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
-        let req = build_spec_request(&vision);
+        // `complete_text` raises `max_tokens` to its genesis floor before sending, so the
+        // scripted request has to match what actually goes out over the wire.
+        let mut req = build_spec_request(&vision);
+        req.max_tokens = crate::compile::GENESIS_MIN_MAX_TOKENS;
         mock.script_response(&req, scripted_completion);
 
         let result = compile_spec(&vision, &mock, clock.as_ref()).await;
@@ -511,7 +499,10 @@ mod tests {
             received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
-        let req = build_spec_request(&vision);
+        // `complete_text` raises `max_tokens` to its genesis floor before sending, so the
+        // scripted request has to match what actually goes out over the wire.
+        let mut req = build_spec_request(&vision);
+        req.max_tokens = crate::compile::GENESIS_MIN_MAX_TOKENS;
         mock.script_response(&req, scripted_completion);
 
         let result = compile_spec(&vision, &mock, clock.as_ref()).await;
@@ -561,7 +552,10 @@ mod tests {
             received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
-        let req = build_spec_request(&vision);
+        // `complete_text` raises `max_tokens` to its genesis floor before sending, so the
+        // scripted request has to match what actually goes out over the wire.
+        let mut req = build_spec_request(&vision);
+        req.max_tokens = crate::compile::GENESIS_MIN_MAX_TOKENS;
         mock.script_response(&req, scripted_completion);
 
         let result = compile_spec(&vision, &mock, clock.as_ref()).await;
@@ -597,7 +591,10 @@ mod tests {
             received_at: tm_types::Timestamp::from_unix_seconds(5000),
         };
 
-        let req = build_spec_request(&vision);
+        // `complete_text` raises `max_tokens` to its genesis floor before sending, so the
+        // scripted request has to match what actually goes out over the wire.
+        let mut req = build_spec_request(&vision);
+        req.max_tokens = crate::compile::GENESIS_MIN_MAX_TOKENS;
         mock.script_response(&req, scripted_completion);
 
         let result = compile_spec(&vision, &mock, clock.as_ref()).await;
