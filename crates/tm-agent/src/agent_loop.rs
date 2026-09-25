@@ -9,7 +9,8 @@
 //! the same task produces byte-identical [`AgentOutcome`]s.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tm_core::{FailureClass, Store};
@@ -126,6 +127,131 @@ impl PromptCacheState {
     }
 }
 
+/// Recorded tool-call resolutions [`AgentLoop::with_replay_tool_source`] replays instead of
+/// dispatching real tool calls (`replay-tool-replay-mode-design`; see
+/// `docs/decisions/D-028-record-replay-harness.md`'s "Tool replay" section for the full design
+/// and why a miss is a hard failure). Built from a prior run's own [`StepRecord`]s — never from
+/// `tool_call.completed` telemetry events, whose [`ToolCallCompletedPayload`] carries only
+/// `tool_name`/`duration_ms`/a collapsed outcome string, not the `tool_use_id`/`input`/full
+/// [`crate::outcome::ToolCallResolution`] a verbatim replay needs.
+///
+/// `Clone` so a caller that builds a fresh [`AgentLoop`] per dispatch (e.g.
+/// `crate::executor::BuiltinExecutor::build`) can hand each one its own full, unconsumed copy
+/// rather than sharing one source across loops and having a second dispatch see it already
+/// partly (or fully) drained by the first.
+#[derive(Clone)]
+pub struct ReplayToolSource {
+    /// Recorded calls not yet consumed by a replayed dispatch, in original step order.
+    remaining: Vec<ToolCallRecord>,
+}
+
+impl ReplayToolSource {
+    /// Build a replay source from a prior run's transcript, flattening every step's tool calls
+    /// in order.
+    pub fn from_steps(steps: &[StepRecord]) -> Self {
+        ReplayToolSource {
+            remaining: steps
+                .iter()
+                .flat_map(|step| step.tool_calls.iter().cloned())
+                .collect(),
+        }
+    }
+
+    /// True once every recorded call has been matched and consumed.
+    pub fn is_exhausted(&self) -> bool {
+        self.remaining.is_empty()
+    }
+
+    /// Find and consume the recorded call matching `id`/`name`/`input`, first by `tool_use_id`
+    /// (exact — a provider-assigned id is only ever reused for its own call), then by
+    /// `tool_name` plus a `root`-normalized input hash (a fresh run's provider mints fresh
+    /// `tool_use_id`s, so replaying under a re-run rather than a byte-identical resumed session
+    /// falls through to this). `None` means no recorded call matches at all — the caller turns
+    /// that into [`REPLAY_DIVERGENCE_PREFIX`]'s hard failure, never a real dispatch. Each record
+    /// is consumed at most once, so two identical calls in the recording are matched to their own
+    /// distinct recorded resolutions in order rather than both replaying the first one found.
+    fn take(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        root: &Path,
+    ) -> Option<crate::outcome::ToolCallResolution> {
+        if let Some(pos) = self.remaining.iter().position(|r| r.tool_use_id == id) {
+            return Some(self.remaining.remove(pos).resolution);
+        }
+        let target = hash_tool_input(input, root);
+        let pos = self
+            .remaining
+            .iter()
+            .position(|r| r.tool_name == name && hash_tool_input(&r.input, root) == target)?;
+        Some(self.remaining.remove(pos).resolution)
+    }
+}
+
+/// Replace every occurrence of `root`'s string form in `value`'s string leaves with
+/// [`tm_provider::cassette::PATH_PLACEHOLDER`] — the same normalization
+/// [`tm_provider::cassette::normalize_request`] applies to a provider prompt, applied here to a
+/// tool call's JSON input instead, so a recording made under one tempdir/project root still
+/// matches a replay under a different one (`fs.read { "path": "<root>/..." }` is the routine
+/// case; every builtin `fs.*`/`edit.*`/`shell.*` tool's input embeds the root somewhere).
+fn normalize_tool_input_strings(value: &mut serde_json::Value, root_str: &str) {
+    match value {
+        serde_json::Value::String(s) => {
+            *s = s.replace(root_str, tm_provider::cassette::PATH_PLACEHOLDER);
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                normalize_tool_input_strings(item, root_str);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                normalize_tool_input_strings(v, root_str);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// [`std::hash::DefaultHasher`] of `input` after normalizing `root`'s string form out of every
+/// string leaf (see [`normalize_tool_input_strings`]) — the "normalized input hash"
+/// `replay-tool-replay-mode-design` asks [`ReplayToolSource::take`] to match a recorded call's
+/// `tool_name` fallback on. Mirrors `tm_provider::mock::hash_request`'s own canonical-JSON-then-hash
+/// shape.
+fn hash_tool_input(input: &serde_json::Value, root: &Path) -> u64 {
+    let root_str = root.to_string_lossy();
+    let mut normalized = input.clone();
+    if !root_str.is_empty() {
+        normalize_tool_input_strings(&mut normalized, root_str.as_ref());
+    }
+    // Invariant: `serde_json::Value` serialization cannot fail.
+    let json = serde_json::to_string(&normalized)
+        .expect("serde_json::Value serialization should never fail");
+    let mut hasher = std::hash::DefaultHasher::new();
+    json.as_bytes().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Prefix every [`AgentOutcome::Failed`] detail [`AgentLoop::drive`]/[`AgentLoop::resume_with`]
+/// produce for a tool-replay miss (no recorded [`ToolCallRecord`] matched a call the model
+/// issued — see [`ReplayToolSource::take`]) starts with, so a caller can recognize this specific
+/// failure without string-matching an unrelated one (mirrors [`CAPACITY_REFUSAL_PREFIX`]'s own
+/// role for a capacity-wait timeout). Tool replay never falls through to a real dispatch on a
+/// miss — `docs/decisions/D-028-record-replay-harness.md`'s "Tool replay" section is explicit
+/// this is a hard stop, not a stale-recording warning.
+pub const REPLAY_DIVERGENCE_PREFIX: &str = "tool replay diverged: ";
+
+/// True when `outcome` is the [`REPLAY_DIVERGENCE_PREFIX`]-tagged failure a tool-replay miss
+/// produces, as opposed to any other [`AgentOutcome::Failed`].
+pub fn is_replay_divergence(outcome: &AgentOutcome) -> bool {
+    matches!(
+        outcome,
+        AgentOutcome::Failed { class: FailureClass::Other, detail, .. }
+            if detail.starts_with(REPLAY_DIVERGENCE_PREFIX)
+    )
+}
+
 /// The tool-using agent loop.
 pub struct AgentLoop {
     fabric: Arc<Fabric>,
@@ -164,6 +290,12 @@ pub struct AgentLoop {
     /// events. Every write through this handle goes through [`tm_core::Store::append`] or one
     /// of its typed helpers, so it materializes in the same transaction it's appended in.
     store: Arc<Store>,
+    /// When set (see [`AgentLoop::with_replay_tool_source`]), every tool call this loop
+    /// dispatches is resolved from here instead of a real [`ToolRegistry::dispatch`] call —
+    /// tool-replay mode (`replay-tool-replay-mode-design`,
+    /// `docs/decisions/D-028-record-replay-harness.md`'s "Tool replay" section). `None` (the
+    /// default) is this loop's ordinary behavior, unchanged.
+    replay_tool_source: Option<ReplayToolSource>,
 }
 
 impl AgentLoop {
@@ -210,6 +342,7 @@ impl AgentLoop {
             capacity_wait: DEFAULT_CAPACITY_WAIT,
             max_events_per_ticket: DEFAULT_MAX_EVENTS_PER_TICKET,
             store,
+            replay_tool_source: None,
         }
     }
 
@@ -264,6 +397,23 @@ impl AgentLoop {
         self
     }
 
+    /// Replay recorded tool-call resolutions instead of dispatching real tool calls for the rest
+    /// of this loop's life (`replay-tool-replay-mode-design`;
+    /// `docs/decisions/D-028-record-replay-harness.md`'s "Tool replay" section) — the tool-level
+    /// analog of `tm run <ticket> --replay <path>`'s provider-level cassette replay
+    /// (`RunArgs::replay`/`tm_provider::MockProvider::script_from_cassette`), applied to this
+    /// crate's own [`ToolCallRecord`]s rather than `tm-provider`'s `CompletionRequest`s. Every
+    /// dispatched call is matched against `source` and its recorded resolution returned verbatim
+    /// (see [`ReplayToolSource::take`]); a call with no match ends the run with
+    /// [`is_replay_divergence`]'s failure rather than falling through to a real dispatch. This
+    /// does not touch the authority/oversight gate `drive` applies before every dispatch — see
+    /// that gate's own call site for why a replay under a different (e.g. stricter) authority
+    /// ceiling than the recording still suspends/denies exactly as a live run would.
+    pub fn with_replay_tool_source(mut self, source: ReplayToolSource) -> Self {
+        self.replay_tool_source = Some(source);
+        self
+    }
+
     /// Render every request's system prompt from `fragments` (see
     /// [`crate::prompt::render_system_prompt`]) instead of the empty default — e.g. an interactive
     /// session's [`crate::prompt::chat_fragments`].
@@ -291,12 +441,52 @@ impl AgentLoop {
         steps.push(step);
     }
 
+    /// Look up whether tool-replay mode is active and, if so, resolve one already-authority-gated
+    /// tool call from it — the one seam both [`AgentLoop::drive`]'s main loop and
+    /// [`AgentLoop::resume_with`]'s resumed dispatch share, so the two can never diverge on how
+    /// they decide "replay or really run it". `None` means [`AgentLoop::with_replay_tool_source`]
+    /// was never called for this loop — the caller falls through to a real
+    /// [`ToolRegistry::dispatch`]. `Some(Err(detail))` is a tool-replay miss: `detail` is
+    /// [`REPLAY_DIVERGENCE_PREFIX`]-tagged plain text for the caller to fold into an
+    /// [`AgentOutcome::Failed`] the same way every other in-band failure this loop produces is —
+    /// never a real `Err` out of `drive`/`resume_with` themselves (see [`AgentLoop::run`]'s own
+    /// doc comment on that invariant).
+    ///
+    /// Takes the call's own fields rather than a [`tm_types::CallContext`], deliberately: this
+    /// mutable borrow of `self.replay_tool_source` must never overlap the immutable borrows of
+    /// `self.actor`/`self.clock`/`self.ids` a `CallContext` for the real-dispatch branch holds —
+    /// see both call sites, which build that `CallContext` only in the `None` arm, after this
+    /// call (and its mutable borrow of `self`) has already returned.
+    fn replay_resolution(
+        &mut self,
+        id: &str,
+        name: &str,
+        input: &serde_json::Value,
+        root: &Path,
+    ) -> Option<std::result::Result<ToolOutcome, String>> {
+        let source = self.replay_tool_source.as_mut()?;
+        Some(source.take(id, name, input, root).ok_or_else(|| {
+            format!(
+                "{REPLAY_DIVERGENCE_PREFIX}no recorded resolution for tool `{name}` (call {id}); \
+                 replay stops instead of dispatching it for real"
+            )
+        }))
+    }
+
     /// The root every tool call this loop dispatches resolves paths against: [`AgentLoop::with_root`]'s
     /// override if set, else [`project_root`]. Exposed (mirroring [`AgentLoop::authority`]/
     /// [`AgentLoop::oversight`]) so a caller constructing the loop can be tested for *what* root
     /// it actually passed, not just inferred from where files land.
     pub fn root(&self) -> PathBuf {
         self.root_override.clone().unwrap_or_else(project_root)
+    }
+
+    /// Whether [`AgentLoop::with_replay_tool_source`] set a tool-replay source on this loop.
+    /// Exposed for the same reason [`AgentLoop::root`] is: so a caller constructing the loop
+    /// (e.g. `crate::executor::BuiltinExecutor::build`) can be tested for *what* it passed, not
+    /// just inferred from run-time dispatch behavior.
+    pub fn has_replay_tool_source(&self) -> bool {
+        self.replay_tool_source.is_some()
     }
 
     /// This loop's own authority ceiling, as constructed via [`AgentLoop::new`] — i.e. before
@@ -408,16 +598,28 @@ impl AgentLoop {
                     self.actor.clone(),
                 )?;
             }
-            let ctx = CallContext {
-                authority: &effective_authority,
-                ticket: task.ticket.as_ref(),
-                session: &task.session,
-                actor: &self.actor,
-                clock: self.clock.as_ref(),
-                ids: self.ids.as_ref(),
-                root: &root,
-            };
-            self.tools.dispatch(&call, &ctx).await
+            match self.replay_resolution(&call.id, &call.name, &call.input, &root) {
+                Some(Ok(resolution)) => resolution,
+                Some(Err(detail)) => {
+                    return Ok(AgentOutcome::Failed {
+                        steps: steps_so_far,
+                        class: FailureClass::Other,
+                        detail,
+                    });
+                }
+                None => {
+                    let ctx = CallContext {
+                        authority: &effective_authority,
+                        ticket: task.ticket.as_ref(),
+                        session: &task.session,
+                        actor: &self.actor,
+                        clock: self.clock.as_ref(),
+                        ids: self.ids.as_ref(),
+                        root: &root,
+                    };
+                    self.tools.dispatch(&call, &ctx).await
+                }
+            }
         } else {
             ToolOutcome::Denied {
                 reason: denial.unwrap_or_else(|| "approval declined".to_string()),
@@ -1183,17 +1385,30 @@ impl AgentLoop {
                     input: input.clone(),
                 };
                 let dispatch_started_at = self.clock.now();
-                let resolution = {
-                    let ctx = CallContext {
-                        authority: &effective_authority,
-                        ticket: task.ticket.as_ref(),
-                        session: &task.session,
-                        actor: &self.actor,
-                        clock: self.clock.as_ref(),
-                        ids: self.ids.as_ref(),
-                        root: &root,
-                    };
-                    self.tools.dispatch(&call, &ctx).await
+                let resolution = match self.replay_resolution(id, name, input, &root) {
+                    Some(Ok(resolution)) => resolution,
+                    Some(Err(detail)) => {
+                        // Steps completed before this call only — the in-progress step
+                        // (including any calls already dispatched within it) is not committed,
+                        // matching `AgentOutcome::AwaitingApproval`'s own contract just above.
+                        return Ok(AgentOutcome::Failed {
+                            steps,
+                            class: FailureClass::Other,
+                            detail,
+                        });
+                    }
+                    None => {
+                        let ctx = CallContext {
+                            authority: &effective_authority,
+                            ticket: task.ticket.as_ref(),
+                            session: &task.session,
+                            actor: &self.actor,
+                            clock: self.clock.as_ref(),
+                            ids: self.ids.as_ref(),
+                            root: &root,
+                        };
+                        self.tools.dispatch(&call, &ctx).await
+                    }
                 };
                 // Millis since `dispatch_started_at`, clamped to 0: the injected `Clock` need not
                 // advance (many scripted tests use a fixed clock), and `millis_since` can go
@@ -1910,7 +2125,9 @@ mod tests {
     use tm_core::{ExecutorRequirements, RetryPolicy, TicketKind, VerificationPolicy};
     use tm_events::{Event, EventKind, EventLog};
     use tm_provider::{Candidate, Completion, MockProvider, ModelId, RoleTable, StopReason, Usage};
-    use tm_types::{FixedClock, SessionId, TestIds};
+    use tm_types::{CapabilityProvider, FixedClock, SessionId, TestIds};
+
+    use crate::tools::BuiltinCapability;
 
     struct NoopCommandCache;
     impl CommandCache for NoopCommandCache {
@@ -3437,6 +3654,249 @@ mod tests {
         assert!(
             find_events(&events, EventKind::ApprovalRequested).is_empty(),
             "the default oversight policy must never ask for approval"
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // Tool replay (`replay-tool-replay-mode-design`,
+    // `docs/decisions/D-028-record-replay-harness.md`'s "Tool replay" section): a recorded
+    // `ToolCallRecord` served verbatim instead of a real dispatch, and a miss as a hard,
+    // distinctly-tagged failure rather than a silent fallback to real execution.
+    // -----------------------------------------------------------------------------------------
+
+    /// A [`CapabilityProvider`] that delegates `id`/`tools`/`to_action`/`requires` straight to a
+    /// real [`BuiltinCapability`] (so a `MockProvider` turn scripted against it hashes identically
+    /// to one scripted against a real registry) but counts every [`CapabilityProvider::invoke`]
+    /// instead of ever really executing one — the "test-double ... asserted to receive zero
+    /// calls" `replay-tool-replay-mode-design`'s acceptance check asks for.
+    struct SpyCapability {
+        inner: BuiltinCapability,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CapabilityProvider for SpyCapability {
+        fn id(&self) -> &str {
+            self.inner.id()
+        }
+        fn tools(&self) -> Vec<tm_types::ToolSchema> {
+            self.inner.tools()
+        }
+        fn to_action(&self, tool: &str, input: &serde_json::Value) -> Result<tm_types::Action> {
+            self.inner.to_action(tool, input)
+        }
+        fn requires(&self) -> tm_types::AuthorityRequirement {
+            self.inner.requires()
+        }
+        async fn invoke(
+            &self,
+            tool: &str,
+            _input: serde_json::Value,
+            _ctx: &CallContext<'_>,
+        ) -> Result<serde_json::Value> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(TmError::invariant(format!(
+                "SpyCapability::invoke unexpectedly called for `{tool}`; tool-replay mode must \
+                 never dispatch a real tool call"
+            )))
+        }
+    }
+
+    fn spy_tools(h: &LiveHarness, calls: Arc<std::sync::atomic::AtomicUsize>) -> ToolRegistry {
+        let ci = Arc::new(CodeIntel::open(h.dir.path()).expect("codeintel"));
+        let spy: Arc<dyn CapabilityProvider> = Arc::new(SpyCapability {
+            inner: BuiltinCapability::new(
+                ci,
+                h.store.clone(),
+                Arc::new(NoopCommandCache),
+                Arc::new(NoopCommandExecutor),
+            ),
+            calls,
+        });
+        ToolRegistry::new(vec![spy], h.store.clone())
+    }
+
+    #[tokio::test]
+    async fn tool_replay_reaches_the_recorded_outcome_without_dispatching_real_tool_calls() {
+        let h = LiveHarness::new();
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        // The recorded run: a real registry, a real dispatch.
+        let mut recorded_loop = AgentLoop::new(
+            fabric.clone(),
+            h.tools(),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+        let task = h.task();
+        let stat_input = serde_json::json!({"path": "nonexistent-tool-replay-fixture.rs"});
+
+        let turn1_request = expected_request(&recorded_loop, &task);
+        let turn1_completion = tool_call_completion(
+            model.clone(),
+            &h.clock,
+            "call-1",
+            "fs.stat",
+            stat_input.clone(),
+        );
+        provider.script_response(&turn1_request, turn1_completion.clone());
+
+        let root = project_root();
+        let effective_authority = recorded_loop.authority().intersect(&task.authority);
+        let ctx = CallContext {
+            authority: &effective_authority,
+            ticket: task.ticket.as_ref(),
+            session: &task.session,
+            actor: &h.actor,
+            clock: h.clock.as_ref(),
+            ids: h.ids.as_ref(),
+            root: &root,
+        };
+        let resolution1 = recorded_loop
+            .tools()
+            .dispatch(
+                &ToolCall {
+                    id: "call-1".to_string(),
+                    name: "fs.stat".to_string(),
+                    input: stat_input.clone(),
+                },
+                &ctx,
+            )
+            .await;
+        assert!(matches!(resolution1, ToolOutcome::Completed { .. }));
+
+        let step1 = StepRecord {
+            index: 1,
+            served_by: model.to_string(),
+            assistant_text: None,
+            tool_calls: vec![ToolCallRecord {
+                tool_use_id: "call-1".to_string(),
+                tool_name: "fs.stat".to_string(),
+                input: stat_input.clone(),
+                resolution: resolution1,
+            }],
+            spend: step_spend_of(&turn1_completion),
+            at: h.clock.now(),
+        };
+
+        let turn2_request =
+            expected_request_after(&recorded_loop, &task, std::slice::from_ref(&step1));
+        provider.script_response(
+            &turn2_request,
+            text_only_completion(model.clone(), &h.clock),
+        );
+
+        let recorded_outcome = recorded_loop
+            .run(task.clone())
+            .await
+            .expect("recorded run completes");
+        assert!(
+            matches!(recorded_outcome, AgentOutcome::Failed { .. }),
+            "expected Failed via a text-only turn 2 reply, got {recorded_outcome:?}"
+        );
+
+        // The replay: a spy registry asserted to receive zero calls, driven by the same fabric
+        // (already scripted for both turns above -- `SpyCapability` delegates its schema straight
+        // to a real `BuiltinCapability`, so the request hash matches the recorded run's turn for
+        // turn, and `MockProvider::script_response` serves any request hashing equal, not just
+        // the first).
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut replay_loop = AgentLoop::new(
+            fabric,
+            spy_tools(&h, calls.clone()),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        )
+        .with_replay_tool_source(ReplayToolSource::from_steps(recorded_outcome.steps()));
+
+        // Belt and suspenders on top of the "same schema hashes the same" reasoning above: script
+        // the replay loop's own exact requests too, so a schema difference this test didn't
+        // anticipate fails loudly as an unscripted-request `ProviderError` rather than silently
+        // passing for the wrong reason.
+        provider.script_response(&expected_request(&replay_loop, &task), turn1_completion);
+        provider.script_response(
+            &expected_request_after(&replay_loop, &task, std::slice::from_ref(&step1)),
+            text_only_completion(model.clone(), &h.clock),
+        );
+
+        let replayed_outcome = replay_loop.run(task).await.expect("replay run completes");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "tool replay must never dispatch a real tool call"
+        );
+        assert_eq!(
+            replayed_outcome, recorded_outcome,
+            "a tool replay must reach the exact same AgentOutcome as the recorded run"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_replay_with_no_recorded_match_produces_the_divergence_failure() {
+        let h = LiveHarness::new();
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // An empty replay source: nothing was ever recorded, so the very first tool call the
+        // model issues has no recorded resolution to match.
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            spy_tools(&h, calls.clone()),
+            Authority::root(),
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        )
+        .with_replay_tool_source(ReplayToolSource::from_steps(&[]));
+
+        let task = h.task();
+        let stat_input = serde_json::json!({"path": "nonexistent-tool-replay-fixture.rs"});
+        let request = expected_request(&agent_loop, &task);
+        provider.script_response(
+            &request,
+            tool_call_completion(model.clone(), &h.clock, "call-1", "fs.stat", stat_input),
+        );
+
+        let outcome = agent_loop
+            .run(task)
+            .await
+            .expect("a tool-replay miss is Ok(AgentOutcome::Failed), never an Err");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an unmatched tool replay must never fall through to a real dispatch"
+        );
+        assert!(
+            is_replay_divergence(&outcome),
+            "expected the tool-replay divergence failure, got {outcome:?}"
         );
     }
 

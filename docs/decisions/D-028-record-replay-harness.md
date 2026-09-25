@@ -135,3 +135,80 @@ to close there. Recording it anyway would only grow every cassette file for no r
   `--json` (`Renderer::emit`), or a one-line human summary otherwise.
 - Without `--replay`, behavior is unchanged: `run_ticket` only takes this path when `args.replay`
   is `Some`.
+
+## Tool replay
+
+`replay-tool-replay-mode-design` adds a second, independent replay axis: everything above
+(`--record`/`--replay`) replays what a *provider* said — the model's own completions — through a
+cassette-scripted `MockProvider`. It says nothing about what a *tool* did. A ticket's own file
+reads, shell commands, and search/symbol calls still execute for real even under `tm run
+<ticket> --replay <path>`, because `MockProvider::script_from_cassette` only ever intercepts
+`Fabric::complete`, not `ToolRegistry::dispatch`. This section adds the matching capability at the
+tool layer, inside `tm-agent` itself (`crates/tm-agent/src/agent_loop.rs`,
+`crates/tm-agent/src/executor.rs`) rather than the CLI: `AgentLoop::with_replay_tool_source`
+takes a `ReplayToolSource` and, for the rest of that loop's life, every tool call is resolved from
+it instead of a real `ToolRegistry::dispatch` call.
+
+- **Source of truth: a prior run's `StepRecord`s, never `tool_call.completed` telemetry.**
+  `ReplayToolSource::from_steps` builds the source by flattening a transcript's `StepRecord::
+  tool_calls` in order. The `tool_call.completed` event (`tel-tool-call-event-kind`, D-030's
+  "local telemetry") was considered and rejected as the source: its `ToolCallCompletedPayload` is
+  deliberately narrow — `ticket`, `session`, `tool_name`, `duration_ms`, and a collapsed `outcome`
+  string (`"completed"`/`"denied"`/`"error"`) — carrying neither the call's `tool_use_id`/`input`
+  nor the full `ToolCallResolution` (a `Completed` result body, a `Denied` reason, an `Errored`
+  detail) a verbatim replay needs to reproduce. A `StepRecord` (kept durably as part of an
+  `AgentOutcome`'s transcript, or reconstructible from a saved session/cassette-adjacent artifact)
+  is the only place that data survives.
+- **Match order: `tool_use_id` first, then `tool_name` plus a root-normalized input hash.**
+  `ReplayToolSource::take` first looks for an exact `tool_use_id` match — the common case, since a
+  cassette-replayed provider (`--replay`'s own `MockProvider::script_from_cassette`) reproduces
+  the recording's own `ContentBlock::ToolUse` ids verbatim, byte-for-byte. Falling back to
+  `tool_name` plus a hash of the call's JSON input — normalized the same way
+  `tm_provider::cassette::normalize_request` normalizes a provider prompt, replacing every
+  occurrence of the execution root's string form with `tm_provider::cassette::PATH_PLACEHOLDER`
+  before hashing — covers the case where the provider side isn't itself a byte-identical cassette
+  replay (e.g. a fresh, non-replayed model re-run against the same tool sequence, or any other
+  source of fresh `tool_use_id`s), so a tool call whose recorded input differs only in which
+  tempdir/project root it was made under still matches. Each recorded call is consumed at most
+  once (`take` removes the match it returns), so two structurally identical calls in the
+  recording still pair with their own distinct recorded resolutions, in order, rather than both
+  replaying the first one found.
+- **A miss is a hard, distinctly-tagged failure — never a fallback to real execution.** Unlike
+  provider-level replay (which serves an ordered cassette and reports a hash mismatch as a
+  `Divergence` the caller can inspect after the fact, without failing the call), a tool-replay
+  miss stops the run immediately: `AgentLoop::drive`/`resume_with` produce
+  `Ok(AgentOutcome::Failed { class: FailureClass::Other, detail, .. })` with `detail` prefixed by
+  `agent_loop::REPLAY_DIVERGENCE_PREFIX` (`is_replay_divergence` recognizes it), matching this
+  loop's own documented invariant that `AgentLoop::run`/`resume_with` return `Err` only for an
+  infrastructure failure, never for an in-band one. The asymmetry with provider replay's softer
+  divergence handling is deliberate: a provider divergence still has *some* real, ordered
+  completion to serve and continue with (the recording just may not describe the current run
+  precisely); a tool call with no recorded resolution at all has nothing to serve — dispatching it
+  for real would mean the "replay" quietly stopped being one, silently mixing a recorded run with
+  live, non-reproducible tool execution (a shell command, a file write) that the whole point of
+  replay is to avoid. Failing loudly and immediately is the only option that stays honest about
+  which mode the run is actually in.
+- **The authority/oversight gate is not bypassed.** `AgentLoop::drive`'s existing
+  `Oversight::review(&action, effective_authority.permits(&action))` check — whether a dispatched
+  action is outright denied, needs human approval, or is allowed — runs exactly as it does for a
+  real dispatch, *before* a tool call reaches `AgentLoop::replay_resolution`. Only the actual
+  `ToolRegistry::dispatch` call (authority re-check, `PreToolUse`/`PostToolUse` hooks, the real
+  `CapabilityProvider::invoke`) is replaced by the recorded resolution. This means a replay driven
+  under a different (e.g. more restrictive) `Authority`/`Oversight` than the original recording
+  still suspends into `AgentOutcome::AwaitingApproval` or denies exactly as a live run under that
+  same ceiling would — tool replay reproduces *what a tool call returned*, not *whether the loop
+  was allowed to make it*, and a caller narrowing authority for a replay (e.g. auditing a
+  recording under a stricter policy) gets a real, current answer to that second question rather
+  than the recording's own, possibly-looser one.
+- **`ReplayToolSource` is `Clone`, not consumed by construction.** `AgentLoop` owns and mutates its
+  own copy (`Option<ReplayToolSource>`, consumed call-by-call via `Vec::remove`); a caller that
+  builds a fresh `AgentLoop` per dispatch (`BuiltinExecutor::build`, once per
+  `Executor::execute` call) hands each one its own full, unconsumed clone via
+  `BuiltinExecutor::with_replay_tool_source`, rather than sharing one source across loops and
+  having a second dispatch see it already partly drained by the first.
+- No CLI verb wires this up yet (`crates/tm-cli/src/args.rs`/`ops.rs` are out of this task's file
+  scope) — `BuiltinExecutor::with_replay_tool_source` is the plumbing a future `tm run <ticket>
+  --replay <path>` extension (or a dedicated tool-replay verb) would call, the same way
+  `with_root`/`with_step_sender` existed as plumbing before `--worktree`'s own CLI wiring landed.
+  Without it, behavior is unchanged: every existing `BuiltinExecutor`/`AgentLoop` caller dispatches
+  real tool calls exactly as before.

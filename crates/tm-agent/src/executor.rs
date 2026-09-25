@@ -210,6 +210,12 @@ pub struct BuiltinExecutor {
     root_override: Option<PathBuf>,
     /// Where every run's steps go as they happen (see [`BuiltinExecutor::with_step_sender`]).
     step_sender: Option<tokio::sync::mpsc::UnboundedSender<crate::outcome::StepRecord>>,
+    /// Threaded into every [`AgentLoop`] this executor builds via
+    /// [`AgentLoop::with_replay_tool_source`], when set — see
+    /// [`BuiltinExecutor::with_replay_tool_source`]. `None` (the default) preserves this
+    /// executor's behavior before tool replay existed exactly: every tool call dispatches for
+    /// real, the same as before.
+    replay_tool_source: Option<crate::agent_loop::ReplayToolSource>,
 }
 
 impl BuiltinExecutor {
@@ -249,6 +255,7 @@ impl BuiltinExecutor {
             oversight,
             root_override: None,
             step_sender: None,
+            replay_tool_source: None,
         }
     }
 
@@ -259,6 +266,19 @@ impl BuiltinExecutor {
         sender: tokio::sync::mpsc::UnboundedSender<crate::outcome::StepRecord>,
     ) -> Self {
         self.step_sender = Some(sender);
+        self
+    }
+
+    /// Replay recorded tool-call resolutions instead of dispatching real tool calls for every run
+    /// this executor drives (`replay-tool-replay-mode-design`,
+    /// `docs/decisions/D-028-record-replay-harness.md`'s "Tool replay" section) — the plumbing a
+    /// future `tm run <ticket> --replay <path>` caller opts a dispatch into, mirroring
+    /// [`BuiltinExecutor::with_root`]'s builder shape. `source` is cloned per [`Executor::execute`]
+    /// call (see [`crate::agent_loop::ReplayToolSource`]'s own doc comment on why it's `Clone`),
+    /// so this executor can be reused across more than one dispatch without a first replay
+    /// draining the recording a second one would also need.
+    pub fn with_replay_tool_source(mut self, source: crate::agent_loop::ReplayToolSource) -> Self {
+        self.replay_tool_source = Some(source);
         self
     }
 
@@ -353,6 +373,9 @@ impl BuiltinExecutor {
         }
         if let Some(sender) = self.step_sender.clone() {
             agent_loop = agent_loop.with_step_sender(sender);
+        }
+        if let Some(source) = self.replay_tool_source.clone() {
+            agent_loop = agent_loop.with_replay_tool_source(source);
         }
         let date = self.clock.now().to_rfc3339();
         let root = agent_loop.root().display().to_string();
@@ -763,6 +786,55 @@ mod tests {
             std::env::current_dir().expect("cwd"),
             "the override must actually take effect, not silently fall back to the process cwd"
         );
+    }
+
+    #[test]
+    fn with_replay_tool_source_reaches_the_built_loop() {
+        // `replay-tool-replay-mode-design`: `BuiltinExecutor::with_replay_tool_source` needs to
+        // actually reach the `AgentLoop` it constructs, not just be stored and ignored — mirrors
+        // `with_root_overrides_the_built_loops_root_instead_of_the_process_cwd` above for
+        // `AgentLoop::has_replay_tool_source`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let executor = test_executor(dir.path())
+            .with_replay_tool_source(crate::agent_loop::ReplayToolSource::from_steps(&[]));
+        let task = ExecutorTask {
+            ticket: TicketId::new("T-1").expect("ticket id"),
+            role: Role::CoderFast,
+            objective: "narrow work".to_string(),
+            context_pack: "pack text".to_string(),
+            authority: Authority::root(),
+            budget: Budget::unlimited(),
+            harness_epoch: 0,
+            actor: ParticipantId::new("agent:test-builtin/T-1").expect("participant"),
+            session: None,
+        };
+
+        let (agent_loop, _agent_task, _handles) = executor.build(&task);
+
+        assert!(agent_loop.has_replay_tool_source());
+    }
+
+    #[test]
+    fn without_with_replay_tool_source_the_built_loop_has_none() {
+        // The zero-replay default path must stay byte-identical to this executor's behavior
+        // before tool replay existed.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let executor = test_executor(dir.path());
+        let task = ExecutorTask {
+            ticket: TicketId::new("T-1").expect("ticket id"),
+            role: Role::CoderFast,
+            objective: "narrow work".to_string(),
+            context_pack: "pack text".to_string(),
+            authority: Authority::root(),
+            budget: Budget::unlimited(),
+            harness_epoch: 0,
+            actor: ParticipantId::new("agent:test-builtin/T-1").expect("participant"),
+            session: None,
+        };
+
+        let (agent_loop, _agent_task, _handles) = executor.build(&task);
+
+        assert!(!agent_loop.has_replay_tool_source());
     }
 
     #[test]
