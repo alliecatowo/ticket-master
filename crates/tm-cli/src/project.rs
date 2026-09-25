@@ -1130,6 +1130,35 @@ fn genesis_candidate_state(
     }
 }
 
+/// Pure selection logic behind [`resolve_genesis_provider`]'s non-local fallback: the first entry
+/// in `known` that is not `slug` (Genesis's own already-not-configured candidate, already
+/// covered), not one of the three local backends (already probed separately, before this runs),
+/// is completion-capable, `is_configured` reports as configured, and `model_for` can name a model
+/// for. `is_configured`/`model_for` are injected (production passes
+/// [`tm_provider::ProviderInfo::is_configured`] and the real
+/// `Registry::env_default_model`/`chat_default_model` pairing) so this is testable without
+/// touching the real process environment. Iteration order follows `known`'s own order
+/// ([`tm_provider::Registry::known_providers`]), so it is deterministic, not "whichever is
+/// configured first alphabetically".
+fn genesis_fallback_provider(
+    known: &[tm_provider::ProviderInfo],
+    slug: &str,
+    is_configured: impl Fn(&tm_provider::ProviderInfo) -> bool,
+    model_for: impl Fn(&str) -> Option<String>,
+) -> Option<(&'static str, String)> {
+    known.iter().find_map(|info| {
+        if info.id == slug
+            || tm_provider::LOCAL_PROVIDER_IDS.contains(&info.id)
+            || !info.capabilities.completion
+            || !is_configured(info)
+        {
+            return None;
+        }
+        let model = model_for(info.id)?;
+        Some((info.id, model))
+    })
+}
+
 /// The error for a Genesis role candidate whose provider slug this build does not recognize.
 fn unknown_genesis_provider_error(
     candidate: &tm_provider::RoleCandidate,
@@ -1226,9 +1255,13 @@ where
 /// currently 750ms) — a brand-new user who has never heard of `ANTHROPIC_API_KEY` but happens to
 /// have Ollama running locally should not be stuck with a bare "set this env var" error. The
 /// first one that answers with at least one model pulled is used automatically (with a printed
-/// note saying so, never silently); if none does, the error names what's actually true about
-/// each local backend's state plus the fastest zero-cost next step, rather than only mentioning
-/// Anthropic.
+/// note saying so, never silently). If none does, this also checks every other known, non-local,
+/// completion-capable provider already configured in the environment (e.g. `devpass`, configured
+/// for `Role::CoderFast` rather than `VisionFrontier`) via the same `Registry::autodetect` +
+/// `env_default_model`/`chat_default_model` pairing `/model` already uses, and uses the first one
+/// found, again with a printed note; only when *that* also finds nothing does the error name what's
+/// actually true about each local backend's state plus the fastest zero-cost next step, rather
+/// than only mentioning Anthropic.
 ///
 /// This gate (probe only when nothing else is configured) is deliberate: a slow-by-comparison
 /// network probe has no business running on every `tm genesis` invocation that already has a
@@ -1296,6 +1329,41 @@ fn resolve_genesis_provider(
             "{missing} is not set (needed by `{slug}`, Genesis's configured provider); using \
              detected local provider `{id}` (model `{model}`) for Genesis instead. Set {missing} \
              to use `{slug}` instead."
+        );
+        return Ok((provider, Some(note)));
+    }
+
+    // No local backend answered either. Before erroring, check whether any other role's
+    // candidate provider is already configured and reachable — e.g. `devpass`, configured for
+    // `Role::CoderFast` via `DEVPASS_API_KEY`/`DEVPASS_BASE_URL`/`DEVPASS_MODEL`, with no
+    // Anthropic key and no local model server running. This reuses the same
+    // `Registry::autodetect` + `env_default_model`/`chat_default_model` pairing
+    // `crate::agent::build_fabric_with_table` already uses to surface a configured-but-unlisted
+    // backend to `/model`, so a working non-Anthropic, non-local credential isn't invisible to
+    // Genesis just because it isn't `VisionFrontier`'s own table row.
+    if let Some((id, model)) = genesis_fallback_provider(
+        &known,
+        &slug,
+        tm_provider::ProviderInfo::is_configured,
+        |id| {
+            tm_provider::Registry::env_default_model(id)
+                .or_else(|| tm_provider::Registry::chat_default_model(id).map(str::to_string))
+        },
+    ) {
+        let candidate = tm_provider::RoleCandidate {
+            provider: id.to_string(),
+            model: model.clone(),
+            max_concurrency: 1,
+            degraded_ok: false,
+            price: None,
+            limits: tm_provider::role_config::Limits::unlimited(),
+        };
+        let provider = tm_provider::Registry::build_provider(&candidate, clock)
+            .map_err(|e| TmError::Provider(e.to_string()))?;
+        let note = format!(
+            "{missing} is not set (needed by `{slug}`, Genesis's configured provider); using \
+             already-configured provider `{id}` (model `{model}`) for Genesis instead. Set \
+             {missing} to use `{slug}` instead."
         );
         return Ok((provider, Some(note)));
     }
@@ -2594,6 +2662,83 @@ mod tests {
                 panic!("an unknown slug must not consult the environment")
             });
         assert_eq!(state, GenesisCandidateState::Unknown);
+    }
+
+    #[test]
+    fn genesis_fallback_provider_picks_a_ready_non_local_provider_when_configured() {
+        // Reproduces `p1-genesis-fallback-tries-other-ready-providers`: with `anthropic` (the
+        // `VisionFrontier` candidate) not configured and no local backend reachable,
+        // `genesis_fallback_provider` should still find e.g. `devpass`, ready for a different
+        // role (`Role::CoderFast`), rather than leaving Genesis stuck.
+        let known = tm_provider::Registry::known_providers();
+        let picked = genesis_fallback_provider(
+            &known,
+            "anthropic",
+            |info| info.id == "devpass",
+            |id| (id == "devpass").then(|| "muse".to_string()),
+        );
+        assert_eq!(picked, Some(("devpass", "muse".to_string())));
+    }
+
+    #[test]
+    fn genesis_fallback_provider_skips_local_backends_and_the_already_tried_slug() {
+        // The three local backends are already probed separately before this runs, and `slug`
+        // itself was already established `NotConfigured` by the caller — both must be excluded
+        // even if `is_configured` would otherwise say yes, or this would either duplicate the
+        // local probe's job or "fall back" to the exact candidate that just failed.
+        let known = tm_provider::Registry::known_providers();
+        let picked = genesis_fallback_provider(
+            &known,
+            "anthropic",
+            |_| true, // every known provider claims to be configured
+            |id| Some(format!("{id}-model")),
+        );
+        assert!(picked.is_some());
+        let (id, _) = picked.unwrap();
+        assert_ne!(id, "anthropic");
+        assert!(!tm_provider::LOCAL_PROVIDER_IDS.contains(&id));
+    }
+
+    #[test]
+    fn genesis_fallback_provider_skips_embedding_only_backends() {
+        // A provider whose capabilities say it cannot serve a completion (e.g. an
+        // embeddings-only backend) must never be picked as Genesis's fallback chat provider even
+        // if it is otherwise configured and has a nameable model. Every backend in the real
+        // registry currently has `capabilities.completion: true` (embedding-only roles are
+        // served by the same completion-capable providers under a different model), so this
+        // synthesizes a non-completion `ProviderInfo` directly rather than depending on that
+        // registry-wide fact staying true.
+        let embedding_only = tm_provider::ProviderInfo {
+            id: "embed-only",
+            display_name: "Embed Only",
+            env_vars: &[],
+            capabilities: tm_provider::Capabilities {
+                completion: false,
+                embedding: true,
+                streaming: false,
+                tool_use: false,
+                vision: false,
+            },
+        };
+        let picked = genesis_fallback_provider(
+            &[embedding_only],
+            "anthropic",
+            |_| true,
+            |id| Some(format!("{id}-model")),
+        );
+        assert_eq!(picked, None);
+    }
+
+    #[test]
+    fn genesis_fallback_provider_none_when_nothing_else_is_configured() {
+        let known = tm_provider::Registry::known_providers();
+        let picked = genesis_fallback_provider(
+            &known,
+            "anthropic",
+            |_| false,
+            |id| Some(format!("{id}-model")),
+        );
+        assert_eq!(picked, None);
     }
 
     #[test]
