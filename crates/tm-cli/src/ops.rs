@@ -3423,8 +3423,8 @@ pub fn format_attach_report(report: &AttachReport) -> String {
         "Code navigation is not yet available."
     };
     sections.push(format!(
-        "Indexed {} {} with {}. {}",
-        report.files_indexed, file_word, commit_word, nav_status
+        "Indexed {} {} and {} {} of git history. {}",
+        report.files_indexed, file_word, report.commits_ingested, commit_word, nav_status
     ));
 
     if !report.docs.is_empty() {
@@ -5294,7 +5294,7 @@ tests_pass = {}
     #[test]
     fn format_attach_report_uses_plain_language() {
         use std::path::PathBuf;
-        use tm_genesis::attach::{AttachReport, DiscoveredDoc, DocKind};
+        use tm_genesis::attach::AttachReport;
         use tm_types::TicketId;
 
         let report = AttachReport {
@@ -5308,7 +5308,8 @@ tests_pass = {}
             build_systems: vec![],
             external_trackers: vec![],
             conventions: vec![],
-            open_questions: vec![],
+            assumptions: vec![],
+            questions: vec![],
         };
 
         let formatted = format_attach_report(&report);
@@ -5364,7 +5365,8 @@ tests_pass = {}
             build_systems: vec![],
             external_trackers: vec![],
             conventions: vec![],
-            open_questions: vec![],
+            assumptions: vec![],
+            questions: vec![],
         };
 
         let formatted = format_attach_report(&report);
@@ -5397,7 +5399,8 @@ tests_pass = {}
             build_systems: vec![],
             external_trackers: vec![],
             conventions: vec![],
-            open_questions: vec![],
+            assumptions: vec![],
+            questions: vec![],
         };
 
         let formatted = format_attach_report(&report);
