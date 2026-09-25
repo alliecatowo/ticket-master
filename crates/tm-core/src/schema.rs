@@ -36,7 +36,12 @@ use tm_types::TmError;
 /// `migrate` runs an explicit `ALTER TABLE tickets ADD COLUMN due TEXT` for this bump, guarded by
 /// a `pragma_table_info` check so it stays a no-op on a fresh database (whose `CREATE TABLE`
 /// already includes `due`) and on a database that already has it.
-pub const SCHEMA_VERSION: i64 = 4;
+///
+/// `5`: adds the `docs.state`/`docs.last_verified` columns (docs-persist-state-across-
+/// invocations), so a doc's `DocState` (fresh/stale/reconciling/unverified) survives across
+/// process invocations instead of resetting to `Unverified` every time `tm docs` re-derives its
+/// in-memory registry. Same guarded-`ALTER TABLE` pattern as `4`'s `tickets.due`.
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// One materialized table's name, paired with the `CREATE TABLE IF NOT EXISTS` DDL for it.
 pub struct TableDef {
@@ -234,7 +239,9 @@ pub const TABLES: &[TableDef] = &[
                 title TEXT NOT NULL,
                 content TEXT NOT NULL,
                 author TEXT NOT NULL,
-                ts TEXT NOT NULL
+                ts TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'unverified',
+                last_verified TEXT
             )
         ",
     },
@@ -411,6 +418,35 @@ pub fn migrate(conn: &mut Connection, clock: &dyn tm_types::Clock) -> tm_types::
                 .map_err(storage_err)?;
         }
 
+        // Same reasoning as `due` above: a `docs` table predating schema version 5 has neither
+        // `state` nor `last_verified`, and `CREATE TABLE IF NOT EXISTS` cannot retrofit them.
+        let has_state_column: bool = tx
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('docs') WHERE name = 'state'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(storage_err)?
+            > 0;
+        if !has_state_column {
+            tx.execute_batch(
+                "ALTER TABLE docs ADD COLUMN state TEXT NOT NULL DEFAULT 'unverified'",
+            )
+            .map_err(storage_err)?;
+        }
+        let has_last_verified_column: bool = tx
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('docs') WHERE name = 'last_verified'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(storage_err)?
+            > 0;
+        if !has_last_verified_column {
+            tx.execute_batch("ALTER TABLE docs ADD COLUMN last_verified TEXT")
+                .map_err(storage_err)?;
+        }
+
         // Record the migration
         let now = clock.now();
         tx.execute(
@@ -584,6 +620,73 @@ mod tests {
             workflows_after, 1,
             "migrate should add workflows to an existing v1 database"
         );
+
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM tm_core_schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query version after migrate");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_migrate_adds_docs_state_and_last_verified_columns_to_a_pre_v5_database() {
+        // Simulate a database migrated by a build before schema version 5: every table's DDL
+        // except `docs`, which is created in its pre-5 shape (no `state`/`last_verified`).
+        let path = temp_db_path("test_upgrade_adds_docs_state_columns");
+        let conn = rusqlite::Connection::open(&path).expect("create db");
+        for table in TABLES {
+            if table.name != "docs" {
+                conn.execute_batch(table.create_sql).expect("create table");
+            }
+        }
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS docs (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                author TEXT NOT NULL,
+                ts TEXT NOT NULL
+            )",
+        )
+        .expect("create pre-v5 docs table");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tm_core_schema_version (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            )",
+        )
+        .expect("create version table");
+        conn.execute(
+            "INSERT INTO tm_core_schema_version (version, applied_at) VALUES (4, '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("record version 4");
+        // A pre-v5 row, to confirm the retrofit is a genuine `ALTER TABLE` (preserving existing
+        // rows) rather than a table rebuild.
+        conn.execute(
+            "INSERT INTO docs (id, title, content, author, ts)
+             VALUES ('docs/x.md', 'docs/x.md', '', 'human:tester', '2020-01-01T00:00:00Z')",
+            [],
+        )
+        .expect("insert pre-v5 doc row");
+
+        drop(conn);
+        let mut conn = rusqlite::Connection::open(&path).expect("reopen db");
+        migrate(&mut conn, &tm_types::FixedClock::epoch())
+            .expect("migrate an existing v4 database");
+
+        let (state, last_verified): (String, Option<String>) = conn
+            .query_row(
+                "SELECT state, last_verified FROM docs WHERE id = 'docs/x.md'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("existing row survives the ALTER TABLE with the new columns' defaults");
+        assert_eq!(state, "unverified");
+        assert_eq!(last_verified, None);
 
         let version: i64 = conn
             .query_row(

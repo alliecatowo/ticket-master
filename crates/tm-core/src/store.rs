@@ -41,8 +41,8 @@ use rusqlite::{Connection, OptionalExtension};
 use tm_events::payload::{
     ArtifactCreatedPayload, AuthorityRevertedPayload, ClassifyDecidedPayload,
     CommandCompletedPayload, CommandStartedPayload, DecisionCreatedPayload,
-    DecisionSupersededPayload, DocInvalidatedPayload, DocReconciledPayload, DocRegisteredPayload,
-    EffectCompletedPayload, EffectFailedPayload, EffectJournaledPayload,
+    DecisionSupersededPayload, DocInvalidatedPayload, DocReconciledPayload, DocReconcilingPayload,
+    DocRegisteredPayload, EffectCompletedPayload, EffectFailedPayload, EffectJournaledPayload,
     GenesisStageCompletedPayload, GoalClaimedCompletePayload, GoalReorientedPayload,
     GoalSetPayload, GoalStepAddedPayload, GoalStepCompletedPayload, HarnessPromotedPayload,
     MilestoneClosedPayload, MilestoneCreatedPayload, MilestoneReopenedPayload, MirrorLinkedPayload,
@@ -171,6 +171,16 @@ pub struct DocRow {
     pub author: ParticipantId,
     /// `docs.ts` -- when this doc was last touched.
     pub ts: Timestamp,
+    /// `docs.state` -- the persisted lowercase label of a `tm_docs::registry::DocState`
+    /// (`"fresh"`/`"stale"`/`"reconciling"`/`"unverified"`). Kept as a plain `String` rather than
+    /// that enum itself: `tm-core` has no dependency on `tm-docs` (`tm-docs` depends on
+    /// `tm-core`, not the reverse), so this crate cannot name that type. A caller that wants the
+    /// typed enum parses this label the same way `tm-docs`' `DocState` serializes it
+    /// (`#[serde(rename_all = "lowercase")]`).
+    pub state: String,
+    /// `docs.last_verified` -- when a human (or, for `Generated` docs, the regeneration step)
+    /// last confirmed this doc matched its basis. `None` for a doc that has never been verified.
+    pub last_verified: Option<Timestamp>,
     /// Tickets recorded in `doc_provenance` as an originating source for this doc.
     pub provenance_tickets: Vec<TicketId>,
 }
@@ -2662,6 +2672,25 @@ impl Store {
         )])
     }
 
+    /// Mark the doc at `path` `Reconciling`: a regeneration or review ticket is now open against
+    /// it (`tm docs reconcile`). Unlike [`Self::invalidate_doc`]/[`Self::reconcile_doc`], which
+    /// only touch `docs.ts` (the schema had no state column when those shipped), this persists
+    /// the `DocState::Reconciling` transition itself — see [`crate::materialize::apply`]'s
+    /// `doc.reconciling` arm — so a fresh `tm docs list` in a later invocation still reads
+    /// `Reconciling` instead of falling back to whatever `load_and_sync_doc_registry` derives.
+    pub fn mark_doc_reconciling(
+        &self,
+        path: String,
+        ticket: Option<TicketId>,
+        actor: ParticipantId,
+    ) -> tm_types::Result<Vec<Event>> {
+        self.append(vec![EventDraft::new(
+            actor,
+            Id::new(path.clone()),
+            Payload::from(DocReconcilingPayload { path, ticket }),
+        )])
+    }
+
     /// Promote `candidate` to a new harness epoch. `harness_epochs.epoch` is allocated inside
     /// [`crate::materialize::apply`]'s `harness.promoted` arm, not here, since it must be derived
     /// deterministically from replay order rather than from any id source this method could call.
@@ -3060,7 +3089,7 @@ impl Store {
     pub fn docs(&self) -> tm_types::Result<Vec<DocRow>> {
         let conn = tm_events::schema::open_read_connection(self.log.path())?;
         let mut stmt = conn
-            .prepare("SELECT id, title, author, ts FROM docs ORDER BY id")
+            .prepare("SELECT id, title, author, ts, state, last_verified FROM docs ORDER BY id")
             .map_err(storage_err)?;
         let rows = stmt
             .query_map([], |row| {
@@ -3069,6 +3098,8 @@ impl Store {
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                 ))
             })
             .map_err(storage_err)?
@@ -3076,7 +3107,7 @@ impl Store {
             .map_err(storage_err)?;
 
         let mut docs = Vec::with_capacity(rows.len());
-        for (id, title, author, ts) in rows {
+        for (id, title, author, ts, state, last_verified) in rows {
             let mut prov_stmt = conn
                 .prepare("SELECT source FROM doc_provenance WHERE doc_id = ?1 ORDER BY source")
                 .map_err(storage_err)?;
@@ -3093,6 +3124,8 @@ impl Store {
                 title,
                 author: author.parse::<ParticipantId>()?,
                 ts: parse_ts(&ts)?,
+                state,
+                last_verified: last_verified.map(|t| parse_ts(&t)).transpose()?,
                 provenance_tickets,
             });
         }

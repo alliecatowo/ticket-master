@@ -534,6 +534,12 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
                 // live outside the log (see `store.rs`'s module note on `store_artifact`) — so
                 // `title` defaults to `path` and `content` to empty; a real doc-content event
                 // kind would be needed to do better, and adding one is out of this item's scope.
+                // `state`/`last_verified` are deliberately untouched by the `ON CONFLICT`
+                // branch: re-registering an already-known doc (`load_and_sync_doc_registry`
+                // calls `register_doc` on every `docs list`/`check`/`reconcile`) must not reset
+                // a persisted `Stale`/`Reconciling`/`Fresh` doc back to the fresh-row default —
+                // only a real `doc.invalidated`/`doc.reconciled`/`doc.reconciling` event may
+                // change state (docs-persist-state-across-invocations).
                 let now = event.ts.to_rfc3339();
                 tx.raw()
                     .execute(
@@ -559,19 +565,20 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
         }
         EventKind::DocInvalidated => {
             if let Some(p) = event.payload.as_doc_invalidated() {
-                // `docs` has no staleness/state column (`id/title/content/author/ts` only, per
-                // `crate::schema`), so `ts` is touched as a durable freshness signal ("this doc
-                // was last acted on at ..."), the same convention `doc.reconciled` below uses.
-                // `reason` has nowhere to persist under the existing schema and is intentionally
-                // dropped here (still recoverable from the raw event log). Upserts rather than a
-                // plain `UPDATE` so replay is order-tolerant if an invalidation is ever logged
-                // for a path this view hasn't seen a `doc.registered` for yet.
+                // `docs.state`/`docs.last_verified` (docs-persist-state-across-invocations) give
+                // this a real home now: an invalidation moves the doc to `Stale`, `ts` is
+                // touched as a durable freshness signal ("this doc was last acted on at..."),
+                // the same convention `doc.reconciled`/`doc.reconciling` below use. `reason` still
+                // has nowhere to persist under the existing schema and is intentionally dropped
+                // here (still recoverable from the raw event log). Upserts rather than a plain
+                // `UPDATE` so replay is order-tolerant if an invalidation is ever logged for a
+                // path this view hasn't seen a `doc.registered` for yet.
                 let now = event.ts.to_rfc3339();
                 tx.raw()
                     .execute(
-                        "INSERT INTO docs (id, title, content, author, ts)
-                         VALUES (?1, ?1, '', ?2, ?3)
-                         ON CONFLICT(id) DO UPDATE SET ts = excluded.ts",
+                        "INSERT INTO docs (id, title, content, author, ts, state)
+                         VALUES (?1, ?1, '', ?2, ?3, 'stale')
+                         ON CONFLICT(id) DO UPDATE SET ts = excluded.ts, state = 'stale'",
                         params![p.path, event.actor.as_str(), now],
                     )
                     .map_err(storage_err)?;
@@ -579,16 +586,48 @@ pub fn apply(tx: &Tx<'_>, event: &Event) -> tm_types::Result<()> {
         }
         EventKind::DocReconciled => {
             if let Some(p) = event.payload.as_doc_reconciled() {
-                // Same mapping and same rationale as `doc.invalidated` above.
+                // Same mapping as `doc.invalidated` above; a reconciliation also sets
+                // `last_verified` to this event's own timestamp, since the doc's content is
+                // confirmed to match its basis again as of now.
                 let now = event.ts.to_rfc3339();
                 tx.raw()
                     .execute(
-                        "INSERT INTO docs (id, title, content, author, ts)
-                         VALUES (?1, ?1, '', ?2, ?3)
-                         ON CONFLICT(id) DO UPDATE SET ts = excluded.ts",
+                        "INSERT INTO docs (id, title, content, author, ts, state, last_verified)
+                         VALUES (?1, ?1, '', ?2, ?3, 'fresh', ?3)
+                         ON CONFLICT(id) DO UPDATE SET
+                             ts = excluded.ts, state = 'fresh', last_verified = excluded.ts",
                         params![p.path, event.actor.as_str(), now],
                     )
                     .map_err(storage_err)?;
+            }
+        }
+        EventKind::DocReconciling => {
+            if let Some(p) = event.payload.as_doc_reconciling() {
+                // A regeneration/review ticket just opened against this doc
+                // (`Store::mark_doc_reconciling`, `tm docs reconcile`). Same upsert shape as
+                // `doc.invalidated`/`doc.reconciled` above, plus a `doc_provenance` row for the
+                // opened ticket (same convention `doc.registered`'s optional `ticket` uses
+                // above), so a later caller (`tm docs attest`, `docs-wire-attestation-cli-path`)
+                // can find the doc's open reconciliation ticket from `Store::docs`' provenance
+                // list without a separate lookup.
+                let now = event.ts.to_rfc3339();
+                tx.raw()
+                    .execute(
+                        "INSERT INTO docs (id, title, content, author, ts, state)
+                         VALUES (?1, ?1, '', ?2, ?3, 'reconciling')
+                         ON CONFLICT(id) DO UPDATE SET ts = excluded.ts, state = 'reconciling'",
+                        params![p.path, event.actor.as_str(), now],
+                    )
+                    .map_err(storage_err)?;
+                if let Some(ticket) = &p.ticket {
+                    tx.raw()
+                        .execute(
+                            "INSERT OR IGNORE INTO doc_provenance (doc_id, source, reason)
+                             VALUES (?1, ?2, 'doc.reconciling')",
+                            params![p.path, ticket.as_str()],
+                        )
+                        .map_err(storage_err)?;
+                }
             }
         }
         EventKind::ProviderSelected => {
@@ -1721,6 +1760,77 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(count, 1, "reconciliation must not duplicate the row");
+        });
+    }
+
+    #[test]
+    fn doc_state_transitions_persist_across_registered_invalidated_reconciling_reconciled() {
+        with_tx(|tx| {
+            let registered = tm_events::Payload::from(DocRegisteredPayload {
+                path: "docs/architecture.md".into(),
+                ticket: None,
+            });
+            apply(tx, &draft_event(1, EK::DocRegistered, registered)).unwrap();
+            let state = |tx: &Tx<'_>| -> String {
+                tx.raw()
+                    .query_row(
+                        "SELECT state FROM docs WHERE id = 'docs/architecture.md'",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(state(tx), "unverified");
+
+            let invalidated = tm_events::Payload::from(DocInvalidatedPayload {
+                path: "docs/architecture.md".into(),
+                reason: "source moved".into(),
+            });
+            apply(tx, &draft_event(2, EK::DocInvalidated, invalidated)).unwrap();
+            assert_eq!(state(tx), "stale");
+
+            let ticket = TicketId::new("T-1").unwrap();
+            let reconciling = tm_events::Payload::from(DocReconcilingPayload {
+                path: "docs/architecture.md".into(),
+                ticket: Some(ticket),
+            });
+            apply(tx, &draft_event(3, EK::DocReconciling, reconciling)).unwrap();
+            assert_eq!(state(tx), "reconciling");
+            let source: String = tx
+                .raw()
+                .query_row(
+                    "SELECT source FROM doc_provenance
+                     WHERE doc_id = 'docs/architecture.md' AND source = 'T-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(source, "T-1");
+
+            let reconciled = tm_events::Payload::from(DocReconciledPayload {
+                path: "docs/architecture.md".into(),
+            });
+            apply(tx, &draft_event(4, EK::DocReconciled, reconciled)).unwrap();
+            assert_eq!(state(tx), "fresh");
+            let last_verified: Option<String> = tx
+                .raw()
+                .query_row(
+                    "SELECT last_verified FROM docs WHERE id = 'docs/architecture.md'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(last_verified.is_some());
+
+            // Re-registering an already-known doc (`load_and_sync_doc_registry` calls
+            // `register_doc` on every `docs list`/`check`) must not reset the persisted state
+            // back to the fresh-row default.
+            let reregistered = tm_events::Payload::from(DocRegisteredPayload {
+                path: "docs/architecture.md".into(),
+                ticket: None,
+            });
+            apply(tx, &draft_event(5, EK::DocRegistered, reregistered)).unwrap();
+            assert_eq!(state(tx), "fresh");
         });
     }
 

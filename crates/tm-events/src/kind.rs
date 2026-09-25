@@ -268,6 +268,9 @@ pub enum EventKind {
     /// `doc.reconciled`
     #[serde(rename = "doc.reconciled")]
     DocReconciled,
+    /// `doc.reconciling`
+    #[serde(rename = "doc.reconciling")]
+    DocReconciling,
     /// `index.updated`
     #[serde(rename = "index.updated")]
     IndexUpdated,
@@ -413,6 +416,7 @@ pub const ALL: &[EventKind] = &[
     EventKind::DocGenerated,
     EventKind::DocInvalidated,
     EventKind::DocReconciled,
+    EventKind::DocReconciling,
     EventKind::IndexUpdated,
     EventKind::HarnessChanged,
     EventKind::HarnessBenchmarked,
@@ -506,6 +510,7 @@ impl EventKind {
             EventKind::DocGenerated => "doc.generated",
             EventKind::DocInvalidated => "doc.invalidated",
             EventKind::DocReconciled => "doc.reconciled",
+            EventKind::DocReconciling => "doc.reconciling",
             EventKind::IndexUpdated => "index.updated",
             EventKind::HarnessChanged => "harness.changed",
             EventKind::HarnessBenchmarked => "harness.benchmarked",
@@ -590,7 +595,8 @@ impl EventKind {
             EventKind::DocRegistered
             | EventKind::DocGenerated
             | EventKind::DocInvalidated
-            | EventKind::DocReconciled => EventCategory::Doc,
+            | EventKind::DocReconciled
+            | EventKind::DocReconciling => EventCategory::Doc,
             EventKind::IndexUpdated => EventCategory::Index,
             EventKind::HarnessChanged
             | EventKind::HarnessBenchmarked
@@ -985,7 +991,7 @@ mod tests {
 
     #[test]
     fn all_kinds_sorted_and_complete() {
-        assert_eq!(ALL.len(), 83);
+        assert_eq!(ALL.len(), 84);
         assert_eq!(ALL[0], EventKind::ProjectCreated);
         assert_eq!(ALL[ALL.len() - 1], EventKind::ClassifyDecided);
     }

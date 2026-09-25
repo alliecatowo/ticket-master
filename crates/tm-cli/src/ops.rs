@@ -64,24 +64,48 @@ fn load_and_sync_doc_registry(
     let declared = tm_docs::registry::parse_tmdocs_toml(&contents)?;
 
     // `docs.id` in `tm-core`'s persisted table is the doc's *path* (`Store::register_doc`'s own
-    // doc comment), not `tm-docs`' short slug id, so the already-registered check keys on path.
-    let already_registered: std::collections::BTreeSet<String> =
-        project.store.docs()?.into_iter().map(|d| d.id).collect();
+    // doc comment), not `tm-docs`' short slug id, so the already-registered check keys on path,
+    // and doubles as the lookup this function needs to give an already-registered doc its
+    // persisted state/last_verified back (docs-persist-state-across-invocations) instead of the
+    // freshly-discovered `Unverified` default every declared doc got before.
+    let persisted: std::collections::BTreeMap<String, tm_core::DocRow> = project
+        .store
+        .docs()?
+        .into_iter()
+        .map(|row| (row.id.clone(), row))
+        .collect();
 
     let mut newly_registered = 0usize;
     for entry in declared.docs {
-        registry.insert(tm_docs::DocRecord::new(
+        let mut record = tm_docs::DocRecord::new(
             entry.id.clone(),
             entry.path.clone(),
             entry.mode,
             entry.derived_from.clone(),
-        ));
-        if !already_registered.contains(&entry.path) {
-            newly_registered += 1;
+        );
+        match persisted.get(&entry.path) {
+            Some(row) => {
+                // Only a doc `tm-core` already has a row for gets its persisted standing;
+                // `DocRecord::new`'s `Unverified` default above stands for anything not found
+                // here, matching the "only newly discovered docs get Unverified" acceptance
+                // check.
+                if let Some(state) = tm_docs::registry::DocState::from_label(&row.state) {
+                    record.state = state;
+                }
+                record.last_verified = row.last_verified;
+            }
+            None => {
+                newly_registered += 1;
+                // Only register docs `tm-core` has never seen — re-registering an
+                // already-known doc on every `docs list`/`check`/`reconcile` call would spam
+                // the event log with a `doc.registered` for no new information (the persisted
+                // row above already reflects everything that event would carry).
+                project
+                    .store
+                    .register_doc(entry.path.clone(), None, project.actor.clone())?;
+            }
         }
-        project
-            .store
-            .register_doc(entry.path.clone(), None, project.actor.clone())?;
+        registry.insert(record);
     }
     Ok((registry, newly_registered))
 }
@@ -167,9 +191,13 @@ pub fn docs_list(project: &Project, renderer: &Renderer) -> tm_types::Result<()>
 /// function does not catch and swallow it.
 ///
 /// No caller yet feeds this a real `ChangeSet` from a commit/index-update hook (`M-14`'s "nothing
-/// triggers staleness" gap remains open), so every doc starts `Unverified` and this genuinely
-/// passes — not vacuously (the registry is real, non-empty, and would fail the moment a doc were
-/// marked `Stale`), just with nothing yet driving that transition.
+/// triggers staleness" gap remains open), so a freshly discovered doc still starts `Unverified`
+/// and this genuinely passes for it — not vacuously (the registry is real, non-empty, and would
+/// fail the moment a doc were marked `Stale`), just with nothing yet driving that transition
+/// automatically. An already-registered doc now reads back whatever state `Store::invalidate_doc`
+/// (or a prior `tm docs reconcile`) persisted (docs-persist-state-across-invocations), so a doc
+/// marked `Stale` by some other path does fail this check on a later invocation, even with no
+/// live `ChangeSet` computed here yet.
 pub fn docs_check(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
     let (registry, _) = load_and_sync_doc_registry(project)?;
     let records: Vec<tm_docs::DocRecord> = registry.list().into_iter().cloned().collect();
@@ -238,6 +266,21 @@ pub fn docs_reconcile(project: &Project, renderer: &Renderer) -> tm_types::Resul
             tm_docs::reconcile::ReconciliationKind::Review => "Review",
         };
         let objective = format!("{verb} stale doc {doc_id} ({})", record.path);
+        let doc_path = record.path.clone();
+
+        // Only a `Review` ticket (a `Maintained`/`Human` doc, which the system may never
+        // rewrite — see this function's own doc comment on `TmError::AuthorityDenied`) requires
+        // a human executor; `Regeneration` keeps the ordinary fast-coder default, since
+        // regenerating a `Generated` doc is exactly the kind of work an agent may do.
+        let executor_requirements = match kind {
+            tm_docs::reconcile::ReconciliationKind::Review => tm_core::ExecutorRequirements {
+                human_required: true,
+                ..crate::tickets::default_executor_requirements()
+            },
+            tm_docs::reconcile::ReconciliationKind::Regeneration => {
+                crate::tickets::default_executor_requirements()
+            }
+        };
 
         let events = project.store.create_ticket(
             tm_core::TicketKind::Work,
@@ -246,7 +289,7 @@ pub fn docs_reconcile(project: &Project, renderer: &Renderer) -> tm_types::Resul
             None,
             tm_types::Authority::default(),
             Vec::new(),
-            crate::tickets::default_executor_requirements(),
+            executor_requirements,
             Vec::new(),
             Vec::new(),
             tm_core::VerificationPolicy::Single,
@@ -259,6 +302,14 @@ pub fn docs_reconcile(project: &Project, renderer: &Renderer) -> tm_types::Resul
         let ticket_id = events
             .first()
             .and_then(|e| crate::tickets::event_ticket_id(&e.subject));
+
+        // Persist the `Reconciling` transition through `Store::mark_doc_reconciling` — an event
+        // plus its materialized `docs` row (`docs-persist-state-across-invocations`) — not just
+        // the function-local `registry` below, so a fresh `tm docs list` in a later invocation
+        // still reads `Reconciling` instead of re-deriving `Unverified`/`Stale` from scratch.
+        project
+            .store
+            .mark_doc_reconciling(doc_path, ticket_id.clone(), project.actor.clone())?;
 
         if let Some(record) = registry.get_mut(doc_id) {
             record.state = tm_docs::DocState::Reconciling;
@@ -3078,6 +3129,156 @@ mod tests {
     #[test]
     fn docs_reconcile_no_stale_docs() {
         // With empty registry, reconcile should succeed with no tickets opened
+    }
+
+    /// Write a minimal `docs/.tmdocs.toml` declaring one doc, for the
+    /// `docs-persist-state-across-invocations` tests below.
+    fn write_tmdocs_toml(root: &std::path::Path, path: &str, id: &str, mode: &str) {
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs").join(tm_docs::registry::TMDOCS_TOML),
+            format!(
+                "[[doc]]\npath = \"{path}\"\nid = \"{id}\"\nmode = \"{mode}\"\nderived_from = []\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn a_doc_marked_stale_through_the_store_still_reads_stale_from_a_fresh_docs_list_call() {
+        // docs-persist-state-across-invocations acceptance: "a doc whose state is persisted as
+        // Stale still reads Stale in a fresh docs_list or docs_check call" — i.e. the state
+        // survives across separate `load_and_sync_doc_registry` calls (each one simulating a
+        // fresh process invocation), not just within one.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        write_tmdocs_toml(root, "docs/architecture.md", "architecture", "generated");
+
+        // First call registers the doc (fresh -> Unverified).
+        let (registry, newly_registered) = load_and_sync_doc_registry(&project).unwrap();
+        assert_eq!(newly_registered, 1);
+        assert_eq!(
+            registry.get("architecture").unwrap().state,
+            tm_docs::DocState::Unverified
+        );
+
+        project
+            .store
+            .invalidate_doc(
+                "docs/architecture.md".into(),
+                "source changed".into(),
+                project.actor.clone(),
+            )
+            .unwrap();
+
+        // A second, independent call (simulating a fresh `tm docs check` invocation) must read
+        // the persisted Stale state back, not re-derive Unverified.
+        let (registry2, newly_registered2) = load_and_sync_doc_registry(&project).unwrap();
+        assert_eq!(
+            newly_registered2, 0,
+            "an already-registered doc must not be re-registered"
+        );
+        assert_eq!(
+            registry2.get("architecture").unwrap().state,
+            tm_docs::DocState::Stale
+        );
+
+        let renderer = test_renderer();
+        assert!(
+            docs_check(&project, &renderer).is_err(),
+            "docs check must fail once the persisted state is Stale"
+        );
+    }
+
+    #[test]
+    fn docs_reconcile_persists_reconciling_state_for_a_later_fresh_registry_load() {
+        // Acceptance: "After docs_reconcile, a fresh docs list shows Reconciling."
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        write_tmdocs_toml(root, "docs/architecture.md", "architecture", "generated");
+        load_and_sync_doc_registry(&project).unwrap();
+        project
+            .store
+            .invalidate_doc(
+                "docs/architecture.md".into(),
+                "source changed".into(),
+                project.actor.clone(),
+            )
+            .unwrap();
+
+        let renderer = test_renderer();
+        docs_reconcile(&project, &renderer).unwrap();
+
+        let (registry, _) = load_and_sync_doc_registry(&project).unwrap();
+        assert_eq!(
+            registry.get("architecture").unwrap().state,
+            tm_docs::DocState::Reconciling
+        );
+    }
+
+    #[test]
+    fn docs_reconcile_sets_human_required_only_for_review_not_regeneration() {
+        // Acceptance: "With one Generated and one Maintained doc both stale, reconcile produces
+        // tickets with human_required false and true respectively."
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs").join(tm_docs::registry::TMDOCS_TOML),
+            "[[doc]]\npath = \"docs/generated.md\"\nid = \"generated\"\nmode = \"generated\"\nderived_from = []\n\
+             \n\
+             [[doc]]\npath = \"docs/maintained.md\"\nid = \"maintained\"\nmode = \"maintained\"\nderived_from = []\n",
+        )
+        .unwrap();
+        load_and_sync_doc_registry(&project).unwrap();
+        project
+            .store
+            .invalidate_doc(
+                "docs/generated.md".into(),
+                "source changed".into(),
+                project.actor.clone(),
+            )
+            .unwrap();
+        project
+            .store
+            .invalidate_doc(
+                "docs/maintained.md".into(),
+                "source changed".into(),
+                project.actor.clone(),
+            )
+            .unwrap();
+
+        let renderer = test_renderer();
+        docs_reconcile(&project, &renderer).unwrap();
+
+        let view = project.store.view().unwrap();
+        let mut human_required_by_objective: Vec<(String, bool)> = view
+            .tickets
+            .values()
+            .map(|t| (t.objective.clone(), t.executor.human_required))
+            .collect();
+        human_required_by_objective.sort();
+
+        let generated_ticket = human_required_by_objective
+            .iter()
+            .find(|(objective, _)| objective.contains("generated.md"))
+            .expect("a ticket was opened for the generated doc");
+        assert!(
+            !generated_ticket.1,
+            "a Generated doc's regeneration ticket must not require a human"
+        );
+
+        let maintained_ticket = human_required_by_objective
+            .iter()
+            .find(|(objective, _)| objective.contains("maintained.md"))
+            .expect("a ticket was opened for the maintained doc");
+        assert!(
+            maintained_ticket.1,
+            "a Maintained doc's review ticket must require a human"
+        );
     }
 
     #[test]

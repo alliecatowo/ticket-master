@@ -379,6 +379,10 @@ payload_kinds! {
     "Payload for `doc.reconciled`.", DocReconciledPayload, DocReconciled, DocReconciled, as_doc_reconciled, {
         path: String,
     };
+    "Payload for `doc.reconciling`.", DocReconcilingPayload, DocReconciling, DocReconciling, as_doc_reconciling, {
+        path: String,
+        ticket: Option<TicketId>,
+    };
     "Payload for `index.updated`.", IndexUpdatedPayload, IndexUpdated, IndexUpdated, as_index_updated, {
         path: String,
         entries: u64,

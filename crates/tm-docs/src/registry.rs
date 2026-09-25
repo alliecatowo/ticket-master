@@ -60,6 +60,35 @@ pub enum DocState {
     Unverified,
 }
 
+impl DocState {
+    /// The lowercase label this state round-trips through `tm-core`'s `docs.state` column as
+    /// (`tm_core::store::DocRow::state`; that crate cannot name this enum directly, since
+    /// `tm-core` has no dependency on `tm-docs`, so a caller on that side stores/reads the plain
+    /// label instead). Matches `#[serde(rename_all = "lowercase")]`'s own encoding, so this and
+    /// `serde_json` serialization never drift apart.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            DocState::Fresh => "fresh",
+            DocState::Stale => "stale",
+            DocState::Reconciling => "reconciling",
+            DocState::Unverified => "unverified",
+        }
+    }
+
+    /// Parse a persisted `docs.state` label back into a [`DocState`]. Returns `None` for
+    /// anything else, including case variants — this is a closed round-trip with exactly one
+    /// producer ([`Self::as_label`]), not a lenient user-facing parser.
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "fresh" => Some(DocState::Fresh),
+            "stale" => Some(DocState::Stale),
+            "reconciling" => Some(DocState::Reconciling),
+            "unverified" => Some(DocState::Unverified),
+            _ => None,
+        }
+    }
+}
+
 /// A doc's `derived_from` basis and identity, parsed from an embedded front-matter block.
 ///
 /// This is the raw parsed shape, before [`DocRecord::new`] adds the path (known only to the
