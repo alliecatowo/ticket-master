@@ -4,6 +4,7 @@
 //! single command that runs the whole formatting/lint/test/hygiene pipeline
 //! so CI and local dev agree on one source of truth.
 
+mod bench_cross;
 mod drift;
 mod hygiene;
 
@@ -20,8 +21,12 @@ fn main() -> ExitCode {
         "hygiene" => run_hygiene(),
         "fmt" => run_fmt(),
         "check-drift" => run_check_drift(),
+        "bench-cross" => bench_cross::run(&env::args().skip(2).collect::<Vec<_>>()),
         other => {
-            eprintln!("usage: xtask <verify|hygiene|fmt|check-drift --base <ref>>");
+            eprintln!(
+                "usage: xtask <verify|hygiene|fmt|check-drift --base <ref>|bench-cross [--tools \
+                 tm,opencode,codex,claude] [--task <filter>] [--out <dir>] [--real-claude-auth]>"
+            );
             if !other.is_empty() {
                 eprintln!("unknown subcommand: {other}");
             }

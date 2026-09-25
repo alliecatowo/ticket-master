@@ -204,6 +204,16 @@ never drift between sessions:
   byte-length proxy. Slower, non-deterministic, and a real provider call unless
   `TM_TEST_MOCK_PROVIDER=1` is set; never part of `mise run verify`. See
   `docs/decisions/D-032-live-benchmark-mode.md`.
+- `mise run bench:cross -- [--tools tm,opencode,codex,claude] [--task <filter>] [--out <dir>]
+  [--real-claude-auth]` (`cargo xtask bench-cross`) runs the same `bench/tasks/*.toml` suite
+  identically through `tm`'s own live path and through configured external coding CLIs, and
+  reports pass/fail, score, cost, tool calls and wall time for every tool side by side
+  (`crates/xtask/src/bench_cross.rs`). Defaults to `--tools tm` alone; `opencode`/`codex` read
+  their own already-cheap credential from the environment, but `claude` is refused unless
+  `--real-claude-auth` is also passed, so a real, metered Claude/Anthropic API call is never the
+  accidental default. Opt-in, real runs only, never part of `mise run verify`/`hygiene`; unit
+  tests exercise the harness against a scripted fake adapter instead. See
+  `docs/decisions/D-033-cross-tool-benchmark.md` and `bench/README.md`.
 
 `tm-codeintel`'s semantic search can now use real Potion static embeddings
 (`minishlab/potion-code-16M-v2`, via `model2vec-rs`) instead of the hash stand-in, but only

@@ -5918,7 +5918,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ignore",
+ "serde",
+ "serde_json",
  "tempfile",
+ "tm-harness",
 ]
 
 [[package]]
