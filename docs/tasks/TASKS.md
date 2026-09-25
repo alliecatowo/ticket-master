@@ -1295,7 +1295,7 @@ Gate: `mise run verify`
   test: `mise run hygiene`
   evidence: embed.rs:222 claims real command paths use `open_auto`, but no caller exists.
 
-- [ ] **u1-bench-cross-permission-flags** — Cross-tool bench: run each competitor headless with its no-prompt mode, only inside the throwaway task copy
+- [~] **u1-bench-cross-permission-flags** — Cross-tool bench: run each competitor headless with its no-prompt mode, only inside the throwaway task copy (needs another pass: the worker made no changes)
   model: sonnet · severity: high · builds Rust: yes · area: bench · deps: u1-bench-cross-stdin-closed
   files: `crates/xtask/src/bench_cross.rs`
   change: The claude/codex/opencode adapters pass no permission flags, so headless runs stall or get refused and tm wins by default. Add `--permission-mode bypassPermissions` to `claude -p`, `--sandbox workspace-write` to `codex exec`, and OpenCode's non-interactive auto-approve flag (check `opencode run --help`). Always set the working dir to the per-task scratch copy, never the repo.
