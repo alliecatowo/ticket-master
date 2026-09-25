@@ -1127,7 +1127,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/probe `tm provider list` output, last row.
 
-- [ ] **u1-verification-state-and-review** — Move auto-verified tickets through `Verifying` and adapt accept/reject, the tickets-screen peek and the server transitions to match
+- [x] **u1-verification-state-and-review** — Move auto-verified tickets through `Verifying` and adapt accept/reject, the tickets-screen peek and the server transitions to match (landed 404e4e6)
   model: sonnet · severity: medium · builds Rust: yes · area: core · deps: u1-automatic-verification-step, u1-hub-shortcuts-panel-tabs
   files: `crates/tm-core/src/store.rs`, `crates/tm-server/src/routes.rs`, `crates/tm-tui/src/screens/tickets.rs`, `SPEC.md`
   change: Once u1-automatic-verification-step records verification evidence, drive `Submitted -> Verifying -> Auditing` through `Store::verify` using a system verifier id that satisfies `AuditorMustDiffer`. Make `Store::accept`/`reject` accept a ticket in `Verifying`/`Auditing` as well as `Submitted` (grep `Trigger::VerificationStarted` in accept/reject). Show the verification result in the peek ("checks passed: cargo test -p x"). Correct SPEC §4/§11 to describe what is implemented, and keep the V-*/A-* ticket split as documented future work.
