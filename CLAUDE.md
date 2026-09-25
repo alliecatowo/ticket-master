@@ -76,7 +76,8 @@ never drift between sessions:
   Ctrl+J newline; ↑/↓ history (persisted), Ctrl+R search; Esc interrupts, Esc Esc clears;
   Shift+Tab cycles auto/plan/ask; Ctrl+O transcript viewer; Ctrl+T task checklist; Ctrl+G
   `$EDITOR`; Ctrl+K/U/W/Y, Alt+B/F/D, Ctrl+_ edit; permission prompts take 1/2/3;   `/resume`,
-  `/compact`, `/model`, `/status`, `/cost`, `/connect`, `/provider`, `/config`, `/init`,
+  `/compact`, `/model`, `/level fast|deep` (switches between a quick chat model and a slower,
+  more careful one), `/status`, `/cost`, `/connect`, `/provider`, `/config`, `/init`,
   `/bg`, `/context`, `/todos`, `/search`, `/review`, `/memory` (opens this project's
   `AGENTS.md` in `$EDITOR`), `/export [path]` (saves the conversation as markdown), `/doctor`
   (runs `tm doctor`'s checks inline), `/permissions [mode]` (shows or sets auto/plan/ask, same

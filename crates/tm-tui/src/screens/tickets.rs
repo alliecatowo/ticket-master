@@ -1056,11 +1056,13 @@ impl TicketsScreen {
                 .fg(theme.background)
                 .bg(theme.accent)
                 .add_modifier(Modifier::BOLD);
-            buf.set_string(area.x, area.y, "▗▄▄▄▄▄▖", edge);
-            buf.set_string(area.x, area.y + 1, "▐", edge);
+            // A small ticket-stub emblem; kept to three rows and eight columns so the
+            // heading still fits the existing narrow-terminal threshold.
+            buf.set_string(area.x, area.y, "╭─────╮", edge);
+            buf.set_string(area.x, area.y + 1, "╞", edge);
             buf.set_string(area.x + 1, area.y + 1, " tm  ", face);
-            buf.set_string(area.x + 6, area.y + 1, "▌", edge);
-            buf.set_string(area.x, area.y + 2, "▝▀▀▀▀▀▘", edge);
+            buf.set_string(area.x + 6, area.y + 1, "╡", edge);
+            buf.set_string(area.x, area.y + 2, "╰─────╯", edge);
         }
         let lines = [
             vec![

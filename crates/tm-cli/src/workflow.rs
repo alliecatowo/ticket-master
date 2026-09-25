@@ -184,7 +184,7 @@ pub fn workflow_list(project: &Project, renderer: &Renderer) -> tm_types::Result
                 })
                 .collect(),
         );
-        renderer.emit(&(), &table.render())?;
+        renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
     }
     Ok(())
 }

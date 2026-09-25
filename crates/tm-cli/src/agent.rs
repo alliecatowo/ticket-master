@@ -226,6 +226,8 @@ struct SavedSession {
     /// The `/model` choice, if the human made one.
     #[serde(default)]
     model: Option<ModelId>,
+    #[serde(default = "default_chat_role")]
+    role: Role,
     turns: Vec<tm_agent::ConversationTurn>,
 }
 
@@ -311,6 +313,10 @@ fn format_age(seconds: i64) -> String {
 
 fn sessions_dir(project: &Project) -> std::path::PathBuf {
     project.state_dir.join("sessions")
+}
+
+fn default_chat_role() -> Role {
+    AGENT_ROLE
 }
 
 /// The message a direct shell command becomes in the conversation, so the next turn sees what
@@ -520,6 +526,8 @@ pub struct AgentSession {
     /// first turn of a session (a fresh `--resume` doesn't recompute one from the saved
     /// transcript rather than inventing numbers for turns it didn't just run).
     last_context: Option<ContextReport>,
+    /// Role selected for conversational turns (`/level`).
+    role: Role,
 }
 
 impl AgentSession {
@@ -547,6 +555,7 @@ impl AgentSession {
             interrupter: TurnInterrupter::default(),
             model,
             last_context: None,
+            role: AGENT_ROLE,
         }
     }
 
@@ -568,6 +577,7 @@ impl AgentSession {
         resumed.mode = saved.mode;
         resumed.attached_ticket = saved.attached_ticket;
         resumed.model = saved.model;
+        resumed.role = saved.role;
         Ok(resumed)
     }
 
@@ -590,6 +600,25 @@ impl AgentSession {
         self.mode = mode;
     }
 
+    /// The role selected for conversational turns.
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    /// Select the conversational role, rejecting roles with no configured route.
+    pub fn set_role(&mut self, role: Role) -> tm_types::Result<()> {
+        let fabric = self.fabric()?;
+        let candidates = fabric.candidates(role);
+        let configured = fabric.provider_ids();
+        if !candidates.iter().any(|m| configured.contains(&m.provider)) {
+            return Err(TmError::Provider(format!("{role} has no configured model. Configure a provider/model for this role in providers.toml.")));
+        }
+        self.role = role;
+        self.model = None;
+        self.save_best_effort();
+        Ok(())
+    }
+
     /// The fabric a turn runs on: the scripted one a test installed, or one built from the
     /// environment, with the session's `/model` choice routed to first.
     fn fabric(&self) -> tm_types::Result<Arc<Fabric>> {
@@ -597,26 +626,36 @@ impl AgentSession {
             Some(fabric) => Arc::clone(fabric),
             None => build_fabric_for_project(&self.project, self.project.clock.clone())?,
         };
+        if first_registered_candidate(&fabric.candidates(self.role), &fabric.provider_ids())
+            .is_none()
+        {
+            return Err(no_chat_model_error(self.role));
+        }
         if self.model.is_some() {
-            fabric.prefer(AGENT_ROLE, self.model.as_ref());
+            fabric.prefer(self.role, self.model.as_ref());
         }
         Ok(fabric)
     }
 
     /// The model turns go to first: the `/model` choice, else the role table's primary.
     pub fn model(&self) -> tm_types::Result<Option<ModelId>> {
-        Ok(self.fabric()?.candidates(AGENT_ROLE).into_iter().next())
+        Ok(self.fabric()?.candidates(self.role).into_iter().next())
     }
 
-    /// What `/model` offers: this session's candidates whose provider is configured, in routing
-    /// order.
+    /// What `/model` offers: candidates across every chat-routable role (never the embedder,
+    /// which is never a valid chat destination) whose provider is configured, in routing order.
     pub fn model_choices(&self) -> tm_types::Result<Vec<ModelId>> {
         let fabric = self.fabric()?;
         let configured = fabric.provider_ids();
         let mut choices: Vec<ModelId> = Vec::new();
-        for model in fabric.candidates(AGENT_ROLE) {
-            if configured.contains(&model.provider) && !choices.contains(&model) {
-                choices.push(model);
+        for role in Role::ALL {
+            if role == Role::Embedder {
+                continue;
+            }
+            for model in fabric.candidates(role) {
+                if configured.contains(&model.provider) && !choices.contains(&model) {
+                    choices.push(model);
+                }
             }
         }
         Ok(choices)
@@ -708,7 +747,7 @@ impl AgentSession {
             n: 1,
             model: None,
         };
-        let completion = self.fabric()?.execute(AGENT_ROLE, request).await?;
+        let completion = self.fabric()?.execute(self.role, request).await?;
         let summary = completion
             .candidates
             .first()
@@ -847,6 +886,7 @@ impl AgentSession {
             attached_ticket: self.attached_ticket.clone(),
             mode: self.mode,
             model: self.model.clone(),
+            role: self.role,
             turns: self.conversation.clone(),
         };
         let path = dir.join(format!("{}.json", self.session));
@@ -1305,7 +1345,7 @@ impl AgentSession {
             Budget::unlimited(),
             self.project.clock.clone(),
             self.project.ids.clone(),
-            AGENT_ROLE,
+            self.role,
             self.project.actor.clone(),
             self.project.store.clone(),
         )
@@ -1654,14 +1694,12 @@ fn build_fabric_with_table(
     if std::env::var_os(TEST_MOCK_PROVIDER_ENV).is_some() {
         return Ok(Arc::new(build_mock_fabric(clock)));
     }
-    // Expose every configured, tool-capable backend the static table never mentions as an
-    // AGENT_ROLE fallback, so `/model` lists it and turns can route to it. Only appends:
-    // the table's own primaries stay first, so the default route never changes.
+    // Expose every configured, tool-capable backend as an AGENT_ROLE fallback candidate, so
+    // `/model` lists it and turns can route to it — even one the table already routes under a
+    // different role (e.g. `coder.deep`), so `/level deep` has something to select. Only
+    // appends: the table's own primaries stay first, so the default route never changes.
     for info in tm_provider::Registry::autodetect() {
         if info.id == "devpass" || info.id == "anthropic" || !info.capabilities.tool_use {
-            continue;
-        }
-        if table_model_for(&table, info.id).is_some() {
             continue;
         }
         let model = tm_provider::Registry::env_default_model(info.id)
@@ -1703,7 +1741,11 @@ fn build_fabric_with_table(
         if fabric.provider_ids().iter().any(|id| id == info.id) {
             continue;
         }
-        let model = fabric_model_for(&fabric, info.id).unwrap_or_else(|| "default".to_string());
+        let Some(model) = fabric_model_for(&fabric, info.id) else {
+            // Local backends have no credential signal or honest model default. Do not register
+            // them under a fabricated model name; the user must configure a concrete model.
+            continue;
+        };
         match tm_provider::Registry::build_provider(
             &tm_provider::RoleCandidate {
                 provider: info.id.to_string(),
@@ -1722,15 +1764,6 @@ fn build_fabric_with_table(
         }
     }
 
-    if fabric.provider_ids().is_empty() {
-        return Err(TmError::Provider(
-            "no provider is configured, so no turn can run. Connect one with `/connect` in \
-             the chat, or `tm auth <provider>` for setup instructions (e.g. ANTHROPIC_API_KEY, \
-             OPENAI_API_KEY, GEMINI_API_KEY — `tm provider detect` lists every backend and what \
-             it needs)."
-                .to_string(),
-        ));
-    }
     // The default turn must point at something live: when the table primary has no
     // credentials but a fallback does, prefer the first registered candidate.
     if let Some(first) =
@@ -1797,21 +1830,10 @@ fn first_registered_candidate(candidates: &[ModelId], registered: &[String]) -> 
         .cloned()
 }
 
-/// The model `table` already routes to `slug` under any *chat-routable* role, if it names the
-/// slug at all. Deliberately excludes [`tm_types::Role::Embedder`]: `default_table`'s embedder
-/// candidate names a provider (`openai`, since Anthropic has no embedding endpoint) purely for
-/// embedding calls, never for a chat turn, so a backend appearing only there must still be
-/// offered as an [`AGENT_ROLE`] fallback by this function's one caller — otherwise a project
-/// whose only configured backend is that embedder's provider (e.g. `OPENAI_API_KEY` alone) would
-/// never get it appended as a chat candidate at all, reproducing exactly the "primary has no
-/// credentials and nothing else is offered" failure D-022 exists to fix.
-fn table_model_for(table: &RoleTable, slug: &str) -> Option<String> {
-    tm_types::Role::ALL
-        .iter()
-        .filter(|role| **role != tm_types::Role::Embedder)
-        .flat_map(|role| table.candidates_for(*role))
-        .find(|c| c.provider == slug)
-        .map(|c| c.model.clone())
+fn no_chat_model_error(role: Role) -> TmError {
+    TmError::Provider(format!(
+        "no usable model is configured for {role}. Add a concrete provider/model route in providers.toml, or use `/connect` in chat / `tm auth <provider>` for setup instructions; `tm provider detect` lists backend requirements."
+    ))
 }
 
 /// The model the live `fabric` routes to `slug` under [`AGENT_ROLE`], if any.
@@ -2369,21 +2391,6 @@ mod tests {
         );
     }
 
-    /// `default_table`'s sole [`tm_types::Role::Embedder`] candidate names `openai` (Anthropic
-    /// has no embedding endpoint). Regression guard: `table_model_for` must not treat that as
-    /// "the table already routes chat traffic to openai", or `build_fabric_with_table`'s
-    /// auto-append loop would skip appending openai as an [`AGENT_ROLE`] fallback for a project
-    /// whose only configured backend is OpenAI — reproducing the "primary has no credentials and
-    /// nothing else is offered" failure D-022 exists to fix, just for a different provider.
-    #[test]
-    fn table_model_for_ignores_the_embedder_only_candidate() {
-        assert!(
-            table_model_for(&tm_provider::RoleTable::default_table(), "openai").is_none(),
-            "openai only appears as the embedder's candidate in the default table; it must not \
-             be reported as already routed for chat roles like AGENT_ROLE"
-        );
-    }
-
     fn open_test_project(dir: &Path) -> Project {
         let store = Arc::new(tm_core::Store::open(dir).expect("open store"));
         Project::for_test(
@@ -2548,6 +2555,22 @@ mod tests {
     fn parse_command_recognizes_exit() {
         assert_eq!(parse_command("/exit"), Command::Exit);
         assert_eq!(parse_command("/quit"), Command::Exit);
+    }
+
+    #[test]
+    fn deep_role_without_a_route_returns_actionable_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = Arc::new(open_test_project(dir.path()));
+        let (fabric, _) = scripted_fabric(project.clock.clone(), "ok");
+        let mut session =
+            AgentSession::new(project, Renderer::from_flags(false, true, true)).with_fabric(fabric);
+        let error = session
+            .set_role(Role::CoderDeep)
+            .expect_err("deep is not routed");
+        assert!(error
+            .to_string()
+            .contains("coder.deep has no configured model"));
+        assert_eq!(session.role(), Role::CoderFast);
     }
 
     #[test]

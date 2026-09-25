@@ -1,20 +1,15 @@
-# D-022: Unified provider/model/config UX (levels, defaults, honest errors)
+# D-022: Provider and chat-model configuration UX
 
-Status: accepted
+Status: accepted (implemented scope and known gaps recorded below)
 Date: 2026-09-23
-Supersedes: none (extends D-005's DevPass default, D-021's chat commands)
+Supersedes: none (extends D-005 and D-021)
 
 ## Context
 
-External research (Claude Code, OpenCode, Pi, Hermes, Goose, Aider, Codex/Gemini CLIs)
-converges: one `/connect` flow, `provider/model` defaults in one file with
-global→project override, tiered models (fast vs deep + thinking levels), env-var keys
-never shown. Our audit found the opposite: `build_fabric` hardcoded to Anthropic with a
-DevPass override (an ollama-only user got "anthropic key not set"); `/model` listed two
-providers max; no persisted default; three vocabularies (`auth`/`provider`/`harness`);
-`harness.toml` parsed as two incompatible schemas by two commands; `harness set`
-validated but did not write while `promote` read disk; `init` scaffolded no settings;
-CLI monochrome by design; workers execute in the launcher cwd instead of the project.
+The provider overhaul exposed mismatches between the role table, registered backends, chat model
+selection, and setup status. In particular, registering a local backend is not evidence that a
+model is available, and a provider's presence in one role does not make it a candidate for every
+role. Chat must report an effective route rather than imply that a backend can answer.
 
 ## Decision
 
@@ -32,8 +27,10 @@ CLI monochrome by design; workers execute in the launcher cwd instead of the pro
    (`{"model": "provider/model"}`); resolution is session choice → file → table primary;
    the `/model` picker marks it.
 4. **`/level fast|deep`** switches the chat role (`CoderFast`/`CoderDeep`), persisted in
-   the session JSON (backward-compatible default). Reasoning-effort knobs are a non-goal:
-   no provider exposes them uniformly.
+   the session JSON (backward-compatible default), and reports an actionable error instead of
+   silently falling back to another role when the selected one has no configured route.
+   Reasoning-effort knobs are a non-goal: no provider exposes them uniformly. `/model` lists
+   candidates across every role, not just the session's current one.
 5. **A shared status source, not yet one identical vocabulary**: `tm provider status` reads the
    same project table as `list`. The CLI's `tm provider list`/`detect` render the full
    `tm_provider::Availability` (`ready`/`not-configured`/`unreachable` — a local backend's probe
@@ -47,8 +44,8 @@ CLI monochrome by design; workers execute in the launcher cwd instead of the pro
    (`HarnessConfig::default`) + `providers.toml` (serialized default table); `harness
    show` renders defaults with a note when missing; `set` scaffolds, validates, and persists a
    candidate configuration. `promote` applies the new harness epoch.
-7. **CLI color**: tty-gated (pipes stay clean), honors `NO_COLOR`/`CLICOLOR`/
-   `CLICOLOR_FORCE`, table headers styled. TUI unchanged.
+7. **CLI color**: tty-gated (pipes stay clean), honors `NO_COLOR` and `CLICOLOR=0`, table
+   headers styled. `CLICOLOR_FORCE` is not yet honored (known gap below). TUI unchanged.
 8. **Dispatch cwd**: worker tool execution runs at the project root, never the launcher
    cwd (the showcase leak), covered by a test.
 
@@ -61,15 +58,22 @@ model default is project-scoped in `default-model.json`; the provider role table
 sessions and background workers. Provider status and list derive routes from the same loader. Local servers are
 constructible without credentials, but their model names are not guessed: choose one explicitly.
 
+## Known gaps
+
+- Built-in role tables still contain provider/model defaults, and the provider registry still has
+  static model defaults for some remote services. They can become stale; no live catalog is
+  queried.
+- Local model discovery/probing and choosing a pulled model from `/model` without first configuring
+  a role route are not implemented.
+- CLI color is only effective where output paths apply the renderer's color support. This decision
+  does not claim every human table is colored; JSON and redirected output remain uncolored, and
+  `CLICOLOR_FORCE` (forcing color onto a non-tty) is not yet handled.
+- A full connection test is separate from environment configuration. Environment presence alone
+  does not prove network reachability or account validity.
+
 ## What this costs, stated plainly
 
-- `chat_default_model` literals rot as vendors rename models; `/model <slug>/<name>`
-  always overrides, and a failure names the fix. A live catalog (models.dev-style) is
-  the real answer and is out of scope (network + caching design of its own).
-- `providers.toml` vs `harness.toml`: two files because one filename already meant two
-  schemas; `list` keeps legacy-harness fallback so existing projects don't break.
-- Local backends register without picker rows (no honest static model): reachable via
-  explicit `/model <slug>/<pulled-model>`, with `/connect` printing how to list tags.
-- `codex-chatgpt` stays invisible to detect/list (no `info()`, D-016's adapter is
-  session-based) — a separate wiring task.
-- Linux CI stays red (`tm-computer` doesn't compile there): unrelated, pre-existing.
+- Fast/deep is a role-table choice, not a provider-independent reasoning-effort control.
+- Statically configured model IDs require maintenance, and a configured endpoint can still be
+  unavailable or reject its model.
+- Local backends need explicit model configuration; tm intentionally refuses to invent a name.

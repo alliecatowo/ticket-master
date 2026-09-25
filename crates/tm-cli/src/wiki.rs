@@ -128,7 +128,7 @@ fn render_report(
         ],
         rows,
     );
-    renderer.emit(&(), &table.render())?;
+    renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
     Ok(())
 }
 

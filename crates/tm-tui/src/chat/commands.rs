@@ -17,6 +17,8 @@ pub enum CommandId {
     Compact,
     /// Show or switch the model.
     Model,
+    /// Choose the fast or deep chat role.
+    Level,
     /// Model, provider, cwd, scope, mode, ticket, tokens.
     Status,
     /// This session's tokens, turn by turn.
@@ -135,6 +137,13 @@ pub const COMMANDS: &[SlashCommand] = &[
         aliases: &[],
         arg: Arg::Optional("[model]"),
         description: "Show or switch the model",
+    },
+    SlashCommand {
+        id: CommandId::Level,
+        name: "level",
+        aliases: &[],
+        arg: Arg::Required("<fast|deep>"),
+        description: "Switch chat between a quick model and a more careful one",
     },
     SlashCommand {
         id: CommandId::Status,
