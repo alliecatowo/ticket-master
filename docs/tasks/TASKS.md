@@ -1255,7 +1255,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-codeintel && mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/chatgen: `tm history why todo.py` gave `error: storage: Unable to read file history — repository may be corrupted.`
 
-- [ ] **u1-genesis-resume-checks-snapshot-first** — `tm genesis --resume` with no snapshot should say so before demanding a provider
+- [~] **u1-genesis-resume-checks-snapshot-first** — `tm genesis --resume` with no snapshot should say so before demanding a provider (needs another pass: the worker made no changes)
   model: haiku · severity: low · builds Rust: yes · area: genesis · deps: u1-genesis-activates-its-graph
   files: `crates/tm-cli/src/project.rs`
   change: `tm genesis --resume` in a project that never ran genesis errors with `provider: ANTHROPIC_API_KEY is not set ... no local model provider is reachable`. Resolve the snapshot first and fail with "No stopped genesis run to resume here. Start one with `tm genesis --prompt \"…\"`."
