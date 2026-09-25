@@ -952,7 +952,7 @@ mod tests {
                 }],
             }],
             tools: vec![],
-            max_tokens: 2048,
+            max_tokens: crate::compile::GENESIS_MIN_MAX_TOKENS,
             temperature: Some(0.2),
             stop_sequences: vec![],
             stream: false,

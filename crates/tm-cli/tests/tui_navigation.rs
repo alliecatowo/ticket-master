@@ -70,6 +70,8 @@ fn spawn(project: &std::path::Path, tm_home: &std::path::Path, mock: bool) -> su
 const ESC: u8 = 0x1b;
 /// The Left arrow's escape sequence (CSI D).
 const LEFT: &[u8] = b"\x1b[D";
+/// The Right arrow's escape sequence (CSI C).
+const RIGHT: &[u8] = b"\x1b[C";
 
 /// Text only the tickets screen shows (its dispatch input's placeholder).
 const TICKETS_MARK: &str = "Describe a task for a background worker";
@@ -142,11 +144,21 @@ fn chat_to_tickets_to_board_to_detail_and_back_one_level_at_a_time() {
         "ctrl+b on tickets opens the board, got: {screen:?}"
     );
     assert!(
-        has(&screen, "draft"),
-        "the board names the real states, got: {screen:?}"
+        has(&screen, "Queued"),
+        "the board groups tickets the same way the tickets screen does, got: {screen:?}"
     );
 
-    // 4. Enter on the card drills into the detail.
+    // 4. The board opens on its first column (Needs input); the draft ticket groups under
+    //    Queued, three columns over. Move right onto its column, then Enter on the card drills
+    //    into the detail.
+    for _ in 0..3 {
+        pty.write(RIGHT).expect("press right");
+    }
+    let screen = pty.wait_for(BOARD_MARK, Duration::from_secs(10));
+    assert!(
+        screen.iter().any(|l| l.contains("kanban nav probe")),
+        "the card must still be visible after moving onto its column, got: {screen:?}"
+    );
     pty.write(b"\r").expect("enter on the card");
     let screen = pty.wait_for(&detail_heading, Duration::from_secs(10));
     assert!(
