@@ -1,0 +1,430 @@
+---
+source: crates/tm-workflow/tests/expand_snapshot.rs
+expression: "&proposal"
+---
+{
+  "source_spec": null,
+  "tickets": [
+    {
+      "ticket_ref": "migrate[0]",
+      "kind": "work",
+      "objective": "Migrate site staging to schema v9.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": [],
+          "pty": false
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "coder_fast",
+        "human_required": false,
+        "min_capability": "any"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Migrate site staging to schema v9."
+          }
+        }
+      ],
+      "verification": "single",
+      "budget": {
+        "tokens": 10000,
+        "dollars_micros": 0,
+        "wall_seconds": 1800,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "migrate[1]",
+      "kind": "work",
+      "objective": "Migrate site prod-us to schema v9.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": [],
+          "pty": false
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "coder_fast",
+        "human_required": false,
+        "min_capability": "any"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Migrate site prod-us to schema v9."
+          }
+        }
+      ],
+      "verification": "single",
+      "budget": {
+        "tokens": 10000,
+        "dollars_micros": 0,
+        "wall_seconds": 1800,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "migrate[2]",
+      "kind": "work",
+      "objective": "Migrate site prod-eu to schema v9.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": [],
+          "pty": false
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "coder_fast",
+        "human_required": false,
+        "min_capability": "any"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Migrate site prod-eu to schema v9."
+          }
+        }
+      ],
+      "verification": "single",
+      "budget": {
+        "tokens": 10000,
+        "dollars_micros": 0,
+        "wall_seconds": 1800,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "verify",
+      "kind": "work",
+      "objective": "Verify every migrated site is now running schema v9.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": [],
+          "pty": false
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "auditor_semantic",
+        "human_required": false,
+        "min_capability": "strict"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Verify every migrated site is now running schema v9."
+          }
+        }
+      ],
+      "verification": "audited",
+      "budget": {
+        "tokens": 6000,
+        "dollars_micros": 0,
+        "wall_seconds": 600,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    }
+  ],
+  "dependencies": [
+    {
+      "from_ref": "verify",
+      "to_ref": "migrate[0]",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "verify",
+      "to_ref": "migrate[1]",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "verify",
+      "to_ref": "migrate[2]",
+      "kind": "hard"
+    }
+  ],
+  "milestones": [],
+  "authority_domains": [],
+  "attempt": 1,
+  "selected_template": null
+}

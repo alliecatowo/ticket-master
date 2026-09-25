@@ -1,0 +1,38 @@
+# "research-and-synthesize": scope a topic into questions, research each in parallel, then
+# synthesize the findings into a report. SPEC.md §25.2's data-driven fan-out shape: `research`
+# fans out via `for_each = "scope.questions"` (a [`tm_workflow::def::ForEach::FromOutput`]
+# reference into `scope`'s declared `produces`), and `synthesize` joins the fanned-out results
+# with an explicit `kind`/`timeout_seconds`/`merge` -- the same `FromOutput` + join pattern as
+# `review-change.toml`'s `review` -> `audit` -> `merge` chain, but with the fan-out set coming
+# from an upstream node's own output instead of a fixed list of dimensions.
+
+name = "research-and-synthesize"
+
+[params.topic]
+description = "The subject to research and produce a synthesized report on."
+
+[[node]]
+id = "scope"
+role = "planner_frontier"
+objective = "Break {{topic}} down into a set of concrete research questions."
+produces = "questions"
+budget = { tokens = 6000, dollars_micros = 0, wall_seconds = 600 }
+verification = "none"
+
+[[node]]
+id = "research"
+role = "explorer_cheap"
+objective = "Research {{item}} as part of understanding {{topic}}."
+for_each = "scope.questions"
+depends = ["scope"]
+budget = { tokens = 12000, dollars_micros = 0, wall_seconds = 1200 }
+verification = "single"
+
+[[node]]
+id = "synthesize"
+role = "synthesizer_long_context"
+objective = "Synthesize the research findings on {{topic}} into a single report."
+depends = ["research"]
+join = { kind = "all", timeout_seconds = 3600, merge = "concat" }
+budget = { tokens = 20000, dollars_micros = 0, wall_seconds = 1800 }
+verification = "single"

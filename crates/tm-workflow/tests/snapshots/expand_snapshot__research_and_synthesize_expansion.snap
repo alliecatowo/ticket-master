@@ -1,0 +1,325 @@
+---
+source: crates/tm-workflow/tests/expand_snapshot.rs
+expression: "&proposal"
+---
+{
+  "source_spec": null,
+  "tickets": [
+    {
+      "ticket_ref": "scope",
+      "kind": "work",
+      "objective": "Break context pack budgets down into a set of concrete research questions.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": [],
+          "pty": false
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "planner_frontier",
+        "human_required": false,
+        "min_capability": "strict"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Break context pack budgets down into a set of concrete research questions."
+          }
+        }
+      ],
+      "verification": "none",
+      "budget": {
+        "tokens": 6000,
+        "dollars_micros": 0,
+        "wall_seconds": 600,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "research",
+      "kind": "work",
+      "objective": "Fan out over scope.questions once available; for each item, run: Research {{item}} as part of understanding {{topic}}.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": [],
+          "pty": false
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "explorer_cheap",
+        "human_required": false,
+        "min_capability": "any"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Fan out over scope.questions once available; for each item, run: Research {{item}} as part of understanding {{topic}}."
+          }
+        }
+      ],
+      "verification": "single",
+      "budget": {
+        "tokens": 12000,
+        "dollars_micros": 0,
+        "wall_seconds": 1200,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    },
+    {
+      "ticket_ref": "synthesize",
+      "kind": "work",
+      "objective": "Synthesize the research findings on context pack budgets into a single report.",
+      "parent_ref": null,
+      "milestone_ref": null,
+      "authority": {
+        "repository": {
+          "read": [
+            "**"
+          ],
+          "write": []
+        },
+        "git": {
+          "commit": false,
+          "branch": false,
+          "merge": false,
+          "push": false,
+          "force": false
+        },
+        "tickets": {
+          "create_children": false,
+          "delegate_children": false,
+          "modify_siblings": false,
+          "close": false,
+          "cancel": false,
+          "reopen": false
+        },
+        "project": {
+          "modify_spec": false,
+          "modify_vision": false,
+          "modify_milestones": false,
+          "close_milestone": false,
+          "reopen_milestone": false,
+          "modify_harness": false
+        },
+        "network": {
+          "docs": false,
+          "arbitrary": false,
+          "allowlist": []
+        },
+        "shell": {
+          "enabled": false,
+          "allow": [],
+          "deny": [],
+          "pty": false
+        },
+        "computer": {
+          "input": false,
+          "capture": false,
+          "clipboard": false
+        },
+        "resources": {
+          "max_workers": 0,
+          "max_concurrent_commands": 0
+        },
+        "budget": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0,
+          "spent": {
+            "tokens": 0,
+            "dollars_micros": 0,
+            "wall_seconds": 0
+          }
+        }
+      },
+      "resources": [],
+      "executor": {
+        "role": "synthesizer_long_context",
+        "human_required": false,
+        "min_capability": "any"
+      },
+      "context_refs": [],
+      "success": [
+        {
+          "judgment": {
+            "claim": "Synthesize the research findings on context pack budgets into a single report."
+          }
+        }
+      ],
+      "verification": "single",
+      "budget": {
+        "tokens": 20000,
+        "dollars_micros": 0,
+        "wall_seconds": 1800,
+        "spent": {
+          "tokens": 0,
+          "dollars_micros": 0,
+          "wall_seconds": 0
+        }
+      },
+      "retry": {
+        "max_attempts": 3,
+        "base_delay_seconds": 30,
+        "backoff_multiplier": 2.0,
+        "max_delay_seconds": 600
+      },
+      "priority": 0
+    }
+  ],
+  "dependencies": [
+    {
+      "from_ref": "research",
+      "to_ref": "scope",
+      "kind": "hard"
+    },
+    {
+      "from_ref": "synthesize",
+      "to_ref": "research",
+      "kind": "hard"
+    }
+  ],
+  "milestones": [],
+  "authority_domains": [],
+  "attempt": 1,
+  "selected_template": null
+}

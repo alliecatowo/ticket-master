@@ -1,0 +1,28 @@
+# "migrate-sites": migrate a fixed set of sites to a target schema in parallel, then verify the
+# whole fleet landed on it. SPEC.md §25.2's other fan-out shape from `ForEach::Static` (a literal
+# list, not one read from another node's output) -- `review-change.toml`'s `review` node fans out
+# the same way over a fixed list of review dimensions, but this fixture is the standalone example
+# with nothing else going on, and gives `crate::expand`'s `ForEach::Static` path a second real
+# fixture (alongside `review-change`) to snapshot-test against.
+
+name = "migrate-sites"
+
+[params.target_schema]
+description = "The schema version every site should end up running."
+
+[[node]]
+id = "migrate"
+role = "coder_fast"
+objective = "Migrate site {{item}} to schema {{target_schema}}."
+for_each = ["staging", "prod-us", "prod-eu"]
+budget = { tokens = 10000, dollars_micros = 0, wall_seconds = 1800 }
+verification = "single"
+
+[[node]]
+id = "verify"
+role = "auditor_semantic"
+objective = "Verify every migrated site is now running schema {{target_schema}}."
+depends = ["migrate"]
+join = { kind = "all", timeout_seconds = 1800, merge = "concat" }
+budget = { tokens = 6000, dollars_micros = 0, wall_seconds = 600 }
+verification = "audited"
