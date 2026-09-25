@@ -1401,7 +1401,7 @@ is based on.
 
 ## V — Found by trials and audits
 
-- [ ] **t20260925-1314-BurntSushi-ripgrep-3376-recover-without-repeating-agent-investigation** — Preserve findings and vary strategy when a model ends without submitting
+- [~] **t20260925-1314-BurntSushi-ripgrep-3376-recover-without-repeating-agent-investigation** — Preserve findings and vary strategy when a model ends without submitting (needs another pass: the worker made no changes)
   model: sonnet · severity: high · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/executor.rs`, `crates/tm-agent/src/agent_loop.rs`
   change: When a ticketed model turn ends without submission, include concise prior findings in the retry context and detect repeated tool/file reads; after a repeated no-progress attempt, ask for a targeted reproduction or produce a specific diagnosis instead of restarting the same investigation.
