@@ -1003,6 +1003,11 @@ pub enum ProviderCommand {
     /// Send one tiny real (billed) completion through each provider tm's turn path uses, or just
     /// the named one; exits non-zero if any fails.
     Test(ProviderTestArgs),
+    /// Regenerate `providers.toml` from the current environment (e.g. after setting `DEVPASS_*`
+    /// or another provider's credentials), keeping the previous file as `providers.toml.bak`.
+    /// Unlike every other provider command, this always overwrites the file, hand-edited or not
+    /// — it is the explicit "start over" command.
+    Reset,
 }
 
 /// Arguments for `tm provider default`.

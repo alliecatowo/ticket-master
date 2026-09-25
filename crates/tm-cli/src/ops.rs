@@ -919,7 +919,66 @@ pub async fn dispatch_provider(
         ProviderCommand::Status => provider_status(project, renderer).await,
         ProviderCommand::Default(args) => provider_default(args, project, renderer),
         ProviderCommand::Test(args) => provider_test(args, project, renderer).await,
+        ProviderCommand::Reset => provider_reset(project, renderer),
     }
+}
+
+/// `tm provider reset`: regenerate `providers.toml` from the current environment, so a project
+/// initialised before a credential (e.g. `DEVPASS_*`) was set picks it up without a hand edit.
+/// Keeps whatever was there before as `providers.toml.bak` (overwriting any previous `.bak`), and
+/// reports what changed on `coder.fast` -- the one role a real turn actually routes through (see
+/// `RoleTable::apply_env_defaults`'s doc comment).
+fn provider_reset(project: Option<&Project>, renderer: &Renderer) -> tm_types::Result<()> {
+    let project = project.ok_or_else(|| {
+        tm_types::TmError::parse(
+            "`tm provider reset` requires a project; run `tm init` first".to_string(),
+        )
+    })?;
+    let path = project.state_dir.join("providers.toml");
+    let previous = if path.is_file() {
+        Some(fs::read_to_string(&path).map_err(|e| {
+            tm_types::TmError::storage(format!("Failed to read providers.toml: {e}"))
+        })?)
+    } else {
+        None
+    };
+    let before_primary = previous.as_deref().and_then(|content| {
+        tm_provider::RoleTable::parse(content)
+            .ok()?
+            .candidates_for(Role::CoderFast)
+            .first()
+            .map(|c| format!("{}/{}", c.provider, c.model))
+    });
+
+    let table = tm_provider::RoleTable::default_table();
+    let new_content = table.to_toml_string().map_err(|e| {
+        tm_types::TmError::parse(format!("Failed to serialize provider defaults: {e}"))
+    })?;
+    let after_primary = table
+        .candidates_for(Role::CoderFast)
+        .first()
+        .map(|c| format!("{}/{}", c.provider, c.model));
+
+    fs::create_dir_all(&project.state_dir)?;
+    if let Some(prev) = &previous {
+        fs::write(project.state_dir.join("providers.toml.bak"), prev)?;
+    }
+    fs::write(&path, &new_content)?;
+
+    let change = match (&before_primary, &after_primary) {
+        (Some(before), Some(after)) if before != after => {
+            format!("coder.fast now routes to {after} (was {before})")
+        }
+        (None, Some(after)) => format!("coder.fast now routes to {after}"),
+        _ => "no routing changes".to_string(),
+    };
+    renderer.emit(
+        &serde_json::json!({
+            "before_coder_fast": before_primary,
+            "after_coder_fast": after_primary,
+        }),
+        &format!("Regenerated providers.toml from the current environment: {change}."),
+    )
 }
 
 fn provider_default(
@@ -1015,28 +1074,34 @@ pub(crate) fn load_role_table_for_state_dir(
     state_dir: &std::path::Path,
 ) -> tm_types::Result<tm_provider::RoleTable> {
     let providers_path = state_dir.join("providers.toml");
-    match providers_path.is_file().then_some(providers_path) {
+    let mut table = match providers_path.is_file().then_some(providers_path) {
         Some(path) => {
             let content = fs::read_to_string(&path).map_err(|e| {
                 tm_types::TmError::storage(format!("Failed to read providers.toml: {e}"))
             })?;
             tm_provider::RoleTable::parse(&content)
-                .map_err(|e| tm_types::TmError::parse(format!("Invalid providers.toml: {e}")))
+                .map_err(|e| tm_types::TmError::parse(format!("Invalid providers.toml: {e}")))?
         }
         None => {
             let legacy = state_dir.join("harness.toml");
+            let mut legacy_table = None;
             if legacy.is_file() {
                 let path = legacy;
                 let content = fs::read_to_string(&path).map_err(|e| {
                     tm_types::TmError::storage(format!("Failed to read legacy role config: {e}"))
                 })?;
-                if let Ok(table) = tm_provider::RoleTable::parse(&content) {
-                    return Ok(table);
-                }
+                legacy_table = tm_provider::RoleTable::parse(&content).ok();
             }
-            Ok(tm_provider::RoleTable::default_table())
+            legacy_table.unwrap_or_else(tm_provider::RoleTable::default_table)
         }
-    }
+    };
+    // Re-apply env-detected preferences (DevPass, today) every load, not just at `tm init` time —
+    // a no-op on a hand-edited table, see `RoleTable::apply_env_defaults`'s doc comment
+    // (`u1-provider-table-follows-env`). This is why a project initialised before `DEVPASS_*` was
+    // set starts routing coder.fast to devpass as soon as the key is set, without a `tm provider
+    // reset`.
+    table.apply_env_defaults();
+    Ok(table)
 }
 
 /// `tm provider list`
@@ -4235,6 +4300,44 @@ mod tests {
 
         harness_show(&project, &renderer).expect("harness_show succeeds on missing file");
         // The test verifies no error is returned and defaults are rendered.
+    }
+
+    #[test]
+    fn provider_reset_regenerates_from_the_environment_and_backs_up_the_old_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let project = test_project(root);
+        let renderer = test_renderer();
+
+        std::fs::create_dir_all(&project.state_dir).unwrap();
+        let providers_path = project.state_dir.join("providers.toml");
+        let hand_written = "[coder_fast]\ncandidates = [{ provider = \"anthropic\", model = \"claude-sonnet-5\", max_concurrency = 20 }]\n";
+        std::fs::write(&providers_path, hand_written).unwrap();
+
+        provider_reset(Some(&project), &renderer).expect("provider_reset succeeds");
+
+        let backup_path = project.state_dir.join("providers.toml.bak");
+        assert!(
+            backup_path.is_file(),
+            "provider reset keeps the previous file as a .bak"
+        );
+        assert_eq!(fs::read_to_string(&backup_path).unwrap(), hand_written);
+
+        let regenerated = fs::read_to_string(&providers_path).unwrap();
+        let table =
+            tm_provider::RoleTable::parse(&regenerated).expect("regenerated table reparses");
+        assert!(
+            table.generated(),
+            "a table written by `tm provider reset` is `[meta]`-marked generated, so a later \
+             load re-applies env-detected preferences"
+        );
+    }
+
+    #[test]
+    fn provider_reset_requires_a_project() {
+        let renderer = test_renderer();
+        let err = provider_reset(None, &renderer).unwrap_err();
+        assert!(matches!(err, tm_types::TmError::Parse(_)));
     }
 
     #[test]

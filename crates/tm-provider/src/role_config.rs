@@ -240,6 +240,17 @@ pub struct RoleTable {
     /// be skipped and `Default`, which `BTreeMap` is).
     #[serde(skip)]
     decider_meta: BTreeMap<(String, String), DeciderEndpoint>,
+    /// Whether this table came from [`Self::default_table`]/[`Self::default_table_with`] (an
+    /// auto-generated `providers.toml`, `[meta]\ngenerated = true` on disk) rather than a
+    /// hand-edited file with no `[meta]` table. An auto-generated table is env-detected
+    /// preferences (DevPass, today) applied *again* at every load, via
+    /// [`Self::apply_env_defaults`], instead of freezing whatever the environment looked like at
+    /// `tm init` time (`u1-provider-table-follows-env`); a hand-edited file never gets this
+    /// treatment, so a deliberate hand edit is never silently overwritten. `#[serde(skip)]` for
+    /// the same reason as `decider_meta` above — this struct's derived (de)serialization is dead
+    /// code, [`Self::parse`]/[`Self::to_toml_string`] do it by hand.
+    #[serde(skip)]
+    generated: bool,
 }
 
 /// A `providers.toml` document failed to parse or validate.
@@ -282,12 +293,24 @@ impl RoleTable {
         // table carrying a `candidates` array, which marks a role's leaf.
         let value: toml::Value =
             toml::from_str(toml_str).map_err(|e| RoleConfigError::InvalidToml(e.to_string()))?;
-        let top = value
+        let mut top = value
             .as_table()
-            .ok_or_else(|| RoleConfigError::InvalidToml("expected a table at top level".into()))?;
+            .ok_or_else(|| RoleConfigError::InvalidToml("expected a table at top level".into()))?
+            .clone();
+
+        // `[meta]` carries this file's own provenance (currently just `generated`), not a role —
+        // pull it out and skip it explicitly before walking the rest of the table for roles.
+        // Left in place, `collect_roles` would try to parse it as a (nested) role path and fail
+        // as soon as it hit a non-table value like `generated = true` ("expected a table at
+        // `meta.generated`"), since only `[meta]` itself is a table.
+        let generated = top
+            .remove("meta")
+            .and_then(|meta| meta.as_table().and_then(|t| t.get("generated")).cloned())
+            .and_then(|g| g.as_bool())
+            .unwrap_or(false);
 
         let mut flat = BTreeMap::new();
-        Self::collect_roles(top, "", &mut flat)?;
+        Self::collect_roles(&top, "", &mut flat)?;
 
         // Process and validate each role
         let mut roles = BTreeMap::new();
@@ -336,6 +359,7 @@ impl RoleTable {
         let table = RoleTable {
             roles,
             decider_meta,
+            generated,
         };
         table.validate()?;
         Ok(table)
@@ -419,8 +443,18 @@ impl RoleTable {
             })
             .collect();
 
-        toml::to_string_pretty(&intermediate)
-            .map_err(|e| RoleConfigError::InvalidToml(e.to_string()))
+        let roles_toml = toml::to_string_pretty(&intermediate)
+            .map_err(|e| RoleConfigError::InvalidToml(e.to_string()))?;
+
+        // `generated` round-trips through a `[meta]` table rather than a top-level key (see
+        // `Self::parse`'s doc comment on why a bare top-level `generated = true` would break
+        // `collect_roles`). Omitted entirely when false, so a hand-edited table (no `[meta]`)
+        // stays byte-identical on a reparse-then-reserialize round trip.
+        if self.generated {
+            Ok(format!("[meta]\ngenerated = true\n\n{roles_toml}"))
+        } else {
+            Ok(roles_toml)
+        }
     }
 
     /// Validate structural invariants: every role known, every role non-empty, every candidate's
@@ -740,7 +774,44 @@ impl RoleTable {
         RoleTable {
             roles,
             decider_meta: BTreeMap::new(),
+            generated: true,
         }
+    }
+
+    /// Re-applies env-detected provider preferences (DevPass, today) to this table in place,
+    /// but only when [`Self::generated`] is true — i.e. this table is `default_table`'s own
+    /// shape (freshly built, or loaded back from a `providers.toml` `tm init`/`tm provider reset`
+    /// wrote), never a hand-edited file. A hand-edited `providers.toml` has no `[meta]` table
+    /// (`generated` parses to `false`), so it is never touched here: this is a load-time refresh
+    /// of the auto-generated default, not a general "override whatever's on disk" mechanism
+    /// (`u1-provider-table-follows-env`).
+    ///
+    /// This is what makes a project initialised before `DEVPASS_*` was set route to DevPass once
+    /// the key is set later, without a `tm provider reset`: callers that load a project's role
+    /// table (see `tm-cli`'s `load_role_table_for_state_dir`) call this after parsing, every
+    /// time, so the effective table always reflects the environment at load time, not at
+    /// whatever moment `providers.toml` was last written.
+    pub fn apply_env_defaults(&mut self) {
+        self.apply_env_defaults_with(DevPassProvider::preferred_model().as_deref());
+    }
+
+    /// Pure core of [`Self::apply_env_defaults`], parameterized the same way
+    /// [`Self::default_table_with`] is, so tests can exercise both branches deterministically
+    /// without touching real process env vars (see that function's doc comment for why).
+    fn apply_env_defaults_with(&mut self, devpass_model: Option<&str>) {
+        if !self.generated {
+            return;
+        }
+        if let Some(model) = devpass_model {
+            self.prefer(Role::CoderFast, "devpass", model);
+        }
+    }
+
+    /// True when this table's `providers.toml` (or in-memory equivalent) was produced by
+    /// [`Self::default_table`]/[`Self::default_table_with`] rather than hand-edited — see
+    /// [`Self::apply_env_defaults`].
+    pub fn generated(&self) -> bool {
+        self.generated
     }
 }
 
@@ -1301,5 +1372,77 @@ candidates = [
         );
         let reparsed = RoleTable::parse(&serialized).expect("round-tripped TOML reparses");
         assert_eq!(table, reparsed);
+    }
+
+    // ---- u1-provider-table-follows-env: `generated`/`apply_env_defaults` ----
+
+    #[test]
+    fn default_table_round_trips_the_generated_meta_table() {
+        let table = RoleTable::default_table_with(None);
+        assert!(table.generated());
+        let toml = table.to_toml_string().expect("serializes");
+        assert!(
+            toml.contains("[meta]") && toml.contains("generated = true"),
+            "an auto-generated table's TOML must record its own provenance: {toml}"
+        );
+        let reparsed = RoleTable::parse(&toml).expect("reparses");
+        assert!(reparsed.generated());
+        assert_eq!(table, reparsed);
+    }
+
+    #[test]
+    fn hand_edited_table_has_no_meta_table_and_parses_as_not_generated() {
+        // No `[meta]` block at all -- exactly what a hand-written or hand-edited
+        // `providers.toml` looks like.
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"anthropic\", model = \"claude-sonnet-5\", max_concurrency = 20 }]\n",
+        )
+        .expect("parses");
+        assert!(!table.generated());
+    }
+
+    #[test]
+    fn apply_env_defaults_prefers_devpass_on_a_generated_table() {
+        let mut table = RoleTable::default_table_with(None);
+        assert_eq!(
+            table.candidates_for(Role::CoderFast)[0].provider,
+            "anthropic"
+        );
+
+        table.apply_env_defaults_with(Some("devpass-env-model"));
+
+        let coder_fast = table.candidates_for(Role::CoderFast);
+        assert_eq!(coder_fast[0].provider, "devpass");
+        assert_eq!(coder_fast[0].model, "devpass-env-model");
+    }
+
+    #[test]
+    fn apply_env_defaults_is_a_no_op_without_a_devpass_model() {
+        let mut table = RoleTable::default_table_with(None);
+        let before = table.clone();
+
+        table.apply_env_defaults_with(None);
+
+        assert_eq!(table, before);
+    }
+
+    #[test]
+    fn apply_env_defaults_never_touches_a_hand_edited_table() {
+        // This is the frozen-at-`tm init`-time bug's mirror image left deliberately alone: a
+        // human wrote this file by hand (no `[meta]` table), so it must never be silently
+        // rewritten just because `DEVPASS_*` happens to be set at load time.
+        let mut table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"anthropic\", model = \"claude-sonnet-5\", max_concurrency = 20 }]\n",
+        )
+        .expect("parses");
+        assert!(!table.generated());
+
+        table.apply_env_defaults_with(Some("devpass-env-model"));
+
+        let coder_fast = table.candidates_for(Role::CoderFast);
+        assert_eq!(
+            coder_fast[0].provider, "anthropic",
+            "apply_env_defaults must be a no-op on a table with no `[meta]` generated marker"
+        );
     }
 }

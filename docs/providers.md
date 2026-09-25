@@ -27,8 +27,30 @@ from `HarnessConfig::default()`. `harness.toml` is only harness behavior; provid
 promote the resulting epoch with `tm harness promote` to apply it. Chat model defaults use
 `<state_dir>/default-model.json`; selection order is the current
 session choice, saved project default, then the effective table's `coder.fast` primary. Interactive
-sessions and scheduler workers consume the same project role table. Local model names are never
-guessed; select one explicitly with `/model <provider>/<model>`.
+sessions and scheduler workers consume the same project role table.
+
+### `providers.toml` follows the environment, not just `tm init` time
+
+A `providers.toml` `tm init` writes (or `tm provider reset` rewrites) carries a `[meta]\ngenerated
+= true` marker, invisible to role routing itself (`RoleTable::parse` strips it before walking role
+tables). Every load of that file (`tm-cli`'s `load_role_table_for_state_dir`, which every
+interactive session, `tm run`, and scheduler worker goes through) re-applies
+`RoleTable::apply_env_defaults`: if `DEVPASS_*` is set in the current environment, `coder.fast`'s
+primary candidate becomes DevPass, exactly as it would have been had those vars been set at `tm
+init` time. This means a project initialised *before* a credential existed starts routing to it
+the moment the credential is set — no re-init, no manual edit — while a `providers.toml` you
+hand-edit (which has no `[meta]` table, so `generated` reads `false`) is never touched by this: a
+hand edit is a deliberate, permanent choice.
+
+Run `tm provider reset` to regenerate `providers.toml` from the current environment outright (e.g.
+after a credential changed and you also want the fallback candidates, prices, or concurrency
+limits refreshed, not just `coder.fast`'s primary). It keeps whatever was there before as
+`providers.toml.bak` and prints what changed on `coder.fast`. Unlike every other provider command,
+`reset` always overwrites the file, hand-edited or not — it is the explicit "start over" command.
+A project created before this behavior existed has no `[meta]` marker either way, so only `tm
+provider reset` (not a passive reload) fixes it.
+
+Local model names are never guessed; select one explicitly with `/model <provider>/<model>`.
 
 A `providers.toml` role candidate names any of the slugs below in its `provider` field:
 
