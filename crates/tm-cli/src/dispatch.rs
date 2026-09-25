@@ -444,7 +444,11 @@ fn open_and_refresh_code_intel(
     workspace_root: &Path,
     clock: &dyn tm_types::Clock,
 ) -> tm_types::Result<tm_codeintel::CodeIntel> {
-    let ci = tm_codeintel::CodeIntel::open_at(index_dir, workspace_root)?;
+    let ci = tm_codeintel::CodeIntel::open_at_auto(
+        index_dir,
+        workspace_root,
+        if cfg!(test) { Some("hash") } else { None },
+    )?;
     if git2::Repository::open(workspace_root).is_ok() {
         if let Err(e) = ci.update_incremental(clock) {
             tracing::warn!(

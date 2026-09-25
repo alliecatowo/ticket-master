@@ -235,12 +235,12 @@ never drift between sessions:
 
 `tm-codeintel`'s semantic search can now use real Potion static embeddings
 (`minishlab/potion-code-16M-v2`, via `model2vec-rs`) instead of the hash stand-in, but only
-through `CodeIntel::open_auto`/`open_at_auto` (picks Potion when it's already cached locally,
-hash otherwise, never downloads); `CodeIntel::open`/`open_at` still default to the hash embedder
-unconditionally so existing tests stay network-free. Env override `TM_EMBEDDER=hash|potion`
-(whitespace/case-insensitive), download opt-out `TM_EMBEDDER_DOWNLOAD=0`. See
-`docs/decisions/D-025-potion-semantic-embedder.md` — as of that doc, no real command path calls
-`open_auto` yet, so `tm search hybrid` does not yet benefit from this in practice.
+through real command paths using `CodeIntel::open_at_auto` (picks Potion when it's already cached
+locally, hash otherwise, never downloads); `CodeIntel::open`/`open_at` still default to the hash
+embedder unconditionally so existing tests stay network-free. The selected embedder identity is
+stored with the index; changing embedders clears stale vectors and re-embeds the corpus on refresh.
+Env override `TM_EMBEDDER=hash|potion` (whitespace/case-insensitive), download opt-out
+`TM_EMBEDDER_DOWNLOAD=0`. See `docs/decisions/D-025-potion-semantic-embedder.md`.
 
 Every build/test/clippy call in these tasks is already capped at `-j 2` — this is an 8GB Mac,
 concurrent full-workspace compiles have caused real disk-space incidents. If you're driving

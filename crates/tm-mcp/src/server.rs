@@ -424,7 +424,11 @@ impl McpServer {
     /// is a plain "does some ancestor have a `.git` entry" walk rather than an actual
     /// `git2::Repository::open`.
     fn code_intel(&self) -> Result<tm_codeintel::CodeIntel> {
-        let ci = tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.project_root)?;
+        let ci = tm_codeintel::CodeIntel::open_at_auto(
+            &self.state_dir,
+            &self.project_root,
+            if cfg!(test) { Some("hash") } else { None },
+        )?;
         if is_inside_git_work_tree(&self.project_root) {
             if let Err(e) = ci.update_incremental(&tm_types::SystemClock) {
                 tracing::warn!(

@@ -280,6 +280,14 @@ impl CodeIntel {
         if !changes.is_empty() {
             let conn = self.store.writer()?;
 
+            if embedder_changed {
+                conn.execute("DELETE FROM vectors", []).map_err(|e| {
+                    tm_types::TmError::storage(format!(
+                        "Failed to clear vectors for embedder change: {e}"
+                    ))
+                })?;
+            }
+
             for record in &changes.added {
                 conn.execute("DELETE FROM files WHERE path = ?1", params![record.path])
                     .map_err(|e| {

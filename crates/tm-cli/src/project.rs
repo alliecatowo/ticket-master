@@ -88,7 +88,11 @@ impl Project {
     /// caller than an error here would be. `tm doctor`'s own explicit
     /// `update_incremental` call stays as its own, separately reported check.
     pub fn code_intel(&self) -> tm_types::Result<tm_codeintel::CodeIntel> {
-        let ci = tm_codeintel::CodeIntel::open_at(&self.state_dir, &self.root)?;
+        let ci = tm_codeintel::CodeIntel::open_at_auto(
+            &self.state_dir,
+            &self.root,
+            if cfg!(test) { Some("hash") } else { None },
+        )?;
         if git2::Repository::open(&self.root).is_ok() {
             if let Err(e) = ci.update_incremental(self.clock.as_ref()) {
                 tracing::warn!(
@@ -2283,8 +2287,12 @@ pub fn doctor(
     // `update_incremental` a guaranteed no-op reporting zero drift every time. Open the index
     // directly instead, so this remains the one real, explicit refresh whose counts this check
     // reports.
-    let index_check = match tm_codeintel::CodeIntel::open_at(&project.state_dir, &project.root)
-        .and_then(|ci| ci.update_incremental(project.clock.as_ref()))
+    let index_check = match tm_codeintel::CodeIntel::open_at_auto(
+        &project.state_dir,
+        &project.root,
+        if cfg!(test) { Some("hash") } else { None },
+    )
+    .and_then(|ci| ci.update_incremental(project.clock.as_ref()))
     {
         Ok(delta) => {
             // When the index was empty before (first build), all files are newly added.
