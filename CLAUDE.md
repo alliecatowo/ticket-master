@@ -399,7 +399,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   which takes effect after `tm harness promote`.
   Chat defaults live in `default-model.json`. Sessions, background workers, and provider list/status
   use the same effective role-table loader (`providers.toml` → legacy role-shaped `harness.toml` →
-  built-in defaults). See `docs/providers.md` and D-022. Test the real `tm` binary only against a
+  built-in defaults). A configured non-mock `[decider]` runs ticket-creation triage in shadow
+  mode and records successful answers as `classify.decided`; the default mock is silent unless
+  `TM_DECIDER_SHADOW=1` opts in. Decider failures never prevent ticket creation. See
+  `docs/providers.md`, D-020 and D-022. Test the real `tm` binary only against a
   fresh `mktemp` project root, never this checkout.
 - Ticket lifecycle from the CLI: `tm ticket new "<objective>"` (starts a global-scope project if
   none exists; new tickets get `Authority::worker()`), `tm ticket activate <T>` (draft -> ready),

@@ -40,6 +40,145 @@ use crate::args::{AttachArgs, DoctorArgs, GenesisArgs, InitArgs, ProjectCommand,
 use crate::ops;
 use crate::render::{Renderer, Table};
 
+/// Adapts a typed decision backend to the store's best-effort ticket triage hook.
+struct TriageAdapter {
+    inner: Arc<dyn tm_provider::DecisionProvider>,
+    runtime: tokio::runtime::Handle,
+    model: tm_provider::ModelId,
+    clock: Arc<dyn Clock>,
+}
+
+impl tm_core::store::TriageDecider for TriageAdapter {
+    fn backend(&self) -> &str {
+        self.inner.id()
+    }
+
+    fn model(&self) -> &str {
+        &self.model.model
+    }
+
+    fn triage(&self, objective: &str) -> Result<tm_core::store::TriageAnswer, String> {
+        use tm_provider::{OptionSpec, Question};
+        let mut questions = BTreeMap::new();
+        questions.insert(
+            "kind".to_string(),
+            Question::Choice {
+                instructions: "Classify the requested work by its primary ticket kind.".into(),
+                options: [
+                    "work",
+                    "verification",
+                    "audit",
+                    "investigation",
+                    "recovery",
+                    "harness",
+                ]
+                .into_iter()
+                .map(|label| OptionSpec {
+                    label: label.into(),
+                })
+                .collect(),
+            },
+        );
+        questions.insert(
+            "routing".to_string(),
+            Question::Choice {
+                instructions: "Choose the primary capability needed to complete this work.".into(),
+                options: ["coding", "research", "review", "operations"]
+                    .into_iter()
+                    .map(|label| OptionSpec {
+                        label: label.into(),
+                    })
+                    .collect(),
+            },
+        );
+        let request = tm_provider::DecideRequest {
+            model: self.model.clone(),
+            state: objective.to_string(),
+            questions,
+        };
+        // Store is synchronous and may itself be called from a Tokio worker. Run the blocking
+        // bridge on a short-lived thread so Handle::block_on never nests inside that worker.
+        let runtime = self.runtime.clone();
+        let provider = self.inner.clone();
+        let started = self.clock.now();
+        let response = std::thread::spawn(move || runtime.block_on(provider.decide(request)))
+            .join()
+            .map_err(|_| "decision provider task panicked".to_string())?
+            .map_err(|error| error.to_string())?;
+        if !response.answers.contains_key("kind") || !response.answers.contains_key("routing") {
+            return Err("decision provider omitted a triage answer".into());
+        }
+        Ok(tm_core::store::TriageAnswer {
+            answers: serde_json::to_value(response.answers).map_err(|e| e.to_string())?,
+            thresholds: serde_json::json!({}),
+            latency_ms: self
+                .clock
+                .now()
+                .unix_nanos()
+                .saturating_sub(started.unix_nanos())
+                .div_euclid(1_000_000)
+                .clamp(0, u64::MAX as i128) as u64,
+            cost_micros: None,
+        })
+    }
+}
+
+fn attach_configured_decider(
+    store: tm_core::Store,
+    state_dir: &Path,
+    clock: Arc<dyn Clock>,
+) -> tm_types::Result<tm_core::Store> {
+    let table = crate::ops::load_role_table_for_state_dir(state_dir)?;
+    let candidate = table
+        .candidates_for(tm_types::Role::Decider)
+        .first()
+        .cloned();
+    let Some(candidate) = candidate else {
+        return Ok(store);
+    };
+    let shadow = std::env::var("TM_DECIDER_SHADOW").is_ok_and(|value| value == "1");
+    if candidate.provider == "mock" && !shadow {
+        return Ok(store);
+    }
+    let endpoint = table.decider_endpoint(&candidate.provider, &candidate.model);
+    let token = endpoint
+        .token_env
+        .as_deref()
+        .and_then(|name| std::env::var(name).ok());
+    let model = tm_provider::ModelId::new(&candidate.provider, &candidate.model);
+    let provider = tm_provider::Registry::build_decider(
+        &candidate.provider,
+        model.clone(),
+        token,
+        endpoint.base_url,
+    )
+    .map_err(|error| TmError::Provider(error.to_string()))?;
+    static DECIDER_RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
+        std::sync::OnceLock::new();
+    let runtime = match tokio::runtime::Handle::try_current() {
+        Ok(runtime) => runtime,
+        Err(_) => match DECIDER_RUNTIME.get_or_init(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())
+        }) {
+            Ok(runtime) => runtime.handle().clone(),
+            Err(error) => {
+                return Err(TmError::invariant(format!(
+                    "could not start decider runtime: {error}"
+                )));
+            }
+        },
+    };
+    Ok(store.with_decider(Arc::new(TriageAdapter {
+        inner: provider,
+        runtime,
+        model,
+        clock,
+    })))
+}
+
 /// Where a project's durable state lives relative to its workspace root (D-003).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Scope {
@@ -170,8 +309,12 @@ fn resolve_actor() -> tm_types::Result<ParticipantId> {
 /// Open the project rooted at `root` with its state at `state_dir`, using the real wall clock and
 /// a restored [`tm_types::CounterIds`], and resolve the local actor identity.
 pub fn open_at(root: &Path, state_dir: &Path, scope: Scope) -> tm_types::Result<Project> {
-    let store = Arc::new(tm_core::Store::open_at(state_dir)?);
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let store = Arc::new(attach_configured_decider(
+        tm_core::Store::open_at(state_dir)?,
+        state_dir,
+        clock.clone(),
+    )?);
     // `tm_core::Store` exposes no accessor for its internal id source, so this restores an
     // equivalent one from the same high-water marks `Store::open_at` itself just read, for the
     // collaborators (scheduler, server) that need to mint ids outside a `Store` command.
