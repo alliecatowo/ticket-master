@@ -50,12 +50,32 @@ not a new durable table.
   them had to change to stay green. `AgentLoop::record_usage` is the only caller that passes
   `Some(...)`, built from the same `Completion::model` `StepRecord.served_by` already stringifies.
 
+**`tool_call.completed` (`tel-tool-call-event-kind`) is the new event kind `usage.recorded`'s
+"Why" section below anticipated.** `EventKind::ToolCallCompleted` gets its own `EventCategory::
+ToolCall`, following the `command.*`/`EventCategory::Command` precedent rather than folding into
+an existing category. Its payload (`ToolCallCompletedPayload`: `ticket`, `session`, `tool_name`,
+`duration_ms`, `outcome`) is deliberately narrower than `crate::outcome::ToolCallResolution`
+itself: `outcome` is a plain `String` of `"completed"`/`"denied"`/`"error"` (mirroring that enum's
+three arms), not the resolution's own richer per-arm payload (a `Completed`'s result value, a
+`Denied`'s reason, an `Errored`'s detail) — those already live on the `ToolCallRecord` a step's
+own transcript carries; this event exists for cross-ticket/cross-day rollup (`tel-ticket-metrics-
+fold`, `tel-stats-cli-command`), which needs "what happened", not "what it said". Both
+`AgentLoop::drive`'s per-turn tool-call loop and `AgentLoop::resume_with`'s single
+resume-after-approval dispatch measure `duration_ms` themselves around each
+`ToolRegistry::dispatch` call via the injected `Clock` (`Timestamp::millis_since`, clamped to `0`
+— `0` for `resume_with`'s declined-without-dispatch path too, since nothing ran) rather than
+reading it back from `ToolCallRecord`, which carries no timing field. `AgentLoop::drive` batches a
+step's several calls into one `Store::append`, mirroring `AgentLoop::record_provider_events`'s
+existing batching of a step's
+`provider.*` events — one event per dispatched call, not per step.
+
 ## Why
 
-- **A payload field, not a new event kind or table.** `tool_call.completed` (batch B11 in
-  `docs/tasks/TASKS.md`) is a new event kind because a tool call has no existing home in the log
-  at all. `usage.recorded` already exists and already names the ticket/session/tokens a call
-  spent; cost and attribution are two more facts about the same call, not a new kind of fact.
+- **A payload field, not a new event kind or table** for cost/attribution specifically.
+  `tool_call.completed` (batch B11 in `docs/tasks/TASKS.md`) is a new event kind because a tool
+  call has no existing home in the log at all. `usage.recorded` already exists and already names
+  the ticket/session/tokens a call spent; cost and attribution are two more facts about the same
+  call, not a new kind of fact.
 - **`Option`, not a schema migration.** The event log has no migration mechanism — an old event's
   JSON is exactly what was written the day it was appended, immutable and hash-chained. Any field
   added to an existing payload must default cleanly when absent, or every already-recorded event
@@ -95,3 +115,9 @@ not a new durable table.
 `clients/web/src/views/timelineModel.ts`'s consumer of it) do not yet carry `provider`/`model` —
 out of scope for this batch's owned files; a follow-up should add them as `string | null` to match
 the Rust `Option<String>` shape.
+
+Same gap for `tool_call.completed`: `clients/ts/src/domain.ts` has no `"tool_call.completed"` arm
+yet, so a TS-side consumer parsing the event log's raw JSON doesn't see it typed — again out of
+scope for this batch's owned files. `SPEC.md` §3.2's event catalogue table likewise has no
+`tool_call.completed` row yet — `SPEC.md` is owned by another track in this batch, so this is
+flagged rather than edited directly.

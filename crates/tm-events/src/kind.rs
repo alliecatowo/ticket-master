@@ -31,6 +31,8 @@ pub enum EventCategory {
     Artifact,
     /// `command.*`
     Command,
+    /// `tool_call.*`
+    ToolCall,
     /// `milestone.*`
     Milestone,
     /// `session.*`
@@ -197,6 +199,12 @@ pub enum EventKind {
     /// `command.completed`
     #[serde(rename = "command.completed")]
     CommandCompleted,
+    /// `tool_call.completed` (`tel-tool-call-event-kind`): one dispatched tool call's outcome —
+    /// which tool, how long it took, and whether it completed, was denied by authority, or
+    /// errored (mirrors `tm-agent`'s `ToolCallResolution`'s three arms via this payload's own
+    /// `outcome` field, not this kind).
+    #[serde(rename = "tool_call.completed")]
+    ToolCallCompleted,
     /// `milestone.created`
     #[serde(rename = "milestone.created")]
     MilestoneCreated,
@@ -383,6 +391,7 @@ pub const ALL: &[EventKind] = &[
     EventKind::ArtifactCreated,
     EventKind::CommandStarted,
     EventKind::CommandCompleted,
+    EventKind::ToolCallCompleted,
     EventKind::MilestoneCreated,
     EventKind::MilestoneClosed,
     EventKind::MilestoneReopened,
@@ -475,6 +484,7 @@ impl EventKind {
             EventKind::ArtifactCreated => "artifact.created",
             EventKind::CommandStarted => "command.started",
             EventKind::CommandCompleted => "command.completed",
+            EventKind::ToolCallCompleted => "tool_call.completed",
             EventKind::MilestoneCreated => "milestone.created",
             EventKind::MilestoneClosed => "milestone.closed",
             EventKind::MilestoneReopened => "milestone.reopened",
@@ -560,6 +570,7 @@ impl EventKind {
             | EventKind::ResourceConflictDetected => EventCategory::Resource,
             EventKind::ArtifactCreated => EventCategory::Artifact,
             EventKind::CommandStarted | EventKind::CommandCompleted => EventCategory::Command,
+            EventKind::ToolCallCompleted => EventCategory::ToolCall,
             EventKind::MilestoneCreated
             | EventKind::MilestoneClosed
             | EventKind::MilestoneReopened => EventCategory::Milestone,
@@ -753,6 +764,14 @@ mod tests {
         assert_eq!(
             EventKind::CommandCompleted.category(),
             EventCategory::Command
+        );
+    }
+
+    #[test]
+    fn category_maps_tool_call_kinds() {
+        assert_eq!(
+            EventKind::ToolCallCompleted.category(),
+            EventCategory::ToolCall
         );
     }
 
@@ -966,7 +985,7 @@ mod tests {
 
     #[test]
     fn all_kinds_sorted_and_complete() {
-        assert_eq!(ALL.len(), 82);
+        assert_eq!(ALL.len(), 83);
         assert_eq!(ALL[0], EventKind::ProjectCreated);
         assert_eq!(ALL[ALL.len() - 1], EventKind::ClassifyDecided);
     }

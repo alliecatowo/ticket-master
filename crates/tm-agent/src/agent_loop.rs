@@ -16,7 +16,7 @@ use tm_core::{FailureClass, Store};
 use tm_events::payload::{
     ApprovalDecidedPayload, ApprovalRequestedPayload, ProviderDegradedPayload,
     ProviderExhaustedPayload, ProviderRecoveredPayload, ProviderSelectedPayload,
-    SessionEndedPayload, SessionStartedPayload,
+    SessionEndedPayload, SessionStartedPayload, ToolCallCompletedPayload,
 };
 use tm_events::{EventDraft, Payload};
 use tm_harness::config::PromptFragments;
@@ -390,6 +390,7 @@ impl AgentLoop {
             input: pending.input.clone(),
         };
 
+        let dispatch_started_at = self.clock.now();
         let resolution = if approved {
             // `goal.claimed_complete` before dispatch, not after (`SPEC.md` §29,
             // `docs/audit-2026-09-18-fable.md` B-09) — see `drive`'s matching call site for the
@@ -417,6 +418,25 @@ impl AgentLoop {
                 reason: denial.unwrap_or_else(|| "approval declined".to_string()),
             }
         };
+        // Same `tool_call.completed` bookkeeping as `AgentLoop::drive`'s own loop
+        // (`tel-tool-call-event-kind`): `duration_ms` is `0` for the declined-without-dispatch
+        // path (`approved` false), since nothing ran to time.
+        let duration_ms = self.clock.now().millis_since(dispatch_started_at).max(0) as u64;
+        self.record_tool_call_events(
+            &task,
+            vec![ToolCallCompletedPayload {
+                ticket: task.ticket.clone(),
+                session: Some(task.session.clone()),
+                tool_name: pending.tool_name.clone(),
+                duration_ms,
+                outcome: match &resolution {
+                    ToolOutcome::Completed { .. } => "completed",
+                    ToolOutcome::Denied { .. } => "denied",
+                    ToolOutcome::Errored { .. } => "error",
+                }
+                .to_string(),
+            }],
+        )?;
 
         let mut steps = steps_so_far;
         let step_index = steps.len() as u32 + 1;
@@ -728,6 +748,33 @@ impl AgentLoop {
         Ok(())
     }
 
+    /// Append one `tool_call.completed` event per already-built `payloads`
+    /// (`tel-tool-call-event-kind`), batched together in a single [`tm_core::Store::append`] call
+    /// like [`AgentLoop::record_provider_events`] above — one event per dispatched tool call in
+    /// the step just finished, not per step. Building each [`ToolCallCompletedPayload`] (tool
+    /// name, measured duration, and an `outcome` of `"completed"`/`"denied"`/`"error"` mirroring
+    /// [`crate::outcome::ToolCallResolution`]'s three arms) is the caller's job, since that is
+    /// also where the call's wall time is actually measured — [`crate::outcome::ToolCallRecord`]
+    /// itself carries no timing field to read it back from afterward.
+    fn record_tool_call_events(
+        &self,
+        task: &AgentTask,
+        payloads: Vec<ToolCallCompletedPayload>,
+    ) -> Result<()> {
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let drafts: Vec<EventDraft> = payloads
+            .into_iter()
+            .map(|payload| {
+                EventDraft::new(self.actor.clone(), task.subject(), Payload::from(payload))
+                    .with_session(task.session.clone())
+            })
+            .collect();
+        self.store.append(drafts)?;
+        Ok(())
+    }
+
     /// Seed `task.ticket`'s durable goal from its own `objective` field, if no goal has ever been
     /// set for it (`SPEC.md` §29, `docs/audit-2026-09-18-fable.md` B-09's "step 0").
     ///
@@ -1020,6 +1067,7 @@ impl AgentLoop {
             }
 
             let mut tool_call_records: Vec<ToolCallRecord> = Vec::new();
+            let mut tool_call_events: Vec<ToolCallCompletedPayload> = Vec::new();
 
             for (id, name, input) in &tool_uses {
                 if let Ok(action) = self.tools.to_action(name, input) {
@@ -1081,6 +1129,7 @@ impl AgentLoop {
                     name: name.clone(),
                     input: input.clone(),
                 };
+                let dispatch_started_at = self.clock.now();
                 let resolution = {
                     let ctx = CallContext {
                         authority: &effective_authority,
@@ -1093,6 +1142,23 @@ impl AgentLoop {
                     };
                     self.tools.dispatch(&call, &ctx).await
                 };
+                // Millis since `dispatch_started_at`, clamped to 0: the injected `Clock` need not
+                // advance (many scripted tests use a fixed clock), and `millis_since` can go
+                // negative if it somehow ran backwards — `tool_call.completed`'s `duration_ms` is
+                // `u64`, so either case saturates to `0` rather than panicking on the cast.
+                let duration_ms = self.clock.now().millis_since(dispatch_started_at).max(0) as u64;
+                tool_call_events.push(ToolCallCompletedPayload {
+                    ticket: task.ticket.clone(),
+                    session: Some(task.session.clone()),
+                    tool_name: name.clone(),
+                    duration_ms,
+                    outcome: match &resolution {
+                        ToolOutcome::Completed { .. } => "completed",
+                        ToolOutcome::Denied { .. } => "denied",
+                        ToolOutcome::Errored { .. } => "error",
+                    }
+                    .to_string(),
+                });
 
                 tool_call_records.push(ToolCallRecord {
                     tool_use_id: id.clone(),
@@ -1105,6 +1171,7 @@ impl AgentLoop {
                     (name.as_str(), &resolution, &task.ticket)
                 {
                     {
+                        self.record_tool_call_events(task, tool_call_events)?;
                         self.push_step(
                             &mut steps,
                             StepRecord {
@@ -1121,6 +1188,7 @@ impl AgentLoop {
                     }
                 }
             }
+            self.record_tool_call_events(task, tool_call_events)?;
 
             // No live `messages` buffer to append to: the next loop iteration rebuilds the whole
             // conversation from `steps` (now including the step pushed below) via
@@ -2791,6 +2859,168 @@ mod tests {
         assert_eq!(find_events(&events, EventKind::TicketSubmitted).len(), 1);
         assert!(find_events(&events, EventKind::TicketVerified).is_empty());
         assert!(find_events(&events, EventKind::TicketVerificationFailed).is_empty());
+    }
+
+    /// `tel-tool-call-event-kind`: a step that dispatches two tool calls -- one that completes
+    /// (`fs.stat`, unaffected by `shell.enabled`) and one an authority restriction denies
+    /// (`shell.run`, with `shell.enabled = false`) -- appends exactly one `tool_call.completed`
+    /// event per call, batched together, each naming the right tool and outcome.
+    #[tokio::test]
+    async fn drive_records_one_tool_call_completed_event_per_dispatched_call() {
+        let h = LiveHarness::new();
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let model = ModelId::new("mock", "m1");
+        let provider = Arc::new(MockProvider::new("mock", model.clone(), h.clock.clone()));
+        fabric.register_provider(provider.clone());
+
+        // `shell.enabled = false` denies `shell.run` at dispatch time while leaving `fs.stat` (a
+        // read, unaffected by shell authority) free to complete -- one call of each outcome in
+        // the same step.
+        let mut authority = Authority::root();
+        authority.shell.enabled = false;
+
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            authority,
+            Budget::unlimited(),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+        let task = h.task();
+        let stat_input = serde_json::json!({"path": "nonexistent-tool-call-event-fixture.rs"});
+        let shell_input = serde_json::json!({"argv": ["echo", "hi"]});
+
+        let turn1_request = expected_request(&agent_loop, &task);
+        let turn1_completion = Completion {
+            model: model.clone(),
+            candidates: vec![Candidate {
+                content: vec![
+                    ContentBlock::ToolUse {
+                        id: "call-1".to_string(),
+                        name: "fs.stat".to_string(),
+                        input: stat_input.clone(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call-2".to_string(),
+                        name: "shell.run".to_string(),
+                        input: shell_input.clone(),
+                    },
+                ],
+                stop_reason: StopReason::ToolUse,
+            }],
+            usage: Usage {
+                input_tokens: 20,
+                output_tokens: 10,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: std::time::Duration::from_millis(0),
+            received_at: h.clock.now(),
+        };
+        provider.script_response(&turn1_request, turn1_completion.clone());
+
+        // Dispatch both calls directly (as `AgentLoop::drive` itself will) only to learn their
+        // real resolutions, so turn 2's request can be predicted and scripted below -- mirroring
+        // `expected_request_after`'s other users in this module. `AgentLoop::run` below redoes
+        // both dispatches for real; nothing here is asserted against directly.
+        let root = project_root();
+        let effective_authority = agent_loop.authority().intersect(&task.authority);
+        let ctx = CallContext {
+            authority: &effective_authority,
+            ticket: task.ticket.as_ref(),
+            session: &task.session,
+            actor: &h.actor,
+            clock: h.clock.as_ref(),
+            ids: h.ids.as_ref(),
+            root: &root,
+        };
+        let resolution1 = agent_loop
+            .tools()
+            .dispatch(
+                &ToolCall {
+                    id: "call-1".to_string(),
+                    name: "fs.stat".to_string(),
+                    input: stat_input.clone(),
+                },
+                &ctx,
+            )
+            .await;
+        assert!(matches!(resolution1, ToolOutcome::Completed { .. }));
+        let resolution2 = agent_loop
+            .tools()
+            .dispatch(
+                &ToolCall {
+                    id: "call-2".to_string(),
+                    name: "shell.run".to_string(),
+                    input: shell_input.clone(),
+                },
+                &ctx,
+            )
+            .await;
+        assert!(matches!(resolution2, ToolOutcome::Denied { .. }));
+
+        let step1 = StepRecord {
+            index: 1,
+            served_by: model.to_string(),
+            assistant_text: None,
+            tool_calls: vec![
+                ToolCallRecord {
+                    tool_use_id: "call-1".to_string(),
+                    tool_name: "fs.stat".to_string(),
+                    input: stat_input.clone(),
+                    resolution: resolution1,
+                },
+                ToolCallRecord {
+                    tool_use_id: "call-2".to_string(),
+                    tool_name: "shell.run".to_string(),
+                    input: shell_input.clone(),
+                    resolution: resolution2,
+                },
+            ],
+            spend: step_spend_of(&turn1_completion),
+            at: h.clock.now(),
+        };
+
+        // Turn 2: a plain text reply ends the run as `Failed` -- the simplest terminal turn
+        // available, matching this module's other multi-turn tests' idiom.
+        let turn2_request =
+            expected_request_after(&agent_loop, &task, std::slice::from_ref(&step1));
+        let turn2_completion = text_only_completion(model.clone(), &h.clock);
+        provider.script_response(&turn2_request, turn2_completion);
+
+        let outcome = agent_loop.run(task).await.expect("run completes");
+        assert!(
+            matches!(outcome, AgentOutcome::Failed { .. }),
+            "expected Failed via a text-only turn 2 reply, got {outcome:?}"
+        );
+
+        let events = h.all_events();
+        let tool_call_events = find_events(&events, EventKind::ToolCallCompleted);
+        assert_eq!(
+            tool_call_events.len(),
+            2,
+            "exactly one tool_call.completed event per dispatched call"
+        );
+        let payload1 = tool_call_events[0]
+            .payload
+            .as_tool_call_completed()
+            .expect("tool_call.completed payload");
+        assert_eq!(payload1.tool_name, "fs.stat");
+        assert_eq!(payload1.outcome, "completed");
+        let payload2 = tool_call_events[1]
+            .payload
+            .as_tool_call_completed()
+            .expect("tool_call.completed payload");
+        assert_eq!(payload2.tool_name, "shell.run");
+        assert_eq!(payload2.outcome, "denied");
     }
 
     // -----------------------------------------------------------------------------------------

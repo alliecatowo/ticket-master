@@ -274,6 +274,13 @@ payload_kinds! {
         exit_code: i32,
         duration_ms: u64,
     };
+    "Payload for `tool_call.completed`.", ToolCallCompletedPayload, ToolCallCompleted, ToolCallCompleted, as_tool_call_completed, {
+        ticket: Option<TicketId>,
+        session: Option<SessionId>,
+        tool_name: String,
+        duration_ms: u64,
+        outcome: String,
+    };
     "Payload for `milestone.created`.", MilestoneCreatedPayload, MilestoneCreated, MilestoneCreated, as_milestone_created, {
         milestone: MilestoneId,
         title: String,
@@ -760,6 +767,28 @@ mod tests {
         let inner = restored.as_command_completed().unwrap();
         assert_eq!(inner.exit_code, 0);
         assert_eq!(inner.duration_ms, 5000);
+    }
+
+    #[test]
+    fn tool_call_completed_round_trips_each_outcome() {
+        for outcome in ["completed", "denied", "error"] {
+            let session = SessionId::new("S-1").unwrap();
+            let original = Payload::from(ToolCallCompletedPayload {
+                ticket: None,
+                session: Some(session),
+                tool_name: "read".to_string(),
+                duration_ms: 42,
+                outcome: outcome.to_string(),
+            });
+
+            let json = original.to_json().unwrap();
+            let restored = Payload::from_json(EventKind::ToolCallCompleted, json).unwrap();
+
+            let inner = restored.as_tool_call_completed().unwrap();
+            assert_eq!(inner.tool_name, "read");
+            assert_eq!(inner.duration_ms, 42);
+            assert_eq!(inner.outcome, outcome);
+        }
     }
 
     #[test]
