@@ -106,6 +106,17 @@ pub enum FabricRecord {
     },
 }
 
+/// One entry of [`Fabric::affordable_candidates`]: a candidate that can afford the estimated
+/// call, plus what that estimate came out to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AffordableCandidate {
+    /// The candidate itself.
+    pub model: ModelId,
+    /// The estimated cost in micro-dollars, or `None` for an unpriced (subscription/unmetered)
+    /// candidate.
+    pub estimated_cost_micros: Option<u64>,
+}
+
 /// The real priced cost of a completion, in micro-dollars, given the candidate's
 /// per-1,000,000-token [`Price`] and the [`Completion`]'s actual token [`Usage`]
 /// (`tel-completion-cost-field`). Cache tokens are not separately priced (no candidate configures
@@ -234,6 +245,59 @@ impl Fabric {
             .collect()
     }
 
+    /// `role`'s candidates, in table order, that can afford one more call estimated at
+    /// `prompt_tokens` input tokens plus up to `max_output_tokens` generated tokens, given
+    /// `remaining_dollars_micros` left in the ticket's dollar budget
+    /// (`budget-affordability-menu-in-context-pack`, `SPEC.md` §31.2).
+    ///
+    /// Each candidate's estimated cost is `prompt_tokens * candidate.price.input +
+    /// max_output_tokens * candidate.price.output`, computed via [`cost_micros`] against a
+    /// synthetic [`Usage`] --
+    /// the same "input tokens times input price plus output tokens times output price" formula
+    /// [`cost_micros`]'s own doc comment describes, just against an upper-bound estimate instead
+    /// of a completion's real, already-known usage. A candidate with no
+    /// [`crate::role_config::RoleCandidate::price`]
+    /// (subscription/unmetered capacity) is always affordable, since its dollar cost isn't
+    /// tracked; `remaining_dollars_micros == u64::MAX` (an unmetered dollar budget) affords every
+    /// priced candidate too. The primary candidate (index 0 of [`Fabric::candidates`]) is still
+    /// first here when it is itself affordable -- this never reorders by price, only filters.
+    pub fn affordable_candidates(
+        &self,
+        role: Role,
+        remaining_dollars_micros: u64,
+        prompt_tokens: u64,
+        max_output_tokens: u32,
+    ) -> Vec<AffordableCandidate> {
+        let usage = Usage {
+            input_tokens: u32::try_from(prompt_tokens).unwrap_or(u32::MAX),
+            output_tokens: max_output_tokens,
+            cache_read_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        self.table
+            .read()
+            .candidates_for(role)
+            .iter()
+            .filter_map(|c| {
+                let model = ModelId::new(c.provider.clone(), c.model.clone());
+                match c.price {
+                    None => Some(AffordableCandidate {
+                        model,
+                        estimated_cost_micros: None,
+                    }),
+                    Some(price) => {
+                        let cost = cost_micros(&price, &usage);
+                        (remaining_dollars_micros == u64::MAX || cost <= remaining_dollars_micros)
+                            .then_some(AffordableCandidate {
+                                model,
+                                estimated_cost_micros: Some(cost),
+                            })
+                    }
+                }
+            })
+            .collect()
+    }
+
     /// The ids of every registered provider, in sorted order.
     pub fn provider_ids(&self) -> Vec<String> {
         self.providers.read().keys().cloned().collect()
@@ -351,6 +415,61 @@ impl Fabric {
             }
         };
 
+        self.dispatch_to_candidate(candidate_key, record, was_half_open, req)
+            .await
+    }
+
+    /// Same as [`Fabric::execute_priced`], but bypasses [`Fabric::route`]'s own candidate choice
+    /// and always calls `candidate` (`budget-affordability-menu-in-context-pack`, `SPEC.md`
+    /// §31.2): the caller (`tm_agent::agent_loop::AgentLoop::drive`) already picked `candidate`
+    /// itself, via [`Fabric::affordable_candidates`], as the cheapest tier that still affords the
+    /// step's estimated dollar cost after the role's primary candidate did not. Concurrency/rpm/
+    /// tpm/breaker admission is intentionally *not* re-checked here (unlike [`Fabric::route`]'s
+    /// normal path): `candidate` was chosen purely for its price, and re-running admission would
+    /// need a second, redundant routing pass over the same [`RoleTable`] the caller already
+    /// consulted. A candidate that turns out to be unhealthy still fails cleanly through the
+    /// ordinary provider-error path below (recorded, breaker-counted if retryable) rather than
+    /// silently falling back again -- a tier-down is already a deliberate one-step decision, not
+    /// something to keep degrading past.
+    ///
+    /// Always recorded as [`FabricRecord::Degraded`] (`reason` explains this was a budget
+    /// tier-down, not a health-driven fallback), so the caller's `provider.degraded` event and
+    /// `tm stats` both see it the same way any other degrade shows up.
+    pub async fn execute_priced_tier_down(
+        &self,
+        role: Role,
+        candidate: ModelId,
+        req: CompletionRequest,
+    ) -> TmResult<(Completion, Option<u64>)> {
+        self.state.write().roll_windows(self.clock.now());
+        let was_half_open = self.is_half_open(&candidate);
+        let record = FabricRecord::Degraded {
+            role,
+            candidate: candidate.clone(),
+            reason: "budget tier-down: primary candidate's estimated cost exceeds the ticket's \
+                     remaining dollar budget"
+                .to_string(),
+        };
+        self.dispatch_to_candidate(candidate, record, was_half_open, req)
+            .await
+    }
+
+    /// The shared tail of [`Fabric::execute_priced`] and [`Fabric::execute_priced_tier_down`]:
+    /// redact, dispatch to `candidate_key`'s provider, price the result and fold the outcome into
+    /// [`FabricState`]. `record` is published via [`Fabric::last_records`] before the call, same
+    /// as it always was inline in `execute_priced`.
+    async fn dispatch_to_candidate(
+        &self,
+        candidate_key: ModelId,
+        record: FabricRecord,
+        was_half_open: bool,
+        req: CompletionRequest,
+    ) -> TmResult<(Completion, Option<u64>)> {
+        let role = match &record {
+            FabricRecord::Selected { role, .. } | FabricRecord::Degraded { role, .. } => *role,
+            _ => unreachable!("dispatch_to_candidate is only ever called with Selected/Degraded"),
+        };
+        let now = self.clock.now();
         *self.records.write() = vec![record];
 
         let provider = {
@@ -1215,5 +1334,91 @@ mod tests {
             Some("mock".into())
         );
         assert!(fabric.provider("anthropic").is_none());
+    }
+
+    // ---- affordable_candidates / execute_priced_tier_down (`budget-affordability-menu-in-
+    // context-pack`, `SPEC.md` §31.2) -----------------------------------------------------------
+
+    #[test]
+    fn affordable_candidates_keeps_the_unpriced_and_cheap_and_drops_the_expensive_one() {
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"
+            { provider = "mock", model = "expensive", max_concurrency = 1, price = { input_micros_per_million_tokens = 10_000_000, output_micros_per_million_tokens = 10_000_000 } },
+            { provider = "mock", model = "cheap", max_concurrency = 1, degraded_ok = true, price = { input_micros_per_million_tokens = 100, output_micros_per_million_tokens = 100 } },
+            { provider = "mock", model = "unmetered", max_concurrency = 1, degraded_ok = true }
+            "#,
+        );
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let fabric = Fabric::new(table, clock as Arc<dyn Clock>);
+
+        // 1,000 prompt tokens + 1,000 output tokens against "expensive"'s $10/M-token price on
+        // both dimensions prices the call at $0.02 -- more than the $0.001 left in budget, so it
+        // must not appear; "cheap" and "unmetered" both still fit.
+        let affordable = fabric.affordable_candidates(Role::CoderFast, 1_000, 1_000, 1_000);
+
+        let models: Vec<&str> = affordable.iter().map(|a| a.model.model.as_str()).collect();
+        assert_eq!(models, vec!["cheap", "unmetered"]);
+        assert_eq!(
+            affordable[1].estimated_cost_micros, None,
+            "an unpriced candidate is always affordable and untracked"
+        );
+        assert!(affordable[0].estimated_cost_micros.unwrap() <= 1_000);
+    }
+
+    #[test]
+    fn affordable_candidates_treats_an_unlimited_remaining_budget_as_affording_everything() {
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "mock", model = "pricey", max_concurrency = 1, price = { input_micros_per_million_tokens = 1_000_000_000, output_micros_per_million_tokens = 1_000_000_000 } }"#,
+        );
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let fabric = Fabric::new(table, clock as Arc<dyn Clock>);
+
+        let affordable = fabric.affordable_candidates(Role::CoderFast, u64::MAX, 1_000_000, 4_096);
+        assert_eq!(affordable.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_priced_tier_down_calls_the_forced_candidate_and_records_a_budget_degrade() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"
+            { provider = "mock", model = "expensive", max_concurrency = 1, price = { input_micros_per_million_tokens = 10_000_000, output_micros_per_million_tokens = 10_000_000 } },
+            { provider = "mock", model = "cheap", max_concurrency = 1, degraded_ok = true, price = { input_micros_per_million_tokens = 100, output_micros_per_million_tokens = 100 } }
+            "#,
+        );
+        let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
+
+        let provider = Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "cheap"),
+            clock.clone() as Arc<dyn Clock>,
+        ));
+        let request = req();
+        provider.script_response(&request, completion(ModelId::new("mock", "cheap"), &clock));
+        fabric.register_provider(provider);
+
+        let (out, cost_micros) = fabric
+            .execute_priced_tier_down(Role::CoderFast, ModelId::new("mock", "cheap"), req())
+            .await
+            .expect("the cheap candidate serves the call");
+        assert_eq!(out.model, ModelId::new("mock", "cheap"));
+        // 10 input + 5 output tokens (`completion`'s fixed `Usage`) at $0.0001/M tokens both
+        // ways: (10*100 + 5*100) / 1_000_000 truncates to 0 micro-dollars -- real, just tiny.
+        assert_eq!(cost_micros, Some(0));
+
+        let records = fabric.last_records();
+        assert_eq!(
+            records,
+            vec![FabricRecord::Degraded {
+                role: Role::CoderFast,
+                candidate: ModelId::new("mock", "cheap"),
+                reason: "budget tier-down: primary candidate's estimated cost exceeds the \
+                         ticket's remaining dollar budget"
+                    .to_string(),
+            }]
+        );
     }
 }

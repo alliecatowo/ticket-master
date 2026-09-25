@@ -127,10 +127,20 @@ pub fn build_objective(ticket: &Ticket) -> RawSection {
     }
 }
 
-/// A ballpark token count for "one provider call", used only to turn a per-token price into a
-/// human-legible "roughly how many calls" figure for [`build_budget`]'s tier menu — not an
-/// attempt to predict any particular call's real size.
+/// A ballpark prompt-token count for "one step's input", used only to turn a per-token price
+/// into a human-legible "roughly how many steps" figure for [`build_budget`]'s tier menu — not
+/// an attempt to predict any particular step's real prompt size. Paired with
+/// [`STEP_MAX_OUTPUT_TOKENS`] as the two inputs to [`tm_provider::fabric::cost_micros`], the same
+/// function `tm_agent::agent_loop::AgentLoop::drive`'s own pre-call dollar estimate uses
+/// (`budget-affordability-menu-in-context-pack`), so this menu's notion of "affordable" agrees
+/// with the loop's rather than drifting from it under a different formula.
 const NOMINAL_CALL_TOKENS: u64 = 2_000;
+
+/// The output-token ceiling one step's provider call is capped at — mirrors
+/// `tm_agent::agent_loop::MAX_TOKENS_PER_STEP` exactly (that constant is defined in terms of this
+/// one, not the reverse, since `tm-agent` already depends on `tm-context` and not the other way
+/// around) so the two can't silently drift apart.
+pub const STEP_MAX_OUTPUT_TOKENS: u32 = 4_096;
 
 /// `limit == u64::MAX` means unlimited (`tm_types::Budget`'s convention); render that as the
 /// word rather than a `u64::MAX`-sized number no one can act on.
@@ -189,40 +199,68 @@ pub fn build_budget(ticket: &Ticket, roles: &RoleTable) -> RawSection {
     }
 
     lines.push(String::new());
-    lines.push("Tier menu (primary candidate per role):".to_string());
+    // "Affordable tiers", not "every configured tier" (`budget-affordability-menu-in-context-
+    // pack`, `SPEC.md` §31.2): a candidate this ticket cannot pay for even once at the nominal
+    // step size is dropped from the menu below rather than listed as an option that would just
+    // trip a caller's `AgentLoop::can_afford`-style check anyway. This uses the same
+    // [`tm_provider::fabric::cost_micros`] formula `AgentLoop::drive`'s own pre-call dollar
+    // estimate does ([`NOMINAL_CALL_TOKENS`] input tokens, [`STEP_MAX_OUTPUT_TOKENS`] output
+    // tokens), just off `roles`/`ticket.budget` here rather than a live `Fabric`, since a
+    // context-pack section only ever sees the configured table, not a running fabric's
+    // breaker/concurrency state.
+    lines.push("Affordable tiers (per role, routing order):".to_string());
+    let nominal_usage = tm_provider::types::Usage {
+        input_tokens: NOMINAL_CALL_TOKENS as u32,
+        output_tokens: STEP_MAX_OUTPUT_TOKENS,
+        cache_read_tokens: 0,
+        cache_write_tokens: 0,
+    };
     for role in Role::ALL {
-        let Some(candidate) = roles.candidates_for(role).first() else {
+        let candidates = roles.candidates_for(role);
+        if candidates.is_empty() {
             continue;
-        };
-        let label = format!(
-            "{} ({}/{})",
-            role.as_str(),
-            candidate.provider,
-            candidate.model
-        );
-        match candidate.price {
-            None => lines.push(format!("  {label}: subscription/unmetered capacity")),
-            Some(price) => {
-                // `Price` is per 1,000,000 tokens, not per token
-                // (`critic-real-prices-and-price-unit`), so divide back down after the
-                // nominal-tokens multiply.
-                let call_micros = NOMINAL_CALL_TOKENS
-                    * (price.input_micros_per_million_tokens
-                        + price.output_micros_per_million_tokens)
-                    / 2
-                    / 1_000_000;
-                if call_micros == 0 {
-                    lines.push(format!("  {label}: effectively free"));
-                } else if budget.dollars_micros == u64::MAX {
-                    lines.push(format!("  {label}: unmetered dollar budget"));
-                } else {
-                    let calls = remaining.dollars_micros / call_micros;
-                    lines.push(format!(
-                        "  {label}: ~${:.4}/call of ~{NOMINAL_CALL_TOKENS} tokens — ~{calls} call(s) remain affordable",
-                        call_micros as f64 / 1_000_000.0
-                    ));
+        }
+        let mut any_affordable = false;
+        for candidate in candidates {
+            let label = format!(
+                "{} ({}/{})",
+                role.as_str(),
+                candidate.provider,
+                candidate.model
+            );
+            match candidate.price {
+                None => {
+                    lines.push(format!("  {label}: subscription/unmetered capacity"));
+                    any_affordable = true;
+                }
+                Some(price) => {
+                    let step_micros = tm_provider::fabric::cost_micros(&price, &nominal_usage);
+                    if step_micros == 0 {
+                        lines.push(format!("  {label}: effectively free"));
+                        any_affordable = true;
+                    } else if budget.dollars_micros == u64::MAX {
+                        lines.push(format!("  {label}: unmetered dollar budget"));
+                        any_affordable = true;
+                    } else {
+                        let steps = remaining.dollars_micros / step_micros;
+                        if steps == 0 {
+                            // Priced, but not affordable even once: leave it off the menu.
+                            continue;
+                        }
+                        lines.push(format!(
+                            "  {label}: ~${:.4}/step of ~{NOMINAL_CALL_TOKENS} prompt + {STEP_MAX_OUTPUT_TOKENS} output tokens — ~{steps} step(s) affordable",
+                            step_micros as f64 / 1_000_000.0
+                        ));
+                        any_affordable = true;
+                    }
                 }
             }
+        }
+        if !any_affordable {
+            lines.push(format!(
+                "  {}: no configured candidate is affordable in what's left of the dollar budget",
+                role.as_str()
+            ));
         }
     }
 
@@ -1231,10 +1269,60 @@ mod tests {
         .expect("valid table");
 
         let section = build_budget(&ticket, &table);
+        // (2_000 prompt + 4_096 output) tokens * $10/M both ways = 60_960 micros/step.
         assert!(section
             .body
-            .contains("coder.fast (anthropic/claude): ~$0.0200/call"));
-        assert!(section.body.contains("call(s) remain affordable"));
+            .contains("coder.fast (anthropic/claude): ~$0.0610/step"));
+        assert!(section.body.contains("step(s) affordable"));
+    }
+
+    #[test]
+    fn build_budget_tier_menu_drops_a_candidate_it_cannot_afford_even_once() {
+        // A near-exhausted dollar budget ($0.0001 left) against a candidate priced at $10/M
+        // tokens both ways: one nominal-sized step already costs far more than that
+        // (`budget-affordability-menu-in-context-pack`) -- the menu should say so instead of
+        // listing "~0 step(s) affordable".
+        let mut ticket = minimal_ticket("T-1", "Task");
+        ticket.budget = Budget::new(u64::MAX, 100, u64::MAX);
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [{ provider = \"anthropic\", model = \"claude\", max_concurrency = 1, price = { input_micros_per_million_tokens = 10000000, output_micros_per_million_tokens = 10000000 } }]\n",
+        )
+        .expect("valid table");
+
+        let section = build_budget(&ticket, &table);
+        assert!(
+            !section.body.contains("coder.fast (anthropic/claude): ~$"),
+            "an unaffordable candidate must not appear priced on the menu: {}",
+            section.body
+        );
+        assert!(section
+            .body
+            .contains("coder.fast: no configured candidate is affordable"));
+    }
+
+    #[test]
+    fn build_budget_tier_menu_lists_a_cheaper_fallback_when_the_primary_is_unaffordable() {
+        // Primary ("expensive") costs more per nominal call than the $0.001 left; the degraded
+        // fallback ("cheap") still fits and must still show up on the menu even though it isn't
+        // index 0.
+        let mut ticket = minimal_ticket("T-1", "Task");
+        ticket.budget = Budget::new(u64::MAX, 1_000, u64::MAX);
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [\
+             { provider = \"anthropic\", model = \"expensive\", max_concurrency = 1, price = { input_micros_per_million_tokens = 10000000, output_micros_per_million_tokens = 10000000 } }, \
+             { provider = \"anthropic\", model = \"cheap\", max_concurrency = 1, degraded_ok = true, price = { input_micros_per_million_tokens = 1000, output_micros_per_million_tokens = 1000 } }\
+             ]\n",
+        )
+        .expect("valid table");
+
+        let section = build_budget(&ticket, &table);
+        assert!(
+            !section.body.contains("(anthropic/expensive)"),
+            "the unaffordable primary must not appear on the menu: {}",
+            section.body
+        );
+        assert!(section.body.contains("coder.fast (anthropic/cheap): ~$"));
+        assert!(section.body.contains("step(s) affordable"));
     }
 
     // ---- build_wiki (SPEC.md §26, docs/audit-2026-09-18-fable.md B-14) ----------------------

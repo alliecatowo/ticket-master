@@ -68,8 +68,13 @@ pub const DEFAULT_MAX_STEPS: u32 = 64;
 /// default), never on ordinary single-run work.
 pub const DEFAULT_MAX_EVENTS_PER_TICKET: u32 = 5000;
 
-/// Upper bound on generated tokens per provider call.
-const MAX_TOKENS_PER_STEP: u32 = 4096;
+/// Upper bound on generated tokens per provider call. Defined in terms of
+/// [`tm_context::sections::STEP_MAX_OUTPUT_TOKENS`] (not the reverse -- this crate already
+/// depends on `tm-context`, not the other way around) so this loop's own pre-call dollar
+/// estimate ([`estimate_prompt_tokens`]/[`Fabric::affordable_candidates`]) and
+/// `tm_context::sections::build_budget`'s "affordable tiers" menu can never silently price a
+/// step differently from each other.
+const MAX_TOKENS_PER_STEP: u32 = tm_context::sections::STEP_MAX_OUTPUT_TOKENS;
 
 /// How long, in total, one provider call waits for fabric capacity before the loop gives up and
 /// reports [`FailureClass::ProviderUnavailable`] (`docs/decisions/D-023-capacity-wait-is-not-a-failed-attempt.md`).
@@ -950,11 +955,51 @@ impl AgentLoop {
             // `docs/audit-2026-09-18-fable.md` B-10), rather than issuing the call and
             // discovering the shortfall only after it returns. `MAX_TOKENS_PER_STEP` — the same
             // ceiling sent below as `CompletionRequest::max_tokens` — is the most this step could
-            // ever be charged, so it doubles as a conservative pre-call estimate; it does not
-            // need to predict the model's actual output length, only bound the worst case.
+            // ever be charged in tokens, so it doubles as a conservative pre-call estimate for
+            // that dimension; it does not need to predict the model's actual output length, only
+            // bound the worst case. The dollar dimension needs its own estimate, priced per
+            // candidate rather than assumed zero (`budget-affordability-menu-in-context-pack`):
+            // `estimate_prompt_tokens` bounds this step's input size, and
+            // [`Fabric::affordable_candidates`] prices every one of `self.role`'s candidates
+            // against it (input tokens times that candidate's input price, plus
+            // `MAX_TOKENS_PER_STEP` output tokens times its output price) to see which still fit
+            // what's left of the ticket's dollar budget.
+            let prompt_tokens = estimate_prompt_tokens(Some(rendered.system.as_str()), &messages);
+            let remaining_dollars_micros = effective_budget.remaining().dollars_micros;
+            let affordable = self.fabric.affordable_candidates(
+                self.role,
+                remaining_dollars_micros,
+                prompt_tokens,
+                MAX_TOKENS_PER_STEP,
+            );
+            let primary = self.fabric.candidates(self.role).into_iter().next();
+            let primary_affordable = primary
+                .as_ref()
+                .is_some_and(|p| affordable.iter().any(|a| &a.model == p));
+            // The primary can't afford this step but a cheaper tier in the same role can: route
+            // this one step to it instead of handing the ticket off (SPEC.md §31.2's "tier down
+            // before refusing"). `affordable` is already in table order, so its first entry is
+            // the least-degraded affordable candidate, not merely the cheapest.
+            let tier_down = (!primary_affordable)
+                .then(|| affordable.first().cloned())
+                .flatten();
+
+            let estimated_dollars_micros = match (&tier_down, primary_affordable) {
+                (Some(candidate), _) => candidate.estimated_cost_micros.unwrap_or(0),
+                (None, true) => affordable
+                    .iter()
+                    .find(|a| Some(&a.model) == primary.as_ref())
+                    .and_then(|a| a.estimated_cost_micros)
+                    .unwrap_or(0),
+                // No candidate configured for this role affords the step: name the dollar
+                // dimension explicitly (a strictly-over-remaining value) so
+                // `first_unaffordable_dimension` reports `Dollars` rather than falling through to
+                // `Tokens` by default.
+                (None, false) => remaining_dollars_micros.saturating_add(1),
+            };
             let estimated_cost = Spend {
                 tokens: u64::from(MAX_TOKENS_PER_STEP),
-                dollars_micros: 0,
+                dollars_micros: estimated_dollars_micros,
                 wall_seconds: 0,
             };
             if !self.can_afford(&effective_budget, estimated_cost) {
@@ -975,7 +1020,15 @@ impl AgentLoop {
                 model: None,
             };
 
-            let (completion, cost_micros) = match self.execute_with_capacity_wait(request).await {
+            let call_result = match &tier_down {
+                Some(candidate) => {
+                    self.fabric
+                        .execute_priced_tier_down(self.role, candidate.model.clone(), request)
+                        .await
+                }
+                None => self.execute_with_capacity_wait(request).await,
+            };
+            let (completion, cost_micros) = match call_result {
                 Ok(result) => result,
                 Err(e) => {
                     self.record_provider_events(task)?;
@@ -1449,6 +1502,32 @@ pub fn first_unaffordable_dimension(budget: &Budget, estimated: Spend) -> Option
         return Some(BudgetDimension::WallSeconds);
     }
     None
+}
+
+/// A conservative, provider-independent estimate of how many input tokens `system` plus
+/// `messages` will cost as the next step's prompt, for pricing a candidate *before* the call
+/// (`budget-affordability-menu-in-context-pack`, `SPEC.md` §31.2) — never sent to the provider
+/// or billed itself; the real charge comes back on `Completion::usage` once the call returns.
+/// Sums every text/tool-input/tool-result byte (the same shape
+/// [`tm_provider::mock::MockProvider::deterministic_completion`] estimates `Usage` from for a
+/// scripted response) and divides by four, rounding up — the prose chars-per-token constant
+/// [`tm_context::tokens::estimate_tokens_prose`] uses for this workspace's other token-budgeting
+/// estimates, applied here to the whole prompt at once rather than per rendered section.
+fn estimate_prompt_tokens(system: Option<&str>, messages: &[Message]) -> u64 {
+    fn block_chars(block: &ContentBlock) -> usize {
+        match block {
+            ContentBlock::Text { text } => text.len(),
+            ContentBlock::ToolUse { input, .. } => input.to_string().len(),
+            ContentBlock::ToolResult { content, .. } => content.iter().map(block_chars).sum(),
+        }
+    }
+    let system_chars = system.map_or(0, str::len);
+    let message_chars: usize = messages
+        .iter()
+        .flat_map(|m| &m.content)
+        .map(block_chars)
+        .sum();
+    ((system_chars + message_chars) as u64).div_ceil(4)
 }
 
 #[cfg(test)]
@@ -2241,6 +2320,163 @@ mod tests {
                 .values()
                 .all(|l| l.ticket != h.ticket),
             "the lease must be released, not left dangling"
+        );
+    }
+
+    // ---- budget-affordability-menu-in-context-pack (`SPEC.md` §31.2): dollar-aware tier-down
+    // and hand-off ------------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn drive_tiers_down_to_a_cheaper_candidate_the_primary_cannot_afford() {
+        // Two priced candidates for the same role: a wildly expensive primary and a genuinely
+        // cheap fallback (not merely unpriced/unmetered, so this exercises picking a cheaper
+        // *priced* tier, not just falling back to untracked cost). A dollar budget of 1,000
+        // micro-dollars cannot afford even the primary's output tokens alone (4,096 tokens at
+        // $1,000/M is already 4,096,000 micros), but the cheap fallback's estimate stays under
+        // it for any realistic prompt size, so the step must route there instead of handing off.
+        let h = LiveHarness::new();
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [\
+             { provider = \"expensive\", model = \"big\", max_concurrency = 1, price = { input_micros_per_million_tokens = 1000000000, output_micros_per_million_tokens = 1000000000 } }, \
+             { provider = \"cheap\", model = \"small\", max_concurrency = 1, degraded_ok = true, price = { input_micros_per_million_tokens = 1000, output_micros_per_million_tokens = 1000 } }\
+             ]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let expensive_provider = Arc::new(MockProvider::new(
+            "expensive",
+            ModelId::new("expensive", "big"),
+            h.clock.clone(),
+        ));
+        let cheap_provider = Arc::new(MockProvider::new(
+            "cheap",
+            ModelId::new("cheap", "small"),
+            h.clock.clone(),
+        ));
+        fabric.register_provider(expensive_provider.clone());
+        fabric.register_provider(cheap_provider.clone());
+
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            Budget::new(u64::MAX, 1_000, u64::MAX),
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        )
+        .with_max_steps(1);
+        let task = h.task();
+        let request = expected_request(&agent_loop, &task);
+        cheap_provider.script_response(
+            &request,
+            text_only_completion(ModelId::new("cheap", "small"), &h.clock),
+        );
+        // Deliberately nothing scripted on `expensive_provider`: if the loop ever calls it
+        // despite the budget shortfall, `MockProvider` errors loudly rather than this test
+        // silently passing.
+
+        let outcome = agent_loop.run(task).await.expect("run completes");
+        assert!(
+            !matches!(outcome, AgentOutcome::BudgetExhausted { .. }),
+            "an affordable fallback exists, so this must not hand off: {outcome:?}"
+        );
+        assert_eq!(
+            expensive_provider.call_log().len(),
+            0,
+            "the unaffordable primary must never be called"
+        );
+        assert_eq!(
+            cheap_provider.call_log().len(),
+            1,
+            "the affordable fallback must serve the step"
+        );
+
+        let events = h.all_events();
+        let degraded = find_events(&events, EventKind::ProviderDegraded);
+        assert_eq!(degraded.len(), 1);
+        let payload = degraded[0]
+            .payload
+            .as_provider_degraded()
+            .expect("provider.degraded payload");
+        assert_eq!(payload.provider, "cheap/small");
+        assert!(
+            payload.reason.contains("budget tier-down"),
+            "the degrade reason should name this as a budget tier-down: {}",
+            payload.reason
+        );
+    }
+
+    #[tokio::test]
+    async fn drive_hands_off_when_no_candidate_for_the_role_can_afford_the_step() {
+        // Both candidates are priced well beyond a near-exhausted dollar budget: unlike the
+        // token-only shortfall `drive_hands_off_cleanly_when_it_cannot_afford_the_next_step`
+        // covers, this must hand off naming `BudgetDimension::Dollars`, and never call either
+        // provider.
+        let h = LiveHarness::new();
+        h.store
+            .activate(&h.ticket, h.actor.clone())
+            .expect("activate");
+        h.store
+            .acquire_lease(
+                &h.ticket,
+                h.actor.clone(),
+                Authority::root(),
+                Vec::new(),
+                300,
+                h.actor.clone(),
+            )
+            .expect("acquire lease");
+        h.store
+            .transition(&h.ticket, tm_core::Trigger::WorkStarted, h.actor.clone())
+            .expect("work started");
+
+        let table = RoleTable::parse(
+            "[coder_fast]\ncandidates = [\
+             { provider = \"mock\", model = \"m1\", max_concurrency = 1, price = { input_micros_per_million_tokens = 1000000000, output_micros_per_million_tokens = 1000000000 } }, \
+             { provider = \"mock\", model = \"m2\", max_concurrency = 1, degraded_ok = true, price = { input_micros_per_million_tokens = 1000000000, output_micros_per_million_tokens = 1000000000 } }\
+             ]\n",
+        )
+        .expect("role table parses");
+        let fabric = Arc::new(Fabric::new(table, h.clock.clone()));
+        let provider = Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "m1"),
+            h.clock.clone(),
+        ));
+        fabric.register_provider(provider.clone());
+        // Deliberately nothing scripted: neither candidate can afford this step, so neither
+        // should ever be called.
+
+        let starved_dollars = Budget::new(u64::MAX, 1, u64::MAX);
+        let mut agent_loop = AgentLoop::new(
+            fabric,
+            h.tools(),
+            Authority::root(),
+            starved_dollars,
+            h.clock.clone(),
+            h.ids.clone(),
+            Role::CoderFast,
+            h.actor.clone(),
+            h.store.clone(),
+        );
+
+        let outcome = agent_loop.run(h.task()).await.expect("run completes");
+        match outcome {
+            AgentOutcome::BudgetExhausted { steps, exhausted } => {
+                assert!(steps.is_empty(), "must hand off before any step executes");
+                assert_eq!(exhausted, BudgetDimension::Dollars);
+            }
+            other => {
+                panic!("expected BudgetExhausted with BudgetDimension::Dollars, got {other:?}")
+            }
+        }
+        assert_eq!(
+            provider.call_log().len(),
+            0,
+            "an unaffordable role must never reach the provider"
         );
     }
 
