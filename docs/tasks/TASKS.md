@@ -1415,7 +1415,7 @@ is based on.
   acceptance: When a tool call fails with an invariant or parse error, `tm run` output names the failed operation and suggests a concrete next action, while detailed diagnostics remain available in logs; add focused tests for both cases.
   test: `cargo test -p tm-cli plain_tool_error`
   evidence: `/tmp/tm-trials/20260925-1314/gohugoio-hugo-15360/tm.log` lines 96-98: “Submitted the ticket -> error: hit an unexpected internal problem”, “Saved a result -> error: got a response it couldn't understand”, then “Saved a result” and “Submitted the ticket”.
-- [ ] **t20260925-1314-pallets-click-3822-summarize-repeated-file-reads** — Make repeated file reads distinguishable in `tm run` progress
+- [~] **t20260925-1314-pallets-click-3822-summarize-repeated-file-reads** — Make repeated file reads distinguishable in `tm run` progress (needs another pass: the worker made no changes)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/agent.rs`
   change: Update tool progress rendering so consecutive repeated reads of the same path are compacted or explicitly counted, while preserving distinct path/range reads as separate actions; include a final repeat count so users can tell whether the agent is stuck rereading context.
