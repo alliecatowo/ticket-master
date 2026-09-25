@@ -630,7 +630,7 @@ impl Backend for MacosBackend {
         }
         notes.push(
             "headless is unavailable on macOS: CGEvent injection and screen capture both target \
-             the active login session (SPEC.md §20.3)"
+             the active login session"
                 .to_string(),
         );
 

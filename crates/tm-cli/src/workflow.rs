@@ -264,7 +264,7 @@ pub fn workflow_show(
         if def.is_one_by_one() {
             human.push_str(
                 "\n# note: this workflow is one node wide and one node deep -- tm doctor flags \
-                 this as a possible \"prompt wearing a costume\" (SPEC.md §25.3).\n",
+                 this as a possible \"prompt wearing a costume\".\n",
             );
         }
         match drift {

@@ -23,6 +23,7 @@ pub fn run_all(root: &Path) -> Vec<String> {
     out.extend(check_dot_tm_literals(root));
     out.extend(check_decision_doc_references(root));
     out.extend(check_cli_help_jargon(root));
+    out.extend(check_spec_refs_in_user_strings(root));
     out
 }
 
@@ -808,6 +809,9 @@ pub fn check_cli_help_jargon(root: &Path) -> Vec<String> {
         if contains_tm_module_path(text) {
             reasons.push("a `tm_*::` module path");
         }
+        if text.contains("SPEC.md") && text.contains('§') {
+            reasons.push("a SPEC section reference");
+        }
         if !reasons.is_empty() {
             violations.push(format!(
                 "{}:{}: user-facing help text contains {} — rewrite this `///` line in plain \
@@ -820,6 +824,45 @@ pub fn check_cli_help_jargon(root: &Path) -> Vec<String> {
         }
     }
     violations
+}
+
+/// User-facing strings and clap help must not expose internal SPEC section references.
+pub fn check_spec_refs_in_user_strings(root: &Path) -> Vec<String> {
+    let mut violations = Vec::new();
+    for src in crate_src_dirs(root) {
+        walk_rs_files(&src, |path, contents| {
+            let mut tracker = TestRegionTracker::new(path);
+            for (i, line) in contents.lines().enumerate() {
+                tracker.observe(line);
+                if tracker.in_test() || path.ends_with("crates/tm-cli/src/args.rs") {
+                    continue;
+                }
+                let code = strip_line_comment(line);
+                if code.contains("SPEC.md") && code.contains('§') && code.contains('"') {
+                    violations.push(format!(
+                        "{}:{}: user-facing string contains a SPEC section reference — rewrite in plain language",
+                        path.display(), i + 1
+                    ));
+                }
+            }
+        });
+    }
+    violations.extend(check_cli_help_jargon_spec_refs(root));
+    violations
+}
+
+fn check_cli_help_jargon_spec_refs(root: &Path) -> Vec<String> {
+    // Reuse the established args.rs-only doc-comment scope; the combined check above covers
+    // string literals in all other production source files.
+    let path = root.join("crates/tm-cli/src/args.rs");
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    contents.lines().enumerate().filter_map(|(i, line)| {
+        let trimmed = line.trim_start();
+        (trimmed.starts_with("///") && trimmed.contains("SPEC.md") && trimmed.contains('§'))
+            .then(|| format!("{}:{}: user-facing help text contains a SPEC section reference — rewrite in plain language", path.display(), i + 1))
+    }).collect()
 }
 
 #[cfg(test)]
@@ -1294,5 +1337,27 @@ mod tests {
         // Deliberately narrow: an underscore between segments breaks the match (see
         // `contains_tm_module_path`'s own doc comment for why that's the intended scope).
         assert!(!contains_tm_module_path("tm_agent_loop::Foo"));
+    }
+
+    #[test]
+    fn spec_refs_in_user_strings_flags_literals_and_args_help_but_allows_plain_text() {
+        let root = temp_root();
+        write(
+            &root.join("crates/tm-cli/src/drive.rs"),
+            "fn message() { let _ = \"see SPEC.md §1\"; }\n",
+        );
+        write(
+            &root.join("crates/tm-cli/src/args.rs"),
+            "/// See SPEC.md §1 for details.\nfn help() {}\n",
+        );
+        let violations = check_spec_refs_in_user_strings(&root);
+        assert_eq!(violations.len(), 2, "{violations:?}");
+
+        let clean = temp_root();
+        write(
+            &clean.join("crates/tm-cli/src/drive.rs"),
+            "fn message() { let _ = \"See the user guide for details.\"; }\n",
+        );
+        assert!(check_spec_refs_in_user_strings(&clean).is_empty());
     }
 }

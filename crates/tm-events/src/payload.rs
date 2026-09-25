@@ -205,7 +205,7 @@ payload_kinds! {
         limit: u64,
         spent: u64,
     };
-    "Payload for `ticket.budget_handoff` (`SPEC.md` §31.3, `docs/audit-2026-09-18-fable.md` B-10): never a failure, so this carries no `FailureClass` — just which dimension triggered the handoff.", TicketBudgetHandoffPayload, TicketBudgetHandoff, TicketBudgetHandoff, as_ticket_budget_handoff, {
+    "Payload for `ticket.budget_handoff`: records which budget dimension triggered the handoff; a handoff is not a failure.", TicketBudgetHandoffPayload, TicketBudgetHandoff, TicketBudgetHandoff, as_ticket_budget_handoff, {
         ticket: TicketId,
         dimension: String,
     };
@@ -428,7 +428,7 @@ payload_kinds! {
         remote: String,
         reference: String,
     };
-    "Payload for `effect.journaled` (`SPEC.md` §21.5).", EffectJournaledPayload, EffectJournaled, EffectJournaled, as_effect_journaled, {
+    "Payload for `effect.journaled`.", EffectJournaledPayload, EffectJournaled, EffectJournaled, as_effect_journaled, {
         key: String,
         ticket: TicketId,
         attempt: u32,
@@ -444,7 +444,7 @@ payload_kinds! {
         ticket: TicketId,
         reason: String,
     };
-    "Payload for `goal.set` (`SPEC.md` §29): sets or replaces the durable objective a worker's live decomposition tracks for one execution -- distinct from the ticket's own `objective` field.", GoalSetPayload, GoalSet, GoalSet, as_goal_set, {
+    "Payload for `goal.set`: sets or replaces the durable objective tracked by a worker's live decomposition for one execution, distinct from the ticket's objective.", GoalSetPayload, GoalSet, GoalSet, as_goal_set, {
         ticket: TicketId,
         text: String,
     };
@@ -457,11 +457,11 @@ payload_kinds! {
         ticket: TicketId,
         step_id: String,
     };
-    "Payload for `goal.reoriented` (`SPEC.md` §29): the loop re-read goal state against observed state at the start of `at_step`, rather than trusting only its own in-memory conversation history.", GoalReorientedPayload, GoalReoriented, GoalReoriented, as_goal_reoriented, {
+    "Payload for `goal.reoriented`: the loop re-reads goal state against observed state at the start of a step instead of relying only on conversation history.", GoalReorientedPayload, GoalReoriented, GoalReoriented, as_goal_reoriented, {
         ticket: TicketId,
         at_step: u32,
     };
-    "Payload for `goal.claimed_complete` (`SPEC.md` §29): the loop believes the goal is met. A claim only -- `SPEC.md` §16's verification ladder decides whether it was, never this event.", GoalClaimedCompletePayload, GoalClaimedComplete, GoalClaimedComplete, as_goal_claimed_complete, {
+    "Payload for `goal.claimed_complete`: the loop believes the goal is met; completion still requires independent verification.", GoalClaimedCompletePayload, GoalClaimedComplete, GoalClaimedComplete, as_goal_claimed_complete, {
         ticket: TicketId,
         summary: String,
     };

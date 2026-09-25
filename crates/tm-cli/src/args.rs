@@ -256,7 +256,7 @@ pub enum Command {
     Mcp(McpArgs),
 
     /// Serve the project as an Agent Client Protocol agent over stdio, for editors like Zed
-    /// (`SPEC.md` §28.1).
+    /// using a standard editor integration.
     #[command(hide = true)]
     Acp(AcpArgs),
 
@@ -284,7 +284,7 @@ pub enum Command {
     Wiki(WikiCommand),
 }
 
-/// `tm wiki ...` (`SPEC.md` §26, B-14).
+/// `tm wiki ...` generates project documentation from current state.
 #[derive(Debug, Subcommand)]
 pub enum WikiCommand {
     /// Assemble every wiki page family (architecture/<crate>, decisions, history/<path>,

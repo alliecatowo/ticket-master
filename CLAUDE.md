@@ -51,7 +51,9 @@ never drift between sessions:
   cross-reference — see that check's own doc comment for the full reasoning. It also flags
   dangling `D-NNN`/`crates/`/`tm_*::` jargon in `tm-cli`'s `--help` text (`args.rs`'s `///` doc
   comments), on the theory that a user-facing help string shouldn't assume repo-internal
-  knowledge.
+  knowledge. It also rejects SPEC section pointers in production string literals and in `args.rs`
+  help comments; user-facing wording should explain behavior directly rather than point users at
+  internal SPEC numbering.
 - `mise run verify` — the full gate (fmt check + clippy + `cargo test --workspace` + hygiene).
   **Run this before considering any change done**, not just a crate-scoped test pass.
 - `mise run check-drift -- <sha>` — advisory, post-merge only, **not** part of `verify`: flags an

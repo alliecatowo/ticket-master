@@ -2361,7 +2361,7 @@ fn workflow_doctor_detail(project: &Project) -> DoctorCheck {
     } else {
         format!(
             "{} workflow(s) are one node wide and one node deep, i.e. a prompt wearing a \
-             costume (SPEC.md §25.3): {}",
+             costume: {}",
             flagged.len(),
             flagged.join(", ")
         )

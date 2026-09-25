@@ -139,7 +139,7 @@ fn load_browser_toml(project: &Project) -> tm_types::Result<BrowserToml> {
     let source = fs::read_to_string(&path).map_err(|_| {
         TmError::not_found(
             "browser.toml",
-            "Create a browser.toml file with a provider configuration. See SPEC.md §19.1a for examples (managed: pinned Chrome download, remote-cdp: existing browser endpoint).",
+            "Create browser.toml with a provider configuration, such as a managed browser download or an existing remote browser endpoint.",
         )
     })?;
     BrowserToml::parse(&source)
@@ -573,20 +573,14 @@ mod tests {
     }
 
     #[test]
-    fn browser_toml_error_message_documentation_focused() {
-        // Verify that the browser.toml error message points to documentation
-        // instead of teaching TOML syntax inline.
-        // The error message should:
-        // - Reference SPEC.md §19.1a
-        // - NOT contain [managed] or [remote_cdp] TOML syntax
-        // - NOT mention fallback_order
+    fn browser_toml_error_message_describes_provider_options() {
+        // The error should name useful provider options without requiring documentation lookup.
         let error_msg = "Create a browser.toml file with a provider configuration. \
-                         See SPEC.md §19.1a for examples (managed: pinned Chrome download, \
-                         remote-cdp: existing browser endpoint).";
+                         such as a managed browser download or an existing remote browser endpoint.";
 
         assert!(
-            error_msg.contains("SPEC.md §19.1a"),
-            "Error should reference SPEC.md §19.1a"
+            error_msg.contains("managed browser download"),
+            "Error should describe the managed provider option"
         );
         assert!(
             !error_msg.contains("[managed]"),
