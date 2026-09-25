@@ -1121,20 +1121,34 @@ pub async fn provider_list(project: Option<&Project>, renderer: &Renderer) -> tm
 
     let known = tm_provider::Registry::known_providers();
     let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::SystemClock);
-    let mut availability_by_slug: BTreeMap<String, tm_provider::Availability> = BTreeMap::new();
+    let mut availability_by_slug: BTreeMap<String, String> = BTreeMap::new();
     for role in Role::ALL {
         for candidate in role_table.candidates_for(role) {
             if availability_by_slug.contains_key(&candidate.provider) {
                 continue;
             }
-            let availability = match known.iter().find(|info| info.id == candidate.provider) {
-                Some(info) => tm_provider::Registry::availability(info, clock.clone()).await,
-                // A slug harness.toml names that this build of the crate doesn't recognize at
-                // all: report it as unconfigured rather than panicking or silently dropping the
-                // row.
-                None => tm_provider::Availability::NotConfigured,
+            let availability = if role == Role::Decider && candidate.provider == "mock" {
+                "offline (mock)"
+            } else if role == Role::Decider
+                && matches!(candidate.provider.as_str(), "systemone" | "systemone-http")
+            {
+                if std::env::var("AI_GATEWAY_API_KEY").is_ok() {
+                    "ready"
+                } else {
+                    "missing AI_GATEWAY_API_KEY"
+                }
+            } else {
+                match known.iter().find(|info| info.id == candidate.provider) {
+                    Some(info) => availability_label(
+                        tm_provider::Registry::availability(info, clock.clone()).await,
+                    ),
+                    // A slug harness.toml names that this build of the crate doesn't recognize at
+                    // all: report it as unconfigured rather than panicking or silently dropping the
+                    // row.
+                    None => "not-configured",
+                }
             };
-            availability_by_slug.insert(candidate.provider.clone(), availability);
+            availability_by_slug.insert(candidate.provider.clone(), availability.to_string());
         }
     }
 
@@ -1147,7 +1161,7 @@ pub async fn provider_list(project: Option<&Project>, renderer: &Renderer) -> tm
                     "provider": candidate.provider,
                     "model": candidate.model,
                     "concurrency": candidate.max_concurrency,
-                    "availability": availability_label(availability_by_slug[&candidate.provider]),
+                    "availability": availability_by_slug[&candidate.provider],
                 }));
             }
         }
@@ -1161,7 +1175,7 @@ pub async fn provider_list(project: Option<&Project>, renderer: &Renderer) -> tm
                     candidate.provider.to_string(),
                     candidate.model.to_string(),
                     candidate.max_concurrency.to_string(),
-                    availability_label(availability_by_slug[&candidate.provider]).to_string(),
+                    availability_by_slug[&candidate.provider].clone(),
                 ]);
             }
         }
@@ -1332,6 +1346,21 @@ pub async fn provider_status(
             "env_vars_present": serde_json::Value::Null,
             "in_turn_fabric": true,
             "roles": roles_routed_to(&table, id),
+        }));
+    }
+    if let Some(candidate) = table.candidates_for(Role::Decider).first() {
+        let availability = match candidate.provider.as_str() {
+            "mock" => "offline (mock)",
+            "systemone" | "systemone-http" if std::env::var("AI_GATEWAY_API_KEY").is_ok() => {
+                "ready"
+            }
+            "systemone" | "systemone-http" => "missing AI_GATEWAY_API_KEY",
+            _ => "not-configured",
+        };
+        rows.push(serde_json::json!({
+            "id": "decider", "provider": candidate.provider, "model": candidate.model,
+            "availability": availability, "env_vars_present": availability == "ready",
+            "in_turn_fabric": false, "roles": ["decider"]
         }));
     }
 
@@ -1635,6 +1664,83 @@ pub async fn provider_test(
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
     let clock: Arc<dyn tm_types::Clock> = Arc::new(tm_types::SystemClock);
+    if args
+        .provider
+        .as_deref()
+        .is_some_and(|name| name.eq_ignore_ascii_case("decider"))
+    {
+        let table = load_role_table(project)?;
+        let candidate = table
+            .candidates_for(Role::Decider)
+            .first()
+            .ok_or_else(|| tm_types::TmError::Provider("no decider is configured".to_string()))?;
+        let model = tm_provider::ModelId::new(&candidate.provider, &candidate.model);
+        let endpoint = table.decider_endpoint(&candidate.provider, &candidate.model);
+        let token = endpoint
+            .token_env
+            .as_deref()
+            .and_then(|name| std::env::var(name).ok());
+        let decider = tm_provider::Registry::build_decider(
+            &candidate.provider,
+            model,
+            token,
+            endpoint.base_url,
+        )
+        .map_err(|e| tm_types::TmError::Provider(e.to_string()))?;
+        let mut questions = BTreeMap::new();
+        questions.insert(
+            "kind".to_string(),
+            tm_provider::Question::Choice {
+                instructions: "Classify the requested work by its primary ticket kind.".to_string(),
+                options: [
+                    "work",
+                    "verification",
+                    "audit",
+                    "investigation",
+                    "recovery",
+                    "harness",
+                ]
+                .into_iter()
+                .map(|label| tm_provider::OptionSpec {
+                    label: label.to_string(),
+                })
+                .collect(),
+            },
+        );
+        let request = tm_provider::DecideRequest {
+            model: tm_provider::ModelId::new(&candidate.provider, &candidate.model),
+            state: "Add a small test for a Rust library function.".to_string(),
+            questions,
+        };
+        let response = decider
+            .decide(request)
+            .await
+            .map_err(|e| tm_types::TmError::Provider(e.to_string()))?;
+        let answers: Vec<_> = response
+            .answers
+            .iter()
+            .map(|(id, answer)| {
+                serde_json::json!({
+                    "question": id,
+                    "answer": answer.value,
+                    "confidence": answer.confidence,
+                })
+            })
+            .collect();
+        let human = answers
+            .iter()
+            .map(|answer| {
+                format!(
+                    "{}: {} (confidence {:.2})",
+                    answer["question"].as_str().unwrap_or("answer"),
+                    answer["answer"].as_str().unwrap_or("unknown"),
+                    answer["confidence"].as_f64().unwrap_or(0.0),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return renderer.emit(&serde_json::json!({"provider":"decider", "status":"ok", "model":response.model.model, "answers":answers}), &human);
+    }
     let known = tm_provider::Registry::known_providers();
     let fabric = match project.map_or_else(
         || crate::agent::build_fabric(clock.clone()),
