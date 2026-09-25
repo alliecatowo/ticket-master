@@ -889,7 +889,7 @@ Gate: `mise run verify`
   acceptance: Unit tests cover the aggregation. Integration test in a tempdir with the mock provider: after tm run, `tm stats --json` shows nonzero tokens for that ticket, and `--by tool` lists at least one tool if the mock script calls one.
   test: `mise run test:crate -- tm-cli && mise run hygiene`
 
-- [ ] **replay-tool-replay-mode-design** — Replay recorded tool resolutions instead of re-executing tools
+- [x] **replay-tool-replay-mode-design** (landed 36cb4ea) — Replay recorded tool resolutions instead of re-executing tools
   model: opus · size: M · builds Rust: yes · area: replay · deps: replay-cli-replay-flag, tel-tool-call-event-kind
   files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-agent/src/executor.rs`, `docs/decisions/D-NNN-record-replay-harness.md`
   change: Add a ReplayToolSource option on AgentLoop. In replay mode, before dispatching a real tool call, match it against the recorded ToolCallRecord, first by tool_use_id and then by tool_name plus a normalized input hash, and return the recorded ToolCallResolution verbatim. When nothing matches, fail with a distinct divergence error; never fall through to real execution. Decide and document how authority checks interact with this, and whether recorded resolutions come from session StepRecords or tool_call.completed events. Amend [new decision: record/replay cassettes] with a tool-replay section; do not create a new D number.
@@ -900,7 +900,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify`
 
-- [ ] **replay-diff-outcomes-command** — tm harness replay-diff <a> <b>: structural diff of two session transcripts
+- [x] **replay-diff-outcomes-command** (landed dfb76f1) — tm harness replay-diff <a> <b>: structural diff of two session transcripts
   model: sonnet · size: S · builds Rust: yes · area: replay · deps: replay-cassette-types
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs`, `crates/tm-cli/src/replay_diff.rs`, `crates/tm-cli/src/lib.rs`, `CLAUDE.md`
   change: Add a HarnessCommand::ReplayDiff subcommand and a dispatch_harness arm in ops.rs. Put the logic in the new replay_diff.rs. Load both session JSON files through the existing session deserialization (agent.rs:215), walk the paired turns and StepRecords, and report assistant_text mismatches, tool-call name, input or resolution mismatches, spend deltas and step-count mismatches. If both inputs carry a harness epoch (a session pin or a cassette header), warn when they differ. The comparison is a pure function; add a CLAUDE.md line.
