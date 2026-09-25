@@ -488,6 +488,7 @@ mod tests {
             command: Some(Command::Init(tm_cli::args::InitArgs {
                 path: Some(tmp.path().to_path_buf()),
                 fresh: true,
+                no_index: true,
             })),
         };
 

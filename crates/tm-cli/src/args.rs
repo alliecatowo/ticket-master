@@ -321,6 +321,11 @@ pub struct InitArgs {
     /// over.
     #[arg(long)]
     pub fresh: bool,
+
+    /// Skip building the code index up front. By default `tm init` indexes the workspace
+    /// immediately so the first `tm doctor` or `tm run` doesn't pay that cost inside an attempt.
+    #[arg(long = "no-index")]
+    pub no_index: bool,
 }
 
 /// `tm attach [path]`

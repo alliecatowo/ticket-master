@@ -1122,7 +1122,7 @@ pub fn init(args: &InitArgs, renderer: &Renderer) -> tm_types::Result<()> {
             .map_err(|e| TmError::parse(format!("Failed to serialize provider defaults: {e}")))?;
         std::fs::write(&providers_path, defaults)?;
     }
-    let (json, human) = match &promotion {
+    let (mut json, mut human) = match &promotion {
         Some(report) => (
             serde_json::json!({ "root": root, "promoted": report }),
             format!(
@@ -1141,7 +1141,92 @@ pub fn init(args: &InitArgs, renderer: &Renderer) -> tm_types::Result<()> {
             ),
         ),
     };
+
+    if !args.no_index {
+        if let Some(summary) = index_workspace_on_init(&root, &state_dir) {
+            human.push('\n');
+            human.push_str(&summary.line);
+            if let Some(obj) = json.as_object_mut() {
+                obj.insert(
+                    "indexed".to_string(),
+                    serde_json::json!({
+                        "files": summary.files,
+                        "seconds": summary.seconds,
+                    }),
+                );
+            }
+        }
+    }
+
     renderer.emit(&json, &human)
+}
+
+/// The one-line result of [`index_workspace_on_init`]'s indexing pass, kept structured (not just
+/// the rendered string) so [`init`] can also fold the counts into its JSON output.
+struct InitIndexSummary {
+    /// Human-readable summary line, e.g. `"Indexed 634 files in 41s"`.
+    line: String,
+    /// Files newly added or modified by this pass.
+    files: u64,
+    /// Wall-clock seconds the indexing pass took.
+    seconds: u64,
+}
+
+/// Build the code index right after `tm init` creates a project, so the first real cost of
+/// indexing a workspace (parsing every file, embedding chunks, walking git history) is paid once
+/// up front, with `tm init` reporting it, instead of silently inside whichever of `tm doctor`/
+/// `tm run` happens to trigger [`Project::code_intel`]'s best-effort refresh first. Reuses the
+/// same [`tm_codeintel::CodeIntel::update_incremental`] mechanism `tm doctor`'s own "index-health"
+/// check calls (this crate's other explicit refresh site) rather than reimplementing indexing.
+///
+/// Skipped (returns `None`) when `root` isn't inside a git work tree — same restriction
+/// `Project::code_intel` applies, since `update_incremental`'s history ingest needs a real `HEAD`
+/// to walk, and a global-scope project can point anywhere, including `$HOME`. Also returns `None`
+/// rather than failing `tm init` when the refresh itself errors (e.g. a repo with no commits
+/// yet) — a freshly initialized project with no index yet is still more useful than `tm init`
+/// failing outright; the same gap `tm doctor`'s own check tolerates.
+fn index_workspace_on_init(root: &Path, state_dir: &Path) -> Option<InitIndexSummary> {
+    if git2::Repository::open(root).is_err() {
+        return None;
+    }
+    // Timed via the injected `SystemClock`, not `std::time::Instant::now()` -- SPEC section 0's
+    // rule that only `tm-types/src/clock.rs` reads real wall-clock time directly, mechanically
+    // enforced by `mise run hygiene`'s `check_time_and_rand`. A one-line progress summary doing
+    // its own timing still has to go through the same substrate every other timestamp in this
+    // codebase does.
+    let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+    let started = clock.now();
+    let result = tm_codeintel::CodeIntel::open_at_auto(
+        state_dir,
+        root,
+        if cfg!(test) { Some("hash") } else { None },
+    )
+    .and_then(|ci| ci.update_incremental(clock.as_ref()));
+    match result {
+        Ok(delta) => {
+            let files = delta.files_added + delta.files_modified;
+            let ended = clock.now();
+            let seconds = ended
+                .unix_nanos()
+                .saturating_sub(started.unix_nanos())
+                .max(0)
+                / 1_000_000_000;
+            let seconds = seconds as u64;
+            Some(InitIndexSummary {
+                line: format!("Indexed {files} files in {seconds}s"),
+                files,
+                seconds,
+            })
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                root = %root.display(),
+                "could not build the initial code index; continuing without one"
+            );
+            None
+        }
+    }
 }
 
 /// `tm attach [path]`: assimilate an existing repository into a project, creating one first if
@@ -2789,6 +2874,7 @@ mod tests {
         let args = InitArgs {
             path: Some(tmp.path().to_path_buf()),
             fresh: true,
+            no_index: true,
         };
         init(&args, &test_renderer()).unwrap();
         assert!(tmp.path().join(".tm").is_dir());
@@ -2800,10 +2886,77 @@ mod tests {
         let args = InitArgs {
             path: Some(tmp.path().to_path_buf()),
             fresh: true,
+            no_index: true,
         };
         init(&args, &test_renderer()).unwrap();
         let err = init(&args, &test_renderer()).unwrap_err();
         assert!(matches!(err, TmError::Conflict(_)));
+    }
+
+    /// The u1-init-builds-index fix: `tm init` should pay the cost of building the code index up
+    /// front (reusing the same `update_incremental` mechanism `tm doctor`'s "index-health" check
+    /// calls), rather than leaving the first `tm doctor`/`tm run` to discover an empty index and
+    /// do that work inside an attempt. This drives `init` end to end and then a real `doctor`
+    /// pass, checking the doctor call afterward reports zero drift (nothing left for it to do).
+    #[test]
+    fn init_builds_the_code_index_up_front() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        std::fs::write(tmp.path().join("README.md"), "# hi\n").unwrap();
+        std::fs::write(tmp.path().join("lib.rs"), "fn main() {}\n").unwrap();
+
+        let args = InitArgs {
+            path: Some(tmp.path().to_path_buf()),
+            fresh: true,
+            no_index: false,
+        };
+        init(&args, &test_renderer()).unwrap();
+
+        assert!(
+            tmp.path().join(".tm").join("index.db").exists(),
+            "tm init should have built the code index, not left it for the first doctor/run"
+        );
+
+        let project = open(tmp.path()).unwrap();
+        let report = doctor(
+            &project,
+            &DoctorArgs {
+                skip_computer_probe: true,
+            },
+            &test_renderer(),
+        )
+        .unwrap();
+        let index_check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "index-health")
+            .expect("doctor should report an index-health check");
+        assert!(
+            index_check
+                .detail
+                .starts_with("repaired incremental drift: 0 added,"),
+            "a doctor run right after `tm init` should find nothing left to index, got: {}",
+            index_check.detail
+        );
+    }
+
+    #[test]
+    fn init_with_no_index_skips_building_the_code_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_git_repo(tmp.path());
+        std::fs::write(tmp.path().join("README.md"), "# hi\n").unwrap();
+
+        let args = InitArgs {
+            path: Some(tmp.path().to_path_buf()),
+            fresh: true,
+            no_index: true,
+        };
+        init(&args, &test_renderer()).unwrap();
+
+        assert!(
+            !tmp.path().join(".tm").join("index.db").exists(),
+            "--no-index should skip building the code index entirely"
+        );
     }
 
     #[test]
@@ -3736,6 +3889,7 @@ mod tests {
         let args = InitArgs {
             path: Some(sub.clone()),
             fresh: false,
+            no_index: true,
         };
         let result = init(&args, &test_renderer());
         std::env::remove_var("TM_HOME");
@@ -3767,6 +3921,7 @@ mod tests {
         let args = InitArgs {
             path: Some(workspace.path().to_path_buf()),
             fresh: true,
+            no_index: true,
         };
         let result = init(&args, &test_renderer());
         std::env::remove_var("TM_HOME");
