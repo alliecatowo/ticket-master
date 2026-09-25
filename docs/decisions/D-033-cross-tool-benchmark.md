@@ -22,6 +22,7 @@ one tool and puts the results next to each other.
 ## Decision
 
 **`cargo xtask bench-cross [--tools tm,opencode,codex,claude] [--task <filter>] [--out <dir>]
+[--model <provider/model>] [--task-timeout <secs>] [--max-cost-usd <amount>]
 [--real-claude-auth]`** (`crates/xtask/src/bench_cross.rs`, wired into `crates/xtask/src/main.rs`;
 `mise run bench:cross` is the `mise.toml` alias) — an `xtask` subcommand, not a `tm` subcommand,
 since it drives `tm` itself as one of several *external* processes rather than running inside a
@@ -58,15 +59,28 @@ Four `ToolAdapter` implementations:
   `providers.toml` resolve — DevPass when `DEVPASS_API_KEY`/`DEVPASS_BASE_URL` are exported in the
   calling environment, per D-005's `coder.fast`-role pattern, but this adapter does not itself pin
   a provider or copy a credential into the scratch directory.
-- **`OpencodeAdapter`**/**`CodexAdapter`** shell `opencode run <task> --format json` / `codex exec
-  <task> --json`, each tool's own documented non-interactive mode. Neither needs an opt-in gate:
-  both already default to reading `OPENAI_API_KEY` (or an equivalent already-cheap credential)
-  from the environment for their own normal use, per `docs/backlog.md`'s own reasoning — asking
-  for them here costs nothing extra to wire.
-- **`ClaudeAdapter`** shells `claude -p <task> --output-format json`. `run()` refuses to construct
-  it at all unless `--real-claude-auth` is passed explicitly — the one adapter here that can reach
-  a real, metered Anthropic API (or an interactive subscription session) by its own default
-  credential resolution, so it is never the accidental default of running this command.
+- **`OpencodeAdapter`**/**`CodexAdapter`** shell `opencode run <task> --format json --auto` /
+  `codex exec <task> --json --sandbox workspace-write`, each tool's own documented non-interactive
+  mode plus the permission/sandbox flag that actually lets it edit files and run commands
+  headlessly (`--auto` auto-approves any permission request not explicitly denied; `workspace-write`
+  is the minimum sandbox posture Codex's default "never approve" policy needs to touch the
+  fixture at all). Neither needs an opt-in gate: both already default to reading `OPENAI_API_KEY`
+  (or an equivalent already-cheap credential) from the environment for their own normal use, per
+  `docs/backlog.md`'s own reasoning — asking for them here costs nothing extra to wire.
+- **`ClaudeAdapter`** shells `claude -p <task> --output-format json --permission-mode
+  bypassPermissions` (not `--permission-mode dontAsk`, which denies rather than approves every
+  prompt). `run()` refuses to construct it at all unless `--real-claude-auth` is passed
+  explicitly — the one adapter here that can reach a real, metered Anthropic API (or an
+  interactive subscription session) by its own default credential resolution, so it is never the
+  accidental default of running this command.
+- Without a real permission/sandbox flag, every non-`tm` adapter could not actually edit files or
+  run commands headlessly, so `tm` "won" every comparison for a reason that had nothing to do with
+  harness quality — an early version of this harness had exactly that bug (caught by
+  `docs/audits/2026-09-25-bench-plan.md`'s "Required fixes" item 0, fixed the same day this
+  decision was accepted). `CrossToolReport::header` now states every tool's permission posture,
+  `--version` output, the pinned `--model` (if any), and the `--task-timeout`/`--max-cost-usd`
+  caps (if any), so a reader of the rendered report doesn't have to trust that the comparison was
+  fair — it's stated.
 - **`FakeAdapter`** (private to `bench_cross.rs`'s own `mod tests`) returns a fixed, scripted
   `AdapterOutcome` and never spawns a coding tool — what unit tests drive `run_comparison` with,
   per `SPEC.md` §0's determinism rule. Those tests do still spawn `git` (to give each scratch
@@ -97,6 +111,23 @@ column, since this report always compares more than one tool for the same task; 
 
 ## What this costs, stated plainly
 
+- **`TmAdapter`'s `--task-timeout` bounds each individual `tm` subprocess call (init/dispatch/
+  run/stats), not one deadline across the whole sequence.** Tracking remaining budget across four
+  separate calls was out of scope; what this does guarantee is that no single `tm` call can hang
+  forever, at the cost of a `tm` arm's total wall time being able to reach up to roughly `4 x
+  --task-timeout` in the worst case rather than being hard-capped at exactly `--task-timeout`.
+- **`--max-cost-usd` is checked between `(tool, task)` pairs, not mid-pair.** A pair already
+  running when the cap is reached still finishes and its cost still counts toward the cap; only
+  pairs not yet started are skipped. There is no way to abort a single tool call mid-flight based
+  on its own eventual cost, since cost is only known once that call reports it.
+- **With `--model`, the `tm` arm's pinned `coder.fast` candidate has no `price`.**
+  `TmAdapter::pin_model` writes a bare `{provider, model, max_concurrency}` candidate, not the
+  full `docs/providers.md`-documented shape that also carries a `price`. `tm`'s own cost
+  accounting (D-030) reports `0` for an unpriced candidate rather than erroring, so a `--model`
+  run's `tm` row always shows `$0` regardless of real spend, and that `$0` never contributes
+  toward `--max-cost-usd`'s cumulative check. A follow-up wanting real cost parity for the `tm`
+  arm under `--model` needs to look up (or accept as a flag) that model's real price and include
+  it in the written candidate.
 - **Scoring logic is duplicated, not shared.** `tm_harness::bench`'s ceiling-subscore formula is
   private, so `bench_cross.rs` re-derives its own copy (`ceiling_subscore`/`score_task`), matching
   this repo's own established convention (`tm-cli/src/bench_live.rs`'s `copy_dir_recursive` doc

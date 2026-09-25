@@ -38,6 +38,7 @@ every mode that does is opt-in and named below.
 ## Cross-tool comparison
 
 **`cargo xtask bench-cross [--tools tm,opencode,codex,claude] [--task <filter>] [--out <dir>]
+[--model <provider/model>] [--task-timeout <secs>] [--max-cost-usd <amount>]
 [--real-claude-auth]`** (`mise run bench:cross` is the alias; see
 `docs/decisions/D-033-cross-tool-benchmark.md`) runs this same task set identically through `tm`'s
 own live path and through one or more external coding CLIs, and reports pass/fail, score, cost,
@@ -52,6 +53,20 @@ of `mise run verify`/`hygiene`.
   session by default.
 - Requires the requested tools' own binaries (`tm`, `opencode`, `codex`, `claude`) to already be
   installed and authenticated on `$PATH`; `bench-cross` does not install or configure any of them.
+- Every non-`tm` adapter now runs under a real edit/bash permission posture instead of a headless
+  no-op: `claude -p --permission-mode bypassPermissions`, `codex exec --sandbox workspace-write`,
+  `opencode run --auto`. `tm` needs no such flag — it always runs the ticket loop directly inside
+  the scratch working dir. Each tool's actual posture is printed in the report header.
+- `--model <provider/model>` (e.g. `anthropic/claude-sonnet-5`) pins every requested tool to the
+  same model rather than each tool's own default/last-configured one — `--model` for
+  claude/codex/opencode, and for `tm` a scratch `providers.toml` `coder.fast` role candidate
+  written right after `tm init`.
+- `--task-timeout <secs>` bounds each adapter's own subprocess work; a call that runs past it is
+  killed (whole process group, not just the direct child) and the pair is reported as `TIMEOUT`
+  rather than `pass`/`fail`.
+- `--max-cost-usd <amount>` stops scheduling further `(tool, task)` pairs once cumulative reported
+  spend reaches it (checked between pairs, not mid-pair — a pair already running still finishes).
+- The report header also lists each requested tool's own `--version` output.
 
 Example, comparing `tm` against `opencode` on the hermetic Python fixtures only:
 

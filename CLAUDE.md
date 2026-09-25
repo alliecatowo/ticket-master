@@ -226,15 +226,25 @@ never drift between sessions:
   `TM_TEST_MOCK_PROVIDER=1` is set; never part of `mise run verify`. See
   `docs/decisions/D-032-live-benchmark-mode.md`.
 - `mise run bench:cross -- [--tools tm,opencode,codex,claude] [--task <filter>] [--out <dir>]
+  [--model <provider/model>] [--task-timeout <secs>] [--max-cost-usd <amount>]
   [--real-claude-auth]` (`cargo xtask bench-cross`) runs the same `bench/tasks/*.toml` suite
   identically through `tm`'s own live path and through configured external coding CLIs, and
   reports pass/fail, score, cost, tool calls and wall time for every tool side by side
   (`crates/xtask/src/bench_cross.rs`). Defaults to `--tools tm` alone; `opencode`/`codex` read
   their own already-cheap credential from the environment, but `claude` is refused unless
   `--real-claude-auth` is also passed, so a real, metered Claude/Anthropic API call is never the
-  accidental default. Opt-in, real runs only, never part of `mise run verify`/`hygiene`; unit
-  tests exercise the harness against a scripted fake adapter instead. See
-  `docs/decisions/D-033-cross-tool-benchmark.md` and `bench/README.md`.
+  accidental default. Every non-`tm` adapter runs under a real edit/bash permission posture
+  (`claude -p --permission-mode bypassPermissions`, `codex exec --sandbox workspace-write`,
+  `opencode run --auto`) rather than a headless no-op that used to make `tm` win by default;
+  `--model` pins every tool (including `tm`, via a scratch `providers.toml` role candidate) to the
+  same model; `--task-timeout` kills a hung adapter's whole process group and marks that pair
+  `TIMEOUT`; `--max-cost-usd` stops scheduling further pairs once cumulative reported spend
+  reaches it. The report header states each tool's permission posture, `--version` output, the
+  pinned model and any caps, so the numbers below it read as a fair, labeled comparison rather
+  than an unlabeled one. Opt-in, real runs only, never part of `mise run verify`/`hygiene`; unit
+  tests exercise the harness against a scripted fake adapter (and, for the timeout path, a real
+  `sleep` subprocess) instead. See `docs/decisions/D-033-cross-tool-benchmark.md` and
+  `bench/README.md`.
 
 `tm-codeintel`'s semantic search can now use real Potion static embeddings
 (`minishlab/potion-code-16M-v2`, via `model2vec-rs`) instead of the hash stand-in, but only

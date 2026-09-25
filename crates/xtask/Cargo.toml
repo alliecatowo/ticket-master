@@ -17,6 +17,19 @@ ignore = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tm-harness = { workspace = true }
+toml = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# Used only by `bench_cross`'s per-task timeout to send SIGKILL to a whole process group (a
+# hung/looping external coding CLI may have spawned its own children) -- see
+# `bench_cross::kill_process_group`. Not needed on non-Unix; this repo's own CI/release targets
+# are macOS and Linux only (see `.github/workflows/*.yml`).
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Test-only: `bench_cross`'s `pin_model` unit test round-trips its written `providers.toml`
+# through the real `RoleTable` parser to prove it stays valid and doesn't drop unrelated roles,
+# rather than asserting on the serialized string's exact formatting.
+tm-provider = { workspace = true }
+tm-types = { workspace = true }
