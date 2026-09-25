@@ -123,6 +123,10 @@ git worktree prune
 description = "Build a release tarball: cargo build --release -p tm-cli + the web client, packaged as dist/tm-<target-triple>.tar.gz (bin/tm + share/tm/web/ + README-INSTALL.md) with a .sha256 alongside -- the same layout .github/workflows/release.yml's CI job produces. Pass -- --publish to also `gh release create` -- see docs/install.md; don't run --publish yourself, only the orchestrator publishes from main."
 run = "bash scripts/release.sh"
 
+[tasks.dogfood]
+description = "Run scripts/dogfood-smoke.sh: clone this repo into a scratch dir, build tm from it, and run one fixed real ticket to completion, reporting SUBMITTED/tokens/tool-calls/wall-time or a clear failure. Makes a real provider call (DevPass, from .env); NOT part of verify."
+run = "scripts/dogfood-smoke.sh"
+
 [tasks."disk:guard"]
 description = "Run scripts/disk-guard.sh, the periodic disk-space guard for target/ dirs, .claude/worktrees/ and tm scratch dirs (see CLAUDE.md's 'Keeping disk use bounded'). Pass flags through, e.g. `mise run disk:guard -- --dry-run --verbose`."
 run = "scripts/disk-guard.sh {{arg(name=\"flags\", var=true, default=\"\")}}"

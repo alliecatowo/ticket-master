@@ -64,6 +64,12 @@ never drift between sessions:
   `.claude/worktrees/` unconditionally — prefer `mise run disk:guard` below for routine cleanup;
   it checks locks, uncommitted changes, busy targets and merge status before removing anything,
   same as it does when run unattended.
+- `mise run dogfood` — `scripts/dogfood-smoke.sh`: clones this repo into a scratch dir, builds
+  `tm` from that clone's own code, and runs one fixed, small, real ticket to completion under a
+  wall-clock bound, printing a one-line verdict (`SUBMITTED in 212s, 380k tokens, 14 tool calls,
+  2 files changed`, or a clear failure) plus `git diff --stat` for what it actually changed.
+  Makes a real provider call (DevPass, sourced from `.env`, never echoed) and can take several
+  minutes — a manual dogfood check, not a CI gate; **not** part of `verify`.
 - `mise run disk:guard -- [--dry-run] [--verbose] [--aggressive]` — the periodic disk-space guard
   for `target/` dirs, `.claude/worktrees/` and tm scratch dirs; see "Keeping disk use bounded"
   below for what it does and doesn't remove. `mise run disk:guard:install`/`:uninstall` manage its
