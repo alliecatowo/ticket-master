@@ -1084,6 +1084,8 @@ pub enum BenchCommand {
     Run(BenchRunArgs),
     /// Compare two benchmark reports.
     Compare(BenchCompareArgs),
+    /// Render a benchmark report as markdown.
+    Report(BenchReportArgs),
 }
 
 /// `tm bench run`
@@ -1106,6 +1108,17 @@ pub struct BenchCompareArgs {
     /// The candidate report file.
     #[arg(value_name = "CANDIDATE")]
     pub candidate: PathBuf,
+}
+
+/// `tm bench report`
+#[derive(Debug, Args)]
+pub struct BenchReportArgs {
+    /// The `BenchmarkReport` JSON file to render.
+    #[arg(value_name = "PATH")]
+    pub path: PathBuf,
+    /// Write the rendered markdown to this file instead of printing it.
+    #[arg(long, value_name = "PATH")]
+    pub out: Option<PathBuf>,
 }
 
 /// `tm workflow ...`

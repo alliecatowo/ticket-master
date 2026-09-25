@@ -187,6 +187,11 @@ never drift between sessions:
   gate.
 - `mise run docs:wiki` — regenerate `docs/wiki/` (`tm wiki generate`); pass `-- --dry-run` to
   preview without writing (see "Navigation" below).
+- `tm bench report <report.json> [--out FILE]` renders a saved `BenchmarkReport` (from `tm bench
+  run --out`) as markdown: an aggregate-score heading, then a per-task table of pass/fail, score,
+  cost, tool calls and wall time. Prints to stdout by default; `--out` writes the markdown to a
+  file instead. The rendering (`crates/tm-cli/src/bench_report.rs`) is a pure function of the
+  parsed report.
 
 `tm-codeintel`'s semantic search can now use real Potion static embeddings
 (`minishlab/potion-code-16M-v2`, via `model2vec-rs`) instead of the hash stand-in, but only

@@ -43,6 +43,7 @@ pub mod acp;
 pub mod agent;
 pub mod args;
 pub mod auth;
+pub mod bench_report;
 pub mod dispatch;
 pub mod drive;
 pub mod mcp;

@@ -11,6 +11,7 @@ use crate::args::{
     MirrorCommand, MirrorLinkArgs, ProviderCommand, ProviderDefaultArgs, ProviderTestArgs,
     TemplatesCommand, TemplatesShowArgs,
 };
+use crate::bench_report;
 use crate::project::Project;
 use crate::render::{Renderer, Table};
 use crate::replay_diff;
@@ -1688,6 +1689,7 @@ pub async fn dispatch_bench(
         BenchCommand::List => bench_list(project, renderer),
         BenchCommand::Run(args) => bench_run(args, project, renderer).await,
         BenchCommand::Compare(args) => bench_compare(args, renderer),
+        BenchCommand::Report(args) => bench_report::run_bench_report(args, renderer),
     }
 }
 
