@@ -918,7 +918,7 @@ Gate: `mise run verify`
 
 Gate: `mise run verify && bash bench/tools/check-fixtures.sh`
 
-- [ ] **bench-report-render** — tm bench report <json> [--out]: render a BenchmarkReport as markdown
+- [x] **bench-report-render** — tm bench report <json> [--out]: render a BenchmarkReport as markdown (landed 25a39ef)
   model: sonnet · size: S · builds Rust: yes · area: bench · deps: none
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs`, `crates/tm-cli/src/bench_report.rs`, `crates/tm-cli/src/lib.rs`, `CLAUDE.md`
   change: Add BenchCommand::Report(BenchReportArgs{path, out}) and a dispatch_bench arm, with the rendering in bench_report.rs. Read a BenchmarkReport JSON and emit markdown: aggregate score, then a per-task table of pass/fail, score, tokens, cost, tool_calls and wall time. The rendering function is pure. Add a CLAUDE.md line.
