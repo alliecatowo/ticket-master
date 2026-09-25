@@ -5918,10 +5918,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "ignore",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
  "tm-harness",
+ "tm-provider",
+ "tm-types",
+ "toml",
 ]
 
 [[package]]

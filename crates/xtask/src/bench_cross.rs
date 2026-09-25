@@ -9,14 +9,16 @@
 //! (`TmAdapter`, `ClaudeAdapter`, `OpencodeAdapter`, `CodexAdapter`) shells out to a real binary;
 //! `mod tests`'s `FakeAdapter` is what unit tests drive `run_comparison` with instead, per
 //! `SPEC.md` §0. That still leaves tests spawning `git` (to give each scratch fixture a real
-//! history) and the fixture's own `test_command` (e.g. `true`/`false`) locally -- neither a coding
-//! tool nor a network call, the two things this module's own real adapters are opt-in about. Real
-//! runs are opt-in from the CLI (`--tools`) and are never part of `mise run verify` or `mise run
-//! hygiene` -- see `run`'s own doc comment.
+//! history), the real `sleep` binary (to prove the `--task-timeout` process-kill path actually
+//! kills a real, slow child) and the fixture's own `test_command` (e.g. `true`/`false`) locally --
+//! none of those is a coding tool or a network call, the two things this module's own real
+//! adapters are opt-in about. Real runs are opt-in from the CLI (`--tools`) and are never part of
+//! `mise run verify` or `mise run hygiene` -- see `run`'s own doc comment.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,9 @@ pub struct AdapterOutcome {
     /// model-controlled comparison, per `docs/audits/2026-09-25-bench-plan.md`'s "Required
     /// fixes" item 1.
     pub model: Option<String>,
+    /// Set when the adapter's own process was killed for exceeding the configured
+    /// `--task-timeout` rather than completing (successfully or not).
+    pub timed_out: bool,
 }
 
 /// One coding tool under comparison. Implemented once per real tool (`TmAdapter` and friends,
@@ -63,6 +68,14 @@ pub trait ToolAdapter {
     fn permission_posture(&self) -> &str {
         "unspecified"
     }
+
+    /// Best-effort `<binary> --version` (or equivalent), for the report header. `None` when the
+    /// tool's version could not be read (missing binary, non-zero exit, non-UTF8 output) --
+    /// purely informational, never affects scoring. `mod tests`'s `FakeAdapter` keeps this
+    /// default so unit tests never spawn a real binary.
+    fn version(&self) -> Option<String> {
+        None
+    }
 }
 
 /// One tool's result for one task, mirroring `tm_harness::TaskResult`'s externally visible
@@ -81,6 +94,10 @@ pub struct CrossTaskResult {
     pub tokens: Option<u64>,
     /// `None` when no adapter run for this (tool, task) pair reported which model served it.
     pub model: Option<String>,
+    /// Set when this pair's adapter process was killed for exceeding `--task-timeout`, rather
+    /// than completing. `passed` is always `false` in that case, and `render_markdown` shows
+    /// `TIMEOUT` rather than `fail` in the `Result` column so the two aren't conflated.
+    pub timed_out: bool,
 }
 
 /// The full comparison: every `(tool, task)` pair that ran, in run order, plus the run-level
@@ -98,6 +115,34 @@ pub struct ReportHeader {
     /// `(tool name, permission/sandbox posture)`, in adapter order -- see
     /// `ToolAdapter::permission_posture`.
     pub permission_postures: Vec<(String, String)>,
+    /// `(tool name, `<binary> --version` output)`, in adapter order -- see
+    /// `ToolAdapter::version`.
+    pub tool_versions: Vec<(String, Option<String>)>,
+    /// The model id passed via `--model`, when the caller pinned one.
+    pub model: Option<String>,
+    /// The per-task timeout, in seconds, when the caller set one via `--task-timeout`.
+    pub task_timeout_seconds: Option<u64>,
+    /// The total-spend cap, in micro-dollars, when the caller set one via `--max-cost-usd`.
+    pub max_cost_micros: Option<u64>,
+}
+
+/// Caller-supplied caps/config for one `run_comparison` call. Pure data -- CLI flag parsing
+/// happens in `run()`, so this can be constructed directly in tests.
+#[derive(Debug, Clone, Default)]
+pub struct RunOptions {
+    /// The model id the caller pinned via `--model`, recorded in the report header. Threading it
+    /// into each adapter's own request is each adapter struct's own `model` field (set by
+    /// `run()`'s construction), not this option -- this copy exists purely for the header.
+    pub model: Option<String>,
+    /// Per-task wall-clock timeout. Each real adapter enforces this itself (killing the whole
+    /// process group -- see `run_with_timeout`); a test double that blocks in-process (like
+    /// `mod tests`'s `SleepingAdapter`) has to opt into the same mechanism itself, since
+    /// `run_comparison` has no way to interrupt an arbitrary blocking Rust call.
+    pub task_timeout: Option<Duration>,
+    /// Total spend cap, in micro-dollars. Once cumulative reported cost across every `(tool,
+    /// task)` pair run so far reaches this, `run_comparison` stops scheduling further pairs
+    /// (already-scheduled pairs still finish; this is checked between pairs, not mid-pair).
+    pub max_cost_micros: Option<u64>,
 }
 
 /// Score of 1.0 while `actual` stays at or under `ceiling`, degrading toward 0.0 past it. A
@@ -228,6 +273,84 @@ fn run_test_command(workdir: &Path, task: &BenchTask) -> Result<bool> {
     }
 }
 
+/// Outcome of `run_with_timeout`: either the command finished (with its captured output) or it
+/// was killed for running past the configured timeout.
+enum TimedOutput {
+    Finished(std::process::Output),
+    TimedOut,
+}
+
+/// Spawn `cmd` (already configured with program, args, cwd and stdin -- stdout/stderr are always
+/// overridden to piped here, matching what `Command::output()` would have done) in its own
+/// process group and wait for it, killing the *whole group* with `SIGKILL` if it runs past
+/// `timeout`. `None` waits unboundedly, matching every adapter's behavior before `--task-timeout`
+/// existed. The whole group, not just the direct child, because several of these tools (Codex,
+/// OpenCode) spawn their own subprocesses, and killing only the direct child would leave those
+/// running.
+///
+/// Used by every real adapter (`TmAdapter`, `ClaudeAdapter`, `OpencodeAdapter`, `CodexAdapter`)
+/// and, in tests, by a `SleepingAdapter` that spawns the real `sleep` binary -- so the timeout
+/// tests exercise this actual process-kill path, not a simulation of it.
+fn run_with_timeout(mut cmd: Command, timeout: Option<Duration>) -> Result<TimedOutput> {
+    prepare_process_group(&mut cmd);
+    // `Command::spawn` alone inherits the parent's stdout/stderr; every caller here wants the
+    // captured-`Output` behavior `Command::output()` gives, just with a bounded wait instead of
+    // an unconditional one -- without this, every adapter would get empty stdout back from a
+    // real run (caught by `claude_adapter_completes_when_the_tool_blocks_on_stdin` below).
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let child = cmd.spawn().context("failed to spawn command")?;
+    let Some(timeout) = timeout else {
+        let output = child.wait_with_output().context("waiting for command")?;
+        return Ok(TimedOutput::Finished(output));
+    };
+
+    let pid = child.id();
+    let (tx, rx) = std::sync::mpsc::channel();
+    // Detached, not scoped: `std::thread::scope` joins every spawned thread before returning,
+    // which would defeat the point of a timeout (we'd still block until the child exits). This
+    // thread outlives a timed-out call; it simply drops its result into a channel nobody is
+    // listening to anymore once the killed child's `wait_with_output` finally returns.
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(output)) => Ok(TimedOutput::Finished(output)),
+        Ok(Err(e)) => Err(e).context("waiting for command"),
+        Err(RecvTimeoutError::Timeout) => {
+            kill_process_group(pid);
+            Ok(TimedOutput::TimedOut)
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            bail!("command wait thread ended without sending a result")
+        }
+    }
+}
+
+#[cfg(unix)]
+fn prepare_process_group(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // New process group whose pgid equals the child's own pid, so `kill_process_group` can
+    // target the whole tree via `-pid` rather than only the direct child.
+    cmd.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn prepare_process_group(_cmd: &mut Command) {}
+
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    // SAFETY: `pid` is a child this same call put in its own new process group via
+    // `process_group(0)` (pgid == pid), so `-pid` addresses exactly that group. Sending SIGKILL
+    // to an already-exited group is a harmless ESRCH, not a hazard, and this never touches any
+    // process this module didn't spawn itself.
+    unsafe {
+        libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
+
 /// Run every task in `tasks` through every `(tool name, adapter)` pair in `adapters`, scoring
 /// each with that task's own `ScoringSpec`/`ExpectedOutcome`. `bench_root` resolves
 /// `task.fixture.path`; `workdir_root` is where each per-tool, per-task scratch copy is made
@@ -237,23 +360,32 @@ fn run_test_command(workdir: &Path, task: &BenchTask) -> Result<bool> {
 /// One `(tool, task)` pair's adapter failure (`ToolAdapter::run` returning `Err`, or its own
 /// `Command` failing to start) is scored as a failed run for that pair and does not stop the rest
 /// of the suite -- a missing or misconfigured external CLI should not hide every other tool's
-/// result.
+/// result. `options.max_cost_micros`, once reached by cumulative reported spend, stops scheduling
+/// further pairs outright (see `RunOptions::max_cost_micros`).
 pub fn run_comparison(
     tasks: &[BenchTask],
     bench_root: &Path,
     adapters: &[(&str, &dyn ToolAdapter)],
     workdir_root: &Path,
+    options: &RunOptions,
 ) -> Result<CrossToolReport> {
-    let permission_postures = adapters
-        .iter()
-        .map(|&(name, adapter)| (name.to_string(), adapter.permission_posture().to_string()))
-        .collect();
     let header = ReportHeader {
-        permission_postures,
+        permission_postures: adapters
+            .iter()
+            .map(|&(name, adapter)| (name.to_string(), adapter.permission_posture().to_string()))
+            .collect(),
+        tool_versions: adapters
+            .iter()
+            .map(|&(name, adapter)| (name.to_string(), adapter.version()))
+            .collect(),
+        model: options.model.clone(),
+        task_timeout_seconds: options.task_timeout.map(|d| d.as_secs()),
+        max_cost_micros: options.max_cost_micros,
     };
 
     let mut results = Vec::with_capacity(tasks.len() * adapters.len());
-    for task in tasks {
+    let mut cumulative_cost_micros: u64 = 0;
+    'tasks: for task in tasks {
         for &(tool_name, adapter) in adapters {
             let task_workdir = workdir_root.join(tool_name).join(&task.id);
             let prepared = prepare_workdir(bench_root, task, &task_workdir);
@@ -270,6 +402,7 @@ pub fn run_comparison(
                         wall_seconds: 0,
                         tokens: None,
                         model: None,
+                        timed_out: false,
                     });
                     eprintln!("bench-cross: {tool_name}/{}: {e:?}", task.id);
                     continue;
@@ -280,21 +413,24 @@ pub fn run_comparison(
             let outcome = adapter.run(task, &workdir);
             let wall_seconds = start.elapsed().as_secs() as u32;
 
-            let (tool_calls, tokens, model, cost_micros, adapter_ran) = match &outcome {
+            let (tool_calls, tokens, model, cost_micros, adapter_ran, timed_out) = match &outcome {
+                Ok(o) if o.timed_out => (0, None, o.model.clone(), 0, false, true),
                 Ok(o) => (
                     o.tool_calls.unwrap_or(0),
                     o.tokens,
                     o.model.clone(),
                     o.cost_micros.unwrap_or(0),
                     true,
+                    false,
                 ),
                 Err(e) => {
                     eprintln!("bench-cross: {tool_name}/{} adapter failed: {e:?}", task.id);
-                    (0, None, None, 0, false)
+                    (0, None, None, 0, false, false)
                 }
             };
 
-            let passed = adapter_ran && run_test_command(&workdir, task).unwrap_or(false);
+            let passed =
+                adapter_ran && !timed_out && run_test_command(&workdir, task).unwrap_or(false);
             let score = score_task(task, passed, cost_micros, wall_seconds, tool_calls);
 
             results.push(CrossTaskResult {
@@ -307,7 +443,21 @@ pub fn run_comparison(
                 wall_seconds,
                 tokens,
                 model,
+                timed_out,
             });
+
+            cumulative_cost_micros = cumulative_cost_micros.saturating_add(cost_micros);
+            if let Some(cap) = options.max_cost_micros {
+                if cumulative_cost_micros >= cap {
+                    eprintln!(
+                        "bench-cross: cumulative spend ${:.4} reached the --max-cost-usd cap \
+                         ${:.4}; stopping",
+                        cumulative_cost_micros as f64 / 1_000_000.0,
+                        cap as f64 / 1_000_000.0,
+                    );
+                    break 'tasks;
+                }
+            }
         }
     }
     Ok(CrossToolReport { header, results })
@@ -334,7 +484,13 @@ pub fn render_markdown(report: &CrossToolReport) -> String {
             r.tool,
             r.task_id,
             r.model.as_deref().unwrap_or("-"),
-            if r.passed { "pass" } else { "fail" },
+            if r.timed_out {
+                "TIMEOUT"
+            } else if r.passed {
+                "pass"
+            } else {
+                "fail"
+            },
             r.score,
             r.cost_micros as f64 / 1_000_000.0,
             r.tokens
@@ -347,18 +503,48 @@ pub fn render_markdown(report: &CrossToolReport) -> String {
     out
 }
 
-/// Render the run-level metadata block (currently: each tool's permission/sandbox posture) that
-/// precedes the per-task table, so a reader sees *how* each tool ran before the numbers, not
-/// just the numbers. Empty when there is nothing to report (e.g. `CrossToolReport::default()`).
+/// Render the run-level metadata block (model/timeout/cost cap, tool versions, permission
+/// postures) that precedes the per-task table, so a reader sees *how* each tool ran and under
+/// what constraints before the numbers, not just the numbers. Empty when there is nothing to
+/// report (e.g. `CrossToolReport::default()`).
 fn render_header(header: &ReportHeader) -> String {
-    if header.permission_postures.is_empty() {
-        return String::new();
+    let mut out = String::new();
+
+    if header.model.is_some()
+        || header.task_timeout_seconds.is_some()
+        || header.max_cost_micros.is_some()
+    {
+        if let Some(model) = &header.model {
+            out.push_str(&format!("Model: {model}\n"));
+        }
+        if let Some(secs) = header.task_timeout_seconds {
+            out.push_str(&format!("Task timeout: {secs}s\n"));
+        }
+        if let Some(cap) = header.max_cost_micros {
+            out.push_str(&format!("Max cost cap: ${:.4}\n", cap as f64 / 1_000_000.0));
+        }
+        out.push('\n');
     }
-    let mut out = String::from("| Tool | Permission posture |\n| --- | --- |\n");
-    for (tool, posture) in &header.permission_postures {
-        out.push_str(&format!("| {tool} | {posture} |\n"));
+
+    if !header.tool_versions.is_empty() {
+        out.push_str("| Tool | Version |\n| --- | --- |\n");
+        for (tool, version) in &header.tool_versions {
+            out.push_str(&format!(
+                "| {tool} | {} |\n",
+                version.as_deref().unwrap_or("unknown")
+            ));
+        }
+        out.push('\n');
     }
-    out.push('\n');
+
+    if !header.permission_postures.is_empty() {
+        out.push_str("| Tool | Permission posture |\n| --- | --- |\n");
+        for (tool, posture) in &header.permission_postures {
+            out.push_str(&format!("| {tool} | {posture} |\n"));
+        }
+        out.push('\n');
+    }
+
     out
 }
 
@@ -380,32 +566,128 @@ fn render_header(header: &ReportHeader) -> String {
 pub struct TmAdapter {
     /// Path to (or bare name of) the `tm` binary to shell out to.
     pub binary: String,
+    /// `provider/model` id to pin `workdir`'s scratch project to, when the caller set one via
+    /// `--model` -- written into `.tm/providers.toml`'s `coder.fast` role candidate right after
+    /// `tm init` (see `pin_model`); `Role::CoderFast` is the role `crates/tm-cli/src/agent.rs`'s
+    /// `AGENT_ROLE` actually uses for a worker ticket's attempts, per `docs/providers.md`.
+    pub model: Option<String>,
+    /// Per-`tm` subprocess-call timeout. Applied to each individual `tm` invocation inside
+    /// `run()` (init/dispatch/run/stats), not as one budget across all four -- a real deadline
+    /// across the whole sequence would need tracking remaining budget between calls, which this
+    /// keeps out of scope; what this does guarantee is that no single `tm` call can hang forever.
+    pub timeout: Option<Duration>,
+}
+
+/// Marks a `tm_json` failure as "the subprocess was killed for exceeding `--task-timeout`"
+/// rather than an ordinary tool failure, so `TmAdapter::run` can report `timed_out` distinctly
+/// instead of a generic adapter error.
+#[derive(Debug)]
+struct AdapterTimedOut;
+
+impl std::fmt::Display for AdapterTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "command exceeded the configured --task-timeout and was killed"
+        )
+    }
+}
+
+impl std::error::Error for AdapterTimedOut {}
+
+fn is_adapter_timeout(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<AdapterTimedOut>().is_some()
 }
 
 impl TmAdapter {
-    /// Run `tm <args>` in `workdir` with `--json`, returning stdout on success.
+    /// Run `tm <args>` in `workdir` with `--json`, returning stdout on success. Returns
+    /// `Err(AdapterTimedOut)` (checkable with `is_adapter_timeout`) rather than an ordinary error
+    /// when the call itself was killed for exceeding `self.timeout`.
     fn tm_json(&self, workdir: &Path, args: &[&str]) -> Result<String> {
         let mut full_args = vec!["--json"];
         full_args.extend_from_slice(args);
-        let output = Command::new(&self.binary)
-            .args(&full_args)
+        let mut cmd = Command::new(&self.binary);
+        cmd.args(&full_args)
             .current_dir(workdir)
             // `tm` never expects to read from stdin here (every one of these calls is
             // non-interactive), and an inherited *open* stdin pipe (e.g. this xtask itself
             // running under a CI runner or another tool's pipe) can make a child that probes
             // stdin block indefinitely rather than treating "nothing there" as EOF -- the same
             // hang this closes off for the other three adapters below.
-            .stdin(Stdio::null())
-            .output()
-            .with_context(|| format!("failed to run `tm {}`", full_args.join(" ")))?;
-        if !output.status.success() {
-            bail!(
-                "tm {} exited non-zero: {}",
-                full_args.join(" "),
-                String::from_utf8_lossy(&output.stderr)
-            );
+            .stdin(Stdio::null());
+        match run_with_timeout(cmd, self.timeout)? {
+            TimedOutput::TimedOut => bail!(AdapterTimedOut),
+            TimedOutput::Finished(output) => {
+                if !output.status.success() {
+                    bail!(
+                        "tm {} exited non-zero: {}",
+                        full_args.join(" "),
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                }
+                Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            }
         }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Overwrite `workdir/.tm/providers.toml`'s `coder.fast` role candidate to pin `model` (a
+    /// `provider/model`-shaped id, e.g. `anthropic/claude-sonnet-5`), preserving every other role
+    /// `tm init` already wrote (`reviewer`, `decider`, etc. would otherwise be left with zero
+    /// candidates and become unroutable for the rest of this run -- `RoleTable::parse` accepts a
+    /// partial table with no error, so a naive from-scratch rewrite would silently break the
+    /// ticket's other role lookups instead of failing loudly). Deliberately drops the `[meta]`
+    /// table so the file reads as a hand edit (`generated` reads `false`), which the role-table
+    /// loader never overwrites from `DEVPASS_*`/other env-detected credentials -- see
+    /// `docs/providers.md`'s "`providers.toml` follows the environment, not just `tm init` time".
+    ///
+    /// The pinned candidate has no `price` (unlike `docs/providers.md`'s documented candidates),
+    /// so real spend against it is not attributed for `--max-cost-usd` purposes -- see
+    /// `docs/decisions/D-033-cross-tool-benchmark.md`'s costs section.
+    fn pin_model(&self, workdir: &Path, model: &str) -> Result<()> {
+        let (provider, model_id) = model.split_once('/').with_context(|| {
+            format!("--model `{model}` must be `provider/model`-shaped for tm, e.g. `anthropic/claude-sonnet-5`")
+        })?;
+
+        let providers_path = workdir.join(".tm").join("providers.toml");
+        let existing = std::fs::read_to_string(&providers_path).unwrap_or_default();
+        let mut root: toml::Value = if existing.trim().is_empty() {
+            toml::Value::Table(Default::default())
+        } else {
+            toml::from_str(&existing)
+                .with_context(|| format!("parsing existing {}", providers_path.display()))?
+        };
+        let top = root
+            .as_table_mut()
+            .context("providers.toml root must be a table")?;
+        top.remove("meta");
+
+        let mut candidate = toml::value::Table::new();
+        candidate.insert(
+            "provider".to_string(),
+            toml::Value::String(provider.to_string()),
+        );
+        candidate.insert(
+            "model".to_string(),
+            toml::Value::String(model_id.to_string()),
+        );
+        candidate.insert("max_concurrency".to_string(), toml::Value::Integer(5));
+        let mut fast = toml::value::Table::new();
+        fast.insert(
+            "candidates".to_string(),
+            toml::Value::Array(vec![toml::Value::Table(candidate)]),
+        );
+
+        let coder = top
+            .entry("coder")
+            .or_insert_with(|| toml::Value::Table(Default::default()));
+        coder
+            .as_table_mut()
+            .context("providers.toml's `coder` entry must be a table")?
+            .insert("fast".to_string(), toml::Value::Table(fast));
+
+        let serialized =
+            toml::to_string_pretty(&root).context("serializing providers.toml model override")?;
+        std::fs::write(&providers_path, serialized).context("writing providers.toml model override")
     }
 }
 
@@ -414,9 +696,30 @@ impl ToolAdapter for TmAdapter {
         // `ticket dispatch` needs an existing project; bootstrap a repo-scoped one at `workdir`
         // itself first (see this struct's own doc comment for why `ticket new`'s auto-bootstrap
         // doesn't help here).
-        self.tm_json(workdir, &["init"])?;
+        if let Err(e) = self.tm_json(workdir, &["init"]) {
+            if is_adapter_timeout(&e) {
+                return Ok(AdapterOutcome {
+                    timed_out: true,
+                    ..Default::default()
+                });
+            }
+            return Err(e);
+        }
 
-        let dispatch_out = self.tm_json(workdir, &["ticket", "dispatch", &task.task])?;
+        if let Some(model) = &self.model {
+            self.pin_model(workdir, model)?;
+        }
+
+        let dispatch_out = match self.tm_json(workdir, &["ticket", "dispatch", &task.task]) {
+            Ok(out) => out,
+            Err(e) if is_adapter_timeout(&e) => {
+                return Ok(AdapterOutcome {
+                    timed_out: true,
+                    ..Default::default()
+                })
+            }
+            Err(e) => return Err(e),
+        };
         // `TicketId` serializes as a bare JSON string, e.g. `"T-12"`.
         let ticket_id = dispatch_out.trim_matches('"').to_string();
         if ticket_id.is_empty() {
@@ -424,16 +727,32 @@ impl ToolAdapter for TmAdapter {
         }
 
         // `tm run <ticket>` reports a failed attempt as a non-zero exit; still worth reading
-        // whatever stats got recorded, so don't bail out before the `tm stats` call below.
+        // whatever stats got recorded, so don't bail out before the `tm stats` call below --
+        // unless it was killed for the timeout, in which case there is nothing left to read.
         let run_result = self.tm_json(workdir, &["run", &ticket_id]);
         if let Err(e) = &run_result {
+            if is_adapter_timeout(e) {
+                return Ok(AdapterOutcome {
+                    timed_out: true,
+                    ..Default::default()
+                });
+            }
             eprintln!("bench-cross: tm run {ticket_id} did not finish cleanly: {e:?}");
         }
 
-        let stats_out = self.tm_json(
+        let stats_out = match self.tm_json(
             workdir,
             &["stats", "--by", "ticket", "--ticket", &ticket_id],
-        )?;
+        ) {
+            Ok(out) => out,
+            Err(e) if is_adapter_timeout(&e) => {
+                return Ok(AdapterOutcome {
+                    timed_out: true,
+                    ..Default::default()
+                })
+            }
+            Err(e) => return Err(e),
+        };
         let rows: Vec<tm_harness::metrics::TicketMetrics> = serde_json::from_str(&stats_out)
             .with_context(|| format!("parsing `tm stats` output: {stats_out}"))?;
 
@@ -444,9 +763,10 @@ impl ToolAdapter for TmAdapter {
                 cost_micros: Some(m.dollars_micros),
                 // `TicketMetrics` (the pure fold `tm stats` renders from) doesn't carry a model
                 // column -- it attributes cost/tokens per (provider, model) pair only under
-                // `tm stats --by model`, not per-ticket, so this adapter has nothing to report
-                // here yet.
-                model: None,
+                // `tm stats --by model`, not per-ticket, so this reports back the model this
+                // adapter was told to pin (if any) rather than something read from `tm` itself.
+                model: self.model.clone(),
+                timed_out: false,
             }),
             None => Ok(AdapterOutcome::default()),
         }
@@ -455,6 +775,10 @@ impl ToolAdapter for TmAdapter {
     fn permission_posture(&self) -> &str {
         "n/a -- runs entirely inside the scratch project's own ticket/attempt loop; no external \
          sandbox flag applies"
+    }
+
+    fn version(&self) -> Option<String> {
+        binary_version(&self.binary, &["--version"])
     }
 }
 
@@ -470,9 +794,11 @@ impl ToolAdapter for TmAdapter {
 /// function's doc comment for the gate itself.
 pub struct ClaudeAdapter {
     pub binary: String,
-    /// Model id passed through to `--model` verbatim, when the caller pinned one. `None` here
-    /// today (`run()` never sets it yet); model passthrough itself lands in a follow-up task.
+    /// Model id passed through to `--model` verbatim, when the caller pinned one.
     pub model: Option<String>,
+    /// Per-call wall-clock timeout, enforced by killing the whole process group -- see
+    /// `run_with_timeout`.
+    pub timeout: Option<Duration>,
 }
 
 impl ClaudeAdapter {
@@ -488,7 +814,10 @@ impl ClaudeAdapter {
             .arg("--permission-mode")
             .arg("bypassPermissions");
         if let Some(model) = &self.model {
-            cmd.arg("--model").arg(model);
+            // Claude Code's `--model` takes a bare alias or model id (`claude --help`: "Provide
+            // an alias for the latest model ... or a model's full name"), not a `provider/model`
+            // pair -- strip any `provider/` prefix the caller's `--model` carried.
+            cmd.arg("--model").arg(bare_model_id(model));
         }
         cmd.current_dir(workdir);
         // Closed, not just unpiped: `claude -p` probes stdin for piped input and prints "no
@@ -501,22 +830,32 @@ impl ClaudeAdapter {
 
 impl ToolAdapter for ClaudeAdapter {
     fn run(&self, task: &BenchTask, workdir: &Path) -> Result<AdapterOutcome> {
-        let output = self
-            .build_command(task, workdir)
-            .output()
-            .context("failed to run `claude -p`")?;
-        // Best-effort: `claude -p --output-format json` prints one JSON result object with a
-        // `usage`/`cost_usd`/`num_turns`-shaped payload. Field names are not pinned by this
-        // crate (no dependency on Claude Code's own output schema), so a shape it doesn't
-        // recognize degrades to "ran, but no metrics reported" rather than a hard error --
-        // pass/fail always comes from re-running the task's own `test_command`, never from this.
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_best_effort_usage(&stdout))
+        match run_with_timeout(self.build_command(task, workdir), self.timeout)
+            .context("failed to run `claude -p`")?
+        {
+            TimedOutput::TimedOut => Ok(AdapterOutcome {
+                timed_out: true,
+                ..Default::default()
+            }),
+            // Best-effort: `claude -p --output-format json` prints one JSON result object with a
+            // `usage`/`cost_usd`/`num_turns`-shaped payload. Field names are not pinned by this
+            // crate (no dependency on Claude Code's own output schema), so a shape it doesn't
+            // recognize degrades to "ran, but no metrics reported" rather than a hard error --
+            // pass/fail always comes from re-running the task's own `test_command`, never from
+            // this.
+            TimedOutput::Finished(output) => Ok(parse_best_effort_usage(&String::from_utf8_lossy(
+                &output.stdout,
+            ))),
+        }
     }
 
     fn permission_posture(&self) -> &str {
         "--permission-mode bypassPermissions (auto-approves Edit/Write/Bash except rm/rmdir on a \
          handful of critical paths)"
+    }
+
+    fn version(&self) -> Option<String> {
+        binary_version(&self.binary, &["--version"])
     }
 }
 
@@ -527,6 +866,9 @@ pub struct OpencodeAdapter {
     pub binary: String,
     /// `provider/model`-shaped id passed to `-m`, when the caller pinned one.
     pub model: Option<String>,
+    /// Per-call wall-clock timeout, enforced by killing the whole process group -- see
+    /// `run_with_timeout`.
+    pub timeout: Option<Duration>,
 }
 
 impl OpencodeAdapter {
@@ -553,16 +895,25 @@ impl OpencodeAdapter {
 
 impl ToolAdapter for OpencodeAdapter {
     fn run(&self, task: &BenchTask, workdir: &Path) -> Result<AdapterOutcome> {
-        let output = self
-            .build_command(task, workdir)
-            .output()
-            .context("failed to run `opencode run`")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_best_effort_usage(&stdout))
+        match run_with_timeout(self.build_command(task, workdir), self.timeout)
+            .context("failed to run `opencode run`")?
+        {
+            TimedOutput::TimedOut => Ok(AdapterOutcome {
+                timed_out: true,
+                ..Default::default()
+            }),
+            TimedOutput::Finished(output) => Ok(parse_best_effort_usage(&String::from_utf8_lossy(
+                &output.stdout,
+            ))),
+        }
     }
 
     fn permission_posture(&self) -> &str {
         "--auto (auto-approves any permission request not explicitly denied)"
+    }
+
+    fn version(&self) -> Option<String> {
+        binary_version(&self.binary, &["--version"])
     }
 }
 
@@ -576,8 +927,12 @@ impl ToolAdapter for OpencodeAdapter {
 /// machine, not a disposable container.
 pub struct CodexAdapter {
     pub binary: String,
-    /// `provider/model`-shaped id passed to `-m`, when the caller pinned one.
+    /// Model id, when the caller pinned one -- passed to `-m` with any `provider/` prefix
+    /// stripped (Codex's `-m` takes a bare model id, not a `provider/model` pair).
     pub model: Option<String>,
+    /// Per-call wall-clock timeout, enforced by killing the whole process group -- see
+    /// `run_with_timeout`.
+    pub timeout: Option<Duration>,
 }
 
 impl CodexAdapter {
@@ -591,7 +946,7 @@ impl CodexAdapter {
             .arg("--sandbox")
             .arg("workspace-write");
         if let Some(model) = &self.model {
-            cmd.arg("-m").arg(model);
+            cmd.arg("-m").arg(bare_model_id(model));
         }
         cmd.current_dir(workdir);
         cmd.stdin(Stdio::null());
@@ -601,16 +956,25 @@ impl CodexAdapter {
 
 impl ToolAdapter for CodexAdapter {
     fn run(&self, task: &BenchTask, workdir: &Path) -> Result<AdapterOutcome> {
-        let output = self
-            .build_command(task, workdir)
-            .output()
-            .context("failed to run `codex exec`")?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(parse_best_effort_usage(&stdout))
+        match run_with_timeout(self.build_command(task, workdir), self.timeout)
+            .context("failed to run `codex exec`")?
+        {
+            TimedOutput::TimedOut => Ok(AdapterOutcome {
+                timed_out: true,
+                ..Default::default()
+            }),
+            TimedOutput::Finished(output) => Ok(parse_best_effort_usage(&String::from_utf8_lossy(
+                &output.stdout,
+            ))),
+        }
     }
 
     fn permission_posture(&self) -> &str {
         "--sandbox workspace-write (never-approve policy, sandboxed to the scratch working dir)"
+    }
+
+    fn version(&self) -> Option<String> {
+        binary_version(&self.binary, &["--version"])
     }
 }
 
@@ -672,7 +1036,47 @@ fn find_str(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Strip any `provider/` prefix from a `--model` value, for tools whose own `--model`/`-m` flag
+/// takes a bare model id rather than a `provider/model` pair (Claude Code, Codex -- OpenCode's
+/// own `-m` explicitly documents `provider/model` as its expected format, so it keeps the full
+/// string; `TmAdapter::pin_model` needs the provider half too, so it does its own `split_once`
+/// rather than calling this).
+fn bare_model_id(model: &str) -> &str {
+    model.split_once('/').map_or(model, |(_, rest)| rest)
+}
+
+/// Bound on how long `binary_version` will wait for a `--version`-shaped call before giving up.
+/// This exists because at least one real tool in this harness (`codex`, confirmed empirically
+/// against the installed binary while writing this module) hangs past two minutes on `--version`
+/// with no arguments and no stdin -- without a cap here, building the report header (which calls
+/// `ToolAdapter::version` for every requested tool before any task runs) could hang the entire
+/// run before `--task-timeout` ever gets a chance to matter.
+const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Best-effort `<binary> <args...>` (typically `--version`), trimmed; `None` on any failure
+/// (missing binary, non-zero exit, non-UTF8 output, or exceeding `VERSION_PROBE_TIMEOUT`).
+/// Purely informational -- see `ToolAdapter::version`'s own doc comment.
+fn binary_version(binary: &str, args: &[&str]) -> Option<String> {
+    let mut cmd = Command::new(binary);
+    cmd.args(args).stdin(Stdio::null());
+    let output = match run_with_timeout(cmd, Some(VERSION_PROBE_TIMEOUT)).ok()? {
+        TimedOutput::TimedOut => return None,
+        TimedOutput::Finished(output) => output,
+    };
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
 /// `cargo xtask bench-cross [--tools tm,opencode,...] [--task <filter>] [--out <dir>]
+/// [--model <provider/model>] [--task-timeout <secs>] [--max-cost-usd <amount>]
 /// [--real-claude-auth]` -- real runs only, opt-in, never part of `mise run verify`/`hygiene`
 /// (shelling to a real tool against a real, possibly-metered provider is exactly the
 /// non-deterministic, network-touching call `SPEC.md` §0 keeps out of the deterministic gate).
@@ -685,6 +1089,15 @@ fn find_str(value: &serde_json::Value, keys: &[&str]) -> Option<String> {
 /// `--real-claude-auth` is also passed -- the explicit opt-in `docs/backlog.md`'s "A head-to-head
 /// benchmark" section asks for, so a real, metered Claude/Anthropic API call is never the
 /// accidental default of running this command.
+///
+/// `--model` is passed through to every requested tool (`claude --model`, `codex -m`, `opencode
+/// -m`, and for `tm` a scratch `providers.toml` role candidate -- see `TmAdapter::pin_model`),
+/// so a comparison isn't silently confounded by each tool's own default/last-configured model.
+/// `--task-timeout` bounds each adapter's own subprocess work (killing the whole process group on
+/// expiry -- see `run_with_timeout`) rather than leaving a hung tool to block the suite
+/// indefinitely. `--max-cost-usd` stops scheduling further `(tool, task)` pairs once cumulative
+/// reported spend reaches it (checked between pairs, never mid-pair -- see
+/// `RunOptions::max_cost_micros`).
 pub fn run(args: &[String]) -> Result<()> {
     let root = crate::workspace_root()?;
     let bench_root = root.join("bench");
@@ -697,6 +1110,21 @@ pub fn run(args: &[String]) -> Result<()> {
             std::env::temp_dir().join(format!("tm-bench-cross-{}", std::process::id()))
         });
     let real_claude_auth = args.iter().any(|a| a == "--real-claude-auth");
+    let model = flag_value(args, "--model");
+    let task_timeout = flag_value(args, "--task-timeout")
+        .map(|s| {
+            s.parse::<u64>()
+                .with_context(|| format!("--task-timeout `{s}` must be a whole number of seconds"))
+        })
+        .transpose()?
+        .map(Duration::from_secs);
+    let max_cost_micros = flag_value(args, "--max-cost-usd")
+        .map(|s| {
+            s.parse::<f64>()
+                .with_context(|| format!("--max-cost-usd `{s}` must be a decimal dollar amount"))
+        })
+        .transpose()?
+        .map(|dollars| (dollars * 1_000_000.0).round() as u64);
 
     let requested: Vec<String> = tools_arg.split(',').map(|s| s.trim().to_string()).collect();
     require_real_claude_auth_opt_in(&requested, real_claude_auth)?;
@@ -708,18 +1136,23 @@ pub fn run(args: &[String]) -> Result<()> {
 
     let tm_adapter = TmAdapter {
         binary: "tm".to_string(),
+        model: model.clone(),
+        timeout: task_timeout,
     };
     let claude_adapter = ClaudeAdapter {
         binary: "claude".to_string(),
-        model: None,
+        model: model.clone(),
+        timeout: task_timeout,
     };
     let opencode_adapter = OpencodeAdapter {
         binary: "opencode".to_string(),
-        model: None,
+        model: model.clone(),
+        timeout: task_timeout,
     };
     let codex_adapter = CodexAdapter {
         binary: "codex".to_string(),
-        model: None,
+        model: model.clone(),
+        timeout: task_timeout,
     };
 
     let mut adapters: Vec<(&str, &dyn ToolAdapter)> = Vec::new();
@@ -741,7 +1174,12 @@ pub fn run(args: &[String]) -> Result<()> {
         adapters.len(),
         out_dir.display()
     );
-    let report = run_comparison(&tasks, &bench_root, &adapters, &out_dir)?;
+    let options = RunOptions {
+        model,
+        task_timeout,
+        max_cost_micros,
+    };
+    let report = run_comparison(&tasks, &bench_root, &adapters, &out_dir, &options)?;
     let markdown = render_markdown(&report);
     print!("{markdown}");
 
@@ -820,6 +1258,7 @@ mod tests {
                     tokens: Some(100),
                     cost_micros: Some(1_000),
                     model: Some("fake-model".to_string()),
+                    timed_out: false,
                 },
             }
         }
@@ -828,6 +1267,29 @@ mod tests {
     impl ToolAdapter for FakeAdapter {
         fn run(&self, _task: &BenchTask, _workdir: &Path) -> Result<AdapterOutcome> {
             Ok(self.outcome.clone())
+        }
+    }
+
+    /// A test-only adapter that spawns the real `sleep` binary for `sleep_seconds` -- used to
+    /// prove `run_with_timeout` actually kills a real, slow child process (not a simulation of
+    /// one), the same mechanism every real per-tool adapter uses for `--task-timeout`. Neither a
+    /// coding tool nor a network call -- see this module's own top-level doc comment.
+    struct SleepingAdapter {
+        sleep_seconds: u64,
+        timeout: Option<Duration>,
+    }
+
+    impl ToolAdapter for SleepingAdapter {
+        fn run(&self, _task: &BenchTask, _workdir: &Path) -> Result<AdapterOutcome> {
+            let mut cmd = Command::new("sleep");
+            cmd.arg(self.sleep_seconds.to_string());
+            match run_with_timeout(cmd, self.timeout)? {
+                TimedOutput::TimedOut => Ok(AdapterOutcome {
+                    timed_out: true,
+                    ..Default::default()
+                }),
+                TimedOutput::Finished(_) => Ok(AdapterOutcome::default()),
+            }
         }
     }
 
@@ -850,8 +1312,14 @@ mod tests {
         let adapters: Vec<(&str, &dyn ToolAdapter)> =
             vec![("tm", &tm_fake), ("opencode", &other_fake)];
 
-        let report = run_comparison(&[task], &bench_root, &adapters, workdir_root.path())
-            .expect("run_comparison should succeed against a fake adapter");
+        let report = run_comparison(
+            &[task],
+            &bench_root,
+            &adapters,
+            workdir_root.path(),
+            &RunOptions::default(),
+        )
+        .expect("run_comparison should succeed against a fake adapter");
 
         assert_eq!(report.results.len(), 2, "{report:?}");
         let tools: Vec<&str> = report.results.iter().map(|r| r.tool.as_str()).collect();
@@ -876,11 +1344,118 @@ mod tests {
         let fake = FakeAdapter::default();
         let adapters: Vec<(&str, &dyn ToolAdapter)> = vec![("tm", &fake)];
 
-        let report = run_comparison(&[task], &bench_root, &adapters, workdir_root.path())
-            .expect("run_comparison should still succeed overall");
+        let report = run_comparison(
+            &[task],
+            &bench_root,
+            &adapters,
+            workdir_root.path(),
+            &RunOptions::default(),
+        )
+        .expect("run_comparison should still succeed overall");
 
         assert_eq!(report.results.len(), 1);
         assert!(!report.results[0].passed);
+    }
+
+    #[test]
+    fn run_comparison_marks_a_real_timed_out_process_as_timeout_not_pass_or_fail() {
+        let task = live_smoke_task();
+        let root = crate::workspace_root().expect("workspace root");
+        let bench_root = root.join("bench");
+        let workdir_root = tempfile::tempdir().expect("tempdir");
+        let sleeping = SleepingAdapter {
+            sleep_seconds: 5,
+            timeout: Some(Duration::from_millis(200)),
+        };
+        let adapters: Vec<(&str, &dyn ToolAdapter)> = vec![("tm", &sleeping)];
+        let options = RunOptions {
+            task_timeout: Some(Duration::from_millis(200)),
+            ..Default::default()
+        };
+
+        let start = Instant::now();
+        let report = run_comparison(
+            &[task],
+            &bench_root,
+            &adapters,
+            workdir_root.path(),
+            &options,
+        )
+        .expect("run_comparison should still succeed overall");
+
+        assert_eq!(report.results.len(), 1, "{report:?}");
+        assert!(report.results[0].timed_out, "{:?}", report.results[0]);
+        assert!(!report.results[0].passed, "{:?}", report.results[0]);
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "should return promptly after killing the sleeping process, not wait out its full \
+             5s sleep"
+        );
+    }
+
+    #[test]
+    fn run_comparison_stops_scheduling_once_the_cost_cap_is_reached() {
+        let mut task_a = live_smoke_task();
+        task_a.id = "live-smoke-a".to_string();
+        let mut task_b = live_smoke_task();
+        task_b.id = "live-smoke-b".to_string();
+        let root = crate::workspace_root().expect("workspace root");
+        let bench_root = root.join("bench");
+        let workdir_root = tempfile::tempdir().expect("tempdir");
+        let fake = FakeAdapter::default(); // reports cost_micros: Some(1_000) every run
+        let adapters: Vec<(&str, &dyn ToolAdapter)> = vec![("tm", &fake)];
+        let options = RunOptions {
+            max_cost_micros: Some(1_000),
+            ..Default::default()
+        };
+
+        let report = run_comparison(
+            &[task_a, task_b],
+            &bench_root,
+            &adapters,
+            workdir_root.path(),
+            &options,
+        )
+        .expect("run_comparison should still succeed overall");
+
+        assert_eq!(
+            report.results.len(),
+            1,
+            "should stop scheduling once the first pair's cost reaches the cap: {report:?}"
+        );
+    }
+
+    #[test]
+    fn run_comparison_header_carries_the_requested_model_timeout_and_cost_cap() {
+        let task = live_smoke_task();
+        let root = crate::workspace_root().expect("workspace root");
+        let bench_root = root.join("bench");
+        let workdir_root = tempfile::tempdir().expect("tempdir");
+        let fake = FakeAdapter::default();
+        let adapters: Vec<(&str, &dyn ToolAdapter)> = vec![("tm", &fake)];
+        let options = RunOptions {
+            model: Some("anthropic/claude-sonnet-5".to_string()),
+            task_timeout: Some(Duration::from_secs(120)),
+            max_cost_micros: Some(5_000_000),
+        };
+
+        let report = run_comparison(
+            &[task],
+            &bench_root,
+            &adapters,
+            workdir_root.path(),
+            &options,
+        )
+        .expect("run_comparison should still succeed overall");
+
+        assert_eq!(
+            report.header.model.as_deref(),
+            Some("anthropic/claude-sonnet-5")
+        );
+        assert_eq!(report.header.task_timeout_seconds, Some(120));
+        assert_eq!(report.header.max_cost_micros, Some(5_000_000));
+        // `FakeAdapter` keeps `ToolAdapter::version`'s default (`None`).
+        assert_eq!(report.header.tool_versions, vec![("tm".to_string(), None)]);
     }
 
     #[test]
@@ -891,6 +1466,13 @@ mod tests {
                     ("tm".to_string(), "n/a (local ticket run)".to_string()),
                     ("opencode".to_string(), "--auto".to_string()),
                 ],
+                tool_versions: vec![
+                    ("tm".to_string(), Some("tm 0.1.0".to_string())),
+                    ("opencode".to_string(), None),
+                ],
+                model: Some("anthropic/claude-sonnet-5".to_string()),
+                task_timeout_seconds: Some(120),
+                max_cost_micros: Some(5_000_000),
             },
             results: vec![
                 CrossTaskResult {
@@ -903,6 +1485,7 @@ mod tests {
                     wall_seconds: 3,
                     tokens: Some(42),
                     model: Some("claude-sonnet-5".to_string()),
+                    timed_out: false,
                 },
                 CrossTaskResult {
                     tool: "opencode".to_string(),
@@ -914,10 +1497,17 @@ mod tests {
                     wall_seconds: 1,
                     tokens: None,
                     model: None,
+                    timed_out: false,
                 },
             ],
         };
         let markdown = render_markdown(&report);
+        assert!(markdown.contains("Model: anthropic/claude-sonnet-5"));
+        assert!(markdown.contains("Task timeout: 120s"));
+        assert!(markdown.contains("Max cost cap: $5.0000"));
+        assert!(markdown.contains("| Tool | Version |"));
+        assert!(markdown.contains("| tm | tm 0.1.0 |"));
+        assert!(markdown.contains("| opencode | unknown |"));
         assert!(markdown.contains("| Tool | Permission posture |"));
         assert!(markdown.contains("| opencode | --auto |"));
         assert!(markdown.contains("| Tool | Task | Model |"));
@@ -967,6 +1557,92 @@ mod tests {
         assert_eq!(filtered[0].id, "live-smoke");
     }
 
+    #[test]
+    fn tm_adapter_pin_model_writes_a_hand_edited_providers_toml() {
+        let adapter = TmAdapter {
+            binary: "tm".to_string(),
+            model: None,
+            timeout: None,
+        };
+        let workdir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(workdir.path().join(".tm")).expect("mkdir .tm");
+        // Simulate `tm init`'s already-generated file: a `[meta]` marker, `coder.fast`'s own
+        // default candidate, and an unrelated role that must survive the override untouched.
+        std::fs::write(
+            workdir.path().join(".tm/providers.toml"),
+            "[meta]\ngenerated = true\n\n[coder.fast]\ncandidates = [\n    { provider = \"devpass\", model = \"devpass-default\", max_concurrency = 10 },\n]\n\n[reviewer.semantic]\ncandidates = [\n    { provider = \"devpass\", model = \"devpass-default\", max_concurrency = 5 },\n]\n",
+        )
+        .expect("seed providers.toml");
+
+        adapter
+            .pin_model(workdir.path(), "anthropic/claude-sonnet-5")
+            .expect("pin_model should succeed");
+
+        let written = std::fs::read_to_string(workdir.path().join(".tm/providers.toml"))
+            .expect("read providers.toml");
+        let table: tm_provider::RoleTable =
+            tm_provider::RoleTable::parse(&written).expect("pin_model must write valid TOML");
+        let coder_fast = table.candidates_for(tm_types::Role::CoderFast);
+        assert_eq!(coder_fast.len(), 1, "{written}");
+        assert_eq!(coder_fast[0].provider, "anthropic");
+        assert_eq!(coder_fast[0].model, "claude-sonnet-5");
+        // The unrelated role from the seeded file must survive the override untouched, not be
+        // silently dropped (see `pin_model`'s own doc comment on why a from-scratch rewrite would
+        // be a real bug).
+        assert!(
+            !table
+                .candidates_for(tm_types::Role::ReviewerSemantic)
+                .is_empty(),
+            "{written}"
+        );
+        // No `[meta]`/`generated = true` -- otherwise the role-table loader would treat this as
+        // a generated file and overwrite `coder.fast`'s primary from `DEVPASS_*` env vars on the
+        // next load, silently undoing the pin (see `pin_model`'s own doc comment).
+        assert!(!written.contains("[meta]"), "{written}");
+    }
+
+    #[test]
+    fn tm_adapter_pin_model_rejects_a_model_without_a_provider_prefix() {
+        let adapter = TmAdapter {
+            binary: "tm".to_string(),
+            model: None,
+            timeout: None,
+        };
+        let workdir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(workdir.path().join(".tm")).expect("mkdir .tm");
+
+        assert!(adapter
+            .pin_model(workdir.path(), "claude-sonnet-5")
+            .is_err());
+    }
+
+    #[test]
+    fn run_with_timeout_kills_a_real_slow_process_and_reports_timed_out() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("5");
+        let start = Instant::now();
+
+        let outcome = run_with_timeout(cmd, Some(Duration::from_millis(200)))
+            .expect("run_with_timeout should not error on a timeout");
+
+        assert!(matches!(outcome, TimedOutput::TimedOut));
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "should return promptly after killing the process, not wait out its full 5s sleep"
+        );
+    }
+
+    #[test]
+    fn run_with_timeout_returns_finished_output_when_the_command_completes_first() {
+        let mut cmd = Command::new("true");
+        cmd.stdin(Stdio::null());
+        let outcome = run_with_timeout(cmd, None).expect("run_with_timeout should succeed");
+        match outcome {
+            TimedOutput::Finished(output) => assert!(output.status.success()),
+            TimedOutput::TimedOut => panic!("`true` should not time out with no timeout set"),
+        }
+    }
+
     /// `[program, args...]` from a not-yet-spawned `Command`, for asserting on the built argv
     /// without a real binary on `$PATH` -- see each `*Adapter::build_command`'s own doc comment.
     fn argv(cmd: &Command) -> Vec<String> {
@@ -986,6 +1662,7 @@ mod tests {
         let adapter = ClaudeAdapter {
             binary: "claude".to_string(),
             model: None,
+            timeout: None,
         };
         let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
         let cmd = adapter.build_command(&task, workdir);
@@ -1006,12 +1683,20 @@ mod tests {
         let task = live_smoke_task();
         let adapter = ClaudeAdapter {
             binary: "claude".to_string(),
-            model: Some("claude-sonnet-5".to_string()),
+            // A full `provider/model` id, as `--model` on the xtask CLI takes -- the adapter
+            // must strip the `anthropic/` prefix before handing it to `claude --model`, which
+            // takes a bare alias or model name.
+            model: Some("anthropic/claude-sonnet-5".to_string()),
+            timeout: None,
         };
         let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
         let args = argv(&adapter.build_command(&task, workdir));
         assert!(
             contains_pair(&args, "--model", "claude-sonnet-5"),
+            "{args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "anthropic/claude-sonnet-5"),
             "{args:?}"
         );
     }
@@ -1022,6 +1707,7 @@ mod tests {
         let adapter = OpencodeAdapter {
             binary: "opencode".to_string(),
             model: None,
+            timeout: None,
         };
         let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
         let cmd = adapter.build_command(&task, workdir);
@@ -1039,6 +1725,7 @@ mod tests {
         let adapter = OpencodeAdapter {
             binary: "opencode".to_string(),
             model: Some("anthropic/claude-sonnet-5".to_string()),
+            timeout: None,
         };
         let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
         let args = argv(&adapter.build_command(&task, workdir));
@@ -1054,6 +1741,7 @@ mod tests {
         let adapter = CodexAdapter {
             binary: "codex".to_string(),
             model: None,
+            timeout: None,
         };
         let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
         let cmd = adapter.build_command(&task, workdir);
@@ -1073,10 +1761,63 @@ mod tests {
         let task = live_smoke_task();
         let adapter = CodexAdapter {
             binary: "codex".to_string(),
-            model: Some("gpt-5-codex".to_string()),
+            model: Some("openai/gpt-5-codex".to_string()),
+            timeout: None,
         };
         let workdir = std::path::Path::new("/tmp/bench-cross-test-workdir");
         let args = argv(&adapter.build_command(&task, workdir));
         assert!(contains_pair(&args, "-m", "gpt-5-codex"), "{args:?}");
+        assert!(!args.iter().any(|a| a == "openai/gpt-5-codex"), "{args:?}");
+    }
+
+    #[test]
+    fn bare_model_id_strips_a_provider_prefix_but_leaves_a_bare_id_alone() {
+        assert_eq!(
+            bare_model_id("anthropic/claude-sonnet-5"),
+            "claude-sonnet-5"
+        );
+        assert_eq!(bare_model_id("claude-sonnet-5"), "claude-sonnet-5");
+    }
+
+    /// Regression test for a real bug this module had briefly: `run_with_timeout` spawned the
+    /// child without piping stdout/stderr, so every adapter silently got back empty output on a
+    /// real run (`TmAdapter::tm_json` would bail "printed no ticket id" on every single call).
+    /// Exercises the actual `ToolAdapter::run` path (not just `run_with_timeout` directly) against
+    /// a real, tiny shell script standing in for `claude`, which also closes the loop on task
+    /// u1-bench-cross-stdin-closed's own acceptance criterion: a tool that blocks reading stdin
+    /// must still complete, because `build_command` closes it with `Stdio::null()`.
+    #[test]
+    fn claude_adapter_completes_and_captures_output_when_the_tool_blocks_on_stdin() {
+        let task = live_smoke_task();
+        let workdir = tempfile::tempdir().expect("tempdir");
+        let script_path = workdir.path().join("fake-claude.sh");
+        std::fs::write(
+            &script_path,
+            "#!/bin/sh\ncat >/dev/null\necho '{\"model\":\"m\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2},\"cost_usd\":0.001}'\n",
+        )
+        .expect("write fake claude script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path)
+                .expect("stat fake claude script")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).expect("chmod +x fake claude script");
+        }
+
+        let adapter = ClaudeAdapter {
+            binary: script_path.to_string_lossy().to_string(),
+            model: None,
+            timeout: Some(Duration::from_secs(5)),
+        };
+
+        let outcome = adapter
+            .run(&task, workdir.path())
+            .expect("should complete rather than hang on stdin, or error on empty output");
+
+        assert!(!outcome.timed_out, "{outcome:?}");
+        assert_eq!(outcome.model.as_deref(), Some("m"));
+        assert_eq!(outcome.tokens, Some(3));
     }
 }
