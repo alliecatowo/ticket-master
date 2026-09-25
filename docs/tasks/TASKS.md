@@ -1167,7 +1167,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-core && mise run test:crate -- tm-server`
   evidence: `tm serve` trial: `{"error":"bad_request","message":"This ticket's request body is invalid: unknown variant \`task\`..."}`.
 
-- [ ] **u1-hygiene-spec-refs-in-user-strings** — Extend hygiene to flag `SPEC.md §`/`D-NNN` references inside user-facing string literals, and fix the current ones
+- [x] **u1-hygiene-spec-refs-in-user-strings** — Extend hygiene to flag `SPEC.md §`/`D-NNN` references inside user-facing string literals, and fix the current ones (landed 8476ca7)
   model: sonnet · severity: medium · builds Rust: yes · area: harness · deps: u1-doctor-providers-warn, u1-ticket-kind-task-alias-api
   files: `crates/xtask/src/hygiene.rs`, `crates/tm-cli/src/drive.rs`, `crates/tm-cli/src/workflow.rs`, `crates/tm-cli/src/project.rs`, `crates/tm-computer/src/macos.rs`, `crates/tm-cli/src/args.rs`
   change: Users see these strings: drive.rs:142 ("See SPEC.md §19.1a for examples"), workflow.rs:267 and project.rs:2153 ("prompt wearing a costume (SPEC.md §25.3)"), macos.rs:633 (`tm doctor` prints "... (SPEC.md §20.3)"), and `tm acp --help` ("for editors like Zed (`SPEC.md` §28.1)"). Hygiene only checks args.rs doc comments for D-NNN/crates/tm_*:: jargon. Extend it to flag `SPEC.md §` inside string literals in non-test code and inside args.rs `///` help text (allowlist mechanism as for D-NNN). Rewrite each hit in plain words (e.g. an inline browser.toml example instead of the SPEC pointer). Update the test at drive.rs:588 accordingly.
