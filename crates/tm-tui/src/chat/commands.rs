@@ -69,6 +69,16 @@ pub enum CommandId {
     Ticket,
     /// Activate and queue a ticket.
     Run,
+    /// Roll up local usage into a table.
+    Stats,
+    /// List, or run, this project's benchmark tasks.
+    Bench,
+    /// Tail recent events from the project's event log.
+    Events,
+    /// Replay a saved cassette against the attached ticket, offline.
+    Replay,
+    /// Start a new project from a prompt.
+    Genesis,
     /// Quit tm.
     Exit,
 }
@@ -319,6 +329,41 @@ pub const COMMANDS: &[SlashCommand] = &[
         description: "Activate and queue a ticket",
     },
     SlashCommand {
+        id: CommandId::Stats,
+        name: "stats",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Roll up local usage into a table",
+    },
+    SlashCommand {
+        id: CommandId::Bench,
+        name: "bench",
+        aliases: &[],
+        arg: Arg::Optional("[task]"),
+        description: "List, or run, this project's benchmark tasks",
+    },
+    SlashCommand {
+        id: CommandId::Events,
+        name: "events",
+        aliases: &[],
+        arg: Arg::None,
+        description: "Tail recent events from the project's log",
+    },
+    SlashCommand {
+        id: CommandId::Replay,
+        name: "replay",
+        aliases: &[],
+        arg: Arg::Required("<path>"),
+        description: "Replay a saved cassette against the attached ticket",
+    },
+    SlashCommand {
+        id: CommandId::Genesis,
+        name: "genesis",
+        aliases: &[],
+        arg: Arg::Required("<prompt>"),
+        description: "Start a new project from a prompt",
+    },
+    SlashCommand {
         id: CommandId::Exit,
         name: "exit",
         aliases: &["quit"],
@@ -465,7 +510,10 @@ mod tests {
         let home = filter("hom");
         assert_eq!(names(&home), vec!["tickets"]);
         assert_eq!(home[0].via_alias, Some("home"));
-        assert_eq!(names(&filter("re")), vec!["resume", "review", "provider"]);
+        assert_eq!(
+            names(&filter("re")),
+            vec!["resume", "review", "replay", "provider"]
+        );
     }
 
     #[test]
@@ -556,6 +604,11 @@ mod tests {
             "doctor",
             "permissions",
             "workflow",
+            "stats",
+            "bench",
+            "events",
+            "replay",
+            "genesis",
             "exit",
         ] {
             assert!(lookup(name).is_some(), "/{name} is a command");
@@ -644,5 +697,33 @@ mod tests {
             matches!(parse("/run T-3"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Run && arg == "T-3")
         );
         assert!(matches!(parse("/run"), Some(Parsed::MissingArg(c)) if c.id == CommandId::Run));
+    }
+
+    #[test]
+    fn stats_bench_events_replay_and_genesis_are_in_the_table() {
+        assert!(
+            matches!(parse("/stats"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Stats && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/bench"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Bench && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/bench run"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Bench && arg == "run")
+        );
+        assert!(
+            matches!(parse("/events"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Events && arg.is_empty())
+        );
+        assert!(
+            matches!(parse("/replay cassette.json"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Replay && arg == "cassette.json")
+        );
+        assert!(
+            matches!(parse("/replay"), Some(Parsed::MissingArg(c)) if c.id == CommandId::Replay)
+        );
+        assert!(
+            matches!(parse("/genesis a task tracker"), Some(Parsed::Known { command, arg }) if command.id == CommandId::Genesis && arg == "a task tracker")
+        );
+        assert!(
+            matches!(parse("/genesis"), Some(Parsed::MissingArg(c)) if c.id == CommandId::Genesis)
+        );
     }
 }

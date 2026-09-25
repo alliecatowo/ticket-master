@@ -2,13 +2,16 @@
 //! kept separate from `chat_ops.rs`'s session/UI plumbing so the text is a pure function of its
 //! inputs and easy to unit test without a live `AgentSession`. `/board`, `/milestones`,
 //! `/timeline` and `/deps` (screen navigation) live directly on `App` in `tui.rs`/`chat_ops.rs`;
-//! `/ticket` and `/run` (`show_ticket_cmd`/`run_ticket_cmd` below) need `App`'s `project`/`chat`
-//! fields for their one-shot store read, so they're `impl crate::tui::App` methods here rather
+//! `/ticket`, `/run`, `/stats`, `/bench`, `/events`, `/replay` and `/genesis` (`show_ticket_cmd`/
+//! `run_ticket_cmd`/`run_stats_cmd`/`run_bench_cmd`/`run_events_cmd`/`run_replay_cmd`/
+//! `run_genesis_cmd` below) need `App`'s `project`/`chat`/`attached` fields for their one-shot
+//! reads (or, for the latter three, to shell out to `tm`'s own CLI implementation of the same
+//! verb — see `run_tm`'s own doc comment), so they're `impl crate::tui::App` methods here rather
 //! than pure functions — placed in this file instead of `chat_ops.rs` to keep that file's diff to
-//! its six one-line match arms (`chat_ops.rs` carries uncommitted edits in the untouched
-//! `odw-integrate` worktree). `crate::tui::App`, not `super::super::App`, so the path still
-//! resolves once this file is folded into a plain `mod slash_views;` in `tui.rs` (see this file's
-//! own `#[path]` note in `chat_ops.rs`).
+//! one-line match arms (`chat_ops.rs` carries uncommitted edits in the untouched `odw-integrate`
+//! worktree). `crate::tui::App`, not `super::super::App`, so the path still resolves once this
+//! file is folded into a plain `mod slash_views;` in `tui.rs` (see this file's own `#[path]` note
+//! in `chat_ops.rs`).
 
 use tm_codeintel::hybrid::RankedHit;
 use tm_context::SectionKind;
@@ -460,6 +463,263 @@ pub(super) fn export_markdown(session: &str, turns: &[tm_agent::ConversationTurn
     out
 }
 
+/// The most events `/events` tails, matching the feel of a quick glance rather than a full `tm
+/// events tail` session.
+const MAX_EVENTS_TAILED: usize = 20;
+
+/// Read this project's whole event log, oldest first -- an independent read of the same log
+/// `stats.rs`'s own private `read_all_events` and `project.rs`'s `open_event_log` each already
+/// duplicate, per `stats.rs`'s own doc comment on why each command module reads through its own
+/// thin handle rather than a shared one.
+fn read_project_events(
+    project: &crate::project::Project,
+) -> tm_types::Result<Vec<tm_events::Event>> {
+    let db_path = project.state_dir.join("project.db");
+    let log = tm_events::EventLog::open_with_clock(&db_path, project.clock.clone())?;
+    const BATCH: usize = 1024;
+    let mut out = Vec::new();
+    let mut seq = 1u64;
+    loop {
+        let batch = log.read_from(seq, BATCH)?;
+        if batch.is_empty() {
+            break;
+        }
+        seq += batch.len() as u64;
+        out.extend(batch);
+    }
+    Ok(out)
+}
+
+/// `$` for an unpriced (zero-micros) call, matching `stats.rs`'s own `format_dollars` -- kept as
+/// a separate copy rather than made `pub` there, the same "each command module renders its own
+/// text" convention `stats.rs`'s doc comment on `read_all_events` already documents for the IO
+/// side.
+fn format_dollars(micros: u64) -> String {
+    if micros == 0 {
+        "not priced".to_string()
+    } else {
+        format!("${:.6}", micros as f64 / 1_000_000.0)
+    }
+}
+
+/// `/stats`'s table: one row per ticket that has recorded usage, matching `tm stats`'s own
+/// default (`--by ticket`) rollup.
+pub(super) fn stats_table(rows: &[tm_harness::metrics::TicketMetrics]) -> String {
+    if rows.is_empty() {
+        return "No usage recorded yet. Run `tm run <ticket>` to record some.".to_string();
+    }
+    let mut out = "Ticket   Tool calls  Tokens  Cost         Wall time (s)".to_string();
+    for m in rows {
+        out.push_str(&format!(
+            "\n{:<8} {:<11} {:<7} {:<12} {}",
+            m.ticket,
+            m.tool_calls,
+            m.tokens_in,
+            format_dollars(m.dollars_micros),
+            m.wall_seconds
+        ));
+    }
+    out
+}
+
+/// `/events`'s listing: `seq  kind  subject`, the last [`MAX_EVENTS_TAILED`] events, oldest of
+/// that window first -- matching `tm events tail`'s own one-line-per-event human format
+/// (`ops.rs`'s private `event_tail_human`).
+pub(super) fn events_tail(events: &[tm_events::Event]) -> String {
+    if events.is_empty() {
+        return "No events recorded yet.".to_string();
+    }
+    let start = events.len().saturating_sub(MAX_EVENTS_TAILED);
+    events[start..]
+        .iter()
+        .map(|e| format!("{}  {}  {}", e.seq, e.kind, e.subject))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Runs this same `tm` binary as a subprocess against `project.root`, with `args`, and returns
+/// its captured stdout (trimmed) on success or a plain description of what went wrong on
+/// failure. `/bench`, `/replay` and `/genesis` each already have a full CLI implementation (`tm
+/// bench`, `tm run --replay`, `tm genesis`); spawning the compiled binary reuses that directly
+/// instead of a second copy of `discover_bench_tasks`/`bench_run`/`run_genesis_stages`'s logic
+/// here. `current_dir` (not `--project`) resolves the project the same way `chat_ops.rs::
+/// run_review`'s own `git diff` subprocess already does, so this also works for a global-scope
+/// project (`--project` always means repo scope, D-003). Callers pass an option's value as
+/// `--flag=value` rather than two separate args, so a value starting with `-` (a path like
+/// `-replay.json`, an unlucky prompt) is never misread as a flag of its own.
+fn run_tm(project: &crate::project::Project, args: &[&str]) -> Result<String, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("Could not find the tm binary: {e}"))?;
+    let output = std::process::Command::new(exe)
+        .args(args)
+        .current_dir(&project.root)
+        .output()
+        .map_err(|e| format!("Could not run tm: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        // `Renderer::error`'s human mode already prefixes with "error: "; strip it so this
+        // doesn't stack a second "Could not X: error: ..." prefix on top (voice rules).
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = stderr
+            .strip_prefix("error: ")
+            .unwrap_or(&stderr)
+            .to_string();
+        Err(if stderr.is_empty() {
+            match output.status.code() {
+                Some(code) => format!("tm didn't finish (exit code {code})"),
+                None => "tm didn't finish".to_string(),
+            }
+        } else {
+            stderr
+        })
+    }
+}
+
+impl crate::tui::App {
+    /// `/stats`: the same per-ticket rollup `tm stats` prints by default, read straight from the
+    /// event log rather than shelling out (unlike `/bench`/`/replay`/`/genesis` below) since the
+    /// aggregation itself ([`crate::stats::stats_by_ticket`]) is a pure, already-public function.
+    pub(super) fn run_stats_cmd(&mut self) {
+        match read_project_events(&self.project) {
+            Ok(events) => {
+                let rows = crate::stats::stats_by_ticket(&events, None);
+                self.chat.push_notice(NoticeLevel::Info, stats_table(&rows));
+            }
+            Err(e) => self
+                .chat
+                .push_notice(NoticeLevel::Warning, format!("Could not read usage: {e}")),
+        }
+    }
+
+    /// `/events`: the last [`MAX_EVENTS_TAILED`] events, the same read [`Self::run_stats_cmd`]
+    /// does.
+    pub(super) fn run_events_cmd(&mut self) {
+        match read_project_events(&self.project) {
+            Ok(events) => self
+                .chat
+                .push_notice(NoticeLevel::Info, events_tail(&events)),
+            Err(e) => self
+                .chat
+                .push_notice(NoticeLevel::Warning, format!("Could not read events: {e}")),
+        }
+    }
+
+    /// `/bench [task]`: bare, `tm bench list`'s table; with a task name, `tm bench run --filter
+    /// <task>`'s summary.
+    pub(super) fn run_bench_cmd(&mut self, arg: &str) {
+        let task = arg.trim();
+        let result = if task.is_empty() {
+            run_tm(&self.project, &["bench", "list"])
+        } else {
+            let filter = format!("--filter={task}");
+            run_tm(&self.project, &["bench", "run", filter.as_str()])
+        };
+        match result {
+            Ok(output) => self.chat.push_notice(
+                NoticeLevel::Info,
+                if output.is_empty() {
+                    "No benchmark tasks found under bench/tasks/.".to_string()
+                } else {
+                    output
+                },
+            ),
+            Err(e) => self
+                .chat
+                .push_notice(NoticeLevel::Warning, format!("Could not run tm bench: {e}")),
+        }
+    }
+
+    /// `/replay <path>`: rerun the attached ticket offline against a saved cassette (`tm run <T>
+    /// --replay <path>`), same as `replay-cli-replay-flag`'s CLI flag. Needs an attached ticket
+    /// (`/attach <ticket>` first), since a cassette replays *a* ticket's calls, not a bare chat
+    /// turn.
+    pub(super) fn run_replay_cmd(&mut self, arg: &str) {
+        let path = arg.trim();
+        let Some(ticket) = self.attached.clone() else {
+            return self.chat.push_notice(
+                NoticeLevel::Warning,
+                "No ticket attached. Run /attach <ticket>, then /replay again.",
+            );
+        };
+        // The subprocess's cwd is `project.root` (see `run_tm`), not wherever the user actually
+        // typed `/replay` from, so a relative path has to be resolved against *this* process's
+        // cwd before crossing that boundary, or it would (silently, and wrongly) resolve against
+        // the project root instead.
+        let path = std::path::Path::new(path);
+        let resolved = if path.is_relative() {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        } else {
+            path.to_path_buf()
+        };
+        let replay = format!("--replay={}", resolved.display());
+        match run_tm(&self.project, &["run", ticket.as_str(), replay.as_str()]) {
+            Ok(output) => self.chat.push_notice(
+                NoticeLevel::Info,
+                if output.is_empty() {
+                    format!("Replayed {ticket} from {}.", resolved.display())
+                } else {
+                    output
+                },
+            ),
+            Err(e) => self.chat.push_notice(
+                NoticeLevel::Warning,
+                format!("Could not replay {ticket}: {e}"),
+            ),
+        }
+    }
+
+    /// `/genesis <prompt>`: start `tm genesis --prompt <prompt>` as a background process rather
+    /// than blocking the chat -- genesis is a multi-stage run that can take minutes and, per
+    /// D-027, stops partway for `tm sched run`/`tm genesis --resume` rather than finishing in one
+    /// shot, so waiting on it here the way `/replay` waits on a (fast, offline) replay would just
+    /// freeze the chat for no benefit.
+    pub(super) fn run_genesis_cmd(&mut self, arg: &str) {
+        let prompt = arg.trim();
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => {
+                return self.chat.push_notice(
+                    NoticeLevel::Warning,
+                    format!("Could not find the tm binary: {e}"),
+                )
+            }
+        };
+        let prompt_flag = format!("--prompt={prompt}");
+        match std::process::Command::new(exe)
+            .args(["genesis", prompt_flag.as_str()])
+            .current_dir(&self.project.root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                // Reap it on a detached thread rather than leaving a zombie process for the rest
+                // of this TUI session -- nothing here needs its exit status, only that something
+                // eventually calls `wait` on it.
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                self.chat.push_notice(
+                    NoticeLevel::Success,
+                    format!(
+                        "Started genesis for \"{prompt}\" in the background. It may stop early \
+                         for you to run `tm sched run`, then continue with `tm genesis \
+                         --resume`; watch new tickets appear on the tickets screen."
+                    ),
+                );
+            }
+            Err(e) => self.chat.push_notice(
+                NoticeLevel::Warning,
+                format!("Could not start genesis: {e}"),
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -662,6 +922,86 @@ mod tests {
         assert_eq!(parse_permission_mode(" plan "), Some(PermissionMode::Plan));
         assert_eq!(parse_permission_mode("ask"), Some(PermissionMode::Ask));
         assert_eq!(parse_permission_mode("nope"), None);
+    }
+
+    fn metrics(
+        ticket: &str,
+        tool_calls: u32,
+        tokens_in: u64,
+        dollars_micros: u64,
+    ) -> tm_harness::metrics::TicketMetrics {
+        tm_harness::metrics::TicketMetrics {
+            ticket: TicketId::new(ticket).expect("valid ticket id"),
+            session: tm_types::SessionId::new("S-1").expect("valid session id"),
+            harness_epoch: 0,
+            wall_seconds: 5,
+            tokens_in,
+            tokens_out: 0,
+            dollars_micros,
+            tool_calls,
+            searches_before_first_relevant_hit: 0,
+            verification_failures: 0,
+            retries: 0,
+            context_bytes: 0,
+            commands_rerun: 0,
+            human_interventions: 0,
+            recorded_at: tm_types::Timestamp::EPOCH,
+        }
+    }
+
+    #[test]
+    fn stats_table_shows_the_empty_state_or_one_row_per_ticket() {
+        assert!(stats_table(&[]).contains("No usage recorded yet"));
+        let rows = vec![metrics("T-1", 3, 100, 1_500_000), metrics("T-2", 0, 0, 0)];
+        let text = stats_table(&rows);
+        assert!(text.contains("T-1"));
+        assert!(text.contains("$1.500000"));
+        assert!(text.contains("T-2"));
+        assert!(text.contains("not priced"));
+    }
+
+    fn test_event(seq: u64, subject: tm_types::Id) -> tm_events::Event {
+        let draft = tm_events::EventDraft::new(
+            tm_types::ParticipantId::new("human:test").expect("valid participant id"),
+            subject,
+            tm_events::Payload::from(tm_events::payload::UsageRecordedPayload {
+                ticket: None,
+                session: None,
+                tokens: 0,
+                dollars_micros: 0,
+                wall_seconds: 0,
+                provider: None,
+                model: None,
+            }),
+        );
+        tm_events::Event {
+            seq,
+            ts: tm_types::Timestamp::EPOCH,
+            kind: draft.kind(),
+            subject: draft.subject,
+            actor: draft.actor,
+            session: draft.session,
+            causation: draft.causation,
+            correlation: draft.correlation,
+            payload: draft.payload,
+            hash: "test".to_string(),
+        }
+    }
+
+    #[test]
+    fn events_tail_shows_the_empty_state_or_the_most_recent_window() {
+        assert!(events_tail(&[]).contains("No events"));
+        let events: Vec<_> = (1..=(MAX_EVENTS_TAILED as u64 + 5))
+            .map(|seq| test_event(seq, tm_types::Id::none()))
+            .collect();
+        let text = events_tail(&events);
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), MAX_EVENTS_TAILED);
+        assert!(lines[0].starts_with('6'));
+        assert!(lines
+            .last()
+            .unwrap()
+            .starts_with(&(MAX_EVENTS_TAILED + 5).to_string()));
     }
 
     fn workflow_def(name: &str) -> tm_workflow::WorkflowDef {

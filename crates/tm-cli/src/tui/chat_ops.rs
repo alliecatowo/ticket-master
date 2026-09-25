@@ -1015,6 +1015,11 @@ impl App {
             CommandId::Deps => return self.open_hub_tab(super::ScreenId::Graph, now),
             CommandId::Ticket => self.show_ticket_cmd(&arg),
             CommandId::Run => self.run_ticket_cmd(&arg),
+            CommandId::Stats => self.run_stats_cmd(),
+            CommandId::Bench => self.run_bench_cmd(&arg),
+            CommandId::Events => self.run_events_cmd(),
+            CommandId::Replay => self.run_replay_cmd(&arg),
+            CommandId::Genesis => self.run_genesis_cmd(&arg),
             // The chat screen answers these itself; handled anyway so the match stays exhaustive.
             CommandId::Status | CommandId::Cost => {}
             CommandId::Tickets => return self.open_tickets(now),
