@@ -88,7 +88,8 @@ struct ModelDecodingTests {
 /// answers with an empty `200 {}` response, which is all `submitTicket`/`acceptTicket`/
 /// `rejectTicket` need since they discard the response body.
 final class CapturingURLProtocol: URLProtocol, @unchecked Sendable {
-    static var capturedBody: Data?
+    // Only the test that installed this protocol reads and writes it, one request at a time.
+    nonisolated(unsafe) static var capturedBody: Data?
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }

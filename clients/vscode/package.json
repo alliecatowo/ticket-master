@@ -100,6 +100,7 @@
   },
   "scripts": {
     "compile": "tsc --noEmit -p ./ && node esbuild.mjs",
+    "build": "tsc --noEmit -p ./ && node esbuild.mjs",
     "watch": "tsc -w -p ./",
     "test": "vitest run",
     "test:watch": "vitest"

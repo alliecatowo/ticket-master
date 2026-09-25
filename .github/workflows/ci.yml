@@ -66,6 +66,8 @@ jobs:
             clients/ts/pnpm-lock.yaml
             clients/vscode/pnpm-lock.yaml
             clients/web/pnpm-lock.yaml
+      # The extension links the TS SDK (link:../ts), whose types live in its dist/.
+      - run: pnpm -C clients/ts install && pnpm -C clients/ts build
       - run: pnpm -C clients/vscode install
       - run: pnpm -C clients/vscode test
       - run: pnpm -C clients/vscode build
