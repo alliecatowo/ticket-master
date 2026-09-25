@@ -1398,3 +1398,48 @@ is based on.
 - SWE-lite fixtures: which toolchains are allowed (Python via uv, Node, dependency-free Rust), and are there licensing constraints on vendoring third-party code snapshots into this private repo?
 - Semantic search currently uses LocalHashEmbedder, a deterministic hash-based stand-in, so any benchmark that scores retrieval quality will hit a ceiling. Do you want a real embedding provider wired in, and if so which one? It is not in this plan.
 - Swift symbol support (B22) adds a tree-sitter-swift C grammar, which costs compile time and disk on the 8GB machine. Build it now or defer?
+
+## V — Found by trials and audits
+
+- [ ] **t20260925-1314-BurntSushi-ripgrep-3376-recover-without-repeating-agent-investigation** — Preserve findings and vary strategy when a model ends without submitting
+  model: sonnet · severity: high · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-agent/src/executor.rs`, `crates/tm-agent/src/agent_loop.rs`
+  change: When a ticketed model turn ends without submission, include concise prior findings in the retry context and detect repeated tool/file reads; after a repeated no-progress attempt, ask for a targeted reproduction or produce a specific diagnosis instead of restarting the same investigation.
+  acceptance: A simulated no-submit ticket whose next attempt repeats the same file reads is steered to a different action or stops with a user-actionable explanation, while normal retries continue to work.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260925-1314/BurntSushi-ripgrep-3376/tm.log` lines 5-37 and 58-82 show repeated reads of `walk.rs`/`dir.rs` followed by the identical no-submit failure; `tm events tail --from 0` shows two sessions and retry scheduling (events 164-176, 287-294).
+- [ ] **t20260925-1314-gohugoio-hugo-15360-actionable-tool-errors** — Make tool-call error messages actionable during `tm run`
+  model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/agent.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  change: Extend `plain_tool_error` and its progress rendering to preserve a concise safe diagnostic and identify an actionable recovery step, especially for invariant and parse failures, instead of reducing them to generic phrases.
+  acceptance: When a tool call fails with an invariant or parse error, `tm run` output names the failed operation and suggests a concrete next action, while detailed diagnostics remain available in logs; add focused tests for both cases.
+  test: `cargo test -p tm-cli plain_tool_error`
+  evidence: `/tmp/tm-trials/20260925-1314/gohugoio-hugo-15360/tm.log` lines 96-98: “Submitted the ticket -> error: hit an unexpected internal problem”, “Saved a result -> error: got a response it couldn't understand”, then “Saved a result” and “Submitted the ticket”.
+- [ ] **t20260925-1314-pallets-click-3822-summarize-repeated-file-reads** — Make repeated file reads distinguishable in `tm run` progress
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/agent.rs`
+  change: Update tool progress rendering so consecutive repeated reads of the same path are compacted or explicitly counted, while preserving distinct path/range reads as separate actions; include a final repeat count so users can tell whether the agent is stuck rereading context.
+  acceptance: A run transcript with multiple identical `fs.read` calls for one path renders a clear repeat indicator instead of an indistinguishable list, while different paths and `fs.read_range` ranges remain individually visible.
+  test: `cargo test -p tm-cli format_tool_call`
+  evidence: `/tmp/tm-trials/20260925-1314/pallets-click-3822/tm.log` lines 27–48 show repeated `Read src/click/types.py` progress entries and overlapping full-file/range reads; implementation and adjacent tests are in `crates/tm-cli/src/agent.rs` (`plain_tool_arg`, `plain_tool_action`, `format_tool_call_shows_the_call_s_salient_argument`).
+- [ ] **t20260925-1314-psf-requests-7432-terminal-failure-summary** — Make failed ticket runs explain whether any work was submitted
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/sched.rs`
+  change: When `tm run` completes with a failed attempt such as “model ended turn without submitting,” render a concise terminal summary that says no patch/evidence was submitted, includes the failure reason, and points to the exact resume/retry command; preserve the current error exit status.
+  acceptance: A ticket run that ends without submission prints a final summary distinguishing this from a test failure and gives an actionable recovery command; a successful run's output remains unchanged.
+  test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
+  evidence: `/private/tmp/tm-trials/20260925-1314/psf-requests-7432/tm.log:170` — “model ended turn without submitting. Run `tm run T-1` again to retry.” after 1,063.43 seconds, followed by `ticket.retry_scheduled` at line 172.
+- [ ] **t20260925-1314-sindresorhus-ky-878-provider-retry-guidance** — Give actionable recovery for provider configuration failures
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/sched.rs`, `crates/tm-provider/src/fabric.rs`
+  change: In `run_outcome`, distinguish an unregistered provider/no-candidate configuration failure from transient provider unavailability. Do not recommend rerunning `tm run <ticket>` with unchanged configuration; explain that the configured provider is not registered and point to the real provider setup/validation command.
+  acceptance: A test for the `provider not registered: <name>` failure verifies the user receives a concrete provider-configuration recovery step and is not told to retry unchanged settings; transient provider failures retain retry guidance.
+  test: `cargo test -p tm-cli run_outcome`
+  evidence: `/tmp/tm-trials/20260925-1314/sindresorhus-ky-878/tm.log:7` — `provider was unavailable: provider: no candidate can serve role coder.fast: provider not registered: devpass. Run tm run T-1 again to retry.`; source: `crates/tm-cli/src/sched.rs:818-830` currently recommends the same retry for every `Ready`/`Blocked` failure.
+- [ ] **t20260925-1314-spf13-cobra-2257-step-limit-submit-recovery** — Recover cleanly when a completed run hits the step limit before submitting
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  change: When the worker approaches `max_steps`, surface an explicit finalization/recovery path and preserve completion evidence if `ticket.submit` fails at the limit; replace generic retry guidance with the actual failure reason and safe next action.
+  acceptance: A test simulates a worker that completes and verifies its task but reaches the final allowed step with a failed submit; the run either submits successfully through the recovery path or returns a user-facing failure that identifies the step-limit/submit cause, preserves the diff and test evidence, and does not claim the ticket was submitted.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260925-1314/spf13-cobra-2257/tm.log` line 19 (`something went wrong: step limit (64) reached without submitting. Run tm run T-2 again to retry`); events seq 355-358 show `goal_claimed_complete`, `ticket.submit` error, then `ticket.failed` for the step limit.
