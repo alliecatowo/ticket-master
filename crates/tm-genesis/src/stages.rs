@@ -303,6 +303,11 @@ pub struct GenesisDriver<'a> {
     provider: &'a dyn tm_provider::Provider,
     clock: &'a dyn Clock,
     ids: &'a dyn IdSource,
+    /// The template catalog `Stage::GraphCompilation` passes to [`crate::compile::compile_with_retry`]
+    /// for [`crate::compile::select_template`]'s capability-tag matching (`SPEC.md` §27.1). An
+    /// empty slice makes template selection a no-op, same as before this field existed; callers
+    /// normally supply [`tm_templates::bundled_catalog`]'s output.
+    catalog: &'a [tm_templates::TemplateManifest],
 }
 
 impl<'a> GenesisDriver<'a> {
@@ -313,12 +318,14 @@ impl<'a> GenesisDriver<'a> {
         provider: &'a dyn tm_provider::Provider,
         clock: &'a dyn Clock,
         ids: &'a dyn IdSource,
+        catalog: &'a [tm_templates::TemplateManifest],
     ) -> Self {
         GenesisDriver {
             store,
             provider,
             clock,
             ids,
+            catalog,
         }
     }
 
@@ -450,12 +457,7 @@ impl<'a> GenesisDriver<'a> {
                     self.clock,
                     self.ids,
                     actor.clone(),
-                    // No template catalog wired into `GenesisDriver` yet — an empty slice makes
-                    // `compile::select_template` a no-op, so this stage's behavior is unchanged
-                    // from before `compile_with_retry` grew this parameter (`SPEC.md` §27.1's
-                    // template-selection path is additive; wiring an actual catalog in here is
-                    // follow-up work, not part of this change).
-                    &[],
+                    self.catalog,
                     &GraphRetryPolicy::default_bounded(),
                 )
                 .await?;
@@ -982,7 +984,7 @@ mod tests {
         };
         provider.script_response(&req, completion);
 
-        let driver = GenesisDriver::new(&store, &provider, &clock, &ids);
+        let driver = GenesisDriver::new(&store, &provider, &clock, &ids, &[]);
         let state = GenesisState::new(raw_prompt, &clock);
 
         let advanced = driver
@@ -1004,6 +1006,125 @@ mod tests {
 
         let resumed = GenesisDriver::resume(&store).expect("resume after advance");
         assert_eq!(resumed, advanced);
+    }
+
+    /// `genesis-wire-template-catalog`: a real, non-empty template catalog passed into
+    /// [`GenesisDriver::new`] reaches [`crate::compile::compile_with_retry`]'s template-selection
+    /// path, so a `GraphCompilation` whose spec's prose matches a catalog template's tags comes
+    /// out with `GraphSummary::selected_template` populated — no longer the permanent `&[]`
+    /// no-op.
+    #[tokio::test]
+    async fn advance_at_graph_compilation_selects_a_template_from_a_matching_catalog() {
+        use tm_provider::mock::MockProvider;
+        use tm_provider::types::{Candidate, Completion, ContentBlock, ModelId, StopReason, Usage};
+        use tm_templates::TemplateManifest;
+
+        use crate::spec::{MilestoneOutline, ReleaseDefinition, Requirement};
+
+        let (_dir, store) = open_store();
+        let clock = FixedClock::epoch();
+        let ids = CounterIds::new();
+        let clock_arc: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock_arc);
+
+        let spec = Specification {
+            source_vision: None,
+            requirements: vec![Requirement {
+                id: "R1".to_string(),
+                text: "does the thing".to_string(),
+                priority: 0,
+            }],
+            // Matches the fixture template's "ratatui" tag below (case-insensitive substring).
+            architecture: "a ratatui terminal UI over one crate".to_string(),
+            interfaces: vec![],
+            data_model: "none".to_string(),
+            technology_choices: vec![],
+            quality_bar: "green CI".to_string(),
+            security_model: "no secrets".to_string(),
+            testing_strategy: "unit tests".to_string(),
+            milestones: vec![MilestoneOutline {
+                title: "v0".to_string(),
+                objective: "ship it".to_string(),
+                scope_hint: "the whole thing".to_string(),
+            }],
+            v0: ReleaseDefinition {
+                objective: "works".to_string(),
+                exit_criteria: vec![],
+            },
+            v1: ReleaseDefinition {
+                objective: "works better".to_string(),
+                exit_criteria: vec![],
+            },
+            created: Timestamp::EPOCH,
+        };
+        let spec_id = store
+            .store_artifact(
+                ArtifactKind::Report,
+                "application/json".to_string(),
+                serde_json::to_vec(&spec).expect("serialize spec"),
+                serde_json::json!({ META_FIELD_KEY: "spec" }),
+                None,
+                actor(),
+            )
+            .expect("store spec")
+            .iter()
+            .find_map(|e| e.payload.as_artifact_created().map(|p| p.artifact.clone()))
+            .expect("spec artifact id");
+
+        // `compile_with_retry`'s provider prompt doesn't depend on the catalog, and this test has
+        // no way to reach `compile`'s private `ProposedGraphPayload` wire type to build an exact
+        // hash-matched request — `script_default_response` answers every request instead, same as
+        // an out-of-process integration test would (see that method's own doc comment). The wire
+        // shape (tickets/dependencies/milestones/authority_domains) mirrors
+        // `crate::compile::ProposedGraphPayload`.
+        let payload_json = serde_json::json!({
+            "tickets": [],
+            "dependencies": [],
+            "milestones": [],
+            "authority_domains": [],
+        })
+        .to_string();
+        provider.script_default_response(Completion {
+            model: ModelId::new("test", "model"),
+            candidates: vec![Candidate {
+                content: vec![ContentBlock::Text { text: payload_json }],
+                stop_reason: StopReason::EndTurn,
+            }],
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            latency: std::time::Duration::from_millis(1),
+            received_at: Timestamp::EPOCH,
+        });
+
+        let catalog = vec![TemplateManifest {
+            id: "starter-ratatui".to_string(),
+            version: "0.1.0".to_string(),
+            license: None,
+            tags: vec!["ratatui".to_string(), "tui".to_string()],
+            params: vec![],
+            checksum: "blake3:fixture".to_string(),
+        }];
+
+        let driver = GenesisDriver::new(&store, &provider, &clock, &ids, &catalog);
+        let mut state = GenesisState::new("demo".to_string(), &clock);
+        state.stage = Stage::GraphCompilation;
+        state.spec = Some(spec_id);
+
+        let advanced = driver
+            .advance(&state, actor())
+            .await
+            .expect("advance graph compilation");
+        assert_eq!(advanced.stage, Stage::Ignition);
+        let graph_id = advanced.graph.clone().expect("graph artifact id");
+        let summary: GraphSummary = driver.load_field(&graph_id).expect("load graph summary");
+        assert_eq!(
+            summary.selected_template.as_deref(),
+            Some("starter-ratatui")
+        );
     }
 
     /// `genesis-explicit-v0-v1-milestone-marking`: a milestone tagged `ReleaseMarker::V0` wins
@@ -1049,7 +1170,7 @@ mod tests {
             selected_template: None,
         };
 
-        let driver = GenesisDriver::new(&store, &provider, &clock, &ids);
+        let driver = GenesisDriver::new(&store, &provider, &clock, &ids, &[]);
         let graph_id = driver
             .persist_field(&summary, "graph", actor())
             .expect("persist graph summary");

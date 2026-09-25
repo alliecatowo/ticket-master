@@ -208,7 +208,7 @@ async fn seed_to_steady_state_offline_and_deterministic() {
     let driver_ids = CounterIds::new();
     let actor = ParticipantId::system();
 
-    let driver = GenesisDriver::new(&store, &provider, clock.as_ref(), &driver_ids);
+    let driver = GenesisDriver::new(&store, &provider, clock.as_ref(), &driver_ids, &[]);
     let mut state = GenesisState::new("demo-project".to_string(), clock.as_ref());
     assert_eq!(state.stage, Stage::Seed);
 
@@ -413,7 +413,7 @@ async fn resume_reproduces_an_in_flight_stage() -> TmResult<()> {
     let provider = MockProvider::new("mock", model.clone(), clock_dyn);
     let driver_ids = CounterIds::new();
     let actor = ParticipantId::system();
-    let driver = GenesisDriver::new(&store, &provider, clock.as_ref(), &driver_ids);
+    let driver = GenesisDriver::new(&store, &provider, clock.as_ref(), &driver_ids, &[]);
 
     let mut state = GenesisState::new("resumable-project".to_string(), clock.as_ref());
     state = advance_stage(

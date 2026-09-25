@@ -1640,6 +1640,13 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
     let actor = project.actor.clone();
     let quiet = renderer.is_quiet();
     let progress = *renderer;
+    // A missing/unreadable bundled catalog degrades to the pre-catalog behavior (template
+    // selection is a no-op) rather than failing the whole run — this can legitimately happen for
+    // an installed `tm` whose layout doesn't ship the starter templates yet.
+    let catalog = tm_templates::bundled_catalog().unwrap_or_else(|e| {
+        tracing::warn!("bundled template catalog unavailable, genesis will run without template selection: {e}");
+        Vec::new()
+    });
 
     let (final_state, stop) = run_async(move || async move {
         let driver = tm_genesis::GenesisDriver::new(
@@ -1647,6 +1654,7 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
             provider.as_ref(),
             project.clock.as_ref(),
             project.ids.as_ref(),
+            &catalog,
         );
         run_genesis_stages(
             &driver,
@@ -2921,7 +2929,7 @@ mod tests {
             received_at: Timestamp::EPOCH,
         });
 
-        let driver = tm_genesis::GenesisDriver::new(&store, &provider, clock.as_ref(), &ids);
+        let driver = tm_genesis::GenesisDriver::new(&store, &provider, clock.as_ref(), &ids, &[]);
         let mut state = tm_genesis::GenesisState::new("demo".to_string(), clock.as_ref());
         state.stage = tm_genesis::Stage::Stabilization;
 
@@ -2970,7 +2978,7 @@ mod tests {
         let model = tm_provider::types::ModelId::new("test", "model");
         let provider = tm_provider::mock::MockProvider::new("test", model, clock.clone());
 
-        let driver = tm_genesis::GenesisDriver::new(&store, &provider, clock.as_ref(), &ids);
+        let driver = tm_genesis::GenesisDriver::new(&store, &provider, clock.as_ref(), &ids, &[]);
         let mut state = tm_genesis::GenesisState::new("demo".to_string(), clock.as_ref());
         state.stage = tm_genesis::Stage::V0;
         state.ignition = Some(tm_genesis::IgnitionPolicy::for_v0(milestone.clone()));
