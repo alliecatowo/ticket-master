@@ -115,6 +115,14 @@ pub fn graph_compilation() -> String {
         milestone_ref: "v1".to_string(),
         title: "v1".to_string(),
         ticket_refs: vec![],
+        // This fixture only ever produces one milestone, which stands in for both the v0 and
+        // v1 release lines the offline scripted sequence's Ignition/maturity-gate stages gate
+        // on -- so it's tagged with both markers rather than relying on the positional
+        // heuristic (proving the explicit-marker path, not the fallback, end to end).
+        releases: vec![
+            crate::compile::ReleaseMarker::V0,
+            crate::compile::ReleaseMarker::V1,
+        ],
     }];
 
     serde_json::json!({

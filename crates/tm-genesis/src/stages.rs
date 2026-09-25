@@ -26,7 +26,7 @@ use tm_types::{
     TicketId, Timestamp, TmError,
 };
 
-use crate::compile::{CommitOutcome, Ref, RetryPolicy as GraphRetryPolicy};
+use crate::compile::{CommitOutcome, Ref, ReleaseMarker, RetryPolicy as GraphRetryPolicy};
 use crate::ignition::IgnitionPolicy;
 use crate::maturity::{MaturityGateResult, MaturityThresholds, ReconvergenceOutcome};
 use crate::seed::Seed;
@@ -201,11 +201,13 @@ pub fn transition(from: Stage, event: &StageEvent) -> Result<Stage, IllegalTrans
 /// `V1` at all (see `docs/decisions/D-027-genesis-cli-stops-for-work.md`'s termination policy),
 /// so the two agree on the same approximation instead of silently drifting apart.
 ///
-/// `GenesisState` only tracks a V0 milestone id directly (via `ignition`'s
-/// [`crate::ignition::IgnitionPolicy::v0_objective_milestone`]); there is no dedicated "V1
-/// milestone" field, so V1 is approximated as the first milestone distinct from V0 (or the only
-/// milestone that exists, if there's just one). `None` for any other stage, or when nothing has
-/// been compiled/ignited yet to resolve from.
+/// `GenesisState` tracks a V0 milestone id directly (via `ignition`'s
+/// [`crate::ignition::IgnitionPolicy::v0_objective_milestone`]) and, when the graph compiler
+/// explicitly tagged one (`genesis-explicit-v0-v1-milestone-marking`), a V1 milestone id too (via
+/// [`crate::ignition::IgnitionPolicy::v1_milestone`]). When no V1 milestone was tagged, V1 is
+/// approximated as the first milestone distinct from V0 (or the only milestone that exists, if
+/// there's just one). `None` for any other stage, or when nothing has been compiled/ignited yet
+/// to resolve from.
 pub fn milestone_for_stage(
     stage: Stage,
     ignition: Option<&IgnitionPolicy>,
@@ -214,12 +216,13 @@ pub fn milestone_for_stage(
     let v0 = ignition.map(|p| p.v0_objective_milestone.clone());
     match stage {
         Stage::V0 => v0,
-        Stage::V1 => view
-            .milestones
-            .keys()
-            .find(|id| Some((*id).clone()) != v0)
-            .or_else(|| view.milestones.keys().next())
-            .cloned(),
+        Stage::V1 => ignition.and_then(|p| p.v1_milestone.clone()).or_else(|| {
+            view.milestones
+                .keys()
+                .find(|id| Some((*id).clone()) != v0)
+                .or_else(|| view.milestones.keys().next())
+                .cloned()
+        }),
         _ => None,
     }
 }
@@ -277,6 +280,11 @@ impl GenesisState {
 struct GraphSummary {
     tickets: BTreeMap<Ref, TicketId>,
     milestones: BTreeMap<Ref, MilestoneId>,
+    /// The [`crate::compile::CommitOutcome::release_milestones`] this graph was compiled with.
+    /// `#[serde(default)]` so a `GraphSummary` persisted before this field existed still
+    /// deserializes (as empty — no marker, callers fall back to the positional heuristic).
+    #[serde(default)]
+    release_milestones: BTreeMap<ReleaseMarker, MilestoneId>,
     /// The [`crate::compile::CommitOutcome::selected_template`] this graph was compiled with, if
     /// any. `#[serde(default)]` so a `GraphSummary` persisted before this field existed still
     /// deserializes (as `None`).
@@ -454,6 +462,7 @@ impl<'a> GenesisDriver<'a> {
                 let summary = GraphSummary {
                     tickets: outcome.tickets.clone(),
                     milestones: outcome.milestones.clone(),
+                    release_milestones: outcome.release_milestones.clone(),
                     selected_template: outcome.selected_template.clone(),
                 };
                 let id = self.persist_field(&summary, "graph", actor.clone())?;
@@ -468,12 +477,22 @@ impl<'a> GenesisDriver<'a> {
                     )
                 })?;
                 let summary: GraphSummary = self.load_field(&graph_id)?;
-                // Approximation: the compiled graph doesn't name "the" V0 milestone distinctly
-                // from any other, so the first (by `Ref`) committed milestone stands in for it.
-                let v0 = summary.milestones.values().next().cloned().ok_or_else(|| {
-                    TmError::invariant("graph compilation didn't produce a milestone to start from")
-                })?;
-                let policy = IgnitionPolicy::for_v0(v0);
+                // Prefer the milestone the graph compiler explicitly tagged `ReleaseMarker::V0`
+                // (`genesis-explicit-v0-v1-milestone-marking`); fall back to the positional
+                // approximation — the first (by `Ref`) committed milestone stands in for it —
+                // only when the proposal (or an older fixture predating the marker) tagged none.
+                let v0 = summary
+                    .release_milestones
+                    .get(&ReleaseMarker::V0)
+                    .cloned()
+                    .or_else(|| summary.milestones.values().next().cloned())
+                    .ok_or_else(|| {
+                        TmError::invariant(
+                            "graph compilation didn't produce a milestone to start from",
+                        )
+                    })?;
+                let mut policy = IgnitionPolicy::for_v0(v0);
+                policy.v1_milestone = summary.release_milestones.get(&ReleaseMarker::V1).cloned();
                 next_state.ignition = Some(policy.clone());
                 transition(state.stage, &StageEvent::IgnitionStarted(policy)).map_err(illegal)?
             }
@@ -770,6 +789,37 @@ mod tests {
         assert_ne!(resolved, v0_id);
     }
 
+    /// `genesis-explicit-v0-v1-milestone-marking`: when `IgnitionPolicy::v1_milestone` is set,
+    /// it wins over the positional "first milestone distinct from V0" heuristic, even when the
+    /// positional pick names a different, real milestone.
+    #[test]
+    fn milestone_for_stage_v1_prefers_the_tagged_milestone_over_position() {
+        let (_dir, store) = open_store();
+        let v0_events = store
+            .create_milestone("v0".to_string(), vec![], vec![], actor())
+            .unwrap();
+        let v0_id = MilestoneId::new(v0_events[0].subject.as_str()).unwrap();
+        // Positionally the first milestone distinct from V0 -- the heuristic would pick this one
+        // if the tag were ignored.
+        let positional_events = store
+            .create_milestone("positionally next".to_string(), vec![], vec![], actor())
+            .unwrap();
+        let positional_id = MilestoneId::new(positional_events[0].subject.as_str()).unwrap();
+        let tagged_events = store
+            .create_milestone("release-tagged v1".to_string(), vec![], vec![], actor())
+            .unwrap();
+        let tagged_id = MilestoneId::new(tagged_events[0].subject.as_str()).unwrap();
+        let view = store.view().unwrap();
+
+        let mut policy = IgnitionPolicy::for_v0(v0_id);
+        policy.v1_milestone = Some(tagged_id.clone());
+
+        let resolved = milestone_for_stage(Stage::V1, Some(&policy), &view)
+            .expect("a milestone exists to resolve");
+        assert_eq!(resolved, tagged_id);
+        assert_ne!(resolved, positional_id);
+    }
+
     #[test]
     fn milestone_for_stage_is_none_for_other_stages() {
         let view = ProjectView::empty();
@@ -954,5 +1004,74 @@ mod tests {
 
         let resumed = GenesisDriver::resume(&store).expect("resume after advance");
         assert_eq!(resumed, advanced);
+    }
+
+    /// `genesis-explicit-v0-v1-milestone-marking`: a milestone tagged `ReleaseMarker::V0` wins
+    /// over the positional heuristic (`summary.milestones.values().next()`), even when the
+    /// positionally-first milestone (by `Ref`) is a different one.
+    #[tokio::test]
+    async fn ignition_prefers_the_release_tagged_v0_milestone_over_position() {
+        use tm_provider::mock::MockProvider;
+        use tm_provider::types::ModelId;
+
+        let (_dir, store) = open_store();
+        let clock = FixedClock::epoch();
+        let ids = CounterIds::new();
+        let clock_arc: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let provider = MockProvider::new("test", ModelId::new("test", "model"), clock_arc);
+
+        let wrong_events = store
+            .create_milestone("positionally first".to_string(), vec![], vec![], actor())
+            .expect("create wrong milestone");
+        let wrong_id = MilestoneId::new(wrong_events[0].subject.as_str()).unwrap();
+        let right_events = store
+            .create_milestone("release-tagged v0".to_string(), vec![], vec![], actor())
+            .expect("create right milestone");
+        let right_id = MilestoneId::new(right_events[0].subject.as_str()).unwrap();
+        let v1_events = store
+            .create_milestone("release-tagged v1".to_string(), vec![], vec![], actor())
+            .expect("create v1 milestone");
+        let v1_id = MilestoneId::new(v1_events[0].subject.as_str()).unwrap();
+
+        // `a-wrong` sorts before `z-right`, so the positional heuristic
+        // (`milestones.values().next()`) would pick `wrong_id` if the marker were ignored.
+        let mut milestones = BTreeMap::new();
+        milestones.insert("a-wrong".to_string(), wrong_id.clone());
+        milestones.insert("z-right".to_string(), right_id.clone());
+        let mut release_milestones = BTreeMap::new();
+        release_milestones.insert(ReleaseMarker::V0, right_id.clone());
+        release_milestones.insert(ReleaseMarker::V1, v1_id.clone());
+
+        let summary = GraphSummary {
+            tickets: BTreeMap::new(),
+            milestones,
+            release_milestones,
+            selected_template: None,
+        };
+
+        let driver = GenesisDriver::new(&store, &provider, &clock, &ids);
+        let graph_id = driver
+            .persist_field(&summary, "graph", actor())
+            .expect("persist graph summary");
+
+        let mut state = GenesisState::new("demo".to_string(), &clock);
+        state.stage = Stage::Ignition;
+        state.graph = Some(graph_id);
+
+        let advanced = driver
+            .advance(&state, actor())
+            .await
+            .expect("advance past ignition");
+        let ignition = advanced.ignition.expect("ignition policy set");
+        assert_eq!(
+            ignition.v0_objective_milestone, right_id,
+            "should pick the release-tagged milestone, not the positionally-first one"
+        );
+        assert_ne!(ignition.v0_objective_milestone, wrong_id);
+        assert_eq!(
+            ignition.v1_milestone,
+            Some(v1_id),
+            "the v1 tag should carry forward onto the ignition policy too"
+        );
     }
 }

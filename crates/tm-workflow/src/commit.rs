@@ -363,6 +363,7 @@ default = "src/lib.rs"
                 milestone_ref: "m".to_string(),
                 title: "unsupported".to_string(),
                 ticket_refs: vec![],
+                releases: vec![],
             });
         let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
         let err = commit(

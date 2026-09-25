@@ -29,6 +29,14 @@ pub struct IgnitionPolicy {
     pub fan_out_width: u32,
     /// The V0 milestone, pinned as the top-priority milestone for the duration of ignition.
     pub v0_objective_milestone: MilestoneId,
+    /// The V1 milestone, if the graph compiler explicitly tagged one with
+    /// `crate::compile::ReleaseMarker::V1` (`genesis-explicit-v0-v1-milestone-marking`). `None`
+    /// when no milestone was tagged (an older fixture, or a proposal that didn't tag anything),
+    /// in which case [`crate::stages::milestone_for_stage`] falls back to its positional
+    /// heuristic. `#[serde(default)]` so an `IgnitionPolicy` persisted before this field existed
+    /// still deserializes.
+    #[serde(default)]
+    pub v1_milestone: Option<MilestoneId>,
 }
 
 impl IgnitionPolicy {
@@ -44,6 +52,7 @@ impl IgnitionPolicy {
             exploratory_code_tolerance: Tolerance::Preferred,
             fan_out_width: 4,
             v0_objective_milestone,
+            v1_milestone: None,
         }
     }
 }

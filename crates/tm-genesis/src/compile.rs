@@ -81,6 +81,21 @@ pub struct ProposedDependency {
     pub kind: DependencyKind,
 }
 
+/// Which release line ([`crate::spec::Specification::v0`] or
+/// [`crate::spec::Specification::v1`]) a [`ProposedMilestone`] is being tagged as gating, so
+/// [`crate::stages::Stage::Ignition`]/[`crate::stages::Stage::MaturityGate`] can select the
+/// right milestone by explicit tag instead of positional order (the milestone that happens to
+/// come first/second in the proposal). Serialized as lowercase `"v0"`/`"v1"` to match the wire
+/// shape [`build_compile_request`] asks the model for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseMarker {
+    /// This milestone is the one v0's exit criteria gate on.
+    V0,
+    /// This milestone is the one v1's exit criteria gate on.
+    V1,
+}
+
 /// One proposed milestone, as a set of ticket [`Ref`]s.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProposedMilestone {
@@ -90,6 +105,13 @@ pub struct ProposedMilestone {
     pub title: String,
     /// Member ticket refs.
     pub ticket_refs: Vec<Ref>,
+    /// Which release line(s) this milestone gates — usually zero or one, but v0 and v1 may both
+    /// gate on the same milestone (e.g. a project where v1 is just v0 hardened), so this is a
+    /// set rather than a single optional marker. `#[serde(default)]` so proposals/fixtures
+    /// written before this field existed still deserialize, as empty — meaning "no marker;
+    /// callers fall back to the positional heuristic" rather than a hard error.
+    #[serde(default)]
+    pub releases: Vec<ReleaseMarker>,
 }
 
 /// A named authority domain applied across a set of tickets, so the proposal can express "these
@@ -245,6 +267,13 @@ fn build_compile_request(
     prompt.push_str(&format!("Milestone outline: {:#?}\n", spec.milestones));
     prompt.push_str(&format!("v0: {:#?}\n", spec.v0));
     prompt.push_str(&format!("v1: {:#?}\n", spec.v1));
+    prompt.push_str(
+        "\nSet exactly one milestone's \"releases\" field to include \"v0\" — the milestone \
+         whose completion satisfies v0's objective and exit_criteria above — and exactly one \
+         milestone's \"releases\" field to include \"v1\", the same way for v1. If the same \
+         milestone gates both v0 and v1, its \"releases\" field should be [\"v0\", \"v1\"]. \
+         Every other milestone's \"releases\" field should be omitted or empty.\n",
+    );
 
     if !prior_violations.is_empty() {
         prompt.push_str("\nThe previous attempt violated these tm-core invariants; address them specifically:\n");
@@ -505,6 +534,10 @@ pub struct CommitOutcome {
     pub tickets: BTreeMap<Ref, TicketId>,
     /// Real milestone ids, keyed by the [`Ref`] they were proposed under.
     pub milestones: BTreeMap<Ref, MilestoneId>,
+    /// Real milestone ids the proposal explicitly tagged with a [`ReleaseMarker`], keyed by that
+    /// marker. Absent whenever the proposal (or an older fixture predating this field) didn't
+    /// tag any milestone — callers fall back to the positional heuristic in that case.
+    pub release_milestones: BTreeMap<ReleaseMarker, MilestoneId>,
     /// The committed proposal's [`GraphCompilation::selected_template`], carried forward
     /// unchanged so a caller doesn't need to hold onto the proposal separately just to learn
     /// which template (if any) was picked.
@@ -598,6 +631,7 @@ pub fn commit_graph(
 
     let mut tickets: BTreeMap<Ref, TicketId> = BTreeMap::new();
     let mut milestones: BTreeMap<Ref, MilestoneId> = BTreeMap::new();
+    let mut release_milestones: BTreeMap<ReleaseMarker, MilestoneId> = BTreeMap::new();
     let mut events: Vec<tm_events::Event> = Vec::new();
 
     for ticket_ref in &order {
@@ -666,6 +700,9 @@ pub fn commit_graph(
             .and_then(|evs| MilestoneId::new(evs[0].subject.as_str()).map(|id| (id, evs)));
         match result {
             Ok((id, evs)) => {
+                for marker in &milestone.releases {
+                    release_milestones.insert(*marker, id.clone());
+                }
                 milestones.insert(milestone.milestone_ref.clone(), id);
                 events.extend(evs);
             }
@@ -698,6 +735,7 @@ pub fn commit_graph(
         events,
         tickets,
         milestones,
+        release_milestones,
         selected_template: proposal.selected_template.clone(),
     })
 }
@@ -1042,6 +1080,7 @@ mod tests {
             milestone_ref: "m1".to_string(),
             title: "milestone one".to_string(),
             ticket_refs: vec![],
+            releases: vec![],
         });
         p.dependencies.push(ProposedDependency {
             from_ref: "child".to_string(),
@@ -1070,6 +1109,67 @@ mod tests {
             .edges()
             .iter()
             .any(|e| e.from == child_id && e.to == parent_id));
+    }
+
+    /// `genesis-explicit-v0-v1-milestone-marking`: `commit_graph` collects every milestone's
+    /// [`ReleaseMarker`] tags into `CommitOutcome::release_milestones`, keyed by marker, and a
+    /// milestone with no `releases` at all (the "no marker" fallback path) contributes nothing.
+    #[test]
+    fn commit_graph_collects_release_markers_by_milestone() {
+        let (_dir, store) = open_store();
+        let mut p = proposal(vec![]);
+        p.milestones.push(ProposedMilestone {
+            milestone_ref: "shared".to_string(),
+            title: "does both".to_string(),
+            ticket_refs: vec![],
+            releases: vec![ReleaseMarker::V0, ReleaseMarker::V1],
+        });
+        p.milestones.push(ProposedMilestone {
+            milestone_ref: "untagged".to_string(),
+            title: "neither".to_string(),
+            ticket_refs: vec![],
+            releases: vec![],
+        });
+
+        let outcome = commit_graph(&store, &p, ParticipantId::system()).expect("commit succeeds");
+        let shared_id = outcome.milestones["shared"].clone();
+        assert_eq!(outcome.release_milestones.len(), 2);
+        assert_eq!(outcome.release_milestones[&ReleaseMarker::V0], shared_id);
+        assert_eq!(outcome.release_milestones[&ReleaseMarker::V1], shared_id);
+    }
+
+    /// `#[serde(default)]` on `ProposedMilestone::releases`: a milestone JSON object with no
+    /// `"releases"` key at all (the shape every fixture/proposal predating this field has)
+    /// deserializes as an empty `Vec`, not an error — the "older fixtures keep working"
+    /// requirement.
+    #[test]
+    fn proposed_milestone_releases_defaults_to_empty_when_absent() {
+        let json = serde_json::json!({
+            "milestone_ref": "m1",
+            "title": "legacy milestone",
+            "ticket_refs": []
+        });
+        let milestone: ProposedMilestone =
+            serde_json::from_value(json).expect("deserializes without a releases field");
+        assert_eq!(milestone.releases, Vec::new());
+    }
+
+    /// A `"releases"` array round-trips through the lowercase wire shape
+    /// [`build_compile_request`]'s prompt asks the model for.
+    #[test]
+    fn proposed_milestone_releases_round_trips_lowercase_markers() {
+        let json = serde_json::json!({
+            "milestone_ref": "m1",
+            "title": "tagged milestone",
+            "ticket_refs": [],
+            "releases": ["v0", "v1"]
+        });
+        let milestone: ProposedMilestone =
+            serde_json::from_value(json).expect("deserializes a tagged milestone");
+        assert_eq!(
+            milestone.releases,
+            vec![ReleaseMarker::V0, ReleaseMarker::V1]
+        );
     }
 
     #[test]
