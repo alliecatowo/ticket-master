@@ -1207,7 +1207,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/self: `init took 0s`, `doctor 57s`.
 
-- [ ] **u1-context-cost-report** — Show per-step context size in `tm stats --by tool`/`tm ticket show` so context blowups are visible
+- [x] **u1-context-cost-report** — Show per-step context size in `tm stats --by tool`/`tm ticket show` so context blowups are visible (landed 2e2c49a)
   model: sonnet · severity: medium · builds Rust: yes · area: telemetry · deps: u1-worker-submit-nudge
   files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-events/src/payload.rs`, `crates/tm-cli/src/stats.rs`
   change: `tool_call.completed` records the tool name and duration but not the result size, so finding which tool call blew the context up needed a manual correlation with `usage.recorded`. Add `result_bytes` (and `truncated: bool`) to the `tool_call.completed` payload (an optional field, so old logs still replay), and add a `Result KB` column and a `Max request tokens` column to `tm stats --by tool`/`--by ticket`.
