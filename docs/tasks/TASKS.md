@@ -1553,3 +1553,39 @@ is based on.
   acceptance: `luna-trials.sh`'s tm arm runs `tm init` inside the actual per-tool clone directory, not its parent. A `shell.run` call with an absolute `cwd` equal to (or inside) the resolved project root succeeds instead of being rejected. A documented baseline failure rate exists for `tm_acp_answers_initialize_over_stdio` (e.g. N/20 runs on an idle machine) to compare future runs against.
   test: `mise run test:crate -- tm-agent`; manual: rerun `cargo test -p tm-cli --test acp_serve -- --test-threads=1` 20x on an otherwise idle machine
   evidence: project-root-path-fixer subagent's final report (this session): confirmed via `tm.log` that the trial's `tm init` ran one directory level higher than the harness script's own comment claims; confirmed the absolute-cwd rejection is a real regression risk via code read of the new `resolve_cwd` guard; observed 7/15 `acp_serve` timeouts in-session with no diff able to reach that code path.
+- [ ] **t20260926-0637-pallets-click-3822-no-submit-recovery-guidance** — Give actionable recovery guidance when a run repeatedly ends without submitting
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/sched.rs`
+  change: In the no-submit failure branch, identify a model turn that ended without submitting as a distinct recoverable cause and provide an action that inspects the saved attempt or resumes it with focused continuation instead of blindly rerunning the unchanged ticket; avoid the generic “something went wrong” phrasing for this known failure.
+  acceptance: A CLI test for repeated `model ended turn without submitting` failures asserts the output names the cause and offers artifact-inspection or focused-resume guidance, while test failures retain their existing retry instructions.
+  test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
+  evidence: `/private/tmp/tm-trials/20260926-0637/pallets-click-3822/tm.log:51` and `:167` — both attempts ended “no patch or evidence was submitted … Failure: something went wrong: model ended turn without submitting. Run `tm run T-1` again to retry.”
+- [ ] **t20260926-0637-psf-requests-7432-no-submit-recovery-guidance** — Give actionable recovery guidance when a run ends without a patch
+  model: sonnet · severity: medium · builds Rust: yes · area: cli
+  deps: none
+  files: `crates/tm-cli/src/sched.rs`
+  change: In the no-submit failure branch, distinguish a model turn that ended without submitting from test failures and provide a concrete recovery action that does not blindly rerun the same unchanged ticket; include where to inspect the run's saved artifacts or how to retry with a focused continuation.
+  acceptance: A CLI test simulates a `model ended turn without submitting` failure and asserts the rendered message names the no-submit cause and gives a useful artifact-inspection or focused-resume command, while ordinary test failures retain their existing retry guidance.
+  test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
+  evidence: `/tmp/tm-trials/20260926-0637/psf-requests-7432/tm.log:45` — “no patch or evidence was submitted … model ended turn without submitting. Run `tm run T-1` again to retry.”
+- [ ] **t20260926-0637-sindresorhus-ky-878-repo-path-argument-guidance** — Make repository-path errors actionable when tools receive absolute paths
+  model: sonnet · severity: medium · builds Rust: yes · area: agent-tools · deps: none
+  files: `crates/tm-agent/src/tools.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  change: When a tool receives an absolute path inside the configured project root, either safely normalize it to the corresponding repository-relative path or return an error that explains the accepted relative-path format and gives the correct example; keep rejecting paths outside the project root.
+  acceptance: A tool request using an absolute path inside the project succeeds or returns a concise correction pointing to its relative form, while an outside-root path remains rejected.
+  test: `cargo test -p tm-agent resolve_repo_path`
+  evidence: `/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm.log:12` — “Built the project -> error: couldn't parse the result (path `/private/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm` must be repository-relative)”
+- [ ] **t20260926-0637-result-schema-recovery** — Explain unsupported result kinds and recover without repeated invalid tool calls
+  model: sonnet · severity: medium · builds Rust: yes · area: agent-tools · deps: none
+  files: `crates/tm-cli/src/agent.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  change: Include the supported result-kind names in parse-error feedback and provide an explicit mapping/recovery hint when a provider emits an unsupported result kind such as `verification`; ensure retries switch to a supported kind rather than resubmitting the same invalid shape.
+  acceptance: A scripted unsupported `verification` result produces one clear error naming valid result kinds and a succeeding retry uses a supported kind, with no repeated schema failure.
+  test: `cargo test -p tm-cli plain_tool_error_keeps_parse_diagnostic_and_recovery_step`
+  evidence: `/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm.log:18` — “Saved a result -> error: couldn't parse the result (unknown variant `verification`, expected one of `command_output`, `patch`, `file`, `report`, `index`, `benchmark`, `tran…); retry the operation, and check its input if it fails again”
+- [ ] **t20260926-0637-evidence-submission-guidance** — Surface evidence requirements before ticket submission fails
+  model: sonnet · severity: low · builds Rust: yes · area: ticket-lifecycle · deps: none
+  files: `crates/tm-cli/src/agent.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  change: When an agent attempts ticket submission without evidence, explain that it must store a report or other evidence artifact first and then cite that artifact when submitting; direct the next action rather than suggesting a blind retry.
+  acceptance: An evidence-free submission produces a user-facing instruction to create and attach evidence, and the agent run completes submission with that evidence without an unhelpful retry loop.
+  test: `cargo test -p tm-cli plain_tool_error_keeps_invariant_diagnostic_and_recovery_step`
+  evidence: `/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm.log:17` — “Submitted the ticket -> error: operation state was inconsistent (Submitting a ticket needs at least one piece of evidence); retry once, then report this failure if it persists”
