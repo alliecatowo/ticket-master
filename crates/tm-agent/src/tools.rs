@@ -544,15 +544,19 @@ fn get_string_vec_or_empty(input: &Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Join `path` onto `root`, rejecting absolute paths and `..` components so a tool can never
-/// escape the project root.
+/// Join `path` onto `root`, accepting absolute paths only when they identify a location inside the
+/// project root, and rejecting `..` components so a tool can never escape the project root.
 fn resolve_repo_path(root: &Path, path: &str) -> Result<PathBuf> {
-    let rel = Path::new(path);
-    if rel.is_absolute() {
-        return Err(TmError::parse(format!(
-            "path `{path}` must be repository-relative"
-        )));
-    }
+    let requested = Path::new(path);
+    let rel = if requested.is_absolute() {
+        requested.strip_prefix(root).map_err(|_| {
+            TmError::parse(format!(
+                "path `{path}` is outside the project root; use a repository-relative path such as `src/main.rs`"
+            ))
+        })?
+    } else {
+        requested
+    };
     if rel
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
@@ -4637,9 +4641,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_repo_path_rejects_absolute_paths() {
+    fn resolve_repo_path_accepts_absolute_path_inside_project_root() {
+        let resolved = resolve_repo_path(Path::new("/root"), "/root/src/main.rs").unwrap();
+        assert_eq!(resolved, Path::new("/root/src/main.rs"));
+    }
+
+    #[test]
+    fn resolve_repo_path_rejects_absolute_paths_outside_project_root() {
         let err = resolve_repo_path(Path::new("/root"), "/etc/passwd").unwrap_err();
         assert!(matches!(err, TmError::Parse(_)));
+        assert!(err.to_string().contains("repository-relative"));
     }
 
     #[test]
