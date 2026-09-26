@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 515.943,
+      "tokens": 2529469,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 1
+      },
+      "better": "The run found the relevant implementation, but spent 2.53M input tokens rereading/searching the same model and utility paths and then ended with ‘model ended turn without submitting’; the retry advice did not explain the underlying failure or make the expensive attempt's state/usage actionable. A narrower plan and better run-failure diagnostics should help users decide whether to retry or inspect provider/model behavior. The requested bare `tm events` command only printed usage, so event capture requires discovering the `tail` subcommand despite the command overview calling it the event-log surface."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 42.569,
+      "tokens": 17324,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The agent stated a scoped plan, found the stream check quickly, changed it to `hasattr(data, \"__iter__\")`, and added a delegated-wrapper regression test. Its own test attempts initially lacked the project package/dependencies and it accurately disclosed that limitation; after setup was corrected, the hidden PR test passed. It could be better by using the prepared environment's interpreter/PYTHONPATH and installing the repository's test extras before reporting test coverage, rather than treating the first import errors as the final verification attempt."
+    }
+  ]
+}

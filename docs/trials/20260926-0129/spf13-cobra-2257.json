@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 724,
+      "tokens": 3961908,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 1,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run found the right append/backing-array bug and produced a fix that passed the independently applied PR regression tests, but it took 64 agent steps and about 3.96M reported tokens while repeatedly rereading command.go and searching for the same parsing flow. It never submitted the ticket: `ticket.submit` surfaced “Submitting a ticket needs at least one piece of evidence” as “operation state was inconsistent,” then `artifact.store` failed with “unknown variant `verification`” while the progress copy merely advised retrying. Make the ticket-submit tool schema explain where valid evidence artifact IDs come from and turn an empty/invalid-evidence rejection into a direct recovery instruction; keep the user-facing failure summary actionable and preserve the test result in the terminal report. A run that hits its step limit should also report that the ticket was not submitted and summarize the verified work before inviting a retry."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 78,
+      "tokens": 205285,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 5,
+        "cost_time": 5
+      },
+      "better": "The run stated a short, correctly scoped plan, quickly traced the append side effect in completions.go, copied the slice before adding the sentinel, added a regression test, and reported the successful full test run accurately. Its first semantic-search attempt reported that no workspace index existed; it recovered immediately with file globbing and exact text search rather than stalling. A slightly more direct opening search could have avoided that failed index lookup, and the final report could include the exact verification command and touched files, but the result was clear and efficient."
+    }
+  ]
+}

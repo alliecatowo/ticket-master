@@ -1,0 +1,56 @@
+{
+  "issue": "https://github.com/gohugoio/hugo/issues/15360",
+  "base_sha": "1d87ee5b7005a38d83cb841471245b9ae7f914bd",
+  "merge_sha": "cb6a7072230920fb47ece28f67501a2c15934ade",
+  "test_files": [
+    "common/hugio/hugio_integration_test.go",
+    "common/hugio/readers_test.go",
+    "hugolib/rebuild_test.go",
+    "tpl/openapi/openapi3/openapi3_integration_test.go"
+  ],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 1057.08,
+      "tokens": 7712825,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 3,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 1
+      },
+      "better": "tm eventually found the decoder and implemented the BOM trim, but the run spent 81 calls and its recorded input was 7.7M tokens for this narrow fix; it could improve by converging on the map-decoder and regression test earlier and reducing repeated broad searches. The run output also exposed raw tool/API failures (the submission-evidence invariant and the unrecognized `test-output` artifact kind) before recovering, which is confusing to users even when retries succeed. A concise end summary should state the changed files, exact verification command and result, elapsed time, and token usage."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 55.656,
+      "tokens": 25771,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 5,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode located `UnmarshalToMap`, made the focused implementation change and added TOML, YAML, and JSON regression cases, then ran `go test ./parser/metadecoders` and accurately reported success. It could improve further by explicitly noting that the fix PR's hidden test files were independently overlaid after the run and that the prescribed package-level verification passed."
+    }
+  ],
+  "verification": {
+    "command": "go test ./parser/metadecoders/...",
+    "tm": "passed",
+    "opencode": "passed",
+    "test_overlay": "Fix PR test files checked out from merge SHA in both clones before verification"
+  },
+  "notes": [
+    "Both clones were checked out at the PR base SHA and `go mod download` completed before either agent ran.",
+    "tm stats reported 803 seconds for T-2; wall_seconds records the measured shell duration of 1057.08 seconds for the ticket run command. Token count is tm stats tokens_in (tokens_out reported 0).",
+    "OpenCode token count is the final session-reported total in its JSON event log."
+  ]
+}
