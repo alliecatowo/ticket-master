@@ -1273,7 +1273,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: The `tm mcp` stdio trial, first response line.
 
-- [ ] **u1-workflow-list-copy** — `tm workflow list` header `NAME NODES PARAMS 1X1?` and empty state; `tm templates list` empty state
+- [x] **u1-workflow-list-copy** — `tm workflow list` header `NAME NODES PARAMS 1X1?` and empty state; `tm templates list` empty state (landed 2e8eaf3)
   model: haiku · severity: low · builds Rust: yes · area: cli-ux · deps: u1-provider-table-follows-env, u1-hygiene-spec-refs-in-user-strings
   files: `crates/tm-cli/src/workflow.rs`, `crates/tm-cli/src/ops.rs`
   change: With no workflows, print "No workflows yet. Starters: `tm workflow new --from <starter>`" (list the real starters) instead of a bare header, and rename the `1X1?` column to `Single-ticket`. `tm templates list` prints `No templates declared in /…/templates.toml`. Instead, list the built-in template catalog (B21) and say where to add project templates.
