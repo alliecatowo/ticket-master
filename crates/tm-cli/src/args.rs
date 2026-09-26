@@ -258,8 +258,8 @@ pub enum Command {
     Acp(AcpArgs),
 
     /// The durable event log: tail, inspect, replay, and verify the hash chain.
-    #[command(subcommand, hide = true)]
-    Events(EventsCommand),
+    #[command(hide = true)]
+    Events(EventsArgs),
 
     /// Drive a headless browser.
     #[command(subcommand, hide = true)]
@@ -1247,6 +1247,14 @@ pub struct McpArgs {
 /// `tm acp`
 #[derive(Debug, Args)]
 pub struct AcpArgs {}
+
+/// `tm events [COMMAND]`
+#[derive(Debug, Args)]
+pub struct EventsArgs {
+    /// A specific event-log operation. Without one, show recent events.
+    #[command(subcommand)]
+    pub command: Option<EventsCommand>,
+}
 
 /// `tm events ...`
 #[derive(Debug, Subcommand)]

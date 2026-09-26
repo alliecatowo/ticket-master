@@ -3221,16 +3221,33 @@ pub fn mirror_status(project: &Project, renderer: &Renderer) -> tm_types::Result
 
 /// Dispatch one [`EventsCommand`].
 pub async fn dispatch_events(
-    cmd: &EventsCommand,
+    cmd: Option<&EventsCommand>,
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
     match cmd {
-        EventsCommand::Tail(args) => events_tail(args, project, renderer).await,
-        EventsCommand::Show(args) => events_show(args, project, renderer),
-        EventsCommand::Replay(args) => events_replay(args, project, renderer),
-        EventsCommand::Verify => events_verify(project, renderer),
+        None => events_recent(project, renderer),
+        Some(EventsCommand::Tail(args)) => events_tail(args, project, renderer).await,
+        Some(EventsCommand::Show(args)) => events_show(args, project, renderer),
+        Some(EventsCommand::Replay(args)) => events_replay(args, project, renderer),
+        Some(EventsCommand::Verify) => events_verify(project, renderer),
     }
+}
+
+/// Show a bounded snapshot of the most recent durable events.
+fn events_recent(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
+    const RECENT_EVENTS: u64 = 20;
+    let log = tm_events::EventLog::open(&project.state_dir.join("project.db"))?;
+    let head = log.head()?;
+    if head == 0 {
+        println!("No events recorded yet. Create a ticket with `tm ticket new`, then run it with `tm run <ticket>`.");
+        return Ok(());
+    }
+    let from = head.saturating_sub(RECENT_EVENTS - 1).max(1);
+    for event in log.read_from(from, RECENT_EVENTS as usize)? {
+        emit_event(renderer, &event)?;
+    }
+    Ok(())
 }
 
 /// How often `tm events tail`'s follow mode re-reads the log for new events. `EventLog::subscribe`

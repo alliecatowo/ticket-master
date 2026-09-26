@@ -403,7 +403,8 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   `tm-tui`/`tm-cli`'s TUI path.
 - Every session's real state lives under `Project.state_dir` (see
   `docs/decisions/D-003-project-scope.md`) — `sqlite3 <state_dir>/project.db` is a legitimate way
-  to inspect what actually got written, and `tm events` reads the same log a UI would.
+  to inspect what actually got written, and bare `tm events` prints the latest 20 entries from
+  that same durable log and exits; `tm events tail` remains the live-following view.
 - `tm sched run`/`tm run` pop a real desktop notification on `approval.requested`/
   `ticket.escalated` (`docs/decisions/D-007-desktop-notifications.md`, `crates/tm-notify`). Set
   `TM_NOTIFY=0` (or `false`/`off`/`no`) to opt out in headless/CI/server contexts — a notification

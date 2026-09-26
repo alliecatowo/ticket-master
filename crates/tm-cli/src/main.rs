@@ -352,7 +352,7 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
         }
         Some(Command::Events(cmd)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
-            ops::dispatch_events(&cmd, &opened, renderer).await
+            ops::dispatch_events(cmd.command.as_ref(), &opened, renderer).await
         }
         Some(Command::Browser(cmd)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
