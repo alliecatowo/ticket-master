@@ -85,7 +85,7 @@ fn sigterm_after_one_recorded_call_leaves_a_valid_partial_cassette() {
     // normally; the second (ticket.submit) blocks forever -- so by the time this test sends its
     // signal, exactly one completion has already been recorded, and this proves that specific
     // completed entry survives rather than only the empty header.
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tm"))
+    let child = Command::new(env!("CARGO_BIN_EXE_tm"))
         .args([
             "--project",
             root.to_str().expect("utf8 tempdir"),
