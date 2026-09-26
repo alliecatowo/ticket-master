@@ -1553,7 +1553,7 @@ is based on.
   acceptance: `luna-trials.sh`'s tm arm runs `tm init` inside the actual per-tool clone directory, not its parent. A `shell.run` call with an absolute `cwd` equal to (or inside) the resolved project root succeeds instead of being rejected. A documented baseline failure rate exists for `tm_acp_answers_initialize_over_stdio` (e.g. N/20 runs on an idle machine) to compare future runs against.
   test: `mise run test:crate -- tm-agent`; manual: rerun `cargo test -p tm-cli --test acp_serve -- --test-threads=1` 20x on an otherwise idle machine
   evidence: project-root-path-fixer subagent's final report (this session): confirmed via `tm.log` that the trial's `tm init` ran one directory level higher than the harness script's own comment claims; confirmed the absolute-cwd rejection is a real regression risk via code read of the new `resolve_cwd` guard; observed 7/15 `acp_serve` timeouts in-session with no diff able to reach that code path.
-- [ ] **t20260926-0637-pallets-click-3822-no-submit-recovery-guidance** — Give actionable recovery guidance when a run repeatedly ends without submitting
+- [x] **t20260926-0637-pallets-click-3822-no-submit-recovery-guidance** — Give actionable recovery guidance when a run repeatedly ends without submitting (landed d352cf9)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: In the no-submit failure branch, identify a model turn that ended without submitting as a distinct recoverable cause and provide an action that inspects the saved attempt or resumes it with focused continuation instead of blindly rerunning the unchanged ticket; avoid the generic “something went wrong” phrasing for this known failure.
