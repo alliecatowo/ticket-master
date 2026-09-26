@@ -1,0 +1,42 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": ["tests/test_requests.py"],
+  "verification_command": ".venv/bin/python -m pytest tests/test_requests.py -k test_getattr_proxy_stream_follows_redirect",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 676,
+      "tokens": 6150789,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm spent 676 seconds exploring and repeatedly rereading the same implementation and test regions, then reported only that the 64-step limit had been reached and scheduled a retry; it did not submit a patch or run tests. `tm stats` reported 6,150,789 input tokens and 66 tool calls. The final message should plainly state that no patch was submitted and verification did not run, distinguish a scheduled retry from a completed retry, and give the exact next command. The run should also preserve step budget for a final verification/submission and reuse already-read file findings instead of repeatedly loading them."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 52,
+      "tokens": 18619,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly located `PreparedRequest.prepare_body()` and the nearby rewind tests, made the core compatibility change, and added a focused delegated-file regression test. It should have invoked tests through the clone's `.venv/bin/python` from the outset: its two pytest attempts used the system interpreter and failed to import Requests/urllib3. Despite that, its final message clearly disclosed the inability to run tests, and independent hidden-test verification passed after checking out the PR test file."
+    }
+  ],
+  "notes": "The prescribed `pip install -e '.[test]'` succeeded in both clones but this revision declares no `test` extra; its test dependencies are in the PEP 735 `test` dependency group, so that group was installed explicitly before independent verification. Both arms' task prompts were assembled from the gh issue title/body, but the trailing system-information portion was abbreviated in the invocation. TM completed its run in 676 seconds; the subsequent live `tm events tail` kept the shell open until its outer 1200-second timeout. `passed` is solely the independent hidden regression test result, not an assertion that each agent completed successfully."
+}

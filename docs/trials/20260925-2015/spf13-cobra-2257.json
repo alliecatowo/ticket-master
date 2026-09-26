@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 1446,
+      "tokens": 6759875,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the relevant append in completions.go and produced the right capacity-limiting fix, but it spent substantial context repeating reads/searches and never submitted the ticket: the first attempt hit the 64-step limit, the retry ended without submission, and retries were automatically scheduled. A user would have seen ‘Run tm run T-1 again to retry’ and then the same failure again, without a clear checkpoint or clear assurance that the underlying edit was complete. The bare `tm events` invocation also returned usage/help text (‘The durable event log: tail, inspect, replay, and verify the hash chain’) instead of directly showing useful event history. Preserve a run transcript automatically, identify repeated investigation, and make failure/retry state and next steps explicit. The hidden test passed against the retained source edit, but tm itself did not claim ticket completion."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 57,
+      "tokens": 20079,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 5,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly located the append in completions.go, made a narrowly scoped copy-before-append change, ran `go test ./...` and `git diff --check`, and accurately described the fix. It could improve by adding a regression test of its own or explicitly reproducing the reported `os.Args` behavior before editing; the regression test was subsequently overlaid from the merge commit for the independent mechanical verification, which passed."
+    }
+  ]
+}

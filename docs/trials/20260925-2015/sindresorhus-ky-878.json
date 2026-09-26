@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 58.507,
+      "tokens": 511713,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 5
+      },
+      "better": "tm went directly to source/utils/body.ts and test/stream.ts, and the implementation is correct: after applying the hidden PR tests, all 19 stream tests passed. The recorded pnpm test command failed mechanically at XO on a pre-existing test/http-error.ts:218 lint error, and browser tests could not run because Playwright browser binaries are absent. The live progress only said ‘Ran tests’ and did not expose the command's result; submission also emitted ‘hit an unexpected internal problem’ and ‘got a response it couldn't understand’ before eventually succeeding, with no explanation that retry/recovery had happened. Give a concise initial plan, report the test command and its actual status, and identify transient operation failures and recovery in user-facing language."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 85.139,
+      "tokens": 36254,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode made a focused plan, found the relevant transform and regression-test areas quickly, implemented the empty-body completion callback, and added clear browser coverage. It correctly reported that the full npm test run was blocked by the pre-existing lint error and that browser execution lacked Playwright binaries; build and test TypeScript checks passed. The mechanical full pnpm test result is failure, although the independently selected hidden test/stream suite passed all 19 tests. It could be better by isolating test selection earlier and distinguishing setup/environment failures from implementation failures in the final verification summary."
+    }
+  ]
+}
