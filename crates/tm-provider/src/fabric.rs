@@ -328,6 +328,52 @@ impl Fabric {
             .cloned()
     }
 
+    /// Preflight check for a role's *configuration*, deliberately blind to capacity/breaker
+    /// state: "can anything possibly ever serve this role", not [`Fabric::route`]'s "can
+    /// something serve it right now". Meant to run before a ticket is leased or dispatched at
+    /// all, so a `providers.toml` candidate naming a provider that was never registered (no
+    /// credential, never wired up) fails fast with a specific diagnosis instead of only
+    /// surfacing after a lease has already been granted and burned, once
+    /// [`Fabric::execute_priced`]'s [`RouteDecision::Exhausted`] path reports the same problem
+    /// mid-run.
+    ///
+    /// Returns `Ok(())` as soon as at least one of `role`'s candidates is backed by a registered
+    /// provider — routing may still fail that call later for capacity/breaker/quota reasons, and
+    /// this check does not attempt to predict that; those are transient, not configuration,
+    /// problems, and are exactly what `route`/`execute` already handle. `Err` names the
+    /// unregistered provider and points at the concrete fix.
+    pub fn preflight_role(&self, role: Role) -> Result<(), String> {
+        let candidates = self.candidates(role);
+        if candidates.is_empty() {
+            return Err(format!(
+                "no candidate is configured for role {}. Add one under `[{}]` in providers.toml.",
+                role.as_str(),
+                role.config_key()
+            ));
+        }
+        {
+            let providers = self.providers.read();
+            if candidates
+                .iter()
+                .any(|c| providers.contains_key(&c.provider))
+            {
+                return Ok(());
+            }
+        }
+        let unregistered = self
+            .first_unregistered_provider(role)
+            .unwrap_or_else(|| candidates[0].provider.clone());
+        Err(format!(
+            "no candidate can serve role {}: provider not registered: {unregistered}. Check \
+             `[{}]`'s candidates in providers.toml and run `tm provider list` to see which \
+             providers are actually registered and credentialed, then fix the candidate (or its \
+             credential) before retrying — rerunning with this same configuration will fail \
+             identically every time.",
+            role.as_str(),
+            role.config_key()
+        ))
+    }
+
     /// The pure routing decision for `role` right now, with no side effects beyond rolling
     /// windows forward (which is itself a pure function of `now`, done for accuracy of reads).
     pub fn route(&self, role: Role, need: &Need, now: Timestamp) -> RouteDecision {
@@ -853,6 +899,64 @@ mod tests {
         assert!(
             matches!(records[0], FabricRecord::Degraded { candidate: ref c, .. } if *c == ModelId::new("mock", "fallback"))
         );
+    }
+
+    // ---- preflight_role (`t20260925-1314-sindresorhus-ky-878-provider-retry-guidance`) --------
+
+    #[test]
+    fn preflight_role_ok_when_a_candidate_is_registered() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "mock", model = "m1", max_concurrency = 1 }"#,
+        );
+        let fabric = Fabric::new(table, clock.clone() as Arc<dyn Clock>);
+        fabric.register_provider(Arc::new(MockProvider::new(
+            "mock",
+            ModelId::new("mock", "m1"),
+            clock as Arc<dyn Clock>,
+        )));
+
+        assert_eq!(fabric.preflight_role(Role::CoderFast), Ok(()));
+    }
+
+    #[test]
+    fn preflight_role_names_the_unregistered_provider_and_a_repair_path() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = table_with_candidates(
+            "coder_fast",
+            r#"{ provider = "devpass", model = "m1", max_concurrency = 1 }"#,
+        );
+        let fabric = Fabric::new(table, clock as Arc<dyn Clock>);
+        // No provider registered under "devpass" at all.
+
+        let err = fabric
+            .preflight_role(Role::CoderFast)
+            .expect_err("no candidate is registered");
+        assert!(
+            err.contains("provider not registered: devpass"),
+            "names the specific missing provider: {err}"
+        );
+        assert!(
+            err.contains("tm provider list"),
+            "points at a real repair path, not a blind retry: {err}"
+        );
+        assert!(
+            !err.to_lowercase().contains("run `tm run"),
+            "must not recommend rerunning the same broken config unchanged: {err}"
+        );
+    }
+
+    #[test]
+    fn preflight_role_reports_no_candidate_configured_at_all() {
+        let clock: Arc<FixedClock> = Arc::new(FixedClock::epoch());
+        let table = RoleTable::parse("").expect("empty table parses");
+        let fabric = Fabric::new(table, clock as Arc<dyn Clock>);
+
+        let err = fabric
+            .preflight_role(Role::CoderFast)
+            .expect_err("no candidate configured");
+        assert!(err.contains("providers.toml"));
     }
 
     #[tokio::test]
