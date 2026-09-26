@@ -1611,7 +1611,7 @@ is based on.
   acceptance: A regression test simulates a relevant investigation followed by a no-submit ending and proves the retry receives the findings without repeating the same discovery calls; the final CLI error names the missing deliverable and the next recovery action.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-0821/psf-requests-7432/tm.log:4-51` — T-3 used 35 tool calls across repeated source/history inspection, then failed “no patch or evidence was submitted … model ended turn without submitting”; `tm stats --json` in the same log records 392 wall seconds and 2,751,047 input tokens.
-- [ ] **t20260926-0821-psf-requests-7432-bound-repeated-source-exploration** — Bound repeated source and history exploration during ticket runs
+- [x] **t20260926-0821-psf-requests-7432-bound-repeated-source-exploration** — Bound repeated source and history exploration during ticket runs (landed e087aa7)
   model: sonnet · severity: medium · builds Rust: yes · area: agent
   deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
