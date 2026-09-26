@@ -1215,7 +1215,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-events && mise run test:crate -- tm-cli`
   evidence: The dogfood forensics needed `sqlite3 .tm/project.db` to see that 18 calls cost 1.03M tokens. `tm stats` only showed `T-1 S-2 18 1025330 not priced 203`.
 
-- [ ] **u1-record-flush-incremental** — `tm run --record` must write the cassette incrementally so a killed or timed-out run still leaves one
+- [x] **u1-record-flush-incremental** (landed 218abf3) — `tm run --record` must write the cassette incrementally so a killed or timed-out run still leaves one
   model: sonnet · severity: medium · builds Rust: yes · area: replay · deps: none
   files: `crates/tm-provider/src/cassette.rs`, `crates/tm-cli/src/agent.rs`, `crates/tm-cli/src/sched.rs`, `crates/tm-cli/src/dispatch.rs`
   change: `tm run T-2 --record /tmp/x.cassette` killed by SIGTERM at a 580s bound left no file at all. Two layers need the fix, not one:
