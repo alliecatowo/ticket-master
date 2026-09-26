@@ -1249,7 +1249,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: The TUI trial: after `?` then Ctrl+C twice, `getContent` still showed the Shortcuts panel. Later, after Esc from the board back to the chat, Ctrl+C twice also left the chat open, and only Ctrl+D quit.
 
-- [ ] **u1-history-why-no-commits-copy** — `tm history why <file>` says "repository may be corrupted" for an untracked file or a repo with no history
+- [x] **u1-history-why-no-commits-copy** — `tm history why <file>` says "repository may be corrupted" for an untracked file or a repo with no history (landed 807c4ee)
   model: haiku · severity: low · builds Rust: yes · area: cli-ux · deps: u1-wire-potion-embedder
   files: `crates/tm-codeintel/src/history.rs`, `crates/tm-cli/src/search.rs`
   change: Map the "file has no commits / unborn HEAD / untracked" cases to "todo.py has no git history yet (it isn't committed)". Keep "may be corrupted" only for real git2 corruption errors.
