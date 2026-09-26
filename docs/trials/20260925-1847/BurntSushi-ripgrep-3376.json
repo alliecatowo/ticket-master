@@ -1,0 +1,42 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "test_files": [
+    "crates/ignore/src/dir.rs"
+  ],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 292,
+      "tokens": 1312951,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 1,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm's run found the relevant ignore files but repeatedly reread walk.rs and dir.rs, spent 1,312,951 input tokens, and ended after about 292 seconds with ‘model ended turn without submitting.’ The only practical recovery offered was to rerun the same ticket, and the retry was merely scheduled in the event log; the run did not leave a submitted implementation or report a test result. A user would also have little indication from the final message whether there was a usable patch or a test failure. The independent cargo test passed after the required merge-SHA checkout, but crates/ignore/src/dir.rs contains both production code and the regression test, so that checkout also imported the reference implementation; this is not evidence that tm fixed the issue."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 287,
+      "tokens": 35612,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode followed a focused plan, identified the parent matcher cache, implemented the absolute-base comparison, recovered from a Rust type error and a test fixture setup omission, then reported its passing regression and ignore-crate tests. It could have avoided the unsupported regression test target command and the extra exploratory reads, and should capture the established test harness conventions before authoring a fixture. Its successful test output came before the mandatory test-file checkout; the subsequent mechanical cargo test also passed, with the caveat that the checked-out file includes the implementation as well as its regression test."
+    }
+  ]
+}

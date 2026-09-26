@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 605,
+      "tokens": 3291872,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm found the relevant prepare_body and redirect code, but repeated reads and broad searches consumed about 3.29M input tokens over 605 seconds before the model ended its turn without submitting any fix. The user-facing run then exposed only a generic turn-failed/retry message, so it was unclear whether the work had been saved, what caused the stop, or whether retrying would preserve progress. The hidden regression test failed mechanically because the base implementation still treated the delegated stream as form data. A useful improvement would be to report the precise stop reason and retained patch state, then offer an explicit continuation that resumes from the current attempt rather than restarting navigation."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 47,
+      "tokens": 32223,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 3,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly located the stream-detection gate, changed it to use delegated __iter__ discovery, and added a focused wrapper regression test. Its initial pytest attempts were blocked by the missing test environment and it reported that limitation; after dependencies were synchronized, the targeted test-file check passed. It could improve by running the focused test again once setup is corrected within the same agent session and presenting the final verification result from that corrected run rather than leaving the user to infer it from a subsequent invocation."
+    }
+  ]
+}

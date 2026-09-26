@@ -1,0 +1,45 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "test_files": ["test/browser.ts", "test/stream.ts"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 43,
+      "tokens": 423469,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "tm navigated straight to source/utils/body.ts and test/stream.ts, applied the correct flush change, and completed quickly. Its test-related progress ended at the opaque ‘Ran tests’ message without a visible result in the captured transcript, so a user could not tell whether verification succeeded; the separate hidden-test run confirms the stream tests pass, but the browser test file could not run because Playwright browsers are not installed. During submission, the transcript also showed ‘Submitted the ticket -> error: couldn't find that’ and ‘Saved a result -> error: got a response it couldn't understand’ before succeeding, which makes healthy retry/recovery look like a broken run. Show each failing operation and retry state clearly, suppress or contextualize transient internal attempts, and finish with an explicit test command and outcome."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 62,
+      "tokens": 27412,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 5,
+        "recoverability": 5,
+        "cost_time": 5
+      },
+      "better": "OpenCode scoped its exploration to the progress transform and stream test, stated a clear plan, and implemented the expected behavior. Its first regression fixture used Response(null), then its focused test exposed that this produced no progress callback; it diagnosed the fixture issue, changed it to an explicitly closed ReadableStream and consumed the response, and obtained 18/18 focused stream tests. After the benchmark overlaid PR tests, test/stream.ts passed 19/19. The complete verification could be made more reproducible by accounting for the repository's pnpm ignored-build policy and required Playwright browsers during setup; consequently the complete test-file check is mechanically marked failed although the relevant stream tests pass."
+    }
+  ],
+  "verification": {
+    "tm": "Failed as a complete check: `pnpm test` was blocked by pnpm's ignored build scripts; direct AVA on test/browser.ts and test/stream.ts failed because Playwright browsers are absent; direct test/stream.ts passed 19/19.",
+    "opencode": "Failed as a complete check: `pnpm test` was blocked by pnpm's ignored build scripts and test/browser.ts needs missing Playwright browsers; direct test/stream.ts passed 19/19."
+  },
+  "setup": "Both pnpm install runs failed after installing dependencies/building distribution because pnpm 11 blocked esbuild@0.28.2 and unrs-resolver@1.12.2 build scripts."
+}

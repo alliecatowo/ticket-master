@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 895,
+      "tokens": 4113841,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 1
+      },
+      "better": "TM did find and edit the right implementation, but its run spent most of its budget revisiting the same completion and flag-parsing paths and repeatedly probing Go installation/GOROOT details; the event-derived usage reports 4.1M input tokens and 63 tool calls. It reached the 64-step limit after an internal submission error and printed `something went wrong` plus a retry command, without a concise summary of completed work or verification, so a user could not tell whether to trust the partial patch or whether retrying would repeat the investigation. Earlier setup output also needed correction because `tm events` requires a subcommand and macOS has no `timeout` binary. The merged test-file checkout followed by `go test ./...` passed mechanically, but the TM ticket itself ended failed."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 127,
+      "tokens": 22492,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a short plan, located the exact append operation quickly, made an isolated-slice fix with a regression test, ran `go test ./...`, and clearly reported the result. The independently applied PR test file and second full-suite run also passed. The added regression test checked backing-array safety with an `Execute` setup but did not reproduce the precise `os.Args`/ValidArgsFunction case from the issue; using the upstream regression test itself would make the implementation test more directly representative."
+    }
+  ]
+}
