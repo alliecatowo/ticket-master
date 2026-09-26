@@ -460,11 +460,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   holder and session id. If `tm run <T>` races an existing lease, the conflict includes `tm ticket
   show <T>` and, when known, `tm --resume <S>` recovery commands. `tm run` reports a failed attempt
   as an error (exit 2), not as "finished". If the model ends without
-   submitting, the final summary says no patch or evidence was submitted, names that cause without
-   calling it a generic error, and points to `tm ticket show <T>` to inspect the saved attempt plus
-   `tm --resume <S>` to continue with a focused request to finish and submit. Ordinary test failures
-   retain their retry command; no-submit recovery should not blindly rerun the unchanged ticket.
-   This is distinct from a test failure.
+   submitting, `tm run` waits for and continues with a scheduled retry when the ticket's retry
+   policy and remaining budget allow it. If no retry is available, the final summary says no
+   patch or evidence was submitted, includes the failure reason and gives the exact next command;
+   this is distinct from a test failure.
    Workers receive explicit finalization guidance near the step limit. If a final submission fails,
    the failure names the submit error and step limit, retains the attempt's work and verification
    results for review, and makes clear that the ticket was not submitted.

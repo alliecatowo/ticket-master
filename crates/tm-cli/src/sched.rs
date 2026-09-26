@@ -799,7 +799,46 @@ pub async fn run_ticket(
                 None => Ok(()),
             }
         }
-        Some(Err(err)) => Err(err),
+        Some(Err(err)) => {
+            // The dispatcher has already recorded the failure and applied the ticket's retry
+            // policy. For no-submit turns, keep this foreground invocation alive until that
+            // scheduled retry is due when the ticket still has retry/budget capacity.
+            let retry = project
+                .store
+                .view()
+                .ok()
+                .and_then(|view| view.tickets.get(&ticket).cloned())
+                .and_then(|current| {
+                    let no_submit = current.failures.last().is_some_and(|failure| {
+                        failure
+                            .detail
+                            .to_ascii_lowercase()
+                            .contains("ended turn without submitting")
+                    });
+                    if !no_submit || current.state != tm_core::TicketState::Ready {
+                        return None;
+                    }
+                    let decision = tm_scheduler::retry::decide_retry(
+                        &current,
+                        current.failures.last()?.class,
+                        project.clock.now(),
+                    );
+                    match decision.outcome {
+                        tm_scheduler::RetryOutcome::Retry { after } => {
+                            Some(after.seconds_since(project.clock.now()).max(0) as u64)
+                        }
+                        tm_scheduler::RetryOutcome::Escalate(_) => None,
+                    }
+                });
+            if let Some(delay) = retry {
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                // A second invocation uses the same ticket, options and project. Its own
+                // failure count bounds this recursion through the ticket retry policy.
+                Box::pin(run_ticket(args, project, renderer)).await
+            } else {
+                Err(err)
+            }
+        }
         None => match replay_error {
             Some(err) => Err(err),
             None => Ok(()),
