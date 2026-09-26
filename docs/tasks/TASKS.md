@@ -1626,7 +1626,7 @@ is based on.
   acceptance: A run that first encounters the evidence invariant and an invalid result shape retries with valid evidence/result data, and its transcript contains neither a misleading success claim nor an unqualified final submitted message while persistence is incomplete.
   test: `cargo test -p tm-cli`
   evidence: `/tmp/tm-trials/20260926-0821/sindresorhus-ky-878/tm.log` lines 44–47 — “Submitting a ticket needs at least one piece of evidence”; “couldn't parse the result”; then “Saved a result” and “Ticket T-2 submitted its work.”
-- [ ] **t20260926-0821-spf13-cobra-2257-events-snapshot-default** — Make `tm events` useful for one-shot event inspection
+- [x] **t20260926-0821-spf13-cobra-2257-events-snapshot-default** — Make `tm events` useful for one-shot event inspection (landed 00b8a7c)
   model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: When `tm events` is invoked without a subcommand, render the current event log snapshot and exit instead of printing command usage; retain `tm events tail` for live-follow behavior and `--no-follow` for snapshots from a chosen sequence.
