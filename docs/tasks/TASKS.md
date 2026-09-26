@@ -1410,7 +1410,7 @@ is based on.
   acceptance: A simulated no-submit ticket whose next attempt repeats the same file reads is steered to a different action or stops with a user-actionable explanation, while normal retries continue to work.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260925-1314/BurntSushi-ripgrep-3376/tm.log` lines 5-37 and 58-82 show repeated reads of `walk.rs`/`dir.rs` followed by the identical no-submit failure; `tm events tail --from 0` shows two sessions and retry scheduling (events 164-176, 287-294). Also: pass-2/3 trials show the same pattern repeatedly: pallets-click-3822 (both passes, up to 1.39M input tokens on a retry that repeated the same reads) and psf-requests-7432 (41 tool calls, 3.29M input tokens, repeated reads of models.py/test_requests.py/utils.py) — see docs/trials/20260925-1650 and 20260925-1847. Also: recurred again in pass 4/5 as pallets-click-3822 ending without submission after repeated Path-source reads (docs/trials/20260925-2015: 1,416,202 input tokens; docs/trials/20260925-2206: 916,284 input tokens for a second ticket) — same no-submit-then-restart-investigation shape.
-- [ ] **t20260925-1314-gohugoio-hugo-15360-actionable-tool-errors**
+- [x] **t20260925-1314-gohugoio-hugo-15360-actionable-tool-errors** (landed 12c4ec6)
   model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/agent.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: Extend `plain_tool_error` and its progress rendering to preserve a concise safe diagnostic and identify an actionable recovery step, especially for invariant and parse failures, instead of reducing them to generic phrases.
