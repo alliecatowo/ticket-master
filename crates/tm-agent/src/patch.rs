@@ -383,7 +383,11 @@ impl PatchEngine {
                 .components()
                 .any(|c| matches!(c, Component::ParentDir))
         {
-            return Err(PatchError::InvalidPath(path.to_string()));
+            return Err(PatchError::InvalidPath(format!(
+                "{path} (project root '{}'; paths must be relative to the project root, with no \
+                 `..` or absolute component)",
+                self.root.display()
+            )));
         }
         let joined = self.root.join(candidate);
         if joined.to_str().is_none() {
@@ -408,7 +412,10 @@ impl PatchEngine {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(PatchError::Io {
                 path: path.to_string(),
-                detail: e.to_string(),
+                detail: format!(
+                    "{e} (project root '{}'; paths are relative to the project root)",
+                    self.root.display()
+                ),
             }),
         }
     }
@@ -889,6 +896,14 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, PatchError::InvalidPath(_)));
+        // The resolved project root is named in the message, not just the bare path — the
+        // recovery hint an agent (or a human reading `tm run`'s output) needs to tell a
+        // wrong-root mistake apart from a genuinely missing file.
+        let root_display = engine.root().to_string_lossy().into_owned();
+        assert!(
+            err.to_string().contains(&root_display),
+            "expected the project root in the error, got: {err}"
+        );
     }
 
     #[test]

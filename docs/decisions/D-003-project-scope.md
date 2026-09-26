@@ -67,6 +67,69 @@ workspace it belongs to, since the sanitized name alone is lossy.
 3. `$TM_HOME/projects/<key>/project.db` exists for this workspace → `Global`, `exists: true`.
 4. Otherwise → `Global`, `exists: false`.
 
+**Update (2026-09-26, `t20260926-agent-tool-paths-not-rooted-to-project`): refusing an ambiguous
+root.** A live trial ran `tm init`/`tm run` from a scratch directory holding two independent git
+clones as immediate children (`tm/`, `opencode/` — a benchmark/comparison harness's layout), not
+from inside either one. `resolve_scope` did exactly what steps 2-4 above say: it rooted the
+project at that scratch directory (not itself a git repository, so step 4's plain-`cwd` rule
+applied). That is correct by this decision's own contract, but it is also a real hazard this
+decision didn't anticipate: every ticket's `Authority::repository.{read,write}` then spanned
+*both* clones at once, since neither `Action::ReadPath`/`WritePath` nor any tool-dispatch check
+narrows scope any further than the resolved `root`. A relative `fs.read` for a path that only
+existed in the intended clone failed, and the agent's own recovery (a directory listing, then a
+read into the correct sibling) stayed safe only by chance — nothing stopped a differently-shaped
+retry from reading or editing the *other* clone instead.
+
+Three points now share one additional check, `reject_ambiguous_sibling_root`: refuse whenever a
+resolved root is not itself a git repository (no `.git` directly inside it) but holds two or more
+immediate children that are independently git-repository-rooted.
+
+- `create_or_promote_project_dir` (what `tm init`/`tm attach` call before creating or promoting a
+  `.tm/`) — the actual path the live trial took: `tm init` itself ran at the ambiguous scratch
+  directory, not at some bare, project-less directory only reachable through this decision's
+  step-4 fallback.
+- `resolve_scope`'s step-2 `locate` hit — a pre-existing `.tm/` this check never got to run
+  against when it was created (the state the trial's own scratch directory was left in after its
+  first, wrongly-rooted `tm init`), or a caller that `cd`'d into one of two sibling clones without
+  noticing the other's presence and re-initing there instead of the ambiguous parent.
+- `crate::dispatch::build_dispatcher_with_fabric`, on `exec_root`, immediately before building an
+  executor/`CodeIntel` index and actually dispatching any ticket's `fs.*`/`edit.*`/`shell.*` tool
+  calls against that root — the point a ticket's file authority is *actually* established,
+  regardless of how the project it belongs to came to be resolved.
+
+Deliberately **not** checked in step 3/4 of `resolve_scope`'s own fallback (this decision's
+numbered list above): that branch resolves for *every* command, including read-only ones with no
+ticket file authority at stake at all — `tm project show`, `tm tickets --json` (documented to
+print `[]` and create nothing), bare `tm`, and a chat turn (`Authority::root()`, not tied to any
+ticket). Checking there was tried first and reverted after it broke exactly those commands in any
+ordinary non-repo directory that happens to hold two unrelated git clones — a real top-level dev
+directory, or `$HOME` itself on a machine with `~/.oh-my-zsh`, `~/.nvm`, `~/.pyenv` or similar as
+git-cloned dotfile managers. **A ticket is created successfully in an ambiguous directory** (`tm
+ticket new` goes through this now-unchecked fallback); the refusal happens at dispatch (`tm run`/
+`tm sched run`/`tm serve`/`tm mcp`/the TUI's in-process runner), not at creation.
+
+This check is deliberately narrow — a project's own repository root is never affected regardless
+of what it vendors deeper than one level or as recorded git submodules, and a single sibling
+repository next to ordinary files is left alone, since that shape is common and benign and this
+check has no principled way to tell it apart from an intentional one. `--project` bypasses only
+`resolve_scope`'s `locate`-branch check (that branch's own explicit-path arm returns before
+`locate` ever runs, per this decision's step 1) — the dispatcher check applies to `exec_root`
+regardless of how the project was opened, so `tm --project <ambiguous-parent> run T-1` still
+refuses, and `tm init`/`tm attach` resolve their target from their own `path` argument (or `cwd`),
+never from the global `--project` flag, so it does nothing for either of those either. The refusal's
+recovery text differs by call site rather than uniformly pointing at `--project`. See
+`crates/tm-cli/src/project.rs`'s `reject_ambiguous_sibling_root` for the exact rule and each call
+site's own fix text.
+
+Two things this does not cover, stated plainly: a chat turn attached to a ticket runs through
+`AgentSession` (`crates/tm-cli/src/agent.rs`), not through `ExecutorDispatcher`, so this specific
+check does not gate that path (an unticketed chat turn runs with `Authority::root()` regardless,
+unrelated to this hazard); and `tm run <ticket>` activates the ticket (draft → ready) before the
+dispatcher call that then refuses, leaving the ticket in `Ready` rather than rolling the
+activation back — a human still has to notice and address it (e.g. by moving/deleting the
+project and retrying), the same as any other dispatch-time failure this codebase doesn't yet roll
+back.
+
 Two openers consume that resolution differently:
 
 - **`open_for_command`** — every explicit subcommand (`tm status`, `tm ticket list`, ...). Errors
