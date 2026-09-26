@@ -491,12 +491,35 @@ pub async fn run_ticket(
 
     let ticket = TicketId::new(&args.ticket)?;
     let mut view = project.store.view()?;
-    let is_draft = view
+    let executor_requirements = view
         .tickets
         .get(&ticket)
         .ok_or_else(|| tm_types::TmError::not_found("ticket", &ticket))?
-        .state
-        == tm_core::TicketState::Draft;
+        .executor
+        .clone();
+    let is_draft = view.tickets[&ticket].state == tm_core::TicketState::Draft;
+
+    // Fail fast, before any state change, lease or worktree is created, when the ticket's
+    // required role has no provider that can actually serve it (a `providers.toml` candidate
+    // naming a provider that was never registered/credentialed) -- see
+    // `preflight_provider_or_fail`'s own doc comment. Deliberately ahead of the draft-activation
+    // below: activating first and failing after would leave a real, visible state change (and a
+    // `Ready` ticket a concurrent `tm sched run`/`tm serve`/the TUI could pick up and lease) from
+    // a run that never got past its own preflight. Skipped when:
+    // - `--replay` is set: that path serves the role from a `MockProvider` regardless of
+    //   `providers.toml`, so the real fabric's configuration is beside the point.
+    // - the ticket is `human_required`: `tm-scheduler`'s dispatcher routes it to `HumanExecutor`
+    //   without ever consulting the role/fabric at all (`tm_scheduler::dispatch`'s
+    //   `human_required` bypass), so a broken `providers.toml` candidate for its nominal role is
+    //   not this ticket's problem.
+    // - `acp.toml` overrides this exact role to an external ACP agent: that role is served by
+    //   `AcpExecutor` instead of `BuiltinExecutor`'s fabric, so `providers.toml` never enters into
+    //   it for this role either.
+    let acp_role = crate::dispatch::acp_override_role(project)?;
+    if provider_preflight_applies(&executor_requirements, args.replay.is_some(), acp_role) {
+        preflight_provider_or_fail(project, &ticket, executor_requirements.role)?;
+    }
+
     // Asking to run a draft is asking for it to be ready: activate it rather than refusing.
     if is_draft {
         project.store.activate(&ticket, project.actor.clone())?;
@@ -663,6 +686,63 @@ pub async fn run_ticket(
     }
 }
 
+/// Whether [`run_ticket`]'s provider preflight should actually run for a ticket with
+/// `requirements`, given whether this run is a `--replay` and whichever role (if any)
+/// `acp.toml` overrides to an external ACP agent. `false` in exactly the three cases where a
+/// broken `providers.toml` candidate for `requirements.role` is not this ticket's problem at
+/// all -- see the call site's own comment for why each one is real, not a hypothetical:
+/// `--replay`'s role is served by a `MockProvider` regardless of configuration; a
+/// `human_required` ticket is routed to `HumanExecutor` without ever consulting the role/fabric;
+/// and a role `acp.toml` overrides is served by `AcpExecutor` instead of `BuiltinExecutor`'s
+/// fabric.
+fn provider_preflight_applies(
+    requirements: &tm_core::ExecutorRequirements,
+    is_replay: bool,
+    acp_override_role: Option<tm_types::Role>,
+) -> bool {
+    !is_replay && !requirements.human_required && acp_override_role != Some(requirements.role)
+}
+
+/// Validates `role`'s effective provider candidates against what is actually registered and
+/// credentialed *before* [`run_ticket`] leases or dispatches anything at all
+/// (`t20260925-1314-sindresorhus-ky-878-provider-retry-guidance`). Before this check existed, a
+/// `providers.toml` candidate naming a provider that was never registered (no credential, never
+/// wired up) only surfaced after `tm run` had already leased the ticket and dispatched an agent
+/// turn that failed immediately -- one whole lease cycle (`no worker attached; lease lapsed`)
+/// burned just to reach the same "provider not registered: <name>" diagnosis this function
+/// reaches for free, before any of that happens. Builds its own short-lived [`tm_provider::Fabric`]
+/// via [`crate::agent::build_fabric_for_project`] (the same one [`crate::dispatch::build_dispatcher`]
+/// builds moments later for the real run) purely to ask [`tm_provider::Fabric::preflight_role`]
+/// this question -- registering providers does no network I/O, so building it twice costs
+/// nothing observable.
+fn preflight_provider_or_fail(
+    project: &Project,
+    ticket: &TicketId,
+    role: tm_types::Role,
+) -> tm_types::Result<()> {
+    let fabric = crate::agent::build_fabric_for_project(project, project.clock.clone())?;
+    preflight_fabric_or_fail(&fabric, ticket, role)
+}
+
+/// The pure half of [`preflight_provider_or_fail`]: asks an already-built [`tm_provider::Fabric`]
+/// (real, or a hand-built one in a test) whether `role` can be served at all, and shapes its
+/// `Err` into the same [`tm_types::TmError::TurnFailed`] `run_ticket` returns for every other
+/// failed-attempt reason. Split out so a test can check this wiring against a `Fabric` it built
+/// by hand from a known role table, instead of going through [`crate::agent::build_fabric_for_project`]'s
+/// real environment-credential autodetection -- which would make the test's outcome depend on
+/// whatever `DEVPASS_*`/`ANTHROPIC_API_KEY`/etc. happen to be set in the process running the
+/// test, a real, already-seen source of cross-test flakiness in this same file (see
+/// `record_test_env_lock`'s doc comment on the sibling `--record`/`--replay` tests).
+fn preflight_fabric_or_fail(
+    fabric: &tm_provider::Fabric,
+    ticket: &TicketId,
+    role: tm_types::Role,
+) -> tm_types::Result<()> {
+    fabric
+        .preflight_role(role)
+        .map_err(|msg| tm_types::TmError::TurnFailed(format!("Ticket {ticket}: {msg}")))
+}
+
 /// `tm run <ticket> --record <path>`'s tail: writes everything `cassette_sink` accumulated
 /// during the run to `path` as a cassette (`docs/decisions/D-028-record-replay-harness.md`), then
 /// stores those same bytes as `ticket`'s `ArtifactKind::Transcript` artifact — the first real use
@@ -815,9 +895,34 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
             format!("{class_desc}: {}", f.detail)
         })
         .unwrap_or_else(|| "unknown failure".to_string());
+    // A `ProviderUnavailable` failure whose detail names an unregistered provider is a
+    // configuration problem, not a transient one (unlike, say, "provider at capacity"): the
+    // preflight check in `preflight_provider_or_fail` is meant to catch this before a lease is
+    // ever granted, but a provider that goes missing/uncredentialed *between* that check and this
+    // attempt's own call (or a role change mid-run) can still reach this path. Blindly suggesting
+    // `tm run <ticket>` again would fail identically every time, so point at the real fix instead.
+    let is_unregistered_provider_failure = failure.is_some_and(|f| {
+        f.class == tm_core::FailureClass::ProviderUnavailable
+            && f.detail.contains("provider not registered")
+    });
     let next = match ticket.state {
+        tm_core::TicketState::Ready | tm_core::TicketState::Blocked
+            if is_unregistered_provider_failure =>
+        {
+            "This is a provider configuration problem, not a transient one: check providers.toml's \
+             candidates for this ticket's role and run `tm provider list` to see what's actually \
+             registered/credentialed, then fix the candidate (or its credential) -- rerunning \
+             unchanged will fail identically."
+                .to_string()
+        }
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked => {
             format!("Run `tm run {}` again to retry.", ticket.id)
+        }
+        tm_core::TicketState::Escalated if is_unregistered_provider_failure => {
+            "This is a provider configuration problem, not a transient one: fix providers.toml's \
+             candidates for this ticket's role (check with `tm provider list`) before retrying -- \
+             `tm ticket retry` alone will fail identically."
+                .to_string()
         }
         tm_core::TicketState::Escalated => {
             format!("Run `tm ticket retry {}` to try again.", ticket.id)
@@ -1580,6 +1685,208 @@ mod tests {
         } else {
             panic!("Expected TurnFailed error");
         }
+    }
+
+    /// `t20260925-1314-sindresorhus-ky-878-provider-retry-guidance`: a `ProviderUnavailable`
+    /// failure whose detail names an unregistered provider (the fabric's own
+    /// `Fabric::preflight_role`/`execute_priced` wording) is a configuration problem, not a
+    /// transient one like "provider at capacity" (covered above) -- rerunning `tm run <ticket>`
+    /// unchanged would fail identically every time, so `run_outcome` must not recommend a blind
+    /// retry for it and must instead name a concrete recovery step.
+    #[test]
+    fn run_outcome_names_a_concrete_fix_for_an_unregistered_provider_mid_run() {
+        use tm_core::{
+            ExecutorRequirements, FailureClass, FailureRecord, RetryPolicy, Ticket, TicketKind,
+            TicketState, VerificationPolicy,
+        };
+        use tm_types::{Authority, Budget, Timestamp, Tolerance};
+
+        let now = Timestamp::EPOCH;
+        let ticket = Ticket {
+            id: TicketId::new("T-1").unwrap(),
+            kind: TicketKind::Work,
+            objective: "test objective".to_string(),
+            state: TicketState::Ready,
+            parent: None,
+            children: vec![],
+            dependencies: vec![],
+            milestone: None,
+            due: None,
+            authority: Authority::none(),
+            resources: vec![],
+            executor: ExecutorRequirements {
+                role: tm_types::Role::CoderFast,
+                human_required: false,
+                min_capability: Tolerance::Strict,
+            },
+            context_refs: vec![],
+            success: vec![],
+            verification: VerificationPolicy::Single,
+            budget: Budget::unlimited(),
+            retry: RetryPolicy {
+                max_attempts: 3,
+                base_delay_seconds: 10,
+                backoff_multiplier: 2.0,
+                max_delay_seconds: 300,
+            },
+            cycle: None,
+            attempts: 1,
+            failures: vec![FailureRecord {
+                class: FailureClass::ProviderUnavailable,
+                detail: "no candidate can serve role coder.fast: provider not registered: devpass"
+                    .to_string(),
+                at: now,
+                attempt: 1,
+            }],
+            priority: 0,
+            created: now,
+            updated: now,
+        };
+
+        let result = run_outcome(&ticket, 0);
+        assert!(result.is_err());
+        if let Err(tm_types::TmError::TurnFailed(msg)) = result {
+            assert!(
+                !msg.contains("Run `tm run T-1` again to retry."),
+                "must not recommend rerunning the same broken configuration unchanged: {msg}"
+            );
+            assert!(
+                msg.contains("providers.toml"),
+                "must point at the actual config to fix: {msg}"
+            );
+            assert!(
+                msg.contains("tm provider list"),
+                "must point at a real diagnostic command, not a blind retry: {msg}"
+            );
+        } else {
+            panic!("Expected TurnFailed error");
+        }
+    }
+
+    /// A hand-built [`tm_provider::Fabric`] whose only `coder.fast` candidate names `provider`
+    /// but never has anything registered under that id -- the same shape a `providers.toml`
+    /// candidate naming a real but uncredentialed/never-wired-up provider produces. Deliberately
+    /// bypasses [`crate::agent::build_fabric_for_project`]'s real environment-credential
+    /// autodetection so this test's outcome can never depend on what happens to be set in the
+    /// process running it (see `preflight_fabric_or_fail`'s own doc comment).
+    fn fabric_with_unregistered_candidate(provider: &str) -> tm_provider::Fabric {
+        let table = tm_provider::RoleTable::parse(&format!(
+            "[coder_fast]\ncandidates = [{{ provider = \"{provider}\", model = \"m1\", max_concurrency = 1 }}]\n"
+        ))
+        .expect("role table parses");
+        tm_provider::Fabric::new(table, Arc::new(tm_types::FixedClock::epoch()))
+    }
+
+    /// `t20260925-1314-sindresorhus-ky-878-provider-retry-guidance`: with a `coder.fast`
+    /// candidate naming a provider (`devpass`) that was never registered, the preflight check
+    /// `run_ticket` calls before any lease/dispatch must fail with a message naming that provider
+    /// and a real repair path -- not a blind "run again" retry.
+    #[test]
+    fn preflight_fabric_or_fail_names_the_missing_provider_before_any_dispatch() {
+        let fabric = fabric_with_unregistered_candidate("devpass");
+        let ticket = TicketId::new("T-1").unwrap();
+
+        let err = preflight_fabric_or_fail(&fabric, &ticket, tm_types::Role::CoderFast)
+            .expect_err("devpass is never registered");
+        match err {
+            tm_types::TmError::TurnFailed(msg) => {
+                assert!(
+                    msg.contains("provider not registered: devpass"),
+                    "names the missing provider: {msg}"
+                );
+                assert!(
+                    msg.contains("providers.toml") && msg.contains("tm provider list"),
+                    "names a real repair path: {msg}"
+                );
+                assert!(
+                    !msg.to_lowercase().contains("run `tm run"),
+                    "must not recommend rerunning the same broken config unchanged: {msg}"
+                );
+            }
+            other => panic!("expected TurnFailed, got {other:?}"),
+        }
+    }
+
+    /// `t20260925-1314-sindresorhus-ky-878-provider-retry-guidance`: the exact skip decision
+    /// `run_ticket` makes before calling `preflight_provider_or_fail`, exercised directly. A
+    /// `human_required` ticket is routed by `tm-scheduler`'s dispatcher to `HumanExecutor`
+    /// without ever consulting its nominal role or the fabric, `--replay` serves the role from a
+    /// `MockProvider` regardless of `providers.toml`, and a role `acp.toml` overrides is served
+    /// by `AcpExecutor` instead of `BuiltinExecutor`'s fabric -- none of those three should ever
+    /// reach the real preflight check, and the everyday case (no replay, not human-required, no
+    /// matching `acp.toml` override) must still reach it.
+    #[test]
+    fn provider_preflight_applies_skips_human_required_replay_and_acp_override() {
+        let requirements =
+            |role: tm_types::Role, human_required: bool| tm_core::ExecutorRequirements {
+                role,
+                human_required,
+                min_capability: tm_types::Tolerance::Any,
+            };
+
+        assert!(
+            provider_preflight_applies(
+                &requirements(tm_types::Role::CoderFast, false),
+                false,
+                None
+            ),
+            "the everyday case must still run the preflight"
+        );
+        assert!(
+            !provider_preflight_applies(
+                &requirements(tm_types::Role::CoderFast, true),
+                false,
+                None
+            ),
+            "human_required must skip the preflight"
+        );
+        assert!(
+            !provider_preflight_applies(
+                &requirements(tm_types::Role::CoderFast, false),
+                true,
+                None
+            ),
+            "--replay must skip the preflight"
+        );
+        assert!(
+            !provider_preflight_applies(
+                &requirements(tm_types::Role::CoderFast, false),
+                false,
+                Some(tm_types::Role::CoderFast),
+            ),
+            "a matching acp.toml override must skip the preflight"
+        );
+        assert!(
+            provider_preflight_applies(
+                &requirements(tm_types::Role::CoderFast, false),
+                false,
+                Some(tm_types::Role::CoderDeep),
+            ),
+            "an acp.toml override for a *different* role must not skip this role's preflight"
+        );
+    }
+
+    /// An `acp.toml` naming a role bypasses that role's fabric entirely (`AcpExecutor` instead of
+    /// `BuiltinExecutor`), so `run_ticket`'s preflight must not run for a ticket whose role
+    /// matches -- `crate::dispatch::acp_override_role` is how it knows.
+    #[test]
+    fn acp_override_role_names_the_role_acp_toml_overrides() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        assert_eq!(
+            crate::dispatch::acp_override_role(&project).expect("no acp.toml"),
+            None
+        );
+
+        std::fs::write(
+            project.root.join("acp.toml"),
+            "[agent]\ncommand = [\"claude-code-acp\"]\nrole = \"coder_fast\"\n",
+        )
+        .expect("write acp.toml");
+        assert_eq!(
+            crate::dispatch::acp_override_role(&project).expect("acp.toml parses"),
+            Some(tm_types::Role::CoderFast)
+        );
     }
 
     #[test]
