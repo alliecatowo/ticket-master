@@ -1295,7 +1295,7 @@ Gate: `mise run verify`
   test: `mise run hygiene`
   evidence: embed.rs:222 claims real command paths use `open_auto`, but no caller exists.
 
-- [ ] **u1-bench-cross-permission-flags**
+- [x] **u1-bench-cross-permission-flags** (landed 9965cc0)
   model: sonnet · severity: high · builds Rust: yes · area: bench · deps: u1-bench-cross-stdin-closed
   files: `crates/xtask/src/bench_cross.rs`
   change: The claude/codex/opencode adapters pass no permission flags, so headless runs stall or get refused and tm wins by default. Add `--permission-mode bypassPermissions` to `claude -p`, `--sandbox workspace-write` to `codex exec`, and OpenCode's non-interactive auto-approve flag (check `opencode run --help`). Always set the working dir to the per-task scratch copy, never the repo.
@@ -1303,7 +1303,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- xtask`
   evidence: docs/audits/2026-09-25-bench-plan.md "Required fixes", item 0.
 
-- [ ] **u1-bench-cross-model-timeout-cost**
+- [x] **u1-bench-cross-model-timeout-cost** (landed 9965cc0)
   model: sonnet · severity: high · builds Rust: yes · area: bench · deps: u1-bench-cross-permission-flags
   files: `crates/xtask/src/bench_cross.rs`
   change: Add `--model <provider/model>` passthrough (claude `--model`, codex `-m`, opencode `-m`, tm via a scratch `providers.toml` role candidate), `--task-timeout <secs>` (kill the process group; mark TIMEOUT) and `--max-cost-usd` (stop scheduling new tasks once reported spend reaches it). Record the tool versions (`--version`) in the report.
