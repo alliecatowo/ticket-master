@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 342.76,
+      "tokens": 1521775,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm eventually identified crates/ignore/src/dir.rs, but spent many calls repeatedly reading overlapping ranges and failed after 342.76 seconds with ‘Required toolchain dependency is unavailable: cargo. Install or configure it, then retry the task.’ Cargo was available to the benchmark shell, and the follow-up message did not show the failed command or explain whether PATH differed inside the agent's command environment, so the suggested recovery was hard to trust or act on. The event log's 1,521,775 total tokens was far above OpenCode's 47,174. A clearer early plan, bounded repeated source inspection, and an actionable failure report with the exact command/output and environment check would improve this run. The required checkout of crates/ignore/src/dir.rs restores the merged production implementation as well as its inline test, so the mechanical post-checkout pass does not show that tm's implementation passed; before checkout tm had not completed a fix or verification. The first post-checkout full crate test overlapped the other arm and had two failures; an isolated rerun passed all 140 unit tests plus the integration suites."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 153.63,
+      "tokens": 47174,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode set out a focused investigation, found the shared parent-matcher cache in crates/ignore/src/dir.rs, implemented a root-specific cache key, and added an issue regression test. It recovered after its first integration-test attempt had an invalid target name and a subsequent assertion-order mismatch; it corrected the test and ran the focused regression, cargo test -p ignore, and formatting check successfully. It could use context more efficiently by immediately falling back from unavailable indexed search to exact repository search and avoiding exploratory reads that did not advance the root-cause investigation. Its final summary clearly described the cache issue and the tests it ran. As with the other arm, the mandatory post-run checkout replaces dir.rs with the merged implementation plus inline test, so the mechanical hidden-test pass is not independent proof of the agent-written implementation. The final isolated post-checkout cargo test -p ignore passed; parallel verification had an intermediate failing result while both checkouts shared build artifacts."
+    }
+  ]
+}

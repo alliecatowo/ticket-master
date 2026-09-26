@@ -1,0 +1,50 @@
+{
+  "issue": {
+    "url": "https://github.com/sindresorhus/ky/issues/878",
+    "title": "`onDownloadProgress` never emits `percent: 1` for empty response bodies",
+    "body": "### Summary\n\nWhen a response has an empty body (for example a `200` with `Content-Length: 0`), `onDownloadProgress` never fires with `percent: 1`. The documented guarantee is that `onDownloadProgress` always reports completion, but for empty bodies the final event is skipped.\n\n### Root cause\n\nIn `source/utils/body.ts`, the transform stream's `flush()` only emits the final progress event inside an `if (previousChunk)` block. For an empty body no chunk is ever read, so `previousChunk` stays `undefined` and the final `{ percent: 1 }` event is never emitted.\n\n### Reproduction\n\n```js\nimport ky from 'ky';\n\nlet lastPercent = 0;\nawait ky.get('https://example.com/empty', { // a 200 with Content-Length: 0\n  onDownloadProgress: (progress) => { lastPercent = progress.percent; }\n});\nconsole.log(lastPercent); // 0 — expected 1\n```\n\n### Proposed fix\n\nMove the final progress emission out of the `if (previousChunk)` guard so it always fires on flush, using an empty `Uint8Array` when the body was empty:\n\n```js\nonProgress?.({percent: 1, totalBytes: Math.max(totalBytes, transferredBytes), transferredBytes}, previousChunk ?? new Uint8Array());\n```\n\nI have a branch ready with the fix and a red→green test (18/18 passing): `pacocartones:fix/ondownloadprogress-empty-body`. Happy to open a PR if you'd like."
+  },
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "fix_pr": 881,
+  "test_files": ["test/browser.ts", "test/stream.ts"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 153.03,
+      "tokens": 1107519,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 4,
+        "cost_time": 2
+      },
+      "better": "The run reached the correct stream flush code quickly and recovered from both a guessed `.js` test-helper path and a missing-evidence submission. However, the transcript repeats searches and rereads `test/stream.ts` many times, and `tm stats --json` reports 1,107,519 tokens despite a 153-second run. A user would also have to interpret an initially failed ticket submission followed by `Saved a result` and a submitted state; finish with one clear summary of changed files, the checks actually run, and their results, and avoid repeatedly loading the same test file after locating the relevant case."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 71.64,
+      "tokens": 21327,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 5,
+        "recoverability": 5,
+        "cost_time": 5
+      },
+      "better": "OpenCode found the precise flush guard and the stream test quickly, gave a scoped plan, and corrected its first regression fixture after observing that `new Response(null)` does not exercise the empty readable-stream path. It reported its own 18 stream tests, XO, and diff check accurately. The independent merge-test verification still failed: the full test command hits an XO error in untouched `test/http-error.ts`, and the broader targeted AVA invocation lacks Firefox/WebKit browser installations. Include the independent verification result in any final summary so the locally passing focused test is not mistaken for the protocol's hidden-test pass."
+    }
+  ],
+  "verification": {
+    "command": "pnpm test; pnpm exec ava test/browser.ts test/stream.ts",
+    "passed": false,
+    "details": "pnpm test exits 1 at XO for an unrelated existing error in test/http-error.ts:218 (@typescript-eslint/no-meaningless-void-operator). The targeted AVA run exits 1: the hidden empty-response browser test fails in Chromium because no completion callback was recorded, and Firefox/WebKit tests cannot launch because their Playwright browsers are unavailable. The hidden test in test/stream.ts passes for both arms. Both test files were overwritten from merge SHA 99644d0169138eb0c42718f06862061288f05a96 before verification."
+  }
+}

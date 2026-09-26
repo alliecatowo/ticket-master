@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 747,
+      "tokens": 1985812,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm should interrupt repeated source exploration earlier and make the retained findings visible as progress instead of spending most of a 12-minute run rereading src/click/types.py and overlapping ranges. For this user, three separate “Ticket T-1 dispatched for execution” notices obscured that the run was repeatedly restarting, and the eventual “no patch or evidence was submitted” message was honest but gave no actionable recovery inline (the saved-session resume guidance was buried in the long failure output). A concise per-attempt update with what was learned, what is still missing, and a direct resume command would make the stall easier to understand and recover from."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 65,
+      "tokens": 186607,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode found the correct implementation file quickly and completed in about a minute, but it should use the repository's typing fixtures as part of verification and continue until they pass. Its self-run suite passed before the hidden PR tests were applied, but the checked-in typing test then found two default-inference mismatches, so the final success message overstated how completely the typing behavior had been verified."
+    }
+  ]
+}

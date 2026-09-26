@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 347.15,
+      "tokens": 1121197,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 3,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 2
+      },
+      "better": "tm identified the right completion flow and made the correct backing-array copy, and the hidden PR regression test plus `go test ./...` passed. The run nevertheless logged a hard `Required toolchain dependency is unavailable: go` failure, retried after many broad/repeated file reads, and took 347 seconds; no clear final user-facing summary was present in the captured run output, and the initial attempt to use the macOS-missing `timeout` executable also prevented the bounded invocation. Make the run preflight toolchain availability in the actual child execution environment, report the precise failing command and a direct recovery path, and preserve progress without re-reading large portions of command.go and completions.go after retry. The telemetry reports 1,121,197 aggregate tokens while stats reports zero input/output splits, so its token count should be clarified before treating it as a comparable cost metric."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 64.88,
+      "tokens": 21853,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 5,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly found the append aliasing bug, copied the argument slice before adding the sentinel, added a focused spare-capacity regression test, and ran `go test ./...` successfully; the checked-out PR test file and full test suite also passed mechanically. It first attempted semantic indexed search, encountered the missing-index response, and then used exact search successfully. A cleaner run would skip index-only retrieval when no index exists and communicate progress in concise human-readable output alongside the machine-readable JSON stream."
+    }
+  ]
+}

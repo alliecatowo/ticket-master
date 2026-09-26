@@ -1,0 +1,42 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "fix_pr": 7433,
+  "test_files": ["tests/test_requests.py"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 580.702,
+      "tokens": 2030788,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 3,
+        "recoverability": 4,
+        "cost_time": 2
+      },
+      "better": "tm eventually found the right stream-detection branch, made the correct one-line compatibility change, and submitted a result; the PR tests passed when independently applied. The run nevertheless recorded 2,030,788 tokens and 53 tool calls for this small change, repeatedly reopening models.py and adjacent source, while its captured progress did not give a concise up-front plan or a final test-command/result summary. The submission error did give actionable evidence instructions and the run recovered, but ‘Saved a result’ followed by ‘Submitted the ticket’ did not explain that the failed evidence-free attempt had been corrected. Add a short scope/test plan, tighter duplicate-read/context handling, and a final human-readable summary naming changed files and verification outcome."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 95.178,
+      "tokens": 31600,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode located PreparedRequest.prepare_body quickly, stated a scoped three-step task list, changed the stream check, and added a delegated-attribute regression test. It recovered from an initially inappropriate plain BytesIO regression fixture and from running pytest without the source path; the final focused command passed 6 tests, and the independently overwritten PR test file passed 5 tests. It would be stronger if it had recognized the fixture's dynamic delegation semantics immediately and used the repository's PYTHONPATH=src test invocation from the first attempt."
+    }
+  ],
+  "setup_note": "Both clones completed python3 -m venv .venv and pip install -e '.[test]' before agents started; pip warned the pinned package did not provide the test extra. tm init was inadvertently omitted before tm ticket new. The first timeout wrapper attempt failed because macOS lacked timeout; both agent runs were subsequently bounded by Python subprocess timeout=1200."
+}
