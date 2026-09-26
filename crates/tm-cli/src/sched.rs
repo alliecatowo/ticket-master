@@ -994,6 +994,11 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
             format!("{class_desc}: {}", f.detail)
         })
         .unwrap_or_else(|| "unknown failure".to_string());
+    let did_not_submit = failure.is_some_and(|f| {
+        f.detail
+            .to_ascii_lowercase()
+            .contains("ended turn without submitting")
+    });
     // A `ProviderUnavailable` failure whose detail names an unregistered provider is a
     // configuration problem, not a transient one (unlike, say, "provider at capacity"): the
     // preflight check in `preflight_provider_or_fail` is meant to catch this before a lease is
@@ -1028,7 +1033,19 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
         }
         _ => "".to_string(),
     };
-    let message = if next.is_empty() {
+    let message = if did_not_submit {
+        let resume = if next.is_empty() {
+            String::new()
+        } else {
+            format!(" {next}")
+        };
+        format!(
+            "Ticket {}: no patch or evidence was submitted (this was not a test failure). Failure: {}.{}",
+            ticket.id,
+            reason,
+            resume
+        )
+    } else if next.is_empty() {
         format!("Ticket {}: {}.", ticket.id, reason)
     } else {
         format!("Ticket {}: {}. {}", ticket.id, reason, next)
@@ -1653,6 +1670,9 @@ mod tests {
             assert!(msg.contains("Run `tm run T-1` again to retry."));
             // Should have plain-English failure reason
             assert!(msg.contains("something went wrong"));
+            assert!(msg.contains("no patch or evidence was submitted"));
+            assert!(msg.contains("not a test failure"));
+            assert!(msg.contains("model ended turn without submitting"));
             // Should contain the ticket ID
             assert!(msg.contains("T-1"));
         } else {
