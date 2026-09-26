@@ -885,13 +885,20 @@ impl Executor for BuiltinExecutor {
                     // ticket's real attempt number the moment a different failure class (a
                     // budget handoff, a denied tool) lands in between two of them.
                     format!(
-                        "no forward progress: this round ended without calling ticket.submit \
-                         again ({}). This needs a targeted reproduction case or a manual \
-                         diagnosis rather than another automatic retry",
+                        "no forward progress: no patch or evidence was submitted. The investigation retained from \
+                         this attempt is: {}. The cause and any proposed fix remain unverified. \
+                         Next: provide a targeted reproduction or manual diagnosis; do not repeat \
+                         the same discovery work automatically.",
                         summary.render()
                     )
                 } else {
-                    detail
+                    format!(
+                        "No patch or evidence was submitted. The investigation retained from \
+                         this attempt is: {}. The cause and any proposed fix remain unverified. \
+                         Next: continue from these findings, verify a fix, and submit the evidence. \
+                         Original failure: {detail}",
+                        summary.render()
+                    )
                 };
                 ExecutorOutcome {
                     ticket,
@@ -1463,7 +1470,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_first_no_submit_attempt_persists_its_investigation_and_reports_the_plain_detail() {
+    async fn a_first_no_submit_attempt_persists_its_investigation_and_reports_what_is_unverified() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (executor, provider) = test_executor_with_mock(dir.path());
         let ticket = seed_ticket(&executor);
@@ -1477,10 +1484,14 @@ mod tests {
             .expect("a no-submit run reports a failure");
 
         assert_eq!(outcome.class, FailureClass::Other);
-        // The very first attempt has nothing to compare itself against, so the failure this
-        // task's own caller (the scheduler) already understands is untouched — normal retries
-        // keep working exactly as before this change.
-        assert_eq!(outcome.detail, NO_SUBMIT_DETAIL);
+        assert!(outcome
+            .detail
+            .contains("No patch or evidence was submitted"));
+        assert!(outcome.detail.contains("crates/foo/src/walk.rs"));
+        assert!(outcome.detail.contains("remain unverified"));
+        assert!(outcome
+            .detail
+            .contains("Next: continue from these findings"));
 
         // But the attempt's own investigation is now durable, for the *next* dispatch to read
         // back.
@@ -1514,8 +1525,9 @@ mod tests {
             .expect("execute completes");
 
         // Attempt 2, a fresh dispatch of the same ticket (exactly what a scheduler retry does):
-        // its own request must already carry a note about what attempt 1 tried, not start cold.
-        provider.script_sequence(no_submit_sequence_reading("crates/foo/src/walk.rs"));
+        // its own request must already carry a note about what attempt 1 tried, then investigate
+        // a different file instead of repeating the same discovery call.
+        provider.script_sequence(no_submit_sequence_reading("crates/foo/src/dir.rs"));
         executor
             .execute(no_submit_task(&ticket))
             .await
@@ -1542,6 +1554,10 @@ mod tests {
             task_text.contains("crates/foo/src/walk.rs"),
             "expected the specific prior investigation to be named, not just a generic notice: \
              {task_text}"
+        );
+        assert!(
+            !task_text.contains("read crates/foo/src/walk.rs"),
+            "retry instructions should preserve the finding without asking for the same read: {task_text}"
         );
     }
 
@@ -1614,8 +1630,8 @@ mod tests {
             .failure
             .expect("still no submission");
 
-        assert_eq!(
-            outcome.detail, NO_SUBMIT_DETAIL,
+        assert!(
+            !outcome.detail.contains("no forward progress"),
             "different investigations must not be reported as repeated no-progress"
         );
     }
@@ -1664,8 +1680,8 @@ mod tests {
             .failure
             .expect("still no submission");
 
-        assert_eq!(
-            outcome.detail, NO_SUBMIT_DETAIL,
+        assert!(
+            !outcome.detail.contains("no forward progress"),
             "one shared read alongside two genuinely new tool calls must not be reported as \
              repeated no-progress: {}",
             outcome.detail
@@ -1734,8 +1750,8 @@ mod tests {
             .failure
             .expect("still no submission");
 
-        assert_eq!(
-            outcome.detail, NO_SUBMIT_DETAIL,
+        assert!(
+            !outcome.detail.contains("no forward progress"),
             "an attempt that called a mutating tool must not be flagged as no forward progress \
              just because it also re-read every file the prior attempt read: {}",
             outcome.detail
@@ -1843,8 +1859,8 @@ mod tests {
             .failure
             .expect("still no submission");
 
-        assert_eq!(
-            outcome.detail, NO_SUBMIT_DETAIL,
+        assert!(
+            !outcome.detail.contains("no forward progress"),
             "a fresh, human-redirected round must not inherit the stale round's repeated flag"
         );
     }
@@ -1949,8 +1965,8 @@ mod tests {
             .failure
             .expect("still no submission");
 
-        assert_eq!(
-            after_retry.detail, NO_SUBMIT_DETAIL,
+        assert!(
+            !after_retry.detail.contains("no forward progress"),
             "a bare retry (no guidance) must still start a fresh round, even though it leaves \
              the objective untouched: {}",
             after_retry.detail
@@ -2077,8 +2093,8 @@ mod tests {
             .expect("execute completes")
             .failure
             .expect("still no submission");
-        assert_eq!(
-            after_reject.detail, NO_SUBMIT_DETAIL,
+        assert!(
+            !after_reject.detail.contains("no forward progress"),
             "a dispatch following a rejected-and-resubmitted ticket must not inherit the earlier \
              chain's repeated flag: {}",
             after_reject.detail

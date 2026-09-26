@@ -463,8 +463,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   show <T>` and, when known, `tm --resume <S>` recovery commands. `tm run` reports a failed attempt
   as an error (exit 2), not as "finished". If the model ends without
    submitting, `tm run` waits for and continues with a scheduled retry when the ticket's retry
-   policy and remaining budget allow it. If no retry is available, the final summary says no
-   patch or evidence was submitted, includes the failure reason and gives the exact next command;
+   policy and remaining budget allow it. A no-submit failure retains a concise summary of the
+   investigation for the next attempt and tells the user that the findings are unverified; if no
+   retry is available, the final summary names the missing patch or evidence and gives the next
+   recovery action;
    this is distinct from a test failure.
    Workers receive explicit finalization guidance near the step limit. If a final submission fails,
    the failure names the submit error and step limit, retains the attempt's work and verification
