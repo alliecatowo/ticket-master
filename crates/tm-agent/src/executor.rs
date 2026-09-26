@@ -405,6 +405,11 @@ impl BuiltinExecutor {
                     summary: InvestigationSummary {
                         tool_signatures,
                         conclusion,
+                        // Not persisted: nothing reads `PriorInvestigation::summary.made_changes`
+                        // (the `made_changes` exemption only ever applies to *this* attempt's own
+                        // freshly-built `InvestigationSummary`, at the `execute` call site below,
+                        // never to a summary read back from a past one).
+                        made_changes: false,
                     },
                     attempt_count,
                     repeated,
@@ -854,7 +859,18 @@ impl Executor for BuiltinExecutor {
                 // `false` once either side has no tool signatures at all. Without this, that
                 // attempt would silently fall back to the generic, uninformative detail below,
                 // discarding exactly the diagnosis/repro-ask this mechanism exists to surface.
-                let repeated = mostly_repeats_prior || effective.is_some_and(|p| p.repeated);
+                // An attempt that made a real change (even one that itself still ended without a
+                // submission) moved from investigating to acting, however it ended — mostly
+                // re-reading the same files before editing one of them is unavoidable (an edit
+                // needs a fresh `expected_hash`), so without this exemption that unavoidable
+                // re-reading alone could flag real, converging work as "the same investigation
+                // repeated" and kill a round that was making progress. This also clears the
+                // sticky flag going forward: a later attempt in an already-`repeated` round that
+                // starts making changes is no longer stuck, even if an *even later* attempt after
+                // it goes back to only investigating (see `InvestigationSummary::made_changes`'s
+                // own doc comment).
+                let repeated = !summary.made_changes
+                    && (mostly_repeats_prior || effective.is_some_and(|p| p.repeated));
                 let attempt_count = prior.as_ref().map_or(1, |p| p.attempt_count + 1);
                 self.persist_no_submit_investigation(
                     &ticket,
@@ -1317,6 +1333,19 @@ mod tests {
         (executor, provider)
     }
 
+    /// [`test_executor_with_mock`], with every tool call this executor dispatches resolved
+    /// against `root` instead of the process's own current directory (`BuiltinExecutor::
+    /// with_root`) -- for a test whose scripted turn includes a real `edit.*` call, so it can
+    /// never reach files outside `root` regardless of what the (deliberately-refused) edit input
+    /// names.
+    fn test_executor_with_mock_at_root(
+        dir: &std::path::Path,
+        root: PathBuf,
+    ) -> (BuiltinExecutor, Arc<MockProvider>) {
+        let (executor, provider) = test_executor_with_mock(dir);
+        (executor.with_root(root), provider)
+    }
+
     /// Seed a real ticket in `executor`'s own store, matching [`no_submit_task`]'s objective —
     /// `execute()` (unlike [`BuiltinExecutor::build`] alone) drives the loop's own
     /// `ensure_goal_set`/`claim_goal_complete` bookkeeping, which needs the ticket to actually
@@ -1639,6 +1668,76 @@ mod tests {
             outcome.detail, NO_SUBMIT_DETAIL,
             "one shared read alongside two genuinely new tool calls must not be reported as \
              repeated no-progress: {}",
+            outcome.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_re_reads_everything_but_then_edits_is_not_flagged_either() {
+        // The harder case `InvestigationSummary::made_changes` exists for: attempt 2 re-reads
+        // *every* file attempt 1 read (unavoidable before editing any of them -- an edit needs a
+        // fresh `expected_hash`), which by itself would be a full repeat under
+        // `mostly_repeats`. But attempt 2 also calls a mutating tool, which by itself means it
+        // moved from investigating to acting -- it must not be flagged as "no forward progress"
+        // just because its read set happened to be a superset of the prior attempt's.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (executor, provider) =
+            test_executor_with_mock_at_root(dir.path(), dir.path().to_path_buf());
+        let ticket = seed_ticket(&executor);
+
+        provider.script_sequence(vec![
+            tool_use_completion(
+                "call-1",
+                "fs.read",
+                serde_json::json!({"path": "crates/foo/src/walk.rs"}),
+            ),
+            tool_use_completion(
+                "call-2",
+                "fs.read",
+                serde_json::json!({"path": "crates/foo/src/dir.rs"}),
+            ),
+            text_only_completion("read the two files, not sure yet"),
+            text_only_completion("still not sure what's wrong"),
+        ]);
+        executor
+            .execute(no_submit_task(&ticket))
+            .await
+            .expect("execute completes");
+
+        provider.script_sequence(vec![
+            tool_use_completion(
+                "call-3",
+                "fs.read",
+                serde_json::json!({"path": "crates/foo/src/walk.rs"}),
+            ),
+            tool_use_completion(
+                "call-4",
+                "fs.read",
+                serde_json::json!({"path": "crates/foo/src/dir.rs"}),
+            ),
+            tool_use_completion(
+                "call-5",
+                "edit.apply_patch",
+                serde_json::json!({
+                    "path": "crates/foo/src/walk.rs",
+                    "expected_hash": "whatever-this-refuses-cleanly",
+                    "text_replace": {"old": "x", "new": "y"},
+                }),
+            ),
+            text_only_completion("applied a fix attempt, tests still failing"),
+            text_only_completion("still not sure what's wrong"),
+        ]);
+        let outcome = executor
+            .execute(no_submit_task(&ticket))
+            .await
+            .expect("execute completes")
+            .failure
+            .expect("still no submission");
+
+        assert_eq!(
+            outcome.detail, NO_SUBMIT_DETAIL,
+            "an attempt that called a mutating tool must not be flagged as no forward progress \
+             just because it also re-read every file the prior attempt read: {}",
             outcome.detail
         );
     }

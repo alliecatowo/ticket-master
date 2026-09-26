@@ -30,6 +30,12 @@ overlap; see `InvestigationSummary::mostly_repeats`'s own doc comment for why), 
 user-actionable failure detail (naming what was repeated, or the model's own diagnosis/repro-ask) in
 place of the generic `"model ended turn without submitting"`, and the *next* attempt's context tells
 the model outright to stop investigating and either name a diagnosis or ask for a targeted repro.
+An attempt that calls any mutating tool (`edit.*`, `git.commit`) at all — regardless of whether the
+call itself succeeded — is exempt from this check entirely (`InvestigationSummary::made_changes`):
+re-reading files it already read before editing one of them is unavoidable (an edit needs a fresh
+`expected_hash`), so without this exemption that unavoidable re-reading alone could flag real,
+converging work as "no forward progress" and steer every remaining attempt in the round away from
+calling tools at all, even while it was actually making progress.
 
 "Same round" is scoped by **three** independent signals, all required to match the artifact
 `BuiltinExecutor::prior_investigation` reads back, because any one alone misses a real production

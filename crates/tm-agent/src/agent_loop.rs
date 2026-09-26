@@ -86,6 +86,16 @@ pub struct InvestigationSummary {
     /// The last non-empty assistant text this attempt produced (its own stated conclusion, if
     /// any), truncated to [`INVESTIGATION_SUMMARY_MAX_CHARS`].
     pub conclusion: Option<String>,
+    /// Whether this attempt called any mutating tool (`edit.*`, `git.commit`) at all, regardless
+    /// of whether the call itself succeeded — a call that erred on the safe side of "did this
+    /// attempt try to act, not just investigate" rather than requiring proof the edit landed. An
+    /// attempt with `made_changes: true` moved from investigating to acting, however that attempt
+    /// itself ended; [`crate::executor::BuiltinExecutor`] uses this to exempt such an attempt from
+    /// [`InvestigationSummary::mostly_repeats`]'s check entirely; re-reading files it already read
+    /// before editing one of them is unavoidable (an edit needs a fresh `expected_hash`), and
+    /// without this exemption that unavoidable re-reading alone could still flag real, converging
+    /// work as "the same investigation repeated".
+    pub made_changes: bool,
 }
 
 impl InvestigationSummary {
@@ -93,9 +103,16 @@ impl InvestigationSummary {
     pub fn from_steps(steps: &[StepRecord]) -> Self {
         let mut signatures: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut conclusion = None;
+        let mut made_changes = false;
         for step in steps {
             for call in &step.tool_calls {
                 signatures.insert(tool_call_signature(&call.tool_name, &call.input));
+                // Whether the call *itself* succeeded is deliberately not checked here: a call
+                // that erred (a stale hash, a denied write) still shows this attempt tried to
+                // act, not merely investigate, which is exactly what this flag exists to record.
+                if call.tool_name.starts_with("edit.") || call.tool_name == "git.commit" {
+                    made_changes = true;
+                }
             }
             if let Some(text) = &step.assistant_text {
                 if !text.trim().is_empty() {
@@ -106,6 +123,7 @@ impl InvestigationSummary {
         InvestigationSummary {
             tool_signatures: signatures.into_iter().collect(),
             conclusion: conclusion.map(|c| truncate_chars(&c, INVESTIGATION_SUMMARY_MAX_CHARS)),
+            made_changes,
         }
     }
 
@@ -2446,6 +2464,7 @@ mod tests {
         let one_read = InvestigationSummary {
             tool_signatures: vec!["fs.read(walk.rs)".to_string()],
             conclusion: None,
+            made_changes: false,
         };
         let lots_of_new_work = InvestigationSummary {
             tool_signatures: vec![
@@ -2454,6 +2473,7 @@ mod tests {
                 "shell.run(cargo test)".to_string(),
             ],
             conclusion: None,
+            made_changes: true,
         };
         assert!(
             !lots_of_new_work.mostly_repeats(&one_read),
@@ -2464,6 +2484,27 @@ mod tests {
             "but an attempt that does nothing except repeat one call from a larger prior \
              investigation is still fully a repeat of it"
         );
+    }
+
+    #[test]
+    fn investigation_summary_made_changes_is_true_only_once_a_mutating_tool_is_called() {
+        let reads_only = InvestigationSummary::from_steps(&[step_with_tool_call(
+            "fs.read",
+            serde_json::json!({"path": "walk.rs"}),
+        )]);
+        assert!(!reads_only.made_changes);
+
+        let with_an_edit = InvestigationSummary::from_steps(&[step_with_tool_call(
+            "edit.apply_patch",
+            serde_json::json!({"path": "walk.rs"}),
+        )]);
+        assert!(with_an_edit.made_changes);
+
+        let with_a_commit = InvestigationSummary::from_steps(&[step_with_tool_call(
+            "git.commit",
+            serde_json::json!({"message": "fix"}),
+        )]);
+        assert!(with_a_commit.made_changes);
     }
 
     // -----------------------------------------------------------------------------------------
