@@ -1265,7 +1265,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/chatgen: `tm genesis --resume` gave the provider error.
 
-- [ ] **u1-mcp-protocol-version** — `tm mcp` should negotiate the client's protocol version (2025-06-18) rather than always answering 2024-11-05
+- [x] **u1-mcp-protocol-version** — `tm mcp` should negotiate the client's protocol version (2025-06-18) rather than always answering 2024-11-05 (landed 7d998cb)
   model: haiku · severity: low · builds Rust: yes · area: mcp · deps: u1-wire-potion-embedder
   files: `crates/tm-mcp/src/server.rs`
   change: `PROTOCOL_VERSION` is hard-coded to "2024-11-05" (tm-mcp server.rs:53; client.rs:23 and capability.rs:178 are the client side, leave them). `initialize` with `protocolVersion:"2025-06-18"` got `"protocolVersion":"2024-11-05"` back. Echo the client's version when it is one tm supports (2024-11-05, 2025-03-26, 2025-06-18); otherwise answer the latest supported. Keep newline-delimited framing.
