@@ -447,8 +447,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   none exists; new tickets get `Authority::worker()`), `tm ticket activate <T>` (draft -> ready),
   then `tm run <T>` (activates a draft itself, and prints each step live) or `tm sched run`. `tm
   run` reports a failed attempt as an error (exit 2), not as "finished". If the model ends without
-  submitting, the final summary says no patch or evidence was submitted, includes the failure
-  reason, and gives the exact command to resume or retry; this is distinct from a test failure.
+   submitting, the final summary says no patch or evidence was submitted, includes the failure
+   reason, and gives the exact command to resume or retry; this is distinct from a test failure.
+   Workers receive explicit finalization guidance near the step limit. If a final submission fails,
+   the failure names the submit error and step limit, retains the attempt's work and verification
+   results for review, and makes clear that the ticket was not submitted.
   Before leasing or
   dispatching anything, `tm run <T>` also checks that the ticket's required role actually has a
   registered/credentialed provider candidate (`sched::preflight_provider_or_fail`,

@@ -1289,10 +1289,11 @@ impl AgentLoop {
 
         loop {
             if steps.len() as u32 >= self.max_steps {
+                let detail = step_limit_detail(self.max_steps, &steps);
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: format!("step limit ({}) reached without submitting", self.max_steps),
+                    detail,
                 });
             }
             if let Some(exhausted) = first_exhausted_dimension(&effective_budget) {
@@ -1408,8 +1409,13 @@ impl AgentLoop {
                 return self.budget_handoff_outcome(task, steps, exhausted);
             }
 
+            let mut system = rendered.system.clone();
+            let remaining = self.max_steps.saturating_sub(steps.len() as u32);
+            if task.conversation.is_none() && !steps.is_empty() && remaining <= 3 {
+                system.push_str("\n\nThis attempt is close to its step limit. Prioritize finishing verification and calling ticket.submit with the available completion evidence now. Do not repeat completed investigation. If submission fails, use the error to make one focused correction before the limit.");
+            }
             let request = CompletionRequest {
-                system: Some(rendered.system.clone()),
+                system: Some(system),
                 messages,
                 tools: self.tools.tool_defs_for(&effective_authority),
                 max_tokens: MAX_TOKENS_PER_STEP,
@@ -1750,6 +1756,30 @@ fn submit_summary(input: &serde_json::Value) -> String {
         .and_then(|v| v.as_str())
         .unwrap_or("submitted")
         .to_string()
+}
+
+/// Describe a hard step-limit stop without hiding a failed final submission. The complete steps
+/// remain attached to `AgentOutcome::Failed`, preserving command output and other review evidence.
+fn step_limit_detail(max_steps: u32, steps: &[StepRecord]) -> String {
+    let failed_submit = steps.last().and_then(|step| {
+        step.tool_calls.iter().find_map(|call| {
+            if call.tool_name == TICKET_SUBMIT {
+                if let crate::outcome::ToolCallResolution::Errored { detail } = &call.resolution {
+                    return Some(detail.as_str());
+                }
+            }
+            None
+        })
+    });
+    if let Some(cause) = failed_submit {
+        format!(
+            "step limit ({max_steps}) reached after ticket submission failed: {cause}. The work and verification results from this attempt are retained; review the submit error and retry the ticket without repeating completed work. The ticket was not submitted."
+        )
+    } else {
+        format!(
+            "step limit ({max_steps}) reached without submitting. Review the retained work and verification results, then retry the ticket and submit it with evidence. The ticket was not submitted."
+        )
+    }
 }
 
 /// The project root threaded through [`tm_types::CallContext::root`] — a `PatchEngine` applies
@@ -4796,5 +4826,60 @@ mod tests {
                 ),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod step_limit_detail_tests {
+    use super::*;
+    use crate::outcome::{ToolCallRecord, ToolCallResolution};
+
+    #[test]
+    fn final_submit_failure_names_the_cause_and_keeps_prior_evidence_in_the_outcome_steps() {
+        let evidence_step = StepRecord {
+            index: 1,
+            served_by: "mock/test".to_string(),
+            assistant_text: None,
+            tool_calls: vec![ToolCallRecord {
+                tool_use_id: "test".to_string(),
+                tool_name: "command.run".to_string(),
+                input: serde_json::json!({"command": "cargo test"}),
+                resolution: ToolCallResolution::Completed {
+                    result: serde_json::json!({"stdout": "all tests passed"}),
+                    artifact: None,
+                },
+            }],
+            spend: Spend::default(),
+            at: tm_types::Timestamp::from_unix_nanos(0),
+        };
+        let submit_step = StepRecord {
+            index: 2,
+            served_by: "mock/test".to_string(),
+            assistant_text: None,
+            tool_calls: vec![ToolCallRecord {
+                tool_use_id: "submit".to_string(),
+                tool_name: TICKET_SUBMIT.to_string(),
+                input: serde_json::json!({"summary": "done"}),
+                resolution: ToolCallResolution::Errored {
+                    detail: "submission requires evidence".to_string(),
+                },
+            }],
+            spend: Spend::default(),
+            at: tm_types::Timestamp::from_unix_nanos(0),
+        };
+        let steps = vec![evidence_step, submit_step];
+
+        let detail = step_limit_detail(2, &steps);
+
+        assert!(detail.contains("step limit (2)"), "{detail}");
+        assert!(detail.contains("submission requires evidence"), "{detail}");
+        assert!(detail.contains("ticket was not submitted"), "{detail}");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].tool_calls[0].tool_name, "command.run");
+        assert!(matches!(
+            &steps[0].tool_calls[0].resolution,
+            ToolCallResolution::Completed { result, .. }
+                if result["stdout"] == "all tests passed"
+        ));
     }
 }
