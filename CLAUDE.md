@@ -161,7 +161,9 @@ never drift between sessions:
   5 minutes, instead of failing the attempt
   (`docs/decisions/D-023-capacity-wait-is-not-a-failed-attempt.md`).
 - `tm mcp [--no-workers]` — the project as an MCP server over stdio (newline-delimited JSON-RPC),
-  so a Claude Code session can delegate to tm workers: `claude mcp add --transport stdio tm -- tm
+  negotiates protocol versions `2024-11-05`, `2025-03-26`, and `2025-06-18` with the client, and
+  defaults to the latest supported version for an unknown request. A Claude Code session can
+  delegate to tm workers: `claude mcp add --transport stdio tm -- tm
   mcp` (add `--scope project` to share it via `.mcp.json`). Tools: `ticket_list`, `ticket_show`,
   `ticket_dispatch` (objective in; creates a ticket with `tm ticket new`'s defaults, activates it,
   actor `agent:mcp/<clientInfo.name>`), `search_exact`, `search_hybrid`, `search_regex`,

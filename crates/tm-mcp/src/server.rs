@@ -46,11 +46,23 @@ use crate::protocol::{
 };
 use crate::transport::{FramedTransport, Transport};
 
-/// The MCP protocol version this server declares in `initialize`'s response. Matches
-/// [`crate::client::McpClient`]'s own `PROTOCOL_VERSION` (kept as a separate private constant
-/// there rather than shared, since a client and a server are free to evolve independently and
-/// this crate's two halves happen to target the same spec revision today).
-const PROTOCOL_VERSION: &str = "2024-11-05";
+/// The latest MCP protocol version supported by this server.
+const PROTOCOL_VERSION: &str = "2025-06-18";
+
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", PROTOCOL_VERSION];
+
+fn negotiated_protocol_version(requested: Option<&str>) -> &'static str {
+    match requested {
+        Some(version) if SUPPORTED_PROTOCOL_VERSIONS.contains(&version) => {
+            SUPPORTED_PROTOCOL_VERSIONS
+                .iter()
+                .copied()
+                .find(|supported| *supported == version)
+                .unwrap_or(PROTOCOL_VERSION)
+        }
+        _ => PROTOCOL_VERSION,
+    }
+}
 
 /// The tools this server exposes: `(name, description, input JSON Schema)`. A
 /// plain function rather than a `const` because `serde_json::json!` allocates.
@@ -902,10 +914,15 @@ impl McpServer {
         match req.method.as_str() {
             "initialize" => {
                 self.remember_client(req.params.as_ref());
+                let protocol_version = req
+                    .params
+                    .as_ref()
+                    .and_then(|params| params.get("protocolVersion"))
+                    .and_then(Value::as_str);
                 JsonRpcResponse::ok(
                     req.id,
                     json!({
-                        "protocolVersion": PROTOCOL_VERSION,
+                        "protocolVersion": negotiated_protocol_version(protocol_version),
                         "capabilities": {"tools": {}},
                         "serverInfo": {"name": "tm-mcp", "version": env!("CARGO_PKG_VERSION")},
                     }),
@@ -1031,15 +1048,22 @@ mod tests {
     }
 
     #[test]
-    fn handle_request_initialize_reports_the_declared_protocol_version() {
+    fn handle_request_initialize_negotiates_supported_protocol_versions() {
         let (server, _dir) = open_test_server();
-        let resp = server.handle_request(JsonRpcRequest::new(
-            crate::protocol::RequestId::Number(1),
-            "initialize",
-            None,
-        ));
-        let result = resp.result.expect("initialize succeeds");
-        assert_eq!(result["protocolVersion"], PROTOCOL_VERSION);
+        for (requested, expected) in [
+            ("2024-11-05", "2024-11-05"),
+            ("2025-03-26", "2025-03-26"),
+            ("2025-06-18", "2025-06-18"),
+            ("unknown", "2025-06-18"),
+        ] {
+            let resp = server.handle_request(JsonRpcRequest::new(
+                crate::protocol::RequestId::Number(1),
+                "initialize",
+                Some(json!({"protocolVersion": requested})),
+            ));
+            let result = resp.result.expect("initialize succeeds");
+            assert_eq!(result["protocolVersion"], expected);
+        }
     }
 
     #[test]
