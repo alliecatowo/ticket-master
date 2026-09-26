@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376 — `.gitignore` not taken into account when multiple search paths are provided",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 467.536,
+      "tokens": 1708426,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 2
+      },
+      "better": "tm found the relevant walker and ignore-matcher code, but reread walk.rs and dir.rs repeatedly, spent 1,708,426 input tokens, and ran for 467.5 seconds without submitting a patch. Its output says the ticket failed because no patch or evidence was submitted and suggests rerunning `tm run T-1`; a user would still be confused by the generic ‘something went wrong’ detail and whether the extensive investigation would carry forward. Add an explicit no-progress/context-cost guard and summarize retained findings and the next concrete action in the failure message. The mechanical `cargo test -p ignore` check passed after the requested checkout, but the sole fix-PR test file is `crates/ignore/src/dir.rs`, which also contains production code; checking it out replaced that file with the fix itself, so this pass does not demonstrate that tm's implementation solved the issue."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 192.666,
+      "tokens": 44194,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode traced the cached-parent matcher behavior, stated a three-step plan, added a multi-root regression test, and recovered from an initial compile error and an overly strict expected-path list before its targeted test passed. It could improve by checking the existing test helpers' exact path semantics before writing the assertion, and by running the package-wide test command before finalizing. The mechanical package test passed after checking out the fix file; because that file includes the production fix as well as tests, the external pass is not independent evidence that OpenCode's patch alone fixes the issue."
+    }
+  ]
+}

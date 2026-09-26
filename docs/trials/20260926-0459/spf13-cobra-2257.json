@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 885,
+      "tokens": 3846515,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 1,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The agent located the relevant append in completions.go, but spent many steps repeatedly rereading command.go and completions.go and investigating outside the repository instead of converging on the aliasing bug; tm stats reported 3,846,515 input tokens and 885 seconds. It never submitted a patch or ran tests. The user-facing failure says ‘something went wrong’ and recommends running tm run again even though the event log says a retry was already scheduled, leaving unclear whether work was saved or what action is useful. A more focused search/reproduction path, a meaningful remaining-step or time warning, and recovery that resumes or clearly explains the next retry state would materially improve this run."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 98,
+      "tokens": 20014,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode identified the shared-backing-array append, copied finalArgs before adding the sentinel, and ran go test ./... successfully. It could have first reproduced the exact os.Args mutation and added a direct regression test of its own; its fix remained narrowly scoped and the independently installed PR regression test passed."
+    }
+  ]
+}

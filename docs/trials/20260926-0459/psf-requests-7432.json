@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432 — `prepare_body` stream detection regression",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 606,
+      "tokens": 4121406,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "A useful tm run would stop or reorient after repeated reads and searches instead of spending over four million input tokens without producing a patch. Its final `no patch or evidence was submitted` message is accurate, but the surrounding generic `something went wrong` and retry prompt do not tell the user that the run spent 606 seconds and 4,121,406 tokens repeating investigation without a fix. Add a no-progress guard with a concise retained-findings summary, show cumulative usage during the run, and make the retry recommendation explain how the next attempt will avoid duplicating this work."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 50,
+      "tokens": 19454,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode found the stream-detection change quickly and added coverage for dynamically delegated file-like behavior. It should run the repository tests through the already-installed project virtual environment rather than system `pytest`; it incorrectly concluded that urllib3 was missing after invoking pytest outside `.venv`, and its final report therefore said tests could not run. Using `.venv/bin/python -m pytest` would have provided immediate verification and a more reliable completion report."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 73,
+      "tokens": 895489,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 3,
+        "plan_quality": 3,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The agent reached source/utils/body.ts and test/stream.ts quickly, made the minimal flush change, and ran checks; the post-run hidden stream tests passed 19/19. It also recovered from tool/API errors, but the transcript exposed confusing internals: “operation state was inconsistent” and “couldn't parse the result (unknown variant `verification`)” were shown as terse tool errors, then a generic “Saved a result” without stating what succeeded or what the user should do. The CLI reported 895,489 input tokens and 0 output tokens for this 73-second run, which is not a credible/useful token breakdown; usage reporting should label unavailable values instead of implying precision. The full npm test command stopped on the existing test/http-error.ts:218 lint error, which is separate from the passing hidden stream checks."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 84,
+      "tokens": 33330,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The agent stated a scoped plan, located the flush logic, implemented the empty Uint8Array completion event, added a regression test, and accurately reported its checks. After applying the PR test files, the hidden stream tests passed 19/19. The full npm test command was blocked by the existing test/http-error.ts:218 lint error, while browser tests could not run because required Playwright browsers are not installed. It could be better by checking test prerequisites earlier, distinguishing the repository-wide lint failure from the focused verification more prominently, and keeping the new test aligned with the PR's stream test placement rather than adding a browser-only regression test that depends on unavailable browsers."
+    }
+  ]
+}
