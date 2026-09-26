@@ -3235,6 +3235,11 @@ impl Store {
         Ok(count as u64)
     }
 
+    /// Read the events recorded against one subject, in log order.
+    pub fn events_for_subject(&self, subject: &Id) -> tm_types::Result<Vec<Event>> {
+        self.log.read_subject(subject)
+    }
+
     /// Current high-water mark of every id counter, for persistence/diagnostics.
     pub fn counters(&self) -> tm_types::Result<BTreeMap<String, u64>> {
         Ok(self.view()?.counters)

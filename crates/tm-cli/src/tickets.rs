@@ -667,6 +667,33 @@ pub fn ticket_new(
                     ticket_title(&args.objective)
                 ),
             )?;
+            let current = project.store.view()?;
+            if let Some(ticket) = current.tickets.get(&created_id) {
+                if ticket.state != TicketState::Draft {
+                    let lease = current.leases.values().find(|lease| {
+                        lease.ticket == created_id && !lease.is_expired(project.clock.now())
+                    });
+                    let mut details =
+                        format!("Ticket {created_id} is now {}.", state_label(ticket.state));
+                    if let Some(lease) = lease {
+                        details.push_str(&format!(" It is being worked by {}.", lease.holder));
+                        let subject = tm_types::Id::from(created_id.clone());
+                        if let Ok(events) = project.store.events_for_subject(&subject) {
+                            if let Some(session) = events.iter().rev().find_map(|event| {
+                                (event.kind == tm_events::EventKind::TicketLeased
+                                    && event.actor == lease.holder)
+                                    .then_some(event.session.as_ref())
+                                    .flatten()
+                            }) {
+                                details.push_str(&format!(" Session: {session}."));
+                            }
+                        }
+                        details
+                            .push_str(&format!(" Inspect it with `tm ticket show {created_id}`."));
+                    }
+                    renderer.note(&details);
+                }
+            }
         }
     }
 

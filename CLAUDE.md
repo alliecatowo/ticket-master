@@ -456,7 +456,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
 - Ticket lifecycle from the CLI: `tm ticket new "<objective>"` (starts a global-scope project if
   none exists; new tickets get `Authority::worker()`), `tm ticket activate <T>` (draft -> ready),
   then `tm run <T>` (activates a draft itself, and prints each step live) or `tm sched run`. `tm
-  run` reports a failed attempt as an error (exit 2), not as "finished". If the model ends without
+  ticket new` also reports a non-draft state after creation and, when a live lease exists, its
+  holder and session id. If `tm run <T>` races an existing lease, the conflict includes `tm ticket
+  show <T>` and, when known, `tm --resume <S>` recovery commands. `tm run` reports a failed attempt
+  as an error (exit 2), not as "finished". If the model ends without
    submitting, the final summary says no patch or evidence was submitted, includes the failure
    reason, and gives the exact command to resume or retry; this is distinct from a test failure.
    Workers receive explicit finalization guidance near the step limit. If a final submission fails,

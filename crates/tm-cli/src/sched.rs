@@ -714,11 +714,13 @@ pub async fn run_ticket(
                 if let Some(w) = worktree {
                     w.cleanup();
                 }
-                return Err(e);
+                return Err(active_lease_guidance(project, &ticket, e));
             }
         }
     } else {
-        dispatcher.dispatch(&ticket, ticket_state, ttl_seconds, project.actor.clone())?;
+        dispatcher
+            .dispatch(&ticket, ticket_state, ttl_seconds, project.actor.clone())
+            .map_err(|e| active_lease_guidance(project, &ticket, e))?;
         None
     };
     renderer.note(&format!("Ticket {ticket} dispatched for execution."));
@@ -802,6 +804,51 @@ pub async fn run_ticket(
             Some(err) => Err(err),
             None => Ok(()),
         },
+    }
+}
+
+/// Turn a lease-race conflict into a useful recovery instruction while preserving other errors.
+fn active_lease_guidance(
+    project: &Project,
+    ticket: &TicketId,
+    error: tm_types::TmError,
+) -> tm_types::TmError {
+    let Ok(view) = project.store.view() else {
+        return error;
+    };
+    let Some(lease) = view
+        .leases
+        .values()
+        .find(|lease| lease.ticket == *ticket && !lease.is_expired(project.clock.now()))
+    else {
+        return error;
+    };
+    let session = project
+        .store
+        .events_for_subject(&tm_types::Id::from(ticket.clone()))
+        .ok()
+        .and_then(|events| {
+            events.iter().rev().find_map(|event| {
+                (event.kind == tm_events::EventKind::TicketLeased && event.actor == lease.holder)
+                    .then(|| event.session.clone())
+                    .flatten()
+            })
+        });
+    let recovery = match session {
+        Some(session) => format!(
+            "The ticket is being worked by {}. Inspect it with `tm ticket show {ticket}`; resume session {session} with `tm --resume {session}`.",
+            lease.holder
+        ),
+        None => format!(
+            "The ticket is being worked by {}. Inspect its progress with `tm ticket show {ticket}`.",
+            lease.holder
+        ),
+    };
+    match error {
+        tm_types::TmError::Conflict(message) => {
+            tm_types::TmError::Conflict(format!("{message}. {recovery}"))
+        }
+        other => other,
     }
 }
 
