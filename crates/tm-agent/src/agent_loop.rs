@@ -60,6 +60,171 @@ pub const DEFAULT_MAX_SUBMIT_NUDGES: u32 = 1;
 const SUBMIT_NUDGE_TEXT: &str = "You ended your turn without calling ticket.submit. If the work \
      is done and verified, call ticket.submit with evidence now; if not, continue working.";
 
+/// The exact [`AgentOutcome::Failed::detail`] a ticketed run's exhausted-nudge, no-`ticket.submit`
+/// text-only ending produces (`recover-without-repeating-agent-investigation`). Named so a caller
+/// on the far side of this crate (`crate::executor::BuiltinExecutor`) can recognize this specific
+/// failure by equality rather than duplicating the literal, the same way [`CAPACITY_REFUSAL_PREFIX`]
+/// lets [`is_capacity_refusal`] recognize its own failure shape.
+pub const NO_SUBMIT_DETAIL: &str = "model ended turn without submitting";
+
+/// Longest rendering of an [`InvestigationSummary`] carried into a following attempt's context or
+/// a failure detail (`recover-without-repeating-agent-investigation`) — concise by design, not a
+/// full transcript dump; a caller that needs the whole thing still has the durable steps/events.
+const INVESTIGATION_SUMMARY_MAX_CHARS: usize = 2000;
+
+/// A concise, comparable digest of one no-submit attempt's tool activity
+/// (`recover-without-repeating-agent-investigation`, `docs/tasks/TASKS.md`'s
+/// `t20260925-1314-BurntSushi-ripgrep-3376-recover-without-repeating-agent-investigation`): what a
+/// run already did before it ended without calling `ticket.submit`, so a following attempt's
+/// context can include it instead of starting cold, and so two consecutive no-submit attempts that
+/// repeat the same investigation can be told apart from one that made real, different progress.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InvestigationSummary {
+    /// One normalized signature per distinct tool call this attempt made (`tool_name` plus its
+    /// most identifying argument), deduplicated and sorted — see [`tool_call_signature`].
+    pub tool_signatures: Vec<String>,
+    /// The last non-empty assistant text this attempt produced (its own stated conclusion, if
+    /// any), truncated to [`INVESTIGATION_SUMMARY_MAX_CHARS`].
+    pub conclusion: Option<String>,
+    /// Whether this attempt called any mutating tool (`edit.*`, `git.commit`) at all, regardless
+    /// of whether the call itself succeeded — a call that erred on the safe side of "did this
+    /// attempt try to act, not just investigate" rather than requiring proof the edit landed. An
+    /// attempt with `made_changes: true` moved from investigating to acting, however that attempt
+    /// itself ended; [`crate::executor::BuiltinExecutor`] uses this to exempt such an attempt from
+    /// [`InvestigationSummary::mostly_repeats`]'s check entirely; re-reading files it already read
+    /// before editing one of them is unavoidable (an edit needs a fresh `expected_hash`), and
+    /// without this exemption that unavoidable re-reading alone could still flag real, converging
+    /// work as "the same investigation repeated".
+    pub made_changes: bool,
+}
+
+impl InvestigationSummary {
+    /// Build a summary from one attempt's own transcript.
+    pub fn from_steps(steps: &[StepRecord]) -> Self {
+        let mut signatures: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut conclusion = None;
+        let mut made_changes = false;
+        for step in steps {
+            for call in &step.tool_calls {
+                signatures.insert(tool_call_signature(&call.tool_name, &call.input));
+                // Whether the call *itself* succeeded is deliberately not checked here: a call
+                // that erred (a stale hash, a denied write) still shows this attempt tried to
+                // act, not merely investigate, which is exactly what this flag exists to record.
+                if call.tool_name.starts_with("edit.") || call.tool_name == "git.commit" {
+                    made_changes = true;
+                }
+            }
+            if let Some(text) = &step.assistant_text {
+                if !text.trim().is_empty() {
+                    conclusion = Some(text.trim().to_string());
+                }
+            }
+        }
+        InvestigationSummary {
+            tool_signatures: signatures.into_iter().collect(),
+            conclusion: conclusion.map(|c| truncate_chars(&c, INVESTIGATION_SUMMARY_MAX_CHARS)),
+            made_changes,
+        }
+    }
+
+    /// True when `self` (a *later* attempt's own investigation) is mostly a repeat of `prior` (an
+    /// earlier one's): more than half of `self`'s own tool signatures also appear in `prior`.
+    /// Deliberately directional, not symmetric like a plain set-overlap check would be: an
+    /// attempt that re-reads one file from the prior attempt but then goes on to edit it, run the
+    /// tests, and do real new work must not be flagged just because that one re-read is *all* the
+    /// prior attempt happened to have done — re-reading a file the model doesn't already have the
+    /// current `hash`/content of is unavoidable before it can safely edit it. Comparing against
+    /// the *later* attempt's own total, rather than the smaller of the two sets, means a large
+    /// amount of genuinely new tool activity dilutes one incidental shared read below the
+    /// threshold, while an attempt that (like `prior`) does nothing but that same one read still
+    /// counts as a full repeat. Two summaries where either side has no tool signatures at all
+    /// never count as a repeat (nothing concrete to compare), even if their conclusions happen to
+    /// match.
+    pub fn mostly_repeats(&self, prior: &InvestigationSummary) -> bool {
+        if self.tool_signatures.is_empty() || prior.tool_signatures.is_empty() {
+            return false;
+        }
+        let prior_set: std::collections::BTreeSet<&str> =
+            prior.tool_signatures.iter().map(String::as_str).collect();
+        let shared = self
+            .tool_signatures
+            .iter()
+            .filter(|s| prior_set.contains(s.as_str()))
+            .count();
+        shared * 2 > self.tool_signatures.len()
+    }
+
+    /// Render this summary as concise prose for a following attempt's context or a failure
+    /// detail: what was touched, and what (if anything) the model itself concluded.
+    pub fn render(&self) -> String {
+        if self.tool_signatures.is_empty() && self.conclusion.is_none() {
+            return "no tool activity recorded".to_string();
+        }
+        let mut out = String::new();
+        if !self.tool_signatures.is_empty() {
+            out.push_str("already investigated: ");
+            out.push_str(&self.tool_signatures.join("; "));
+        }
+        if let Some(c) = &self.conclusion {
+            if !out.is_empty() {
+                out.push_str(". ");
+            }
+            out.push_str("its own conclusion: \"");
+            out.push_str(c);
+            out.push('"');
+        }
+        truncate_chars(&out, INVESTIGATION_SUMMARY_MAX_CHARS)
+    }
+}
+
+/// A stable, comparable signature for one tool call: `tool_name` plus its most identifying
+/// argument, in this priority order — `path`, `query`, `pattern`, `command`, then `argv` (a
+/// string array, per `shell.run`/`build.run`/`test.run`'s own schema — joined with a space, since
+/// `serde_json::Value::as_str` alone would silently skip it and fall through, treating every
+/// distinct shell command as the same bare `"shell.run"` signature), then the first string value
+/// found in the input object at all, then nothing. Two calls to the same tool against the same
+/// file/query/pattern/command/argv hash to the same signature regardless of any other argument
+/// (e.g. a line range or `cacheable` flag), which is deliberate: this is a "did it touch the same
+/// ground" check, not a byte-exact input comparison.
+fn tool_call_signature(tool_name: &str, input: &serde_json::Value) -> String {
+    const KEY_PRIORITY: [&str; 4] = ["path", "query", "pattern", "command"];
+    let arg = KEY_PRIORITY
+        .iter()
+        .find_map(|k| input.get(k).and_then(|v| v.as_str()))
+        .map(str::to_string)
+        .or_else(|| {
+            input
+                .get("argv")
+                .and_then(|v| v.as_array())
+                .and_then(|items| {
+                    let joined = items
+                        .iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    (!joined.is_empty()).then_some(joined)
+                })
+        })
+        .or_else(|| {
+            input
+                .as_object()
+                .and_then(|obj| obj.values().find_map(|v| v.as_str()).map(str::to_string))
+        });
+    match arg {
+        Some(a) => format!("{tool_name}({a})"),
+        None => tool_name.to_string(),
+    }
+}
+
+/// Truncate `s` to at most `max` `char`s, appending an ellipsis when it was cut short.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let truncated: String = s.chars().take(max).collect();
+    format!("{truncated}…")
+}
+
 /// Upper bound on the total number of events recorded against one ticket's subject before
 /// [`AgentLoop::drive`] force-stops with [`AgentOutcome::Failed`] (`FailureClass::Other`),
 /// regardless of `tm_core::CycleBudget`/[`AgentLoop::max_steps`] state — the project-wide "dumb
@@ -1371,7 +1536,7 @@ impl AgentLoop {
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: "model ended turn without submitting".to_string(),
+                    detail: NO_SUBMIT_DETAIL.to_string(),
                 });
             }
 
@@ -2224,6 +2389,122 @@ mod tests {
     fn ticket_id_round_trips_through_display() {
         let id = TicketId::new("T-1").expect("valid ticket id literal");
         assert_eq!(id.to_string(), "T-1");
+    }
+
+    /// A minimal, single-tool-call [`StepRecord`] for [`InvestigationSummary`] tests below —
+    /// deliberately without a completed dispatch: `InvestigationSummary::from_steps` reads only
+    /// `tool_name`/`input`/`assistant_text`, never `resolution`.
+    fn step_with_tool_call(tool_name: &str, input: serde_json::Value) -> StepRecord {
+        StepRecord {
+            index: 1,
+            served_by: "mock/mock".to_string(),
+            assistant_text: None,
+            tool_calls: vec![ToolCallRecord {
+                tool_use_id: "call-1".to_string(),
+                tool_name: tool_name.to_string(),
+                input,
+                resolution: crate::outcome::ToolCallResolution::Completed {
+                    result: serde_json::json!({}),
+                    artifact: None,
+                },
+            }],
+            spend: Spend::default(),
+            at: tm_types::Timestamp::from_unix_nanos(0),
+        }
+    }
+
+    #[test]
+    fn investigation_summary_treats_two_different_argv_only_shell_calls_as_not_overlapping() {
+        // `shell.run`/`build.run`/`test.run` take an `argv` string array, not a `command`
+        // string (`recover-without-repeating-agent-investigation`'s own fix for exactly this:
+        // `tool_call_signature`'s original fallback silently skipped `argv` since
+        // `serde_json::Value::as_str` returns `None` for an array, collapsing every distinct
+        // shell command down to the bare `"shell.run"` signature). Two attempts running
+        // genuinely different commands must not be flagged as the same investigation repeated.
+        let cargo_test = InvestigationSummary::from_steps(&[step_with_tool_call(
+            "shell.run",
+            serde_json::json!({"argv": ["cargo", "test", "--workspace"]}),
+        )]);
+        let ls = InvestigationSummary::from_steps(&[step_with_tool_call(
+            "shell.run",
+            serde_json::json!({"argv": ["ls"]}),
+        )]);
+        assert_ne!(
+            cargo_test.tool_signatures, ls.tool_signatures,
+            "two different argv-only shell calls must not collapse to the same signature"
+        );
+        assert!(
+            !cargo_test.mostly_repeats(&ls),
+            "genuinely different shell commands must not be treated as a repeated investigation"
+        );
+    }
+
+    #[test]
+    fn investigation_summary_treats_the_same_argv_only_shell_call_as_a_repeat() {
+        let a = InvestigationSummary::from_steps(&[step_with_tool_call(
+            "shell.run",
+            serde_json::json!({"argv": ["cargo", "test", "--workspace"], "cacheable": true}),
+        )]);
+        let b = InvestigationSummary::from_steps(&[step_with_tool_call(
+            "shell.run",
+            serde_json::json!({"argv": ["cargo", "test", "--workspace"], "cacheable": false}),
+        )]);
+        assert!(
+            a.mostly_repeats(&b),
+            "the same argv, with an unrelated flag differing, is still the same command repeated"
+        );
+    }
+
+    #[test]
+    fn investigation_summary_mostly_repeats_is_directional_not_a_symmetric_overlap() {
+        // `mostly_repeats` compares against the *later* attempt's own total, not the smaller of
+        // the two sets: a later attempt that does a lot of genuinely new work, alongside one
+        // incidental re-read shared with the prior attempt, must not be flagged just because that
+        // one shared read happens to be *all* the prior attempt did.
+        let one_read = InvestigationSummary {
+            tool_signatures: vec!["fs.read(walk.rs)".to_string()],
+            conclusion: None,
+            made_changes: false,
+        };
+        let lots_of_new_work = InvestigationSummary {
+            tool_signatures: vec![
+                "fs.read(walk.rs)".to_string(),
+                "edit.apply_patch(walk.rs)".to_string(),
+                "shell.run(cargo test)".to_string(),
+            ],
+            conclusion: None,
+            made_changes: true,
+        };
+        assert!(
+            !lots_of_new_work.mostly_repeats(&one_read),
+            "one shared read out of three genuinely different calls must not count as a repeat"
+        );
+        assert!(
+            one_read.mostly_repeats(&lots_of_new_work),
+            "but an attempt that does nothing except repeat one call from a larger prior \
+             investigation is still fully a repeat of it"
+        );
+    }
+
+    #[test]
+    fn investigation_summary_made_changes_is_true_only_once_a_mutating_tool_is_called() {
+        let reads_only = InvestigationSummary::from_steps(&[step_with_tool_call(
+            "fs.read",
+            serde_json::json!({"path": "walk.rs"}),
+        )]);
+        assert!(!reads_only.made_changes);
+
+        let with_an_edit = InvestigationSummary::from_steps(&[step_with_tool_call(
+            "edit.apply_patch",
+            serde_json::json!({"path": "walk.rs"}),
+        )]);
+        assert!(with_an_edit.made_changes);
+
+        let with_a_commit = InvestigationSummary::from_steps(&[step_with_tool_call(
+            "git.commit",
+            serde_json::json!({"message": "fix"}),
+        )]);
+        assert!(with_a_commit.made_changes);
     }
 
     // -----------------------------------------------------------------------------------------

@@ -190,14 +190,9 @@ fn optional_acp_executor(
     project: &Project,
     exec_root: &Path,
 ) -> tm_types::Result<Option<(Role, Arc<AcpExecutor>)>> {
-    let path = project.root.join(ACP_TOML_FILENAME);
-    if !path.exists() {
+    let Some(parsed) = read_acp_toml(project)? else {
         return Ok(None);
-    }
-    let source = std::fs::read_to_string(&path)
-        .map_err(|e| tm_types::TmError::Io(format!("reading {}: {e}", path.display())))?;
-    let parsed: AcpToml = toml::from_str(&source)
-        .map_err(|e| tm_types::TmError::parse(format!("{}: {e}", path.display())))?;
+    };
     let timeout = Duration::from_secs(parsed.agent.timeout_seconds.unwrap_or(120));
     let executor = Arc::new(AcpExecutor::new(
         "acp",
@@ -209,6 +204,31 @@ fn optional_acp_executor(
         project.store.clone(),
     ));
     Ok(Some((parsed.agent.role, executor)))
+}
+
+/// Reads and parses `project.root`'s `acp.toml`, or `None` when it's absent — the shared parse
+/// [`optional_acp_executor`] and [`acp_override_role`] both build on.
+fn read_acp_toml(project: &Project) -> tm_types::Result<Option<AcpToml>> {
+    let path = project.root.join(ACP_TOML_FILENAME);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let source = std::fs::read_to_string(&path)
+        .map_err(|e| tm_types::TmError::Io(format!("reading {}: {e}", path.display())))?;
+    let parsed: AcpToml = toml::from_str(&source)
+        .map_err(|e| tm_types::TmError::parse(format!("{}: {e}", path.display())))?;
+    Ok(Some(parsed))
+}
+
+/// The [`Role`] `project.root`'s `acp.toml` overrides to an external ACP agent, if any — the
+/// cheap half of [`optional_acp_executor`]'s work, for callers that only need to know *which*
+/// role bypasses the real [`tm_provider::Fabric`] entirely rather than building the executor
+/// itself (which needs an `exec_root`). [`crate::sched::run_ticket`]'s provider preflight uses
+/// this to skip checking a role that `acp.toml` serves from an external agent instead of the
+/// fabric — that role never touches `providers.toml`'s candidates at all, so no fabric
+/// misconfiguration for it is ever this ticket's problem.
+pub(crate) fn acp_override_role(project: &Project) -> tm_types::Result<Option<Role>> {
+    Ok(read_acp_toml(project)?.map(|parsed| parsed.agent.role))
 }
 
 /// The human-authored approval policy (`SPEC.md` §4.4), per `docs/decisions/D-009-oversight-policy-wiring.md`.

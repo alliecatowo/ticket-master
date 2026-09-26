@@ -445,7 +445,18 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
 - Ticket lifecycle from the CLI: `tm ticket new "<objective>"` (starts a global-scope project if
   none exists; new tickets get `Authority::worker()`), `tm ticket activate <T>` (draft -> ready),
   then `tm run <T>` (activates a draft itself, and prints each step live) or `tm sched run`. `tm
-  run` reports a failed attempt as an error (exit 2), not as "finished". A submitted ticket waits
+  run` reports a failed attempt as an error (exit 2), not as "finished". Before leasing or
+  dispatching anything, `tm run <T>` also checks that the ticket's required role actually has a
+  registered/credentialed provider candidate (`sched::preflight_provider_or_fail`,
+  `tm_provider::Fabric::preflight_role`) — a `providers.toml` candidate naming a provider that was
+  never wired up used to only surface after a full lease cycle had already been burned dispatching
+  an agent turn that failed immediately; now it fails fast and names the missing provider plus
+  `tm provider list`/`providers.toml` as the fix, not a blind "run again" retry. Skipped for
+  `--replay` (served by a `MockProvider` regardless of configuration), `human_required` tickets
+  (routed to a human, never the fabric), and a role `acp.toml` overrides to an external agent.
+  `tm sched run`/`tm serve`/the TUI's in-process runner don't yet have this same preflight — they
+  still lease-then-fail on the identical misconfiguration; only `tm run`'s single-ticket path does
+  today. A submitted ticket waits
   for `tm ticket accept <T>` or `tm ticket reject <T> --reason "..."`; an escalated one (out of
   attempts) for `tm ticket retry <T> [--guidance "..."]`, which gives it a fresh round of attempts
   and appends the guidance to its objective. All three are human-only, and the tickets screen and
