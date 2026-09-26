@@ -1530,7 +1530,7 @@ is based on.
 
 ## BB — Groomed from trial-inbox passes 8 (0240) and 9 (0459) (2026-09-26); 9 of 11 raw findings duplicated open V/X/Z/AA-section tasks, folded in as evidence
 
-- [ ] **t20260926-ticket-new-shows-active-lease-state** — Show lease/session ownership when a ticket is already being worked before `tm run`
+- [x] **t20260926-ticket-new-shows-active-lease-state** — Show lease/session ownership when a ticket is already being worked before `tm run` (landed 2c0ddb6)
   model: sonnet · severity: high · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/tickets.rs`
   change: When a background scheduler activates and leases a ticket before the user invokes `tm run` on it (a real race in any project running `tm serve`/the TUI/`sched run` in-process), `tm ticket new`'s own output only ever prints "Created ticket T-2" — the user has no way to know a worker already grabbed it until `tm run` fails with `error: conflict: T-2 is already being worked by agent:builtin/T-2 until <timestamp>`. Show the ticket's current state, lease holder, and session id as part of `tm ticket new`'s creation output when it's non-draft; when `tm run <ticket>` hits an active-lease conflict, either follow/attach to the existing session automatically or print the precise command to inspect/resume it, rather than ending on an unexplained conflict.
