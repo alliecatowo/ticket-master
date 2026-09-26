@@ -1191,7 +1191,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: A mis-quoted subcommand (`tm "acp --help"`) returned `error: the following required arguments were not provided: --prompt  Usage: tm --prompt <TEXT>`, which is confusing wording for the most natural invocation.
 
-- [ ] **u1-bench-cross-stdin-closed**
+- [x] **u1-bench-cross-stdin-closed** (landed a902066)
   model: sonnet · severity: medium · builds Rust: yes · area: bench · deps: none
   files: `crates/xtask/src/bench_cross.rs`
   change: `opencode run` hung for the full 300s timeout when stdin was an open pipe, and passed in 14s with `< /dev/null`. `claude -p` printed "no stdin data received in 3s". In each `ToolAdapter::run`, spawn with `Stdio::null()` for stdin. Also record per-tool `model` and `tokens`/`cost` where the tool reports them (claude `--output-format json` usage/total_cost_usd, tm `--json -p` tokens), so the report isn't model-confounded without saying so.
