@@ -371,6 +371,20 @@ pub(crate) fn build_dispatcher_with_fabric(
     human_sink: Arc<dyn HumanApprovalSink>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
     let exec_root = execution_root(&project.root, exec_root);
+    // Refuse to build a dispatcher — and thereby grant any ticket's `fs.*`/`edit.*`/`shell.*`
+    // tool calls file authority — over an ambiguous root: one that isn't itself a git repository
+    // but holds two or more independent git-repository checkouts as immediate children (see
+    // `project::reject_ambiguous_sibling_root`'s doc comment for the live trial that found this).
+    // Checked here rather than in `project::resolve_scope` itself, since this is the actual point
+    // a ticket's file authority is established against `exec_root` — `resolve_scope` resolves for
+    // every command, including read-only ones with no ticket file authority at stake at all.
+    crate::project::reject_ambiguous_sibling_root(
+        exec_root,
+        "A ticket in a project rooted here cannot be dispatched. Recreate it in the repository \
+         you mean: `cd` into it, run `tm init`, then `tm ticket new ...`. `--project <repo>`, or \
+         running from inside a repo, opens a *different* project that does not contain this \
+         ticket.",
+    )?;
     let (index_root, index_state_dir) = index_root_and_state_dir(project, exec_root);
     let ci = Arc::new(open_and_refresh_code_intel(
         &index_state_dir,
@@ -493,6 +507,41 @@ mod tests {
         let store =
             Arc::new(Store::open_with(root, clock.clone(), ids.clone()).expect("open store"));
         Project::for_test(root, store, clock, ids)
+    }
+
+    /// The actual point a ticket's file authority gets established against a resolved root:
+    /// `build_dispatcher_with_fabric` must refuse before building anything (indexing, an
+    /// executor, tool dispatch) when `exec_root` is not itself a git repository but holds two or
+    /// more independent git-repository checkouts as immediate children — the live-trial hazard
+    /// `project::reject_ambiguous_sibling_root` exists for. `project.root` here plays the role of
+    /// the ambiguous scratch directory a live trial actually hit; the fabric never needs a real
+    /// registered provider, since the refusal happens before it would ever be consulted.
+    #[tokio::test]
+    async fn build_dispatcher_refuses_an_ambiguous_project_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("tm").join(".git")).expect("tm clone");
+        std::fs::create_dir_all(dir.path().join("opencode").join(".git")).expect("opencode clone");
+        let project = test_project(dir.path());
+        let fabric = Arc::new(tm_provider::Fabric::new(
+            tm_provider::RoleTable::default_table(),
+            project.clock.clone(),
+        ));
+
+        let result = build_dispatcher_with_fabric(
+            &project,
+            tokio::runtime::Handle::current(),
+            None,
+            None,
+            fabric,
+            Arc::new(HeadlessApprovalSink),
+        );
+
+        match result {
+            Ok(_) => {
+                panic!("an ambiguous root must be refused, not silently indexed and dispatched")
+            }
+            Err(err) => assert!(matches!(err, tm_types::TmError::Conflict(_)), "{err}"),
+        }
     }
 
     #[test]

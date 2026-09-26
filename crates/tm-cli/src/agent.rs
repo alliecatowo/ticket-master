@@ -2437,24 +2437,46 @@ fn plain_tool_action(tool_name: &str, input: &serde_json::Value) -> String {
 /// provider-specific message, say) also falls back to a generic phrase rather than guessing.
 fn plain_tool_error(detail: &str) -> String {
     const MAX_DIAGNOSTIC_CHARS: usize = 120;
-    let concise_diagnostic = |prefix: &str| {
+    // `io:` details can legitimately be longer than the other prefixes' budget: since
+    // `crates/tm-agent/src/tools.rs`'s `fs_io_error`/`crates/tm-agent/src/patch.rs`'s
+    // `PatchError::Io`, an `io:` detail on a failed relative path now names both the attempted
+    // path and the resolved project root (plus, on a not-found, a "did you mean" hint) — real
+    // recovery information a model can act on directly, which a bare "couldn't read or write a
+    // file" (this function's old fixed phrase for every `io:` detail, regardless of content)
+    // never gave it. A live trial hit exactly that: a failed relative `fs.read` gave no root to
+    // correct against, so the agent fell back to a blind directory listing of its parent instead
+    // — which, had the project root itself been ambiguous, could have wandered into an unrelated
+    // sibling checkout. A wider budget here means that context survives truncation.
+    const MAX_IO_DIAGNOSTIC_CHARS: usize = 280;
+    let concise_diagnostic_with_budget = |prefix: &str, budget: usize| {
         let diagnostic = detail
             .strip_prefix(prefix)
             .unwrap_or_default()
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        let diagnostic: String = diagnostic.chars().take(MAX_DIAGNOSTIC_CHARS).collect();
+        let diagnostic: String = diagnostic.chars().take(budget).collect();
         if diagnostic.is_empty() {
             "the operation failed".to_string()
-        } else if diagnostic.chars().count() == MAX_DIAGNOSTIC_CHARS {
+        } else if diagnostic.chars().count() == budget {
             format!("{diagnostic}…")
         } else {
             diagnostic
         }
     };
+    let concise_diagnostic =
+        |prefix: &str| concise_diagnostic_with_budget(prefix, MAX_DIAGNOSTIC_CHARS);
     let phrase = if detail.starts_with("io: ") {
-        "couldn't read or write a file"
+        // No fixed recovery-step suffix here, unlike `parse:`/`invariant violated:` below: an
+        // `io:` detail isn't always about a path at all (a UTF-8 decode failure, a spawn
+        // failure), so a suffix written for the path case would be actively wrong for those.
+        // When it *is* a path failure, `fs_io_error`/`PatchError::Io` (`tm-agent`) already build
+        // the resolved project root and any recovery hint straight into the detail text itself,
+        // so nothing needs to be added here.
+        return format!(
+            "error: couldn't read or write a file ({})",
+            concise_diagnostic_with_budget("io: ", MAX_IO_DIAGNOSTIC_CHARS)
+        );
     } else if detail.starts_with("parse: ") {
         return format!(
             "error: couldn't parse the result ({}); retry the operation, and check its input if it fails again",
@@ -4185,7 +4207,28 @@ mod tests {
         let line = format_tool_call(&errored);
         assert_eq!(
             line,
-            "  * Read crates/tm-cli/src/project.rs -> error: couldn't read or write a file"
+            "  * Read crates/tm-cli/src/project.rs -> error: couldn't read or write a file \
+             (stream did not contain valid UTF-8)"
+        );
+    }
+
+    /// An `io:` detail that names the resolved project root and a "did you mean" hint (the shape
+    /// `crates/tm-agent/src/tools.rs`'s `fs_io_error` now produces for a missing relative path)
+    /// survives into the plain-language line rather than collapsing to a bare generic phrase —
+    /// the recovery context a live trial found missing (see `plain_tool_error`'s doc comment).
+    #[test]
+    fn plain_tool_error_keeps_the_project_root_and_hint_from_an_io_detail() {
+        let detail = "io: path 'source/utils/body.ts' not found under project root \
+                       '/tmp/tm-trials/20260926-0129/sindresorhus-ky-878/tm'; did you mean \
+                       'source/utils/body.ts'?";
+        let line = plain_tool_error(detail);
+        assert!(
+            line.contains("/tmp/tm-trials/20260926-0129/sindresorhus-ky-878/tm"),
+            "expected the resolved project root to survive, got: {line}"
+        );
+        assert!(
+            line.contains("did you mean"),
+            "expected the recovery hint to survive, got: {line}"
         );
     }
 

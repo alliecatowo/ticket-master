@@ -469,6 +469,28 @@ pub fn resolve_scope(explicit: Option<&Path>, cwd: &Path) -> tm_types::Result<Re
     if let Ok(found) = locate(cwd) {
         let is_real_home_tm = real_home_tm.as_deref() == Some(found.join(".tm").as_path());
         if !is_real_home_tm {
+            // A located `.tm/` is trusted less than an explicit `--project`: it could be a
+            // parent-directory `.tm/` a bad earlier `tm init` left behind (exactly the state a
+            // live trial's own scratch directory was in after its first, wrongly-rooted `tm
+            // init`), or a caller that `cd`'d into one of two sibling clones without noticing the
+            // *other* clone's presence and re-initing there instead. Either way, rooting a
+            // project at a directory that isn't itself a git repository but holds two or more
+            // independent ones is the same hazard [`create_or_promote_project_dir`] refuses at
+            // creation time — check it here too, since `locate` can hand back a pre-existing
+            // `.tm/` this check never got to run against when it was created.
+            reject_ambiguous_sibling_root(
+                &found,
+                &format!(
+                    "`{tm}` names an ambiguous parent, not a real single project — if it holds \
+                     tickets/history worth keeping, rename it aside first (`mv {tm} {tm}.ambiguous`) \
+                     rather than deleting it outright, since removing it discards that project's \
+                     tickets and event log; the intended repository may already have its own \
+                     `.tm/`, so moving straight into it could overwrite that one instead. Then \
+                     run `tm init` inside the specific repository you mean, so its own `.tm/` \
+                     takes precedence, or pass `--project <dir>` explicitly.",
+                    tm = found.join(".tm").display()
+                ),
+            )?;
             return Ok(Resolved {
                 state_dir: found.join(".tm"),
                 root: found,
@@ -477,6 +499,18 @@ pub fn resolve_scope(explicit: Option<&Path>, cwd: &Path) -> tm_types::Result<Re
             });
         }
     }
+    // No `reject_ambiguous_sibling_root` check here, deliberately: this branch resolves for
+    // *every* command, including read-only ones that grant no ticket file authority at all (`tm
+    // project show`, `tm tickets --json`, bare `tm`, a chat turn) — refusing here broke `tm
+    // tickets --json`'s documented "empty and creates nothing" contract, and bare `tm`/chat, in
+    // any non-repo directory that merely happens to hold two unrelated git clones (a real
+    // top-level dev directory, `$HOME` itself on some machines). The actual hazard is a
+    // *ticket's* file authority spanning an ambiguous root, not resolving one for inspection —
+    // see `crate::dispatch::build_dispatcher_with_fabric`'s own call to this same check on
+    // `exec_root`, right before a dispatcher is built to actually run tool calls against it.
+    // `create_or_promote_project_dir` (what `tm init`/`tm attach` call) and the `locate` branch
+    // above still check, since those are the points that create or trust a *repo-scoped*
+    // project's root outright.
     let root = workspace_root_for(cwd)?;
     let state_dir = global_project_dir(&root)?;
     let exists = state_dir.join("project.db").is_file();
@@ -486,6 +520,90 @@ pub fn resolve_scope(explicit: Option<&Path>, cwd: &Path) -> tm_types::Result<Re
         scope: Scope::Global,
         exists,
     })
+}
+
+/// Refuse to treat `root` as a single project's root when `root` is not itself a git repository
+/// but holds two or more independent git-repository checkouts as immediate children — the
+/// specific hazard a live trial found (`docs/tasks/TASKS.md`'s
+/// `t20260926-agent-tool-paths-not-rooted-to-project`, evidence at
+/// `/tmp/tm-trials/20260926-0129/sindresorhus-ky-878/tm.log`): a benchmark/comparison harness laid
+/// out two sibling clones (`tm/`, `opencode/`) under one scratch directory, `tm init` was invoked
+/// from that scratch directory rather than from inside the intended clone, and
+/// [`workspace_root_for`] — correctly, by its own contract — rooted the project at that scratch
+/// directory itself (not a git repo, so it falls through to plain `cwd`). Every ticket's
+/// `Authority::repository.{read,write}` then spans *both* clones at once: a relative `fs.read`
+/// for a path that only existed in the intended clone failed and the agent recovered by listing
+/// its parent, surfacing the unrelated sibling by name — and nothing but luck stopped a
+/// differently-shaped retry from reading or editing that sibling instead.
+///
+/// Called at the points that actually create, trust, or grant ticket file authority over a root
+/// — [`create_or_promote_project_dir`] (`tm init`/`tm attach`), [`resolve_scope`]'s `locate`
+/// branch (a pre-existing `.tm/` this check never got to run against when it was created), and
+/// `crate::dispatch::build_dispatcher_with_fabric` on `exec_root` (right before a dispatcher is
+/// built to actually run tool calls) — never in [`resolve_scope`]'s global-scope fallback branch,
+/// which resolves for *every* command including read-only ones with no ticket file authority at
+/// stake at all (`tm project show`, `tm tickets --json`, bare `tm`, a chat turn): refusing there
+/// broke `tm tickets --json`'s documented "empty and creates nothing" contract, and bare `tm`/
+/// chat, in any non-repo directory that merely happens to hold two unrelated git clones (a real
+/// top-level dev directory, `$HOME` itself on some machines).
+///
+/// Deliberately narrow: only trips when `root` itself has no `.git` (so an ordinary project's own
+/// repository root, even one that vendors other repos as subdirectories deeper than one level, or
+/// as git submodules recorded *inside* that same repository, is never affected) and at least two
+/// immediate children are independently git-repository-rooted. A single sibling repository next
+/// to unrelated ordinary files is not this shape and is left alone, since that's an unremarkable,
+/// common layout this check has no principled way to distinguish from an intentional one.
+///
+/// `fix_hint` is the caller-specific recovery sentence appended to the error, because the same
+/// correction does not read as true from every call site: `tm init`/`tm attach`
+/// ([`create_or_promote_project_dir`]) resolve their target from their own `path` argument (or
+/// `cwd`), never from the global `--project` flag — telling a caller there to "pass `--project`"
+/// would be wrong advice for the exact command that hit the error, confirmed empirically (`tm
+/// --project <dir> init` still initializes at `cwd`, ignoring `--project` entirely, since `init`
+/// never calls [`open_for_command`]/[`resolve_scope`]). [`resolve_scope`]'s `locate` branch and
+/// `crate::dispatch::build_dispatcher_with_fabric` both resolve through `open_for_command`, which
+/// does honor `--project`, so that advice is correct there.
+pub(crate) fn reject_ambiguous_sibling_root(root: &Path, fix_hint: &str) -> tm_types::Result<()> {
+    if root.join(".git").exists() {
+        return Ok(());
+    }
+    let siblings = sibling_git_repos(root);
+    if siblings.len() < 2 {
+        return Ok(());
+    }
+    let mut names: Vec<String> = siblings
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    names.sort();
+    // Canonicalized only for the message: `root` can arrive as a bare relative path (a bare `tm
+    // init` passes `"."`), and "`.` is not itself a git repository" names nothing a human or
+    // model could act on. Falls back to `root` itself if canonicalization fails (unreadable, or
+    // never existed) rather than erroring on top of the conflict being reported.
+    let displayed = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    Err(TmError::conflict(format!(
+        "{} is not itself a git repository and holds {} separate ones ({}); refusing to treat \
+         it as one project's root, since a ticket's file authority would then span all of them \
+         at once. {fix_hint}",
+        displayed.display(),
+        siblings.len(),
+        names.join(", "),
+    )))
+}
+
+/// The immediate subdirectories of `dir` that are themselves git-repository roots (have their own
+/// `.git`), for [`reject_ambiguous_sibling_root`]. Never walks deeper than one level, and never
+/// errors on an unreadable `dir` — that failure surfaces on its own from whatever tries to use
+/// `dir` next.
+fn sibling_git_repos(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path.join(".git").exists())
+        .collect()
 }
 
 /// Write `$TM_HOME/projects/<key>/workspace.json`, the marker [`open_bare`] creates exactly once
@@ -759,6 +877,18 @@ fn create_or_promote_project_dir(
             dir.display()
         )));
     }
+    // Checked before anything is written, on both the promotion and the fresh-`create_project_dir`
+    // branch below: `tm init`/`tm attach` invoked directly at an ambiguous parent (see
+    // `reject_ambiguous_sibling_root`'s doc comment) must never get as far as creating a `.tm/`
+    // there. This is the actual path a live trial took — `tm init` itself ran at the scratch
+    // directory holding two sibling clones, not at some bare, project-less directory only
+    // reachable through `resolve_scope`'s global-scope fallback.
+    reject_ambiguous_sibling_root(
+        dir,
+        "Run `tm init <path>`/`tm attach <path>` naming the repository you mean directly (or \
+         `cd` into it first) — the global `--project` flag does not override this command's own \
+         destination argument.",
+    )?;
     if !fresh {
         // The global session lives under a key derived from the *workspace* (the git toplevel,
         // or the canonical cwd outside a repo — see `workspace_root_for`), but the destination
@@ -2755,6 +2885,129 @@ mod tests {
         assert_eq!(resolved.root, cwd);
         assert_eq!(resolved.scope, Scope::Global);
         assert!(!resolved.exists);
+    }
+
+    #[test]
+    fn resolve_scope_still_resolves_global_scope_in_a_directory_with_two_sibling_clones() {
+        // `resolve_scope`'s global-scope fallback branch (used by every command, including
+        // read-only ones like `tm project show`/`tm tickets --json` and bare `tm`/chat, which
+        // grant no ticket file authority at all) must keep resolving normally here — refusing at
+        // this generic a point broke exactly those commands in any ordinary non-repo directory
+        // that happens to hold two unrelated git clones (a real top-level dev directory, `$HOME`
+        // itself on some machines). The actual hazard — a *ticket's* file authority spanning an
+        // ambiguous root — is caught instead at `create_or_promote_project_dir` (`tm init`/`tm
+        // attach`), the `locate` branch above (a pre-existing bad `.tm/`), and
+        // `crate::dispatch::build_dispatcher_with_fabric`'s own call on `exec_root` right before
+        // a dispatcher is built — see the tests for each of those.
+        let _guard = ENV_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().canonicalize().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+        std::fs::create_dir_all(cwd.join("tm").join(".git")).unwrap();
+        std::fs::create_dir_all(cwd.join("opencode").join(".git")).unwrap();
+
+        let resolved = resolve_scope(None, &cwd).unwrap();
+
+        std::env::remove_var("TM_HOME");
+        assert_eq!(resolved.root, cwd);
+        assert_eq!(resolved.scope, Scope::Global);
+    }
+
+    #[test]
+    fn resolve_scope_refuses_a_pre_existing_tm_dir_at_an_ambiguous_parent() {
+        // The state a live trial's own scratch directory was actually left in: `tm init` ran at
+        // the ambiguous parent first (creating a `.tm/` there), before a corrected run moved to
+        // the intended clone. Any later command from the same parent must keep refusing, via
+        // `locate`'s branch, not just at fresh-creation time — a bad `.tm/` already on disk is
+        // not a reason to trust the root it names.
+        let _guard = ENV_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+        std::fs::create_dir_all(root.join(".tm")).unwrap();
+        std::fs::create_dir_all(root.join("tm").join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("opencode").join(".git")).unwrap();
+
+        let err = resolve_scope(None, &root).unwrap_err();
+
+        std::env::remove_var("TM_HOME");
+        assert!(matches!(err, TmError::Conflict(_)), "{err}");
+    }
+
+    #[test]
+    fn resolve_scope_refuses_when_cwd_is_a_sibling_clone_under_a_bad_parent_tm() {
+        // The same bad-parent `.tm/` as above, but resolved from *inside* one of the sibling
+        // clones (`cd tm/`) rather than from the parent itself — `locate` walks up past `tm/`
+        // (which has no `.tm` of its own) to find the parent's, and the ambiguity check must
+        // still catch it there.
+        let _guard = ENV_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+        std::fs::create_dir_all(root.join(".tm")).unwrap();
+        let tm_clone = root.join("tm");
+        std::fs::create_dir_all(tm_clone.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("opencode").join(".git")).unwrap();
+
+        let err = resolve_scope(None, &tm_clone).unwrap_err();
+
+        std::env::remove_var("TM_HOME");
+        assert!(matches!(err, TmError::Conflict(_)), "{err}");
+    }
+
+    #[test]
+    fn create_or_promote_project_dir_refuses_and_creates_no_tm_dir() {
+        // `tm init`'s own entry point, not just `resolve_scope`: it must refuse before writing
+        // anything, leaving no `.tm/` behind for a later command to trust.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(dir.join("tm").join(".git")).unwrap();
+        std::fs::create_dir_all(dir.join("opencode").join(".git")).unwrap();
+
+        let err = create_or_promote_project_dir(&dir, true).unwrap_err();
+
+        assert!(matches!(err, TmError::Conflict(_)), "{err}");
+        assert!(
+            !dir.join(".tm").exists(),
+            "refused init must not leave a .tm/ behind"
+        );
+    }
+
+    #[test]
+    fn resolve_scope_allows_a_directory_with_only_one_sibling_repository() {
+        // A single sibling repository next to ordinary files/directories is a common, benign
+        // layout (e.g. a scratch directory with one vendored clone alongside notes or scripts) —
+        // this check must not refuse it just because *a* repository exists nearby.
+        let _guard = ENV_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().canonicalize().unwrap();
+        let tm_home = tempfile::tempdir().unwrap();
+        std::env::set_var("TM_HOME", tm_home.path());
+        std::fs::create_dir_all(cwd.join("vendored").join(".git")).unwrap();
+        std::fs::create_dir_all(cwd.join("notes")).unwrap();
+
+        let resolved = resolve_scope(None, &cwd).unwrap();
+
+        std::env::remove_var("TM_HOME");
+        assert_eq!(resolved.root, cwd);
+        assert_eq!(resolved.scope, Scope::Global);
+    }
+
+    #[test]
+    fn reject_ambiguous_sibling_root_allows_a_directory_that_is_itself_a_git_repo() {
+        // Even one that happens to hold sibling-looking `.git`-bearing children one level down
+        // (e.g. vendored submodule checkouts) — `root` being a real repo of its own is the
+        // signal that this is one intentional project, not an accidental ambiguous parent.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("vendor-a").join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("vendor-b").join(".git")).unwrap();
+
+        assert!(reject_ambiguous_sibling_root(&root, "unused").is_ok());
     }
 
     #[test]
