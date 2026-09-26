@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 324,
+      "tokens": 732981,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "A scoped plan before execution and a single focused inspection of Path's generic typing would reduce the repeated reads and large context use. After the model ended without submitting any patch or evidence, tm should surface concise actionable recovery guidance—what was inspected, that no files changed, and whether retrying is likely to help—instead of the vague 'something went wrong' detail followed by an unconditional rerun suggestion. A no-progress stop would also prevent spending several minutes and hundreds of thousands of input tokens without implementation."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 67.136,
+      "tokens": 24288,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The implementation was appropriately scoped and the agent gave a clear plan, but it should run the repository's complete typing test file (or the configured typing suite) rather than only checking assertions it added to an existing file. The PR's hidden typing test catches that the no-argument Path default is inferred as str while the required assertion expects the broader path union; running that exact test before stopping would have exposed the miss."
+    }
+  ]
+}

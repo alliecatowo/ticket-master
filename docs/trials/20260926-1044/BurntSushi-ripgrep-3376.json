@@ -1,0 +1,42 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "test_files": [
+    "crates/ignore/src/dir.rs"
+  ],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 498,
+      "tokens": 2483595,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm identified the right ignore-walker area after substantial exploration, but repeatedly read overlapping sections of walk.rs and dir.rs, tried to build the CLI instead of quickly isolating the ignore crate behavior, and never submitted a patch or evidence. The final message clearly said no patch or evidence was submitted, so it did not falsely claim a fix; however, the user-facing failure gave only a generic provider-ended-turn explanation and an immediate retry instruction, without saying whether retry was automatic, why the turn ended, or what to do after the ticket was marked failed. Add an explicit scoped plan, sharper relevant-symbol navigation, bounded build/test commands, and actionable retry/status guidance. Mechanical `cargo test -p ignore` after checking out the PR file passed, but this PR's only changed file contains both production code and its new regression test, so the prescribed checkout replaced the agent's implementation; this pass does not indicate tm solved the issue."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 153,
+      "tokens": 33253,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode traced the cache/root relationship, implemented a root-sensitive reuse check, and added a focused multi-path regression test. It caught and corrected a type mismatch, a formatting issue, and an expected-output mismatch, then reported the focused test and formatting checks accurately. It spent an early turn on an unavailable zvec index before falling back to local search, and initially looked for tests in the wrong locations; exact local search could have avoided that friction. The prescribed merged-file checkout and full `cargo test -p ignore` passed, though the merged file includes both implementation and test, so that mechanical pass is not independent evidence of the agent's own implementation."
+    }
+  ]
+}

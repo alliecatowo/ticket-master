@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 619,
+      "tokens": 83380,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm eventually inspected the correct request-body code and the hidden test confirms that the fix was needed, but it repeatedly revisited the same source and history, spent substantial effort on ad hoc Python checks and package-install attempts, and ended without submitting any patch or evidence. The final message correctly said the run had failed, but `tm run` left the user with only a generic model-ended-turn reason and a retry command after 619 seconds and 83,380 recorded tokens. A tighter no-progress stop with a concise summary of the explored code, attempted verification, and a concrete next action would make failure cheaper and more recoverable; ensuring agent commands use the clone's prepared virtualenv would also avoid the wasted system-Python dependency probes."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 62,
+      "tokens": 19889,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 5,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped plan, went directly to `PreparedRequest.prepare_body()` and the related tests, and implemented the compatibility fallback with regression coverage quickly. Its in-run pytest attempts failed because it used system Python instead of the clone's prepared `.venv`, and it did not recover from that environment mismatch before finishing; the independent hidden test passed after being installed from the merge SHA. Detecting and using the project's local virtualenv for test commands would make its self-verification more reliable and its success report stronger."
+    }
+  ]
+}
