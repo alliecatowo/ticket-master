@@ -1424,7 +1424,7 @@ is based on.
   acceptance: A run transcript with multiple identical `fs.read` calls for one path renders a clear repeat indicator instead of an indistinguishable list, while different paths and `fs.read_range` ranges remain individually visible.
   test: `cargo test -p tm-cli format_tool_call`
   evidence: `/tmp/tm-trials/20260925-1314/pallets-click-3822/tm.log` lines 27–48 show repeated `Read src/click/types.py` progress entries and overlapping full-file/range reads; implementation and adjacent tests are in `crates/tm-cli/src/agent.rs` (`plain_tool_arg`, `plain_tool_action`, `format_tool_call_shows_the_call_s_salient_argument`). Also: confirmed again in pass 2 (docs/trials/20260925-1650/pallets-click-3822.json) and pass 3 (docs/trials/20260925-1847), including a retry that repeats the same file reads a second time. Also: psf-requests-7432 pass 4 (docs/trials/20260925-2015) repeated reads of `tests/test_requests.py` and `prepare_body`/`_body_position` searches across 66 tool calls and 6,150,789 input tokens before hitting the step limit.
-- [ ] **t20260925-1314-psf-requests-7432-terminal-failure-summary**
+- [x] **t20260925-1314-psf-requests-7432-terminal-failure-summary** (landed fa0ccf2)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: When `tm run` completes with a failed attempt such as “model ended turn without submitting,” render a concise terminal summary that says no patch/evidence was submitted, includes the failure reason, and points to the exact resume/retry command; preserve the current error exit status.
