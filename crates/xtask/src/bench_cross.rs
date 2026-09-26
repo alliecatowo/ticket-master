@@ -42,6 +42,10 @@ pub struct AdapterOutcome {
     /// model-controlled comparison, per `docs/audits/2026-09-25-bench-plan.md`'s "Required
     /// fixes" item 1.
     pub model: Option<String>,
+    /// Whether the coding tool completed its run successfully. A task predicate can already be
+    /// satisfied by the untouched fixture, so it only counts as a pass when the tool itself
+    /// finished cleanly as well.
+    pub completed: bool,
     /// Set when the adapter's own process was killed for exceeding the configured
     /// `--task-timeout` rather than completing (successfully or not).
     pub timed_out: bool,
@@ -413,29 +417,31 @@ pub fn run_comparison(
             let outcome = adapter.run(task, &workdir);
             let wall_seconds = start.elapsed().as_secs() as u32;
 
-            let (tool_calls, tokens, model, cost_micros, adapter_ran, timed_out) = match &outcome {
-                Ok(o) if o.timed_out => (0, None, o.model.clone(), 0, false, true),
-                Ok(o) => (
-                    o.tool_calls.unwrap_or(0),
-                    o.tokens,
-                    o.model.clone(),
-                    o.cost_micros.unwrap_or(0),
-                    true,
-                    false,
-                ),
-                Err(e) => {
-                    eprintln!("bench-cross: {tool_name}/{} adapter failed: {e:?}", task.id);
-                    (0, None, None, 0, false, false)
-                }
-            };
+            let (tool_calls, tokens, model, cost_micros, adapter_completed, timed_out) =
+                match &outcome {
+                    Ok(o) if o.timed_out => (0, None, o.model.clone(), 0, false, true),
+                    Ok(o) => (
+                        o.tool_calls.unwrap_or(0),
+                        o.tokens,
+                        o.model.clone(),
+                        o.cost_micros.unwrap_or(0),
+                        o.completed,
+                        false,
+                    ),
+                    Err(e) => {
+                        eprintln!("bench-cross: {tool_name}/{} adapter failed: {e:?}", task.id);
+                        (0, None, None, 0, false, false)
+                    }
+                };
 
-            let passed =
-                adapter_ran && !timed_out && run_test_command(&workdir, task).unwrap_or(false);
+            let passed = adapter_completed
+                && !timed_out
+                && run_test_command(&workdir, task).unwrap_or(false);
             // A killed run reports `cost_micros`/`tool_calls` as `0` (nothing was actually
             // measured, not "measured and found to be zero"), which `score_task` would otherwise
             // read as full cost/tool-count credit -- score it `0.0` outright instead, the same
             // way the "adapter failed to even start" path above already does.
-            let score = if timed_out {
+            let score = if timed_out || !adapter_completed {
                 0.0
             } else {
                 score_task(task, passed, cost_micros, wall_seconds, tool_calls)
@@ -738,6 +744,7 @@ impl ToolAdapter for TmAdapter {
         // whatever stats got recorded, so don't bail out before the `tm stats` call below --
         // unless it was killed for the timeout, in which case there is nothing left to read.
         let run_result = self.tm_json(workdir, &["run", &ticket_id]);
+        let completed = run_result.is_ok();
         if let Err(e) = &run_result {
             if is_adapter_timeout(e) {
                 return Ok(AdapterOutcome {
@@ -775,8 +782,12 @@ impl ToolAdapter for TmAdapter {
                 // adapter was told to pin (if any) rather than something read from `tm` itself.
                 model: self.model.clone(),
                 timed_out: false,
+                completed,
             }),
-            None => Ok(AdapterOutcome::default()),
+            None => Ok(AdapterOutcome {
+                completed,
+                ..Default::default()
+            }),
         }
     }
 
@@ -851,9 +862,11 @@ impl ToolAdapter for ClaudeAdapter {
             // recognize degrades to "ran, but no metrics reported" rather than a hard error --
             // pass/fail always comes from re-running the task's own `test_command`, never from
             // this.
-            TimedOutput::Finished(output) => Ok(parse_best_effort_usage(&String::from_utf8_lossy(
-                &output.stdout,
-            ))),
+            TimedOutput::Finished(output) => {
+                let mut outcome = parse_best_effort_usage(&String::from_utf8_lossy(&output.stdout));
+                outcome.completed = output.status.success();
+                Ok(outcome)
+            }
         }
     }
 
@@ -910,9 +923,11 @@ impl ToolAdapter for OpencodeAdapter {
                 timed_out: true,
                 ..Default::default()
             }),
-            TimedOutput::Finished(output) => Ok(parse_best_effort_usage(&String::from_utf8_lossy(
-                &output.stdout,
-            ))),
+            TimedOutput::Finished(output) => {
+                let mut outcome = parse_best_effort_usage(&String::from_utf8_lossy(&output.stdout));
+                outcome.completed = output.status.success();
+                Ok(outcome)
+            }
         }
     }
 
@@ -971,9 +986,11 @@ impl ToolAdapter for CodexAdapter {
                 timed_out: true,
                 ..Default::default()
             }),
-            TimedOutput::Finished(output) => Ok(parse_best_effort_usage(&String::from_utf8_lossy(
-                &output.stdout,
-            ))),
+            TimedOutput::Finished(output) => {
+                let mut outcome = parse_best_effort_usage(&String::from_utf8_lossy(&output.stdout));
+                outcome.completed = output.status.success();
+                Ok(outcome)
+            }
         }
     }
 
@@ -1357,6 +1374,7 @@ mod tests {
                     cost_micros: Some(1_000),
                     model: Some("fake-model".to_string()),
                     timed_out: false,
+                    completed: true,
                 },
             }
         }
@@ -1453,6 +1471,32 @@ mod tests {
 
         assert_eq!(report.results.len(), 1);
         assert!(!report.results[0].passed);
+    }
+
+    #[test]
+    fn run_comparison_does_not_credit_a_failed_adapter_when_the_fixture_already_passes() {
+        let root = crate::workspace_root().expect("workspace root");
+        let task = live_smoke_task();
+        let workdir_root = tempfile::tempdir().expect("tempdir");
+        let failed = FakeAdapter {
+            outcome: AdapterOutcome {
+                completed: false,
+                ..FakeAdapter::default().outcome
+            },
+        };
+        let adapters: Vec<(&str, &dyn ToolAdapter)> = vec![("tm", &failed)];
+
+        let report = run_comparison(
+            &[task],
+            &root.join("bench"),
+            &adapters,
+            workdir_root.path(),
+            &RunOptions::default(),
+        )
+        .expect("run_comparison should still succeed overall");
+
+        assert!(!report.results[0].passed);
+        assert_eq!(report.results[0].score, 0.0);
     }
 
     #[test]
@@ -1915,7 +1959,7 @@ mod tests {
         let adapter = ClaudeAdapter {
             binary: script_path.to_string_lossy().to_string(),
             model: None,
-            timeout: Some(Duration::from_secs(5)),
+            timeout: Some(Duration::from_secs(30)),
         };
 
         let outcome = adapter

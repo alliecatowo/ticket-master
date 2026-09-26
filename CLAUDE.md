@@ -246,7 +246,9 @@ never drift between sessions:
   `opencode run --auto`) rather than a headless no-op that used to make `tm` win by default; all
   adapters receive closed stdin so tools cannot wait indefinitely for piped input;
   `--model` pins every tool (including `tm`, via a scratch `providers.toml` role candidate) to the
-  same model; `--task-timeout` kills a hung adapter's whole process group and marks that pair
+  same model; `mise run bench:cross` builds `tm` first, so its default `tm` adapter works from a
+  fresh checkout; a pair only passes when the adapter finishes successfully and the task predicate
+  passes; `--task-timeout` kills a hung adapter's whole process group and marks that pair
   `TIMEOUT`; `--max-cost-usd` stops scheduling further pairs once cumulative reported spend
   reaches it. The report header states each tool's permission posture, `--version` output, the
   pinned model and any caps, so the numbers below it read as a fair, labeled comparison rather

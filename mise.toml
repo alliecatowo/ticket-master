@@ -84,6 +84,7 @@ run = "cargo run -p xtask -- check-drift --base {{arg(name='base')}}"
 
 [tasks."bench:cross"]
 description = "Run bench/tasks/*.toml identically through tm's own live path and configured external coding CLIs (opencode/codex/claude), reporting pass/fail, score, cost, tool calls and wall time side by side. Opt-in, real runs only, NOT part of verify (D-033). Defaults to --tools tm alone; add e.g. -- --tools tm,opencode --task py- --out /tmp/cross-demo. claude additionally requires --real-claude-auth."
+depends = ["build"]
 run = "cargo run -p xtask -- bench-cross"
 
 [tasks.clean]
