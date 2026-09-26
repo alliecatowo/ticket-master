@@ -1458,7 +1458,7 @@ is based on.
 
 ## X — Groomed from trial-inbox passes 2 and 3 (2026-09-25); 7 of 9 raw findings were duplicates of existing V-section tasks and were merged in as extra evidence instead of new entries
 
-- [ ] **t20260925-1650-ticket-title-from-long-body** — Keep long, pasted issue bodies out of ticket display titles
+- [x] **t20260925-1650-ticket-title-from-long-body** — Keep long, pasted issue bodies out of ticket display titles (landed 994c684)
   model: sonnet · severity: medium · builds Rust: yes · area: tickets · deps: none
   files: `crates/tm-cli/src/tickets.rs`
   change: `tm ticket new` passes the whole objective straight through as the display title (`crates/tm-cli/src/tickets.rs` ~line 605-610's `args.objective.clone()`), so pasting a multi-paragraph GitHub issue body makes markdown, reproduction code, and environment details the ticket's title everywhere it's listed. Keep the complete objective in storage (the worker still needs the full text), but derive a concise display title from its first meaningful line for `ticket.created` events, `tm ticket list`, and creation feedback; show the full text only in `tm ticket show`/detail views.
