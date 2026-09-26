@@ -564,6 +564,159 @@ fn resolve_repo_path(root: &Path, path: &str) -> Result<PathBuf> {
     Ok(root.join(rel))
 }
 
+/// Turn a filesystem failure from an `fs.*` tool into a [`TmError::Io`] that names the resolved
+/// project root and, on a not-found, a best-effort recovery hint — instead of surfacing the bare
+/// OS error text (`"No such file or directory (os error 2)"`), which names neither.
+///
+/// A live trial surfaced exactly the failure mode this replaces: a relative `fs.read` for a path
+/// that didn't exist under the true project root failed with an error naming nothing to correct
+/// against, so the agent fell back to a blind directory listing of its parent instead — which,
+/// had the project root itself been wrong (or a differently-shaped retry gone one directory
+/// further), could have surfaced or touched an unrelated sibling checkout. Naming the resolved
+/// root here means the model can tell immediately whether its whole path is off by a leading
+/// component, without guessing via a listing that might wander outside the project entirely.
+fn fs_io_error(root: &Path, path: &str, err: std::io::Error) -> TmError {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        match find_by_suffix_under(root, path) {
+            NameHint::Unique(found) => TmError::Io(format!(
+                "path '{path}' not found under project root '{}'; did you mean '{found}'?",
+                root.display()
+            )),
+            NameHint::Ambiguous(candidates) => TmError::Io(format!(
+                "path '{path}' not found under project root '{}'; more than one path under it \
+                 ends the same way, so no single correction is safe to guess — candidates: {}",
+                root.display(),
+                candidates.join(", "),
+            )),
+            NameHint::None => TmError::Io(format!(
+                "path '{path}' not found under project root '{}'; fs paths are relative to the \
+                 project root, not the process's own working directory — list '.' with fs.list \
+                 to see the project root's actual top-level entries",
+                root.display()
+            )),
+        }
+    } else {
+        TmError::Io(format!(
+            "path '{path}' under project root '{}': {err}",
+            root.display()
+        ))
+    }
+}
+
+/// The outcome of [`find_by_suffix_under`]'s recovery search.
+enum NameHint {
+    /// Exactly one plausible correction was found.
+    Unique(String),
+    /// More than one path matched, so guessing one over the other could point at the wrong
+    /// file/repository entirely (e.g. under an ambiguous root that holds more than one
+    /// checkout) — safer to name the candidates than to silently pick the first.
+    Ambiguous(Vec<String>),
+    /// Nothing plausible turned up within budget.
+    None,
+}
+
+/// Best-effort search for a path ending the same way as `requested` somewhere under `root`, for
+/// [`fs_io_error`]'s recovery hint. Bounded in both depth and the number of entries visited so a
+/// missing-path error can never turn into an expensive, unbounded filesystem walk.
+///
+/// Matches on `requested`'s trailing path components (its basename, plus its parent component
+/// too when `requested` has one — e.g. `source/utils/body.ts` only matches a candidate whose own
+/// last two components are also `utils/body.ts`), not on the bare basename alone: a basename-only
+/// match previously risked the exact shape a live trial's recovery relied on staying
+/// coincidentally safe — under an ambiguous root holding more than one checkout, a same-named
+/// file could plausibly exist in more than one of them, and a hint should never silently steer a
+/// retry toward whichever one `read_dir` happened to visit first.
+///
+/// Never descends past a subdirectory that has its own `.git` (a separate repository root):
+/// crossing that boundary is exactly how a hint could point into an unrelated sibling checkout.
+/// Collects up to a small cap of matches and reports ambiguity rather than guessing when more
+/// than one turns up.
+fn find_by_suffix_under(root: &Path, requested: &str) -> NameHint {
+    const MAX_DEPTH: usize = 6;
+    const MAX_ENTRIES: usize = 4000;
+    const MAX_MATCHES: usize = 5;
+
+    let wanted: Vec<&str> = Path::new(requested)
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let Some(&wanted_last) = wanted.last() else {
+        return NameHint::None;
+    };
+
+    fn matches_suffix(candidate: &[&str], wanted: &[&str]) -> bool {
+        let take = wanted.len().min(candidate.len());
+        if take == 0 {
+            return false;
+        }
+        candidate[candidate.len() - take..] == wanted[wanted.len() - take..]
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        wanted: &[&str],
+        wanted_last: &str,
+        depth: usize,
+        budget: &mut usize,
+        matches: &mut Vec<String>,
+    ) {
+        if depth == 0 || matches.len() >= MAX_MATCHES {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries {
+            if *budget == 0 || matches.len() >= MAX_MATCHES {
+                return;
+            }
+            *budget -= 1;
+            let Ok(entry) = entry else { continue };
+            let file_name = entry.file_name();
+            if file_name == ".git" || file_name == "target" || file_name == "node_modules" {
+                continue;
+            }
+            let path = entry.path();
+            let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if file_name.to_str() == Some(wanted_last) {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    let rel_components: Vec<&str> = rel
+                        .components()
+                        .filter_map(|c| c.as_os_str().to_str())
+                        .collect();
+                    if matches_suffix(&rel_components, wanted) {
+                        matches.push(rel.to_string_lossy().into_owned());
+                    }
+                }
+            }
+            // Never cross into a separate repository's own tree: a hint that did would defeat
+            // the exact isolation this whole recovery-hint mechanism exists to preserve.
+            if is_dir && !path.join(".git").exists() {
+                walk(&path, root, wanted, wanted_last, depth - 1, budget, matches);
+            }
+        }
+    }
+
+    let mut budget = MAX_ENTRIES;
+    let mut matches = Vec::new();
+    walk(
+        root,
+        root,
+        &wanted,
+        wanted_last,
+        MAX_DEPTH,
+        &mut budget,
+        &mut matches,
+    );
+    match matches.len() {
+        0 => NameHint::None,
+        1 => NameHint::Unique(matches.remove(0)),
+        _ => NameHint::Ambiguous(matches),
+    }
+}
+
 fn symbol_json(sym: &Symbol) -> Value {
     json!({
         "id": sym.id,
@@ -667,9 +820,27 @@ pub(crate) fn deterministic_command_key(argv: &[String], cwd: &str) -> String {
     key
 }
 
-fn resolve_cwd(root: &Path, input: &Value) -> String {
+/// Resolve a `shell.run`/`test.run`/`build.run`/`shell.query_output` call's `cwd` field against
+/// `root`, exactly as [`resolve_repo_path`] resolves an `fs.*`/`edit.*` path: reject an absolute
+/// `cwd` or one containing a `..` component, so a command's working directory can never land
+/// outside the project root.
+///
+/// Before this, `resolve_cwd` joined `cwd` onto `root` with no validation at all.
+/// [`tm_types::Action::RunCommand`] only gates a command's `argv`, never its `cwd` — there is no
+/// second, path-shaped authority check downstream the way `Action::ReadPath`/`Action::WritePath`
+/// gate `fs.*`/`edit.*` — so an unchecked `cwd: ".."` (or an absolute `cwd`) let a shell command
+/// run entirely outside the project root. This closes that specific gap defensively, alongside
+/// `tm-cli`'s own `project::reject_ambiguous_sibling_root` fix for the actual root cause a live
+/// trial hit — an ambiguous project root established one directory too high, over two sibling
+/// clones at once. This function's own gap was never observed to be exploited in
+/// that trial's log (its recovery walked `.`/`tm`/`opencode` as plain `fs.list` calls, not a
+/// `shell.run` with an escaping `cwd`), but it is real on its own terms: an unchecked `cwd` would
+/// have let a shell command reach outside the project root — including into an unrelated sibling
+/// checkout — regardless of whether the root itself was ever wrong.
+fn resolve_cwd(root: &Path, input: &Value) -> Result<String> {
     let rel = get_opt_string(input, "cwd").unwrap_or_else(|| ".".to_string());
-    root.join(rel).to_string_lossy().into_owned()
+    let full = resolve_repo_path(root, &rel)?;
+    Ok(full.to_string_lossy().into_owned())
 }
 
 /// How much of a command's stdout is returned inline: the first `HEAD` bytes and the last `TAIL`
@@ -861,7 +1032,7 @@ impl BuiltinCapability {
         patch_engine: &PatchEngine,
     ) -> Result<Value> {
         let argv = command_argv(input)?;
-        let cwd = resolve_cwd(patch_engine.root(), input);
+        let cwd = resolve_cwd(patch_engine.root(), input)?;
         let cacheable = get_bool_or(input, "cacheable", false);
         let key = command_key(ctx, &argv, &cwd, cacheable);
         let spec = CommandSpec {
@@ -1153,8 +1324,10 @@ impl BuiltinCapability {
             // copies it instead of guessing a hash format (see `crate::patch::Edit`).
             ToolName::FsRead => {
                 let path = get_str(input, "path")?;
-                let full = resolve_repo_path(patch_engine.root(), path)?;
-                let content = std::fs::read_to_string(&full)?;
+                let root = patch_engine.root();
+                let full = resolve_repo_path(root, path)?;
+                let content =
+                    std::fs::read_to_string(&full).map_err(|e| fs_io_error(root, path, e))?;
                 let hash = hash_bytes(content.as_bytes());
                 Ok(json!({"path": path, "content": content, "hash": hash}))
             }
@@ -1162,8 +1335,9 @@ impl BuiltinCapability {
                 let path = get_str(input, "path")?;
                 let byte_start = get_usize(input, "byte_start")?;
                 let byte_end = get_usize(input, "byte_end")?;
-                let full = resolve_repo_path(patch_engine.root(), path)?;
-                let bytes = std::fs::read(&full)?;
+                let root = patch_engine.root();
+                let full = resolve_repo_path(root, path)?;
+                let bytes = std::fs::read(&full).map_err(|e| fs_io_error(root, path, e))?;
                 if byte_start > byte_end || byte_end > bytes.len() {
                     return Err(TmError::parse(format!(
                         "invalid range [{byte_start}, {byte_end}) for {path} of length {}",
@@ -1178,10 +1352,11 @@ impl BuiltinCapability {
             }
             ToolName::FsList => {
                 let path = get_str(input, "path")?;
-                let full = resolve_repo_path(patch_engine.root(), path)?;
+                let root = patch_engine.root();
+                let full = resolve_repo_path(root, path)?;
                 let mut entries = Vec::new();
-                for entry in std::fs::read_dir(&full)? {
-                    let entry = entry?;
+                for entry in std::fs::read_dir(&full).map_err(|e| fs_io_error(root, path, e))? {
+                    let entry = entry.map_err(|e| fs_io_error(root, path, e))?;
                     let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
                     entries.push(json!({
                         "name": entry.file_name().to_string_lossy().into_owned(),
@@ -1192,11 +1367,14 @@ impl BuiltinCapability {
             }
             ToolName::FsStat => {
                 let path = get_str(input, "path")?;
-                let full = resolve_repo_path(patch_engine.root(), path)?;
+                let root = patch_engine.root();
+                let full = resolve_repo_path(root, path)?;
                 match std::fs::metadata(&full) {
                     Ok(meta) if meta.is_file() => Ok(json!({
                         "path": path, "exists": true, "is_dir": false, "len": meta.len(),
-                        "hash": hash_bytes(&std::fs::read(&full)?),
+                        "hash": hash_bytes(
+                            &std::fs::read(&full).map_err(|e| fs_io_error(root, path, e))?
+                        ),
                     })),
                     Ok(meta) => Ok(json!({
                         "path": path, "exists": true, "is_dir": meta.is_dir(), "len": meta.len(),
@@ -1204,7 +1382,7 @@ impl BuiltinCapability {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                         Ok(json!({"path": path, "exists": false}))
                     }
-                    Err(e) => Err(TmError::from(e)),
+                    Err(e) => Err(fs_io_error(root, path, e)),
                 }
             }
             // `expected_hash` stays mandatory here (the schema requires it, and the patch engine
@@ -1315,7 +1493,7 @@ impl BuiltinCapability {
                     return Ok(query_answer_json(answer));
                 }
                 let argv = get_string_vec(input, "argv")?;
-                let cwd = resolve_cwd(patch_engine.root(), input);
+                let cwd = resolve_cwd(patch_engine.root(), input)?;
                 let cacheable = get_bool_or(input, "cacheable", false);
                 let key = command_key(ctx, &argv, &cwd, cacheable);
                 let Some(result) = self.command_cache.get(&key)? else {
@@ -3362,6 +3540,123 @@ mod tests {
             )
             .await;
         assert!(matches!(outcome, ToolOutcome::Errored { .. }));
+    }
+
+    /// A failed relative `fs.read` names the resolved project root, not just the bare OS error —
+    /// the recovery hint a live trial found missing (see `fs_io_error`'s doc comment).
+    #[tokio::test]
+    async fn fs_read_of_a_missing_path_names_the_project_root() {
+        let h = Harness::new();
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("fs.read", json!({"path": "no/such/file.txt"})),
+                &h.ctx(),
+            )
+            .await;
+        match outcome {
+            ToolOutcome::Errored { detail } => {
+                assert!(
+                    detail.contains(&h.root().display().to_string()),
+                    "expected the resolved project root in the error, got: {detail}"
+                );
+            }
+            other => panic!("expected Errored, got {other:?}"),
+        }
+    }
+
+    /// The recovery hint matches on trailing path components, not the bare basename alone: a
+    /// same-named file under an unrelated directory must not be suggested just because its
+    /// basename happens to match.
+    #[test]
+    fn find_by_suffix_under_matches_trailing_components_not_bare_basename() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("source/utils")).unwrap();
+        std::fs::write(root.join("source/utils/body.ts"), "").unwrap();
+        // A same-basename file nested under a *different* immediate parent must not match a
+        // request for `source/utils/body.ts`.
+        std::fs::create_dir_all(root.join("other/place")).unwrap();
+        std::fs::write(root.join("other/place/body.ts"), "").unwrap();
+
+        match find_by_suffix_under(root, "source/utils/body.ts") {
+            NameHint::Unique(found) => assert_eq!(found, "source/utils/body.ts"),
+            NameHint::Ambiguous(candidates) => {
+                panic!("expected a unique hint, got Ambiguous({candidates:?})")
+            }
+            NameHint::None => panic!("expected a unique hint, got None"),
+        }
+    }
+
+    /// More than one plausible match is reported as ambiguous rather than silently picking
+    /// whichever `read_dir` visits first — picking wrong could point a retry at the wrong file
+    /// entirely (the exact risk under an ambiguous project root).
+    #[test]
+    fn find_by_suffix_under_reports_ambiguity_instead_of_guessing() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("a/utils")).unwrap();
+        std::fs::write(root.join("a/utils/body.ts"), "").unwrap();
+        std::fs::create_dir_all(root.join("b/utils")).unwrap();
+        std::fs::write(root.join("b/utils/body.ts"), "").unwrap();
+
+        match find_by_suffix_under(root, "utils/body.ts") {
+            NameHint::Ambiguous(candidates) => assert_eq!(candidates.len(), 2),
+            NameHint::Unique(found) => panic!("expected Ambiguous, got Unique({found:?})"),
+            NameHint::None => panic!("expected Ambiguous, got None"),
+        }
+    }
+
+    /// Never crosses into a subdirectory that has its own `.git` — that boundary is exactly what
+    /// keeps a recovery hint from pointing into an unrelated sibling repository.
+    #[test]
+    fn find_by_suffix_under_never_crosses_into_a_nested_repository() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("sibling-repo/.git")).unwrap();
+        std::fs::create_dir_all(root.join("sibling-repo/source/utils")).unwrap();
+        std::fs::write(root.join("sibling-repo/source/utils/body.ts"), "").unwrap();
+
+        assert!(matches!(
+            find_by_suffix_under(root, "source/utils/body.ts"),
+            NameHint::None
+        ));
+    }
+
+    /// A shell command's `cwd` is resolved the same way an `fs.*` path is: `..` must not escape
+    /// the project root. Before the fix this joined `cwd` onto the root unchecked, so a sibling
+    /// directory (or anywhere else reachable via `..`, or an absolute path) was a legitimate
+    /// place to run a command — the real gap a live trial surfaced.
+    #[tokio::test]
+    async fn shell_run_rejects_a_cwd_escaping_the_root() {
+        let h = Harness::new();
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("shell.run", json!({"argv": ["echo", "hi"], "cwd": ".."})),
+                &h.ctx(),
+            )
+            .await;
+        assert!(
+            matches!(outcome, ToolOutcome::Errored { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_run_rejects_an_absolute_cwd() {
+        let h = Harness::new();
+        let outcome = h
+            .registry
+            .dispatch(
+                &call("shell.run", json!({"argv": ["echo", "hi"], "cwd": "/tmp"})),
+                &h.ctx(),
+            )
+            .await;
+        assert!(
+            matches!(outcome, ToolOutcome::Errored { .. }),
+            "{outcome:?}"
+        );
     }
 
     #[tokio::test]
