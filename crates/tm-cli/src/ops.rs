@@ -689,10 +689,8 @@ pub fn templates_list(project: &Project, renderer: &Renderer) -> tm_types::Resul
             .collect();
         renderer.emit(&serde_json::json!({"templates": templates}), "")?;
     } else if registry.entries.is_empty() {
-        renderer.note(&format!(
-            "No templates declared in {}",
-            registry_path.display()
-        ));
+        let catalog = tm_templates::bundled_catalog()?;
+        renderer.note(&templates_empty_state(&registry_path, &catalog));
     } else {
         let mut rows = Vec::new();
         for (entry, (_, result)) in registry.entries.iter().zip(resolved.iter()) {
@@ -713,6 +711,22 @@ pub fn templates_list(project: &Project, renderer: &Renderer) -> tm_types::Resul
         renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
     }
     Ok(())
+}
+
+fn templates_empty_state(
+    registry_path: &std::path::Path,
+    catalog: &[tm_templates::TemplateManifest],
+) -> String {
+    let starters = catalog
+        .iter()
+        .map(|template| template.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "No templates declared in {}. Built-in starters: {starters}. Add project templates to {}.",
+        registry_path.display(),
+        registry_path.display()
+    )
 }
 
 /// Human/JSON label for a [`tm_templates::manifest::ParamType`], purpose-built so `tm templates
@@ -5621,6 +5635,22 @@ tests_pass = {}
         assert!(
             formatted.contains("3 commits"),
             "Should pluralize 'commits' when count > 1"
+        );
+    }
+}
+
+#[cfg(test)]
+mod template_empty_state_snapshot_tests {
+    use super::templates_empty_state;
+
+    #[test]
+    fn templates_empty_state_snapshot() {
+        let catalog = tm_templates::bundled_catalog().expect("built-in catalog");
+        let rendered =
+            templates_empty_state(std::path::Path::new("/project/templates.toml"), &catalog);
+        assert_eq!(
+            rendered,
+            "No templates declared in /project/templates.toml. Built-in starters: starter-ratatui, starter-axum, starter-rust-lib. Add project templates to /project/templates.toml."
         );
     }
 }

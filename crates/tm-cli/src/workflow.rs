@@ -153,12 +153,16 @@ pub fn workflow_list(project: &Project, renderer: &Renderer) -> tm_types::Result
             .collect();
         renderer.emit(&out, "")?;
     } else {
+        if rows.is_empty() {
+            renderer.emit(&(), &workflow_empty_state())?;
+            return Ok(());
+        }
         let table = Table::new(
             vec![
                 "NAME".to_string(),
                 "NODES".to_string(),
                 "PARAMS".to_string(),
-                "1X1?".to_string(),
+                "Single-ticket".to_string(),
             ],
             rows.iter()
                 .map(|row| match row {
@@ -187,6 +191,23 @@ pub fn workflow_list(project: &Project, renderer: &Renderer) -> tm_types::Result
         renderer.emit(&(), &table.render_colored(renderer.color_enabled()))?;
     }
     Ok(())
+}
+
+fn workflow_empty_state() -> String {
+    let starters = [
+        "harness-benchmark",
+        "migrate-sites",
+        "research-and-synthesize",
+        "review-change",
+    ];
+    format!(
+        "No workflows yet. Starters: {}",
+        starters
+            .iter()
+            .map(|starter| format!("`tm workflow new --from {starter}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// The version-drift relationship between the on-disk `.toml` currently being shown and whatever
@@ -414,6 +435,14 @@ mod tests {
     #[test]
     fn parse_params_empty_is_empty() {
         assert!(parse_params(&[]).expect("parses").is_empty());
+    }
+
+    #[test]
+    fn workflow_empty_state_snapshot() {
+        assert_eq!(
+            workflow_empty_state(),
+            "No workflows yet. Starters: `tm workflow new --from harness-benchmark`, `tm workflow new --from migrate-sites`, `tm workflow new --from research-and-synthesize`, `tm workflow new --from review-change`"
+        );
     }
 
     #[test]
