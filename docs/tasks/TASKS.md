@@ -1582,7 +1582,7 @@ is based on.
   acceptance: A scripted unsupported `verification` result produces one clear error naming valid result kinds and a succeeding retry uses a supported kind, with no repeated schema failure.
   test: `cargo test -p tm-cli plain_tool_error_keeps_parse_diagnostic_and_recovery_step`
   evidence: `/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm.log:18` — “Saved a result -> error: couldn't parse the result (unknown variant `verification`, expected one of `command_output`, `patch`, `file`, `report`, `index`, `benchmark`, `tran…); retry the operation, and check its input if it fails again”
-- [ ] **t20260926-0637-evidence-submission-guidance** — Surface evidence requirements before ticket submission fails
+- [x] **t20260926-0637-evidence-submission-guidance** — Surface evidence requirements before ticket submission fails (landed cfa02f3)
   model: sonnet · severity: low · builds Rust: yes · area: ticket-lifecycle · deps: none
   files: `crates/tm-cli/src/agent.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: When an agent attempts ticket submission without evidence, explain that it must store a report or other evidence artifact first and then cite that artifact when submitting; direct the next action rather than suggesting a blind retry.
