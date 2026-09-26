@@ -26,6 +26,8 @@ pub enum ArtifactKind {
     File,
     /// A generated report (verification, audit, benchmark writeup).
     Report,
+    /// Results from running verification checks.
+    Verification,
     /// A code/search index snapshot.
     Index,
     /// Benchmark results.

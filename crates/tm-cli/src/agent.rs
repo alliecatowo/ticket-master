@@ -2554,6 +2554,9 @@ fn plain_tool_error(detail: &str) -> String {
             concise_diagnostic("parse: ")
         );
     } else if detail.starts_with("invariant violated: ") {
+        if detail.contains("attach its returned artifact ID") {
+            return "error: submission needs evidence; store a result, then put the artifact ID returned by artifact.store in ticket.submit".to_owned();
+        }
         return format!(
             "error: operation state was inconsistent ({}); retry once, then report this failure if it persists",
             concise_diagnostic("invariant violated: ")
@@ -4214,6 +4217,16 @@ mod tests {
         assert!(rendered.contains("submission requires at least one evidence artifact"));
         assert!(rendered.contains("report this failure if it persists"));
         assert!(!rendered.contains("invariant violated:"));
+    }
+
+    #[test]
+    fn plain_tool_error_guides_empty_submission_to_returned_artifact_id() {
+        let rendered = plain_tool_error(
+            "invariant violated: Submitting a ticket needs at least one piece of evidence; store a result with artifact.store and attach its returned artifact ID",
+        );
+        assert!(rendered.contains("artifact ID returned by artifact.store"));
+        assert!(rendered.contains("ticket.submit"));
+        assert!(!rendered.contains("operation state was inconsistent"));
     }
 
     /// Regression guard for u1-run-progress-shows-args: live `tm run` progress must show what

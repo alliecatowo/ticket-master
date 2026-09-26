@@ -1009,7 +1009,7 @@ impl Store {
     ) -> tm_types::Result<Vec<Event>> {
         if evidence.is_empty() {
             return Err(TmError::invariant(
-                "Submitting a ticket needs at least one piece of evidence",
+                "Submitting a ticket needs at least one piece of evidence; store a result with artifact.store and attach its returned artifact ID",
             ));
         }
         let ticket = ticket.clone();

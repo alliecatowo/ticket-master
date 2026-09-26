@@ -2364,7 +2364,7 @@ impl CapabilityProvider for BuiltinCapability {
                 input_schema: json!({
                     "type": "object",
                     "properties": {
-                        "kind": {"type": "string"},
+                        "kind": {"type": "string", "enum": ["command_output", "patch", "file", "report", "verification", "index", "benchmark", "transcript", "workspace_snapshot"]},
                         "media_type": {"type": "string"},
                         "content": {"type": "string"},
                         "meta": {"type": "object"},
