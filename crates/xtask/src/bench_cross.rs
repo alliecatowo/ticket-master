@@ -1085,9 +1085,19 @@ fn binary_version(binary: &str, args: &[&str]) -> Option<String> {
 
 /// `cargo xtask bench-cross [--tools tm,opencode,...] [--task <filter>] [--out <dir>]
 /// [--model <provider/model>] [--task-timeout <secs>] [--max-cost-usd <amount>]
-/// [--real-claude-auth]` -- real runs only, opt-in, never part of `mise run verify`/`hygiene`
-/// (shelling to a real tool against a real, possibly-metered provider is exactly the
-/// non-deterministic, network-touching call `SPEC.md` §0 keeps out of the deterministic gate).
+/// [--tm-binary <path>] [--real-claude-auth] [--help|-h]` -- real runs only, opt-in, never part
+/// of `mise run verify`/`hygiene` (shelling to a real tool against a real, possibly-metered
+/// provider is exactly the non-deterministic, network-touching call `SPEC.md` §0 keeps out of the
+/// deterministic gate). `--help`/`-h` prints usage and returns immediately without discovering
+/// tasks or spawning anything.
+///
+/// `--tm-binary <path>` overrides how the `tm` adapter locates the `tm` binary it spawns; absent
+/// that flag, `resolve_tm_binary` looks for a `tm`/`tm.exe` next to this xtask binary's own
+/// `current_exe()` (the common case for a from-source build, since `xtask` and `tm` land in the
+/// same `target/<profile>/` directory) before falling back to the bare `"tm"` string (a `$PATH`
+/// search, for a genuinely-installed `tm`). This matters because a normal from-source dev
+/// workflow never puts this workspace's own compiled `tm` onto `$PATH`, so the old unconditional
+/// bare-name spawn failed instantly with "No such file or directory" on every real run.
 ///
 /// `--tools` defaults to `tm` alone when omitted: the only adapter with a genuinely
 /// zero-additional-cost default credential already wired end to end
@@ -1107,6 +1117,11 @@ fn binary_version(binary: &str, args: &[&str]) -> Option<String> {
 /// reported spend reaches it (checked between pairs, never mid-pair -- see
 /// `RunOptions::max_cost_micros`).
 pub fn run(args: &[String]) -> Result<()> {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print!("{BENCH_CROSS_HELP}");
+        return Ok(());
+    }
+
     let root = crate::workspace_root()?;
     let bench_root = root.join("bench");
 
@@ -1142,8 +1157,12 @@ pub fn run(args: &[String]) -> Result<()> {
         bail!("no bench/tasks/*.toml matched (filter: {:?})", task_filter);
     }
 
+    let tm_binary = resolve_tm_binary(
+        flag_value(args, "--tm-binary").as_deref(),
+        std::env::current_exe().ok().as_deref(),
+    );
     let tm_adapter = TmAdapter {
-        binary: "tm".to_string(),
+        binary: tm_binary,
         model: model.clone(),
         timeout: task_timeout,
     };
@@ -1218,6 +1237,77 @@ fn flag_value(args: &[String], flag: &str) -> Option<String> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .cloned()
+}
+
+/// Usage text for `cargo xtask bench-cross --help`/`-h`.
+const BENCH_CROSS_HELP: &str = "\
+cargo xtask bench-cross (mise run bench:cross) -- run bench/tasks/*.toml through tm and/or \
+configured external coding CLIs.
+
+USAGE:
+    cargo xtask bench-cross [OPTIONS]
+
+OPTIONS:
+    --tools <list>          Comma-separated tools to run (default: tm). One or more of: tm, \
+opencode, codex, claude.
+    --task <filter>         Only run bench tasks whose id contains this substring.
+    --out <dir>             Directory to write the report and per-run scratch state to.
+    --model <provider/model> Pin every requested tool to the same model.
+    --task-timeout <secs>   Kill a hung adapter's process group after this many seconds.
+    --max-cost-usd <amount> Stop scheduling further (tool, task) pairs once cumulative reported \
+spend reaches this amount.
+    --tm-binary <path>      Path to the tm binary to use for the tm adapter. Used as given only \
+if it exists; otherwise falls back to the default resolution (next to this xtask binary, then \
+$PATH).
+    --real-claude-auth      Required to include `claude` in --tools: opts into a real, metered \
+Claude/Anthropic API call.
+    --help, -h              Print this help and exit without running anything.
+";
+
+/// Resolves the real path to the `tm` binary the `tm` adapter should spawn, rather than the bare
+/// `"tm"` string relying on `$PATH` -- see this function's callers for why: a normal from-source
+/// dev workflow never installs the workspace's own compiled `tm` onto `$PATH`, so a bare-name
+/// `Command::new("tm")` fails to spawn instantly in the common case. Order of preference:
+/// 1. `explicit` -- an operator-supplied `--tm-binary <path>` override, resolved to an absolute
+///    path (see below) so a relative one is not silently reinterpreted later -- but only when it
+///    resolves to a file that actually exists; a mistyped or stale `--tm-binary` warns on stderr
+///    and falls through to the next option rather than being spawned as given and failing with a
+///    confusing "No such file or directory" far from where the flag was set.
+/// 2. `current_exe`'s own sibling `tm`/`tm.exe` -- `xtask` and `tm` land in the same
+///    `target/<profile>/` directory when built from this workspace, so this is the common case
+///    and works with zero configuration.
+/// 3. The bare `"tm"` string (the old behavior, `$PATH` search) -- only when neither of the above
+///    resolves to a file that actually exists, so a genuinely-on-PATH `tm` (e.g. an installed
+///    release) still works.
+///
+/// `current_exe` is threaded through as a parameter (rather than calling `std::env::current_exe`
+/// directly) so unit tests can point it at a fake scratch directory instead of this test binary's
+/// own real path.
+///
+/// A relative `explicit` path is resolved against the current working directory before returning
+/// (via `std::path::absolute`, a lexical resolution that does not require the path to exist) --
+/// `TmAdapter::tm_json` spawns the resolved binary with `.current_dir(workdir)` set to each bench
+/// task's own scratch fixture directory, so a relative path passed straight through would resolve
+/// against that scratch directory instead of wherever the caller actually ran `bench-cross` from.
+fn resolve_tm_binary(explicit: Option<&str>, current_exe: Option<&Path>) -> String {
+    if let Some(path) = explicit {
+        let absolute = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
+        if absolute.is_file() {
+            return absolute.to_string_lossy().to_string();
+        }
+        eprintln!(
+            "bench-cross: --tm-binary {path} is not a file; falling back to the default tm \
+             lookup"
+        );
+    }
+    let sibling_name = if cfg!(windows) { "tm.exe" } else { "tm" };
+    if let Some(dir) = current_exe.and_then(Path::parent) {
+        let candidate = dir.join(sibling_name);
+        if candidate.is_file() {
+            return candidate.to_string_lossy().to_string();
+        }
+    }
+    "tm".to_string()
 }
 
 /// Parse every `bench/tasks/*.toml` file, optionally restricted to ids containing `filter`.
@@ -1835,5 +1925,109 @@ mod tests {
         assert!(!outcome.timed_out, "{outcome:?}");
         assert_eq!(outcome.model.as_deref(), Some("m"));
         assert_eq!(outcome.tokens, Some(3));
+    }
+
+    /// Regression test for the real bug this fixes: `TmAdapter` used to hardcode `binary: "tm"`,
+    /// a bare `$PATH`-relative name, but a normal from-source dev workflow never installs this
+    /// workspace's own compiled `tm` onto `$PATH` -- every real `mise run bench:cross` invocation
+    /// failed instantly with "failed to spawn command: No such file or directory".
+    #[test]
+    fn resolve_tm_binary_prefers_explicit_override_over_everything_else() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let fake_exe = scratch.path().join("xtask");
+        std::fs::write(&fake_exe, "").expect("write fake xtask");
+        let sibling_tm = scratch.path().join("tm");
+        std::fs::write(&sibling_tm, "").expect("write fake tm sibling");
+        let custom_tm = scratch.path().join("custom-tm");
+        std::fs::write(&custom_tm, "").expect("write fake custom tm");
+
+        let resolved = resolve_tm_binary(
+            Some(custom_tm.to_str().expect("utf8 path")),
+            Some(&fake_exe),
+        );
+        assert_eq!(resolved, custom_tm.to_string_lossy());
+    }
+
+    /// `TmAdapter` spawns the resolved binary with `.current_dir` set to a scratch fixture
+    /// directory, not the caller's own cwd -- an unresolved relative `--tm-binary` path would
+    /// silently resolve against that scratch directory instead, so this must come back absolute.
+    /// Uses `Cargo.toml`, a file this crate's own `cargo test` run is guaranteed to have relative
+    /// to its working directory (the package root), so the explicit-path existence check passes.
+    #[test]
+    fn resolve_tm_binary_absolutizes_a_relative_explicit_override() {
+        let resolved = resolve_tm_binary(Some("Cargo.toml"), None);
+        assert!(
+            Path::new(&resolved).is_absolute(),
+            "expected an absolute path, got {resolved:?}"
+        );
+        assert!(resolved.ends_with("Cargo.toml"), "{resolved:?}");
+    }
+
+    #[test]
+    fn resolve_tm_binary_finds_a_sibling_of_current_exe_when_present() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let fake_exe = scratch.path().join("xtask");
+        std::fs::write(&fake_exe, "").expect("write fake xtask");
+        let sibling_tm = scratch
+            .path()
+            .join(if cfg!(windows) { "tm.exe" } else { "tm" });
+        std::fs::write(&sibling_tm, "").expect("write fake tm sibling");
+
+        let resolved = resolve_tm_binary(None, Some(&fake_exe));
+        assert_eq!(resolved, sibling_tm.to_string_lossy());
+    }
+
+    /// A nonexistent `--tm-binary` (mistyped, stale, or removed) must not be spawned as given --
+    /// it warns and falls through to the sibling lookup, same as if `--tm-binary` were absent.
+    #[test]
+    fn resolve_tm_binary_falls_through_to_sibling_when_explicit_path_does_not_exist() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let fake_exe = scratch.path().join("xtask");
+        std::fs::write(&fake_exe, "").expect("write fake xtask");
+        let sibling_tm = scratch.path().join("tm");
+        std::fs::write(&sibling_tm, "").expect("write fake tm sibling");
+
+        let resolved = resolve_tm_binary(Some("/no/such/path/tm"), Some(&fake_exe));
+        assert_eq!(resolved, sibling_tm.to_string_lossy());
+    }
+
+    #[test]
+    fn resolve_tm_binary_falls_back_to_bare_path_search_when_no_sibling_exists() {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let fake_exe = scratch.path().join("xtask");
+        std::fs::write(&fake_exe, "").expect("write fake xtask");
+        // Deliberately no `tm`/`tm.exe` written alongside `fake_exe`.
+
+        let resolved = resolve_tm_binary(None, Some(&fake_exe));
+        assert_eq!(resolved, "tm");
+    }
+
+    /// A nonexistent `--tm-binary` with no sibling either falls all the way through to the bare
+    /// `$PATH` search, same as if `--tm-binary` were never passed.
+    #[test]
+    fn resolve_tm_binary_falls_back_to_bare_path_search_when_explicit_path_and_sibling_are_both_missing(
+    ) {
+        let scratch = tempfile::tempdir().expect("tempdir");
+        let fake_exe = scratch.path().join("xtask");
+        std::fs::write(&fake_exe, "").expect("write fake xtask");
+        // Deliberately no `tm`/`tm.exe` written alongside `fake_exe`, and no file at the
+        // explicit path either.
+
+        let resolved = resolve_tm_binary(Some("/no/such/path/tm"), Some(&fake_exe));
+        assert_eq!(resolved, "tm");
+    }
+
+    #[test]
+    fn resolve_tm_binary_falls_back_to_bare_path_search_when_current_exe_is_unknown() {
+        let resolved = resolve_tm_binary(None, None);
+        assert_eq!(resolved, "tm");
+    }
+
+    #[test]
+    fn bench_cross_help_flag_prints_usage_without_discovering_tasks_or_spawning_anything() {
+        // `--help`/`-h` must short-circuit before `workspace_root()`/task discovery/adapter
+        // construction -- if it didn't, this call would try to spawn real tools and likely error.
+        run(&["--help".to_string()]).expect("--help should succeed");
+        run(&["-h".to_string()]).expect("-h should succeed");
     }
 }

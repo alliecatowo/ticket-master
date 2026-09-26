@@ -25,7 +25,8 @@ fn main() -> ExitCode {
         other => {
             eprintln!(
                 "usage: xtask <verify|hygiene|fmt|check-drift --base <ref>|bench-cross [--tools \
-                 tm,opencode,codex,claude] [--task <filter>] [--out <dir>] [--real-claude-auth]>"
+                 tm,opencode,codex,claude] [--task <filter>] [--out <dir>] [--tm-binary <path>] \
+                 [--real-claude-auth]>"
             );
             if !other.is_empty() {
                 eprintln!("unknown subcommand: {other}");
