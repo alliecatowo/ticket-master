@@ -1215,7 +1215,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-events && mise run test:crate -- tm-cli`
   evidence: The dogfood forensics needed `sqlite3 .tm/project.db` to see that 18 calls cost 1.03M tokens. `tm stats` only showed `T-1 S-2 18 1025330 not priced 203`.
 
-- [~] (claimed: subagent) **u1-record-flush-incremental** — `tm run --record` must write the cassette incrementally so a killed or timed-out run still leaves one
+- [ ] **u1-record-flush-incremental** — `tm run --record` must write the cassette incrementally so a killed or timed-out run still leaves one
   model: sonnet · severity: medium · builds Rust: yes · area: replay · deps: none
   files: `crates/tm-provider/src/cassette.rs`
   change: `tm run T-2 --record /tmp/x.cassette` killed by SIGTERM at a 580s bound left no file at all. Make the recording provider append each entry as it happens (JSONL, header first, fsync per entry or per N entries), and have the reader accept a cassette without a footer or with a truncated last line (treat it as ended at the last complete entry). Keep the file format backward compatible for reading.
@@ -1223,7 +1223,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-provider`
   evidence: /tmp/tm-audit/dogfood3.log ends `TIMEOUT after 580s / EXIT 124`, and `ls /tmp/tm-audit/dog2.cassette` gives No such file.
 
-- [~] (claimed: subagent) **u1-run-sigterm-releases-lease** — On SIGINT/SIGTERM, `tm run` should release its lease and record an interrupted attempt instead of leaving the ticket `active`
+- [ ] **u1-run-sigterm-releases-lease** — On SIGINT/SIGTERM, `tm run` should release its lease and record an interrupted attempt instead of leaving the ticket `active`
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: u1-run-progress-shows-args
   files: `crates/tm-cli/src/agent.rs`, `crates/tm-cli/src/sched.rs`
   change: After `tm run T-2` was killed with SIGTERM, `tm ticket list` still shows `T-2 work active`. Install a signal handler (tokio::signal) for the foreground run. On the first signal, cancel the agent loop, append an attempt failure (`interrupted by user`), release the lease (so the ticket returns to Ready through the existing retry path), and exit 130. On a second signal, exit immediately. Confirm first where the foreground run loop lives (grep `fn run_ticket` in crates/tm-cli/src) and adjust `files:` if it's elsewhere.
