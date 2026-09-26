@@ -87,7 +87,8 @@ fn git_err(e: git2::Error) -> TmError {
 
 /// Map a git2 error from [`HistoryIndex::why`]'s `blame_file` call — the one call whose
 /// `NotFound` genuinely means "this path isn't (or never was) in the tree" — to a plain-English
-/// message: a missing path reads as "File does not exist in repository history." rather than
+/// message: a path without commits reads as "<path> has no git history yet (it isn't committed)"
+/// rather than
 /// git2's NotFound class/code numbers, and anything else (a corrupt object, a pack failure) as a
 /// generic "repository may be corrupted" message rather than git2's own `Debug`/`Display` text.
 /// The raw error (with its real class and code) is logged via `tracing` for debugging, never
@@ -95,10 +96,12 @@ fn git_err(e: git2::Error) -> TmError {
 /// here", not "no such path" — see [`why_open_err`]) or for the per-commit lookups inside the
 /// blame loop (a `NotFound` there means a missing commit object, i.e. corruption, not a missing
 /// file — see [`why_corrupt_err`]).
-fn why_blame_err(e: git2::Error) -> TmError {
+fn why_blame_err(e: git2::Error, path: &str) -> TmError {
     if e.code() == git2::ErrorCode::NotFound {
         tracing::debug!(error = %e, "tm history why: path not found in repository history");
-        TmError::storage("File does not exist in repository history.".to_string())
+        TmError::storage(format!(
+            "{path} has no git history yet (it isn't committed)"
+        ))
     } else {
         tracing::warn!(error = %e, "tm history why: git2 error");
         TmError::storage("Unable to read file history — repository may be corrupted.".to_string())
@@ -258,12 +261,17 @@ impl HistoryIndex {
         }
 
         let repo = git2::Repository::open(&self.repo_root).map_err(why_open_err)?;
+        if matches!(repo.head(), Err(ref error) if error.code() == git2::ErrorCode::UnbornBranch) {
+            return Err(TmError::storage(format!(
+                "{path} has no git history yet (it isn't committed)"
+            )));
+        }
         let mut opts = git2::BlameOptions::new();
         opts.min_line(line_start as usize)
             .max_line(line_end as usize);
         let blame = repo
             .blame_file(std::path::Path::new(path), Some(&mut opts))
-            .map_err(why_blame_err)?;
+            .map_err(|error| why_blame_err(error, path))?;
 
         let mut shas: HashSet<String> = HashSet::new();
         for hunk in blame.iter() {
@@ -629,8 +637,8 @@ mod tests {
     }
 
     #[test]
-    fn why_on_a_path_missing_from_history_gives_a_plain_english_message() {
-        // A path that was never committed (blame_file's real NotFound case) reports as plain
+    fn why_on_an_untracked_path_gives_a_plain_english_message() {
+        // A path that was never committed reports as plain
         // English, not git2's class/code numbers (e.g. "class=Tree (14); code=NotFound (-3)").
         let (dir, repo) = init_repo();
         write_file(dir.path(), "a.txt", "line one\n");
@@ -640,15 +648,28 @@ mod tests {
         let clock = FixedClock::epoch();
         history.ingest_incremental(&clock).unwrap();
 
-        let err = history.why("nonexistent.txt", 1, 1).unwrap_err();
+        write_file(dir.path(), "todo.py", "print('todo')\n");
+        let err = history.why("todo.py", 1, 1).unwrap_err();
         let message = err.to_string();
         assert_eq!(
             message,
-            "storage: File does not exist in repository history."
+            "storage: todo.py has no git history yet (it isn't committed)"
         );
         assert!(
             !message.to_lowercase().contains("class=") && !message.to_lowercase().contains("code="),
             "message leaked git2 internals: {message}"
+        );
+    }
+
+    #[test]
+    fn why_in_a_repository_without_commits_gives_a_plain_english_message() {
+        let (dir, _repo) = init_repo();
+        write_file(dir.path(), "todo.py", "print('todo')\n");
+
+        let err = open_index(dir.path()).why("todo.py", 1, 1).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "storage: todo.py has no git history yet (it isn't committed)"
         );
     }
 
