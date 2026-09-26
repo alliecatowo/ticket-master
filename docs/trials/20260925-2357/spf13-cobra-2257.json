@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 3,
+      "tokens": 0,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 5
+      },
+      "better": "The run never reached code navigation or planning: after `tm init` and ticket creation, `tm run T-1` failed because the selected `devpass` provider was not registered, despite the prescribed credential-loading command. The message ended with `Run tm run T-1 again to retry`, which cannot repair unchanged provider configuration; the user would be left wondering whether retrying is actually useful or how to configure a usable provider. Validate provider readiness before dispatch, name the missing provider/configuration and a concrete repair command, and avoid recommending an unchanged retry for a configuration failure. The hidden regression test mechanically failed because the implementation was never changed."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 207.072,
+      "tokens": 27879,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode stated a concise plan, found the unsafe append in `getCompletions`, implemented a copy before adding the sentinel, and added a regression test. It first attempted `go test ./...` through a Go shim with no selected version, noticed and corrected the environment by using `mise exec go@1.25.8`, and reported the successful full suite. The hidden-test checkout then mechanically passed both packages. It could be more efficient by avoiding the unsuccessful semantic-index lookup (the repository had no index) and by running the configured Go command from the outset."
+    }
+  ]
+}

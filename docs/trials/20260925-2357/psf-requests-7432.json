@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 493,
+      "tokens": 2886820,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 1,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm located the correct stream-detection code and test area, but the run spent 2,886,820 reported input tokens over 35 tool calls and 493 seconds, revisiting the same implementation and broad historical diffs. It ended with ‘agent turn failed’ / ‘model ended turn without submitting’ and suggested rerunning, without telling the user that no implementation was submitted or that verification had not happened; retrying the same approach did not make progress. A one-time continuation after a text-only model stop, deduplicated findings between repeated reads, and a final summary that states whether a patch was submitted and tested would make the workflow more efficient and recoverable. The independent hidden test failed mechanically: the delegated-attribute stream test reaches `_encode_params` and raises `TypeError` because no stream was detected."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 56,
+      "tokens": 28107,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped plan, found the stream detection and rewind tests quickly, changed the detection to support delegated `__iter__`, and added a focused regression test. Its first test attempts failed because the agent invoked system pytest rather than the prepared virtual environment, and it reported the dependency/import blocker accurately; using the clone’s `.venv` would have allowed it to verify the change during its run. After replacing the agent-authored test file with PR #7433’s hidden test file and using the prepared virtual environment, the focused hidden-test selection passed (11 passed)."
+    }
+  ]
+}

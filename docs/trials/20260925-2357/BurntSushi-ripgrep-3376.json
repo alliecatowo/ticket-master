@@ -1,0 +1,70 @@
+{
+  "issue": {
+    "url": "https://github.com/BurntSushi/ripgrep/issues/3376",
+    "title": "`.gitignore` not taken into account when multiple search paths are provided",
+    "body": "### Please tick this box to confirm you have reviewed the above.\n\n- [x] I have a different issue.\n\n### What version of ripgrep are you using?\n\nripgrep 15.1.0\n\nfeatures:+pcre2\nsimd(compile):+SSE2,-SSSE3,-AVX2\nsimd(runtime):+SSE2,+SSSE3,+AVX2\n\nPCRE2 10.45 is available (JIT is available)\n\n### How did you install ripgrep?\n\nNixpkgs stable 25.11\n\n### What operating system are you using ripgrep on?\n\nNixOs 25.11\n\n### Describe your bug.\n\n`.gitignore` seems to be not taken into account if mutiple search paths are provided\n\n### What are the steps to reproduce the behavior?\n\n1. `mkdir tests src`\n2. `echo \"this\" > tests/valid && echo \"this\" > src/valid && echo \"this\" > src/invalid`\n3. `git init . && echo \"src/invalid\" > .gitignore`\n4. `rg \"this\"` => no `src/invalid`\n5. `rg \"this\" src/` => no `src/invalid`\n6. `rg \"this\" src/ tests/` => **`src/invalid` is found**\n7. `rg \"this\" tests/ src/` => funnily, `src/invalid` is not found\n\n### What is the actual behavior?\n\n```\n❯ rg --debug \"this\" src tests\nrg: DEBUG|rg::flags::parse|crates/core/flags/parse.rs:97: no extra arguments found from configuration file\nrg: DEBUG|rg::flags::hiargs|crates/core/flags/hiargs.rs:954: read CWD from environment: /tmp/reproduce\nrg: DEBUG|rg::flags::hiargs|crates/core/flags/hiargs.rs:1092: number of paths given to search: 2\nrg: DEBUG|rg::flags::hiargs|crates/core/flags/hiargs.rs:1103: is_one_file? false\nrg: DEBUG|rg::flags::hiargs|crates/core/flags/hiargs.rs:1278: found hostname for hyperlink configuration: sunbase\nrg: DEBUG|rg::flags::hiargs|crates/core/flags/hiargs.rs:1288: hyperlink format: \"\"\nrg: DEBUG|rg::flags::hiargs|crates/core/flags/hiargs.rs:175: using 12 thread(s)\nrg: DEBUG|grep_regex::config|/build/source/crates/regex/src/config.rs:175: assembling HIR from 1 fixed string literals\nrg: DEBUG|ignore::gitignore|crates/ignore/src/gitignore.rs:398: opened gitignore file: /tmp/reproduce/.gitignore\nrg: DEBUG|globset|crates/globset/src/lib.rs:515: built glob set; 1 literals, 0 basenames, 0 extensions, 0 prefixes, 0 suffixes, 0 required extensions, 0 regexes\nrg: DEBUG|ignore::gitignore|crates/ignore/src/gitignore.rs:398: opened gitignore file: /tmp/reproduce/.git/info/exclude\n\nsrc/valid\n1:this\n\nsrc/invalid\n1:this\n\ntests/valid\n1:this\n```\n\n### What is the expected behavior?\n\nIn step `6.` of reproduction I feel that I should not find `src/invalid`"
+  },
+  "fix_pr": 3468,
+  "base_sha": "3a570990c4cf04404c4c320391e92749d434643b",
+  "merge_sha": "241b87b3377136659ef0f57948b8e0739e9a691b",
+  "fix_test_files": [
+    "crates/ignore/src/dir.rs (inline unit tests; not overwritten wholesale because it also contains the implementation fix)",
+    "tests/misc.rs"
+  ],
+  "setup": "Rust: no setup required; both fresh clones checked out at base SHA before either agent started.",
+  "verification": {
+    "command": "cargo test -p ignore; cargo test --test integration ignore_git_multi_root_order",
+    "tm": {
+      "passed": true,
+      "evidence": "verification.log:180; hidden-result.log:37-41"
+    },
+    "opencode": {
+      "passed": true,
+      "evidence": "verification-opencode.log:179; hidden-result-opencode.log:6-10"
+    },
+    "note": "The merged PR's issue-specific inline unit tests in crates/ignore/src/dir.rs were not copied wholesale because that file also contains production implementation. The integration test file tests/misc.rs was checked out from the merge SHA in both arms. The selected integration test passed in both arms despite neither agent making an implementation change."
+  },
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 344,
+      "tokens": 1777863,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 2
+      },
+      "better": "tm located the relevant ignore traversal and matcher code quickly, but spent 25 tool calls and 344 seconds exploring without landing a patch. The run ended with the vague user-facing phrase ‘something went wrong’ followed by ‘model ended turn without submitting’ and a retry instruction; a user could reasonably assume retrying is the only remedy, while the message does not say that no change or verification was submitted. A bounded continuation that asks for a concrete submission, followed by a clear summary of absent changes and verification, would make this run more recoverable. The focused investigation and existing-cache test were not enough to verify the issue itself."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 132,
+      "tokens": 28543,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode set out a scoped investigation-and-verification plan, traced the code path from multiple CLI roots into cached parent matchers, and clearly admitted it had not made a change when it could not establish the cause. It used 28,543 reported tokens and finished in 132 seconds. It would be better if it had run the issue-specific multi-root regression after exploring, rather than only the existing cache test; that would have provided direct evidence about whether its understanding matched the reported behavior."
+    }
+  ],
+  "artifacts": {
+    "tm_log": "BurntSushi-ripgrep-3376/tm.log",
+    "opencode_log": "BurntSushi-ripgrep-3376/opencode.log",
+    "tm_verification": "BurntSushi-ripgrep-3376/verification.log",
+    "opencode_verification": "BurntSushi-ripgrep-3376/verification-opencode.log",
+    "tm_hidden_test": "BurntSushi-ripgrep-3376/hidden-result.log",
+    "opencode_hidden_test": "BurntSushi-ripgrep-3376/hidden-result-opencode.log",
+    "tm_inbox_tasks": "/tmp/tm-luna/inbox/trial-20260925-2357-BurntSushi-ripgrep-3376.md"
+  }
+}
