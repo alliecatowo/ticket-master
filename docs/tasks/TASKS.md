@@ -1619,7 +1619,7 @@ is based on.
   acceptance: An agent-loop test fixture with duplicate read/history calls demonstrates that the run reuses its first findings, bounds redundant exploration, and still permits a targeted reread when new evidence requires it.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-0821/psf-requests-7432/tm.log:6-49` — T-3 repeatedly read `src/requests/models.py`, `src/requests/utils.py`, and `tests/test_requests.py` and compared several historical revisions before failing without a patch; `tm stats --json` records 35 tool calls, 392 seconds, and 2,751,047 input tokens.
-- [ ] **t20260926-0821-sindresorhus-ky-878-result-persistence-recovery** — Recover cleanly from agent result/evidence persistence errors
+- [x] **t20260926-0821-sindresorhus-ky-878-result-persistence-recovery** — Recover cleanly from agent result/evidence persistence errors (landed efebfa3)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-cli/src/agent.rs`
   change: When ticket submission reports missing evidence or a result save fails to parse, give the agent a concrete recovery action and ensure a later success message only appears after durable evidence/result persistence succeeds; preserve a concise indication of whether the ticket was actually submitted.
