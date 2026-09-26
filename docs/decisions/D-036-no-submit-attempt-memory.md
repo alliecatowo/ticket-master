@@ -22,9 +22,11 @@ dispatch to the next; each `Executor::execute` call is otherwise a clean-slate f
 `BuiltinExecutor` persists a concise `InvestigationSummary` (deduplicated tool-call signatures, plus
 the model's own last non-empty reply) as a tagged `ArtifactKind::Report` artifact whenever an attempt
 ends without submitting, and reads the most recent one back on the *next* dispatch of the same ticket
-to fold a steering note onto that attempt's own context. Two consecutive no-submit attempts whose
-investigations overlap (more than half of the smaller side's tool signatures also appear on the other
-side) flip a sticky `repeated` flag: every attempt from then on, in the same round, gets a specific,
+to fold a steering note onto that attempt's own context. Two consecutive no-submit attempts, where the
+*later* one's investigation is mostly a repeat of the earlier one's (more than half of the later
+attempt's own tool signatures also appear in the earlier attempt's — directional, not a plain set
+overlap; see `InvestigationSummary::mostly_repeats`'s own doc comment for why), flip a sticky
+`repeated` flag: every attempt from then on, in the same round, gets a specific,
 user-actionable failure detail (naming what was repeated, or the model's own diagnosis/repro-ask) in
 place of the generic `"model ended turn without submitting"`, and the *next* attempt's context tells
 the model outright to stop investigating and either name a diagnosis or ask for a targeted repro.
@@ -101,10 +103,11 @@ already generic enough to carry this; no new event kind or table was needed.
   scheduled again by the ordinary retry path — it just carries a specific, actionable detail instead
   of a generic one once it does. Adding a real "needs a human before retrying" failure class (and
   wiring `tm-scheduler`'s escalation policy to it) is a natural follow-up, out of this task's scope.
-- `InvestigationSummary::overlaps` is a coarse, symmetric-set heuristic (more than half the smaller
-  side's signatures shared), not a semantic judgment of whether the model actually made progress; a
-  model that reads the same files but reasons its way to real new insight is indistinguishable from
-  one that is genuinely stuck, by this check alone.
+- `InvestigationSummary::mostly_repeats` is a coarse, directional heuristic (more than half of the
+  *later* attempt's own tool signatures also appear in the earlier attempt's), not a semantic
+  judgment of whether the model actually made progress; a model that reads the same files but
+  reasons its way to real new insight is indistinguishable from one that is genuinely stuck, by
+  this check alone.
 - This memory is a `BuiltinExecutor`-only side channel, not part of `ExecutorTask::context_pack`
   itself (`SPEC.md` §24.1's "every executor receives the same compiled artifact"). Concretely:
   `tm ticket context <ID>` (which previews `tm_context::pack::compile`'s own output, not anything

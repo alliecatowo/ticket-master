@@ -839,17 +839,22 @@ impl Executor for BuiltinExecutor {
                 // no-submit attempts in this round, independent of whether the round was ever
                 // resolved partway through.
                 let effective = prior.as_ref().and_then(PriorInvestigation::effective);
-                let overlapped_this_attempt =
-                    effective.is_some_and(|p| p.summary.overlaps(&summary));
+                // Directional: does *this* attempt's own investigation mostly repeat the prior
+                // one, not merely "do the two sets overlap" — see `InvestigationSummary::
+                // mostly_repeats`'s own doc comment for why a symmetric check would wrongly flag
+                // an attempt that did a lot of genuinely new work alongside one incidental
+                // shared read.
+                let mostly_repeats_prior =
+                    effective.is_some_and(|p| summary.mostly_repeats(&p.summary));
                 // Sticky, not re-derived fresh each time: once a round has been flagged as
                 // making no forward progress, a *later* attempt in that same round that heeded
                 // the steering in `BuiltinExecutor::augmented_context` and stopped calling tools
                 // (e.g. it just names a diagnosis or asks for a repro instead) has nothing left
-                // to overlap by definition — `InvestigationSummary::overlaps` always returns
-                // `false` once one side has no tool signatures at all. Without this, that
+                // to repeat by definition — `InvestigationSummary::mostly_repeats` always returns
+                // `false` once either side has no tool signatures at all. Without this, that
                 // attempt would silently fall back to the generic, uninformative detail below,
                 // discarding exactly the diagnosis/repro-ask this mechanism exists to surface.
-                let repeated = overlapped_this_attempt || effective.is_some_and(|p| p.repeated);
+                let repeated = mostly_repeats_prior || effective.is_some_and(|p| p.repeated);
                 let attempt_count = prior.as_ref().map_or(1, |p| p.attempt_count + 1);
                 self.persist_no_submit_investigation(
                     &ticket,
@@ -859,10 +864,14 @@ impl Executor for BuiltinExecutor {
                     repeated,
                 );
                 let detail = if repeated {
+                    // Deliberately no attempt number in this message: `attempt_count` only
+                    // counts this mechanism's own no-submit records, which can disagree with the
+                    // ticket's real attempt number the moment a different failure class (a
+                    // budget handoff, a denied tool) lands in between two of them.
                     format!(
-                        "no forward progress: attempt {attempt_count} in this round ended \
-                         without calling ticket.submit ({}). This needs a targeted reproduction \
-                         case or a manual diagnosis rather than another automatic retry",
+                        "no forward progress: this round ended without calling ticket.submit \
+                         again ({}). This needs a targeted reproduction case or a manual \
+                         diagnosis rather than another automatic retry",
                         summary.render()
                     )
                 } else {
@@ -1579,6 +1588,58 @@ mod tests {
         assert_eq!(
             outcome.detail, NO_SUBMIT_DETAIL,
             "different investigations must not be reported as repeated no-progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_attempt_that_does_real_new_work_alongside_one_shared_read_is_not_flagged() {
+        // The real, previously-broken case a symmetric overlap check would get wrong: attempt 1
+        // does one incidental read and gives up; attempt 2 re-reads that same file (unavoidable —
+        // an edit needs `expected_hash` from a fresh `fs.read`) but then goes on to do real,
+        // different work (an edit, a test run) before also ending without submitting. Attempt 2
+        // must not be flagged as "the same investigation repeated" just because attempt 1's
+        // *entire* investigation happened to be the one thing they share.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (executor, provider) = test_executor_with_mock(dir.path());
+        let ticket = seed_ticket(&executor);
+
+        provider.script_sequence(no_submit_sequence_reading("crates/foo/src/walk.rs"));
+        executor
+            .execute(no_submit_task(&ticket))
+            .await
+            .expect("execute completes");
+
+        provider.script_sequence(vec![
+            tool_use_completion(
+                "call-1",
+                "fs.read",
+                serde_json::json!({"path": "crates/foo/src/walk.rs"}),
+            ),
+            tool_use_completion(
+                "call-2",
+                "fs.read",
+                serde_json::json!({"path": "crates/foo/src/dir.rs"}),
+            ),
+            tool_use_completion(
+                "call-3",
+                "shell.run",
+                serde_json::json!({"argv": ["cargo", "test", "--workspace"]}),
+            ),
+            text_only_completion("tests still fail, still investigating"),
+            text_only_completion("still not sure what's wrong"),
+        ]);
+        let outcome = executor
+            .execute(no_submit_task(&ticket))
+            .await
+            .expect("execute completes")
+            .failure
+            .expect("still no submission");
+
+        assert_eq!(
+            outcome.detail, NO_SUBMIT_DETAIL,
+            "one shared read alongside two genuinely new tool calls must not be reported as \
+             repeated no-progress: {}",
+            outcome.detail
         );
     }
 

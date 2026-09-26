@@ -109,24 +109,31 @@ impl InvestigationSummary {
         }
     }
 
-    /// True when `self` and `other` share enough tool signatures to count as "the same
-    /// investigation, repeated" rather than genuinely different work: more than half of the
-    /// smaller side's signatures also appear on the other side. Two summaries with no tool
-    /// signatures at all never overlap (nothing concrete to compare), even if their conclusions
-    /// happen to match.
-    pub fn overlaps(&self, other: &InvestigationSummary) -> bool {
-        if self.tool_signatures.is_empty() || other.tool_signatures.is_empty() {
+    /// True when `self` (a *later* attempt's own investigation) is mostly a repeat of `prior` (an
+    /// earlier one's): more than half of `self`'s own tool signatures also appear in `prior`.
+    /// Deliberately directional, not symmetric like a plain set-overlap check would be: an
+    /// attempt that re-reads one file from the prior attempt but then goes on to edit it, run the
+    /// tests, and do real new work must not be flagged just because that one re-read is *all* the
+    /// prior attempt happened to have done — re-reading a file the model doesn't already have the
+    /// current `hash`/content of is unavoidable before it can safely edit it. Comparing against
+    /// the *later* attempt's own total, rather than the smaller of the two sets, means a large
+    /// amount of genuinely new tool activity dilutes one incidental shared read below the
+    /// threshold, while an attempt that (like `prior`) does nothing but that same one read still
+    /// counts as a full repeat. Two summaries where either side has no tool signatures at all
+    /// never count as a repeat (nothing concrete to compare), even if their conclusions happen to
+    /// match.
+    pub fn mostly_repeats(&self, prior: &InvestigationSummary) -> bool {
+        if self.tool_signatures.is_empty() || prior.tool_signatures.is_empty() {
             return false;
         }
-        let other_set: std::collections::BTreeSet<&str> =
-            other.tool_signatures.iter().map(String::as_str).collect();
+        let prior_set: std::collections::BTreeSet<&str> =
+            prior.tool_signatures.iter().map(String::as_str).collect();
         let shared = self
             .tool_signatures
             .iter()
-            .filter(|s| other_set.contains(s.as_str()))
+            .filter(|s| prior_set.contains(s.as_str()))
             .count();
-        let smaller = self.tool_signatures.len().min(other.tool_signatures.len());
-        shared * 2 >= smaller
+        shared * 2 > self.tool_signatures.len()
     }
 
     /// Render this summary as concise prose for a following attempt's context or a failure
@@ -2409,13 +2416,13 @@ mod tests {
             "two different argv-only shell calls must not collapse to the same signature"
         );
         assert!(
-            !cargo_test.overlaps(&ls),
+            !cargo_test.mostly_repeats(&ls),
             "genuinely different shell commands must not be treated as a repeated investigation"
         );
     }
 
     #[test]
-    fn investigation_summary_treats_the_same_argv_only_shell_call_as_overlapping() {
+    fn investigation_summary_treats_the_same_argv_only_shell_call_as_a_repeat() {
         let a = InvestigationSummary::from_steps(&[step_with_tool_call(
             "shell.run",
             serde_json::json!({"argv": ["cargo", "test", "--workspace"], "cacheable": true}),
@@ -2425,8 +2432,37 @@ mod tests {
             serde_json::json!({"argv": ["cargo", "test", "--workspace"], "cacheable": false}),
         )]);
         assert!(
-            a.overlaps(&b),
+            a.mostly_repeats(&b),
             "the same argv, with an unrelated flag differing, is still the same command repeated"
+        );
+    }
+
+    #[test]
+    fn investigation_summary_mostly_repeats_is_directional_not_a_symmetric_overlap() {
+        // `mostly_repeats` compares against the *later* attempt's own total, not the smaller of
+        // the two sets: a later attempt that does a lot of genuinely new work, alongside one
+        // incidental re-read shared with the prior attempt, must not be flagged just because that
+        // one shared read happens to be *all* the prior attempt did.
+        let one_read = InvestigationSummary {
+            tool_signatures: vec!["fs.read(walk.rs)".to_string()],
+            conclusion: None,
+        };
+        let lots_of_new_work = InvestigationSummary {
+            tool_signatures: vec![
+                "fs.read(walk.rs)".to_string(),
+                "edit.apply_patch(walk.rs)".to_string(),
+                "shell.run(cargo test)".to_string(),
+            ],
+            conclusion: None,
+        };
+        assert!(
+            !lots_of_new_work.mostly_repeats(&one_read),
+            "one shared read out of three genuinely different calls must not count as a repeat"
+        );
+        assert!(
+            one_read.mostly_repeats(&lots_of_new_work),
+            "but an attempt that does nothing except repeat one call from a larger prior \
+             investigation is still fully a repeat of it"
         );
     }
 
