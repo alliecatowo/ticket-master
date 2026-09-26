@@ -2430,6 +2430,7 @@ fn bound_result(
     let preview = String::from_utf8_lossy(&bytes[..preview_len]).into_owned();
     let preview_json = json!({
         "truncated": true,
+        "result_bytes": bytes.len(),
         "artifact": artifact.as_str(),
         "preview": preview,
     });

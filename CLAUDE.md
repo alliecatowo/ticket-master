@@ -463,7 +463,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
 - `tm stats [--by ticket|day|model|tool] [--ticket T]` rolls up local usage from the project's own
   event log: tokens, cost, and tool calls per ticket (default), per UTC calendar day, per
   provider/model pair (`unattributed` when a call predates cost/model attribution), or per tool
-  (count, failures, average duration). `--ticket T` restricts any of the four to one ticket. A
+  (count, failures, average duration, result size, and largest request). Ticket and tool tables
+  include result KB and maximum request tokens; result size is summed from completed tool calls,
+  and older events without a recorded size contribute zero. `--ticket T` restricts any of the
+  four to one ticket. A
   `0` cost means the serving candidate has no price configured (`not priced`), not that the call
   was free. It folds the whole event log fresh on every run — nothing is cached or persisted
   separately (`docs/decisions/D-030-local-telemetry.md`).

@@ -280,6 +280,8 @@ payload_kinds! {
         tool_name: String,
         duration_ms: u64,
         outcome: String,
+        result_bytes: Option<u64>,
+        truncated: Option<bool>,
     };
     "Payload for `milestone.created`.", MilestoneCreatedPayload, MilestoneCreated, MilestoneCreated, as_milestone_created, {
         milestone: MilestoneId,
@@ -783,6 +785,8 @@ mod tests {
                 tool_name: "read".to_string(),
                 duration_ms: 42,
                 outcome: outcome.to_string(),
+                result_bytes: Some(123),
+                truncated: Some(false),
             });
 
             let json = original.to_json().unwrap();
@@ -793,6 +797,18 @@ mod tests {
             assert_eq!(inner.duration_ms, 42);
             assert_eq!(inner.outcome, outcome);
         }
+    }
+
+    #[test]
+    fn tool_call_completed_old_shape_still_decodes() {
+        let old_shape = serde_json::json!({
+            "ticket": null, "session": null, "tool_name": "read",
+            "duration_ms": 42, "outcome": "completed"
+        });
+        let restored = Payload::from_json(EventKind::ToolCallCompleted, old_shape).unwrap();
+        let payload = restored.as_tool_call_completed().unwrap();
+        assert_eq!(payload.result_bytes, None);
+        assert_eq!(payload.truncated, None);
     }
 
     #[test]

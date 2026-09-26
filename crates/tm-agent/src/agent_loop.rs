@@ -666,6 +666,8 @@ impl AgentLoop {
                     ToolOutcome::Errored { .. } => "error",
                 }
                 .to_string(),
+                result_bytes: outcome_result_bytes(&resolution),
+                truncated: outcome_truncated(&resolution),
             }],
         )?;
 
@@ -1478,6 +1480,8 @@ impl AgentLoop {
                         ToolOutcome::Errored { .. } => "error",
                     }
                     .to_string(),
+                    result_bytes: outcome_result_bytes(&resolution),
+                    truncated: outcome_truncated(&resolution),
                 });
 
                 tool_call_records.push(ToolCallRecord {
@@ -1757,6 +1761,33 @@ pub(crate) fn tool_result_text(resolution: &ToolOutcome) -> (String, bool) {
         ToolOutcome::Completed { result, .. } => (result.to_string(), false),
         ToolOutcome::Denied { reason } => (format!("denied: {reason}"), true),
         ToolOutcome::Errored { detail } => (format!("error: {detail}"), true),
+    }
+}
+
+fn outcome_truncated(resolution: &ToolOutcome) -> Option<bool> {
+    match resolution {
+        ToolOutcome::Completed { result, .. } => Some(
+            result
+                .get("truncated")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+        ),
+        ToolOutcome::Denied { .. } | ToolOutcome::Errored { .. } => Some(false),
+    }
+}
+
+fn outcome_result_bytes(resolution: &ToolOutcome) -> Option<u64> {
+    match resolution {
+        ToolOutcome::Completed { result, .. } => Some(
+            result
+                .get("result_bytes")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_else(|| {
+                    serde_json::to_vec(result).map_or(0, |bytes| bytes.len() as u64)
+                }),
+        ),
+        ToolOutcome::Denied { reason } => Some(reason.len() as u64),
+        ToolOutcome::Errored { detail } => Some(detail.len() as u64),
     }
 }
 

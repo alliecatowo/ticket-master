@@ -776,6 +776,8 @@ mod tests {
                     tool_name: "search".into(),
                     duration_ms: 50,
                     outcome: "ok".into(),
+                    result_bytes: None,
+                    truncated: None,
                 }),
             ),
             event(
@@ -787,6 +789,8 @@ mod tests {
                     tool_name: "edit".into(),
                     duration_ms: 80,
                     outcome: "ok".into(),
+                    result_bytes: None,
+                    truncated: None,
                 }),
             ),
             event(

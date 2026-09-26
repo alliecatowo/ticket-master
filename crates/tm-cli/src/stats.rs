@@ -85,6 +85,10 @@ pub struct ToolStats {
     pub failures: u64,
     /// Mean `duration_ms` across this tool's calls, `0.0` when `count == 0`.
     pub avg_duration_ms: f64,
+    /// Sum of recorded result sizes, displayed in kibibytes.
+    pub result_bytes: u64,
+    /// Largest request recorded in the selected event set.
+    pub max_request_tokens: u64,
 }
 
 /// The ticket this event's payload names, if any -- only `usage.recorded`, `tool_call.completed`
@@ -222,10 +226,16 @@ pub fn stats_by_model(events: &[Event]) -> Vec<ModelStats> {
 
 /// Per-tool rollup over `tool_call.completed` events, sorted by tool name ascending.
 pub fn stats_by_tool(events: &[Event]) -> Vec<ToolStats> {
+    let max_request_tokens = events
+        .iter()
+        .filter_map(|event| event.payload.as_usage_recorded().map(|p| p.tokens))
+        .max()
+        .unwrap_or(0);
     struct Acc {
         count: u64,
         failures: u64,
         duration_sum_ms: u64,
+        result_bytes: u64,
     }
     let mut tools: BTreeMap<String, Acc> = BTreeMap::new();
     for event in events {
@@ -239,12 +249,14 @@ pub fn stats_by_tool(events: &[Event]) -> Vec<ToolStats> {
             count: 0,
             failures: 0,
             duration_sum_ms: 0,
+            result_bytes: 0,
         });
         acc.count += 1;
         if p.outcome != "completed" {
             acc.failures += 1;
         }
         acc.duration_sum_ms = acc.duration_sum_ms.saturating_add(p.duration_ms);
+        acc.result_bytes = acc.result_bytes.saturating_add(p.result_bytes.unwrap_or(0));
     }
     tools
         .into_iter()
@@ -257,6 +269,8 @@ pub fn stats_by_tool(events: &[Event]) -> Vec<ToolStats> {
             } else {
                 0.0
             },
+            result_bytes: acc.result_bytes,
+            max_request_tokens,
         })
         .collect()
 }
@@ -296,6 +310,26 @@ fn restrict_to_ticket(events: &[Event], ticket: Option<&TicketId>) -> Vec<Event>
     }
 }
 
+fn ticket_result_bytes(events: &[Event], ticket: &TicketId) -> u64 {
+    events
+        .iter()
+        .filter_map(|event| event.payload.as_tool_call_completed())
+        .filter(|p| p.ticket.as_ref() == Some(ticket))
+        .fold(0u64, |sum, p| {
+            sum.saturating_add(p.result_bytes.unwrap_or(0))
+        })
+}
+
+fn ticket_max_request_tokens(events: &[Event], ticket: &TicketId) -> u64 {
+    events
+        .iter()
+        .filter_map(|event| event.payload.as_usage_recorded())
+        .filter(|p| p.ticket.as_ref() == Some(ticket))
+        .map(|p| p.tokens)
+        .max()
+        .unwrap_or(0)
+}
+
 /// A friendly one-liner for an empty rollup, naming what to do next rather than printing a bare
 /// header row.
 fn empty_state_message() -> &'static str {
@@ -325,6 +359,8 @@ pub fn dispatch_stats(
                     "Tokens".to_string(),
                     "Cost".to_string(),
                     "Wall time (s)".to_string(),
+                    "Result KB".to_string(),
+                    "Max request tokens".to_string(),
                 ],
                 rows.iter()
                     .map(|m| {
@@ -335,6 +371,11 @@ pub fn dispatch_stats(
                             m.tokens_in.to_string(),
                             format_dollars(m.dollars_micros),
                             m.wall_seconds.to_string(),
+                            format!(
+                                "{:.1}",
+                                ticket_result_bytes(&events, &m.ticket) as f64 / 1024.0
+                            ),
+                            ticket_max_request_tokens(&events, &m.ticket).to_string(),
                         ]
                     })
                     .collect(),
@@ -412,6 +453,8 @@ pub fn dispatch_stats(
                     "Count".to_string(),
                     "Failures".to_string(),
                     "Avg duration (ms)".to_string(),
+                    "Result KB".to_string(),
+                    "Max request tokens".to_string(),
                 ],
                 rows.iter()
                     .map(|t| {
@@ -420,6 +463,8 @@ pub fn dispatch_stats(
                             t.count.to_string(),
                             t.failures.to_string(),
                             format!("{:.1}", t.avg_duration_ms),
+                            format!("{:.1}", t.result_bytes as f64 / 1024.0),
+                            t.max_request_tokens.to_string(),
                         ]
                     })
                     .collect(),
@@ -507,6 +552,8 @@ mod tests {
                 tool_name: tool_name.to_string(),
                 duration_ms,
                 outcome: outcome.to_string(),
+                result_bytes: None,
+                truncated: None,
             }),
         )
     }
@@ -614,6 +661,31 @@ mod tests {
         let read = rows.iter().find(|r| r.tool == "read").expect("row");
         assert_eq!(read.count, 1);
         assert_eq!(read.failures, 0);
+    }
+
+    #[test]
+    fn stats_by_tool_and_ticket_include_result_size_and_max_request_tokens() {
+        let t1 = ticket("T-1");
+        let call = event(
+            1,
+            Timestamp::EPOCH,
+            tm_events::Payload::from(tm_events::payload::ToolCallCompletedPayload {
+                ticket: Some(t1.clone()),
+                session: Some(session("S-1")),
+                tool_name: "read".into(),
+                duration_ms: 1,
+                outcome: "completed".into(),
+                result_bytes: Some(2048),
+                truncated: Some(true),
+            }),
+        );
+        let usage = usage_event(2, Timestamp::EPOCH, &t1, 8192, 0, None, None);
+        let events = vec![call, usage];
+        let tool = &stats_by_tool(&events)[0];
+        assert_eq!(tool.result_bytes, 2048);
+        assert_eq!(tool.max_request_tokens, 8192);
+        assert_eq!(ticket_result_bytes(&events, &t1), 2048);
+        assert_eq!(ticket_max_request_tokens(&events, &t1), 8192);
     }
 
     #[test]
