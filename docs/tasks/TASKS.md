@@ -1575,7 +1575,7 @@ is based on.
   acceptance: A tool request using an absolute path inside the project succeeds or returns a concise correction pointing to its relative form, while an outside-root path remains rejected.
   test: `cargo test -p tm-agent resolve_repo_path`
   evidence: `/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm.log:12` — “Built the project -> error: couldn't parse the result (path `/private/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm` must be repository-relative)”
-- [ ] **t20260926-0637-result-schema-recovery** — Explain unsupported result kinds and recover without repeated invalid tool calls
+- [x] **t20260926-0637-result-schema-recovery** — Explain unsupported result kinds and recover without repeated invalid tool calls (landed e84fdba)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-tools · deps: none
   files: `crates/tm-cli/src/agent.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: Include the supported result-kind names in parse-error feedback and provide an explicit mapping/recovery hint when a provider emits an unsupported result kind such as `verification`; ensure retries switch to a supported kind rather than resubmitting the same invalid shape.
