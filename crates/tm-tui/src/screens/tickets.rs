@@ -1396,6 +1396,7 @@ impl TicketsScreen {
                  queue a draft",
             ),
             ("ctrl+b", "open the Kanban board"),
+            ("tab / shift+tab", "switch view"),
             ("enter on a heading", "collapse or expand the group"),
             ("shift+enter  ctrl+j", "newline in the dispatch input"),
             ("esc", "close peek, clear the input, or go back to the chat"),
@@ -1505,7 +1506,7 @@ impl TicketsScreen {
             hints.push("enter to open".into());
             hints.push("space to close".into());
             return vec![Span::new(hints.join(glyphs.sep), muted)];
-        } else if !self.input.is_empty() {
+        } else if !self.input.is_empty() || self.data.rows.is_empty() {
             vec![
                 "enter to dispatch",
                 "shift+enter for a newline",
@@ -2331,5 +2332,23 @@ mod tests {
         assert_eq!(compact_age(3 * 3_600_000), "3h");
         assert_eq!(compact_age(2 * 86_400_000), "2d");
         assert_eq!(compact_age(-1), "0s");
+    }
+
+    #[test]
+    fn empty_tickets_screen_shortcuts_and_footer_snapshot() {
+        let mut s = TicketsScreen::new(
+            ComponentId::new("t"),
+            TicketsData {
+                version: "0.1.0".into(),
+                model: "mock/m1".into(),
+                place: "~/new".into(),
+                notice: None,
+                rows: vec![],
+            },
+        );
+        let env = Env::new(true);
+        press(&mut s, &env, KeyCode::Char('?'));
+        let text = render(&s, 100, 40, true).join("\n");
+        insta::assert_snapshot!("empty_tickets_shortcuts", text);
     }
 }

@@ -1,0 +1,44 @@
+---
+source: crates/tm-tui/src/screens/tickets.rs
+expression: text
+---
+
+  ╭─────╮  Ticketmaster v0.1.0
+  ╞ tm  ╡  mock/m1 · ~/new
+  ╰─────╯  no tickets yet
+           Tickets  ·  Board  ·  Milestones  ·  Timeline  ·  Graph
+
+  ╭─ Shortcuts ──────────────────────────────────────────────────────────────────────────────────╮
+  │ ↑ ↓                  move between tickets                                                    │
+  │ enter                attach: open the chat on the ticket, or dispatch the typed task         │
+  │ →                    attach to the selected ticket                                           │
+  │ space                peek: objective, attempts, activity, failures, submission               │
+  │ ctrl+x               cancel the ticket (press again within 2s to confirm)                    │
+  │ space, then 1 2 3    a ticket's options: accept or reject a submission, retry an escalated … │
+  │ ctrl+b               open the Kanban board                                                   │
+  │ tab / shift+tab      switch view                                                             │
+  │ enter on a heading   collapse or expand the group                                            │
+  │ shift+enter  ctrl+j  newline in the dispatch input                                           │
+  │ esc                  close peek, clear the input, or go back to the chat                     │
+  │ ctrl+t               back to the chat                                                        │
+  │ ctrl+c               clear the input; twice to exit                                          │
+  │ ?                    this list                                                               │
+  │                                                                                              │
+  │                                                                                              │
+  ╰────────────────────────────────────────────────────────────────────────────esc or ? to close─╯
+
+
+
+
+
+
+
+
+
+
+  Dispatch a task to get started: describe it below and press Enter.
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+  ❯ Describe a task for a background worker and press Enter
+  ────────────────────────────────────────────────────────────────────────────────────────────────
+    enter to dispatch · shift+enter for a newline · esc to clear
