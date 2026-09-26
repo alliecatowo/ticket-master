@@ -1486,7 +1486,7 @@ is based on.
 
 ## Z — Groomed from trial-inbox passes 4, 5 and 6 (2026-09-26); 19 of 22 raw findings were duplicates of existing V/X-section tasks and were merged in as extra evidence instead of new entries
 
-- [ ] **t20260926-agent-loop-detect-unproductive-exploration-cycles** — Detect repeated read/search/command cycles with no forward progress and nudge instead of burning the step budget
+- [x] **t20260926-agent-loop-detect-unproductive-exploration-cycles** — Detect repeated read/search/command cycles with no forward progress and nudge instead of burning the step budget (landed dd4e266)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: Distinct from the existing no-submit-retry cluster above (which fires only after a turn ends without submitting): during a single attempt, detect near-identical repeated file reads/searches/toolchain-discovery commands with no intervening edit or verification progress, and inject one concise goal-focused nudge (listing already-inspected paths and findings) before the step budget is exhausted. Also cover the specific case where the repeated discovery is chasing a missing toolchain/environment dependency rather than exploring source — that should hand off with the concrete missing-dependency diagnosis, not keep retrying the same search.
