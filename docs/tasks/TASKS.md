@@ -1568,7 +1568,7 @@ is based on.
   acceptance: A CLI test simulates a `model ended turn without submitting` failure and asserts the rendered message names the no-submit cause and gives a useful artifact-inspection or focused-resume command, while ordinary test failures retain their existing retry guidance.
   test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
   evidence: `/tmp/tm-trials/20260926-0637/psf-requests-7432/tm.log:45` — “no patch or evidence was submitted … model ended turn without submitting. Run `tm run T-1` again to retry.”
-- [ ] **t20260926-0637-sindresorhus-ky-878-repo-path-argument-guidance** — Make repository-path errors actionable when tools receive absolute paths
+- [x] **t20260926-0637-sindresorhus-ky-878-repo-path-argument-guidance** — Make repository-path errors actionable when tools receive absolute paths (landed d882bec)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-tools · deps: none
   files: `crates/tm-agent/src/tools.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: When a tool receives an absolute path inside the configured project root, either safely normalize it to the corresponding repository-relative path or return an error that explains the accepted relative-path format and gives the correct example; keep rejecting paths outside the project root.
