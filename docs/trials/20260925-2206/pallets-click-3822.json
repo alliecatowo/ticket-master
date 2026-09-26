@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 185,
+      "tokens": 916284,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run found the relevant Path type and inspected the prompt typing, but ended without a plan, implementation, or verification after substantial repeated reads. tm reported ‘model ended turn without submitting’ and suggested rerunning, but did not explain that no patch was submitted and no verification ran or give a useful next step; the retry repeated the investigation. The ticket itself was created successfully. For event capture, `tm events` only prints usage because it requires a subcommand, and `events tail --json` follows indefinitely unless `--no-follow` is provided, which makes the command easy to misuse for a one-shot log snapshot."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 110,
+      "tokens": 296320,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode stated a scoped plan, located Path and the existing typing conventions quickly, implemented the generic type, then used checker failures to correct the default generic assertion. It independently ran the relevant runtime test and both typing checks. It could improve by directly adding the issue-specific assertion to the dedicated typing_path test file and avoiding an initial extra assertion that both mypy and pyright rejected, but it recovered cleanly and the hidden PR tests all passed."
+    }
+  ]
+}

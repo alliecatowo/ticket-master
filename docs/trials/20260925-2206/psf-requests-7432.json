@@ -1,0 +1,45 @@
+{
+  "issue": {
+    "number": 7432,
+    "title": "`prepare_body` stream detection regression",
+    "url": "https://github.com/psf/requests/issues/7432"
+  },
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": ["tests/test_requests.py"],
+  "verification": "python -m pytest tests/ -k test_getattr_proxy_stream_follows_redirect",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 241,
+      "tokens": 2786544,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 1,
+        "plan_quality": 3,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 2
+      },
+      "better": "tm found the relevant prepare_body implementation quickly and produced the compatible __iter__ fallback, but used 2,786,544 recorded input tokens across 43 calls for this focused change. The run also recorded repeated provider/usage/tool-call cycles and attempted tests through interpreters that could not import the project before submission. It would be better if tm surfaced one concise final result with the edit, exact test command and outcome, and a clear dependency/interpreter diagnosis before submitting; reducing repeated context carried into subsequent model calls would materially improve efficiency."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 79.543,
+      "tokens": 21777,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode made the correct production change and added a relevant regression test, then clearly disclosed that its focused test attempts failed because it used an interpreter without the test dependencies. It could be better by detecting and using the pre-created project virtual environment (`.venv/bin/python`) for its tests, so the check can run during the agent session rather than requiring a later independent verification."
+    }
+  ]
+}

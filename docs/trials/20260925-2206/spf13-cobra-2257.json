@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 972.322,
+      "tokens": 3808073,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 1,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm eventually found the correct append/backing-array bug and made a compatible change, but took 972 seconds and 64 turns, repeatedly rereading large files and searching host Go installation paths. It emitted ‘hit an unexpected internal problem’ and ‘got a response it couldn't understand’ before the unhelpfully generic ‘something went wrong: step limit (64) reached without submitting. Run tm run T-1 again to retry.’ The retry suggestion did not explain the preceding internal failures or the likely missing Go environment, and no completed result was produced. Make toolchain/environment discovery explicit, detect repeated identical reads and unproductive investigation, and stop with a concise actionable blocker before exhausting the step limit; the final CLI error should preserve the specific failure and a safe recovery step."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 60.098,
+      "tokens": 28365,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 3,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 2,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly located the append side effect in completions.go, copied the arguments before appending, and accurately disclosed that its test command could not run because the Go version was not configured in its shell. Its final explanation was clear, though it did not state a plan before editing and did not recover from the test-environment issue. Better environment discovery or a targeted retry with the installed Go toolchain would have enabled verification during the agent run."
+    }
+  ]
+}
