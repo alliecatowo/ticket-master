@@ -1655,6 +1655,14 @@ fn read_line<R: BufRead>(reader: &mut R, buf: &mut String) -> tm_types::Result<u
 /// `crate::project::mock_genesis_provider`), so `tm genesis` gets the same offline path.
 pub(crate) const TEST_MOCK_PROVIDER_ENV: &str = "TM_TEST_MOCK_PROVIDER";
 
+/// Alongside [`TEST_MOCK_PROVIDER_ENV`]: when set, [`ScriptedMockProvider::complete`] never
+/// returns instead of playing its scripted reply. Exists for an integration test that needs a
+/// `tm run` it can send a real SIGTERM/SIGINT to while an attempt is still genuinely in flight
+/// (`crates/tm-cli/tests/run_interrupt.rs`) — without this, the scripted turn finishes too fast
+/// for a test process to reliably land the signal before the ticket already left
+/// `Leased`/`Running` on its own.
+pub(crate) const TEST_MOCK_PROVIDER_BLOCK_ENV: &str = "TM_TEST_MOCK_PROVIDER_BLOCK";
+
 /// Build the fabric this session issues completions through, registered against the workspace's
 /// default role table ([`RoleTable::default_table`]) — or, when [`TEST_MOCK_PROVIDER_ENV`] is
 /// set, a deterministic mock (see that constant's docs).
@@ -2012,7 +2020,8 @@ fn build_mock_fabric(clock: Arc<dyn Clock>, recording: Option<&RecordingSpec>) -
     .expect("this crate's own static mock role table always parses");
     let fabric = Fabric::new(table, clock.clone());
     let model = ModelId::new("mock", "m1");
-    let provider = ScriptedMockProvider { model, clock };
+    let block = std::env::var_os(TEST_MOCK_PROVIDER_BLOCK_ENV).is_some();
+    let provider = ScriptedMockProvider { model, clock, block };
     register_recordable(&fabric, Arc::new(provider), recording);
     fabric
 }
@@ -2038,6 +2047,8 @@ fn build_mock_fabric(clock: Arc<dyn Clock>, recording: Option<&RecordingSpec>) -
 struct ScriptedMockProvider {
     model: ModelId,
     clock: Arc<dyn Clock>,
+    /// [`TEST_MOCK_PROVIDER_BLOCK_ENV`]: when true, `complete` never resolves.
+    block: bool,
 }
 
 impl ScriptedMockProvider {
@@ -2086,6 +2097,10 @@ impl tm_provider::fabric::Provider for ScriptedMockProvider {
         &self,
         req: tm_provider::CompletionRequest,
     ) -> Result<tm_provider::Completion, tm_provider::ProviderError> {
+        if self.block {
+            // Deliberately never resolves; see `TEST_MOCK_PROVIDER_BLOCK_ENV`'s doc comment.
+            std::future::pending::<()>().await;
+        }
         let model = req.model_or(&self.model);
         let has_ticket = req
             .system
