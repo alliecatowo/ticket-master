@@ -23,7 +23,7 @@ one tool and puts the results next to each other.
 
 **`cargo xtask bench-cross [--tools tm,opencode,codex,claude] [--task <filter>] [--out <dir>]
 [--model <provider/model>] [--task-timeout <secs>] [--max-cost-usd <amount>]
-[--real-claude-auth]`** (`crates/xtask/src/bench_cross.rs`, wired into `crates/xtask/src/main.rs`;
+[--tm-binary <path>] [--real-claude-auth] [--help|-h]`** (`crates/xtask/src/bench_cross.rs`, wired into `crates/xtask/src/main.rs`;
 `mise run bench:cross` is the `mise.toml` alias) — an `xtask` subcommand, not a `tm` subcommand,
 since it drives `tm` itself as one of several *external* processes rather than running inside a
 single project the way every other `tm bench` verb does.
@@ -111,6 +111,19 @@ column, since this report always compares more than one tool for the same task; 
 
 ## What this costs, stated plainly
 
+- **`TmAdapter` used to hardcode `binary: "tm"`, a bare `$PATH`-relative name — fixed.** A normal
+  from-source dev workflow never installs this workspace's own compiled `tm` onto `$PATH`, so
+  every real `mise run bench:cross` invocation failed instantly for every task with `failed to
+  spawn command: No such file or directory`, undetected because `cargo test -p xtask` only ever
+  exercises `FakeAdapter`. `resolve_tm_binary` (`crates/xtask/src/bench_cross.rs`) now resolves an
+  explicit `--tm-binary <path>` when it exists (absolutized, since `TmAdapter` spawns with
+  `.current_dir` set to each task's own scratch fixture, not the caller's cwd; a mistyped or stale
+  `--tm-binary` warns on stderr and falls through instead of being spawned as given), else a
+  `tm`/`tm.exe` sibling of this `xtask` binary's own `current_exe()` (the common case for a
+  from-source build), else falls back to the original bare `"tm"` `$PATH` search for a
+  genuinely-installed `tm`. Anyone re-verifying a
+  prior "landed" `u1-bench-cross-*` fix task should treat a real, live run (not just `cargo test -p
+  xtask`) as the actual acceptance bar going forward.
 - **`TmAdapter`'s `--task-timeout` bounds each individual `tm` subprocess call (init/dispatch/
   run/stats), not one deadline across the whole sequence.** Tracking remaining budget across four
   separate calls was out of scope; what this does guarantee is that no single `tm` call can hang

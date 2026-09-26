@@ -231,7 +231,8 @@ never drift between sessions:
   `docs/decisions/D-032-live-benchmark-mode.md`.
 - `mise run bench:cross -- [--tools tm,opencode,codex,claude] [--task <filter>] [--out <dir>]
   [--model <provider/model>] [--task-timeout <secs>] [--max-cost-usd <amount>]
-  [--real-claude-auth]` (`cargo xtask bench-cross`) runs the same `bench/tasks/*.toml` suite
+  [--tm-binary <path>] [--real-claude-auth] [--help|-h]` (`cargo xtask bench-cross`) runs the same
+  `bench/tasks/*.toml` suite
   identically through `tm`'s own live path and through configured external coding CLIs, and
   reports pass/fail, score, model, tokens, cost, tool calls and wall time for every tool side by
   side, where the tool reports those usage details
@@ -247,7 +248,15 @@ never drift between sessions:
   `TIMEOUT`; `--max-cost-usd` stops scheduling further pairs once cumulative reported spend
   reaches it. The report header states each tool's permission posture, `--version` output, the
   pinned model and any caps, so the numbers below it read as a fair, labeled comparison rather
-  than an unlabeled one. Opt-in, real runs only, never part of `mise run verify`/`hygiene`; unit
+  than an unlabeled one. The `tm` adapter resolves its own binary rather than trusting a bare `tm`
+  on `$PATH` (which a normal from-source dev workflow never sets): `--tm-binary <path>` overrides
+  it explicitly (resolved to an absolute path, since `TmAdapter` spawns with `.current_dir` set to
+  each task's own scratch fixture), but only when it exists -- a mistyped or stale `--tm-binary`
+  warns on stderr and falls through instead of being spawned as given; if the flag is absent or
+  not a real file it looks for a `tm`/`tm.exe` next to this `xtask` binary's own `current_exe()`
+  (the common case, since `xtask` and `tm` land in the same `target/<profile>/` directory),
+  falling back to a bare `"tm"` `$PATH` search only if neither resolves to a real file. `--help`/
+  `-h` prints usage and exits without discovering tasks or spawning anything. Opt-in, real runs only, never part of `mise run verify`/`hygiene`; unit
   tests exercise the harness against a scripted fake adapter (and, for the timeout path, a real
   `sleep` subprocess) instead. See `docs/decisions/D-033-cross-tool-benchmark.md` and
   `bench/README.md`.
