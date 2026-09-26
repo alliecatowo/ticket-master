@@ -2559,8 +2559,10 @@ fn plain_tool_error(detail: &str) -> String {
             "error: couldn't parse the result ({diagnostic}); use one of the supported result kinds: command_output, patch, file, report, verification, index, benchmark, transcript, or workspace_snapshot. Retry with a supported kind, and check the input if it fails again"
         );
     } else if detail.starts_with("invariant violated: ") {
-        if detail.contains("attach its returned artifact ID") {
-            return "error: submission needs evidence; store a result, then put the artifact ID returned by artifact.store in ticket.submit".to_owned();
+        if detail.contains("Submitting a ticket needs at least one piece of evidence")
+            || detail.contains("attach its returned artifact ID")
+        {
+            return "error: submission needs evidence; store a report or other evidence artifact, then cite the artifact ID returned by artifact.store in ticket.submit".to_owned();
         }
         return format!(
             "error: operation state was inconsistent ({}); retry once, then report this failure if it persists",
@@ -4241,10 +4243,12 @@ mod tests {
     #[test]
     fn plain_tool_error_guides_empty_submission_to_returned_artifact_id() {
         let rendered = plain_tool_error(
-            "invariant violated: Submitting a ticket needs at least one piece of evidence; store a result with artifact.store and attach its returned artifact ID",
+            "invariant violated: Submitting a ticket needs at least one piece of evidence",
         );
+        assert!(rendered.contains("store a report or other evidence artifact"));
         assert!(rendered.contains("artifact ID returned by artifact.store"));
         assert!(rendered.contains("ticket.submit"));
+        assert!(!rendered.contains("retry"));
         assert!(!rendered.contains("operation state was inconsistent"));
     }
 
