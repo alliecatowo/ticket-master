@@ -821,9 +821,9 @@ pub(crate) fn deterministic_command_key(argv: &[String], cwd: &str) -> String {
 }
 
 /// Resolve a `shell.run`/`test.run`/`build.run`/`shell.query_output` call's `cwd` field against
-/// `root`, exactly as [`resolve_repo_path`] resolves an `fs.*`/`edit.*` path: reject an absolute
-/// `cwd` or one containing a `..` component, so a command's working directory can never land
-/// outside the project root.
+/// `root`, exactly as [`resolve_repo_path`] resolves an `fs.*`/`edit.*` path: reject paths outside
+/// the project root or paths containing a `..` component. Absolute paths are accepted only when
+/// they are already inside the project root.
 ///
 /// Before this, `resolve_cwd` joined `cwd` onto `root` with no validation at all.
 /// [`tm_types::Action::RunCommand`] only gates a command's `argv`, never its `cwd` — there is no
@@ -839,7 +839,21 @@ pub(crate) fn deterministic_command_key(argv: &[String], cwd: &str) -> String {
 /// checkout — regardless of whether the root itself was ever wrong.
 fn resolve_cwd(root: &Path, input: &Value) -> Result<String> {
     let rel = get_opt_string(input, "cwd").unwrap_or_else(|| ".".to_string());
-    let full = resolve_repo_path(root, &rel)?;
+    let path = Path::new(&rel);
+    let full = if path.is_absolute() {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|_| TmError::parse(format!("cwd `{rel}` must be inside the project root")))?;
+        if relative
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(TmError::parse(format!("cwd `{rel}` may not contain `..`")));
+        }
+        path.to_path_buf()
+    } else {
+        resolve_repo_path(root, &rel)?
+    };
     Ok(full.to_string_lossy().into_owned())
 }
 
@@ -3625,8 +3639,8 @@ mod tests {
 
     /// A shell command's `cwd` is resolved the same way an `fs.*` path is: `..` must not escape
     /// the project root. Before the fix this joined `cwd` onto the root unchecked, so a sibling
-    /// directory (or anywhere else reachable via `..`, or an absolute path) was a legitimate
-    /// place to run a command — the real gap a live trial surfaced.
+    /// directory (or anywhere else reachable via `..`) was a legitimate place to run a command —
+    /// the real gap a live trial surfaced.
     #[tokio::test]
     async fn shell_run_rejects_a_cwd_escaping_the_root() {
         let h = Harness::new();
@@ -3644,17 +3658,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shell_run_rejects_an_absolute_cwd() {
+    async fn shell_run_accepts_an_absolute_cwd_inside_the_root() {
         let h = Harness::new();
         let outcome = h
             .registry
             .dispatch(
-                &call("shell.run", json!({"argv": ["echo", "hi"], "cwd": "/tmp"})),
+                &call(
+                    "shell.run",
+                    json!({"argv": ["echo", "hi"], "cwd": h.root().to_string_lossy()}),
+                ),
                 &h.ctx(),
             )
             .await;
         assert!(
-            matches!(outcome, ToolOutcome::Errored { .. }),
+            matches!(outcome, ToolOutcome::Completed { .. }),
             "{outcome:?}"
         );
     }
@@ -4622,6 +4639,21 @@ mod tests {
     #[test]
     fn resolve_repo_path_rejects_absolute_paths() {
         let err = resolve_repo_path(Path::new("/root"), "/etc/passwd").unwrap_err();
+        assert!(matches!(err, TmError::Parse(_)));
+    }
+
+    #[test]
+    fn resolve_cwd_accepts_absolute_project_root_and_descendants() {
+        let root = Path::new("/project");
+        for cwd in ["/project", "/project/subdir"] {
+            let resolved = resolve_cwd(root, &json!({"cwd": cwd})).unwrap();
+            assert_eq!(resolved, cwd);
+        }
+    }
+
+    #[test]
+    fn resolve_cwd_rejects_absolute_paths_outside_project_root() {
+        let err = resolve_cwd(Path::new("/project"), &json!({"cwd": "/elsewhere"})).unwrap_err();
         assert!(matches!(err, TmError::Parse(_)));
     }
 
