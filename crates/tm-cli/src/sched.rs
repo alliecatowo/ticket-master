@@ -1064,17 +1064,21 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
         });
     }
     let failure = ticket.failures.get(failures_before..).and_then(<[_]>::last);
-    let reason = failure
-        .map(|f| {
-            let class_desc = failure_class_description(f.class);
-            format!("{class_desc}: {}", f.detail)
-        })
-        .unwrap_or_else(|| "unknown failure".to_string());
     let did_not_submit = failure.is_some_and(|f| {
         f.detail
             .to_ascii_lowercase()
             .contains("ended turn without submitting")
     });
+    let reason = failure
+        .map(|f| {
+            let class_desc = failure_class_description(f.class);
+            if did_not_submit {
+                f.detail.clone()
+            } else {
+                format!("{class_desc}: {}", f.detail)
+            }
+        })
+        .unwrap_or_else(|| "unknown failure".to_string());
     // A `ProviderUnavailable` failure whose detail names an unregistered provider is a
     // configuration problem, not a transient one (unlike, say, "provider at capacity"): the
     // preflight check in `preflight_provider_or_fail` is meant to catch this before a lease is
@@ -1095,6 +1099,12 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
              unchanged will fail identically."
                 .to_string()
         }
+        tm_core::TicketState::Ready | tm_core::TicketState::Blocked if did_not_submit => {
+            format!(
+                "Inspect the saved attempt with `tm ticket show {}`. To continue its work, resume the saved session with `tm --resume <session>` and ask it to focus on the remaining change, run the relevant checks, and submit evidence; avoid rerunning the unchanged ticket.",
+                ticket.id
+            )
+        }
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked => {
             format!("Run `tm run {}` again to retry.", ticket.id)
         }
@@ -1103,6 +1113,12 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
              candidates for this ticket's role (check with `tm provider list`) before retrying -- \
              `tm ticket retry` alone will fail identically."
                 .to_string()
+        }
+        tm_core::TicketState::Escalated if did_not_submit => {
+            format!(
+                "Inspect the saved attempt with `tm ticket show {}`. To continue its work, resume the saved session with `tm --resume <session>` and ask it to focus on the remaining change, run the relevant checks, and submit evidence; avoid retrying the unchanged ticket.",
+                ticket.id
+            )
         }
         tm_core::TicketState::Escalated => {
             format!("Run `tm ticket retry {}` to try again.", ticket.id)
@@ -1743,9 +1759,12 @@ mod tests {
             // Should not have stacked error prefix
             assert!(!msg.contains("did not finish:"));
             // Should contain the correct next step for Ready state
-            assert!(msg.contains("Run `tm run T-1` again to retry."));
+            assert!(msg.contains("Inspect the saved attempt with `tm ticket show T-1`"));
+            assert!(msg.contains("tm --resume <session>"));
+            assert!(msg.contains("focus on the remaining change"));
+            assert!(!msg.contains("Run `tm run T-1` again to retry."));
             // Should have plain-English failure reason
-            assert!(msg.contains("something went wrong"));
+            assert!(!msg.contains("something went wrong"));
             assert!(msg.contains("no patch or evidence was submitted"));
             assert!(msg.contains("not a test failure"));
             assert!(msg.contains("model ended turn without submitting"));
@@ -1754,6 +1773,74 @@ mod tests {
         } else {
             panic!("Expected TurnFailed error");
         }
+    }
+
+    #[test]
+    fn repeated_no_submit_failure_gets_focused_recovery_guidance() {
+        use tm_core::{
+            ExecutorRequirements, FailureClass, FailureRecord, RetryPolicy, Ticket, TicketKind,
+            TicketState, VerificationPolicy,
+        };
+        use tm_types::{Authority, Budget, Timestamp, Tolerance};
+
+        let now = Timestamp::EPOCH;
+        let mut ticket = Ticket {
+            id: TicketId::new("T-1").unwrap(),
+            kind: TicketKind::Work,
+            objective: "test objective".to_string(),
+            state: TicketState::Ready,
+            parent: None,
+            children: vec![],
+            dependencies: vec![],
+            milestone: None,
+            due: None,
+            authority: Authority::none(),
+            resources: vec![],
+            executor: ExecutorRequirements {
+                role: tm_types::Role::CoderDeep,
+                human_required: false,
+                min_capability: Tolerance::Strict,
+            },
+            context_refs: vec![],
+            success: vec![],
+            verification: VerificationPolicy::Single,
+            budget: Budget::unlimited(),
+            retry: RetryPolicy {
+                max_attempts: 3,
+                base_delay_seconds: 10,
+                backoff_multiplier: 2.0,
+                max_delay_seconds: 300,
+            },
+            cycle: None,
+            attempts: 2,
+            failures: (1..=2)
+                .map(|attempt| FailureRecord {
+                    class: FailureClass::Other,
+                    detail: "model ended turn without submitting".to_string(),
+                    at: now,
+                    attempt,
+                })
+                .collect(),
+            priority: 0,
+            created: now,
+            updated: now,
+        };
+
+        // A subsequent ordinary test failure keeps its existing retry advice.
+        let repeated_no_submit = run_outcome(&ticket, 1).unwrap_err().to_string();
+        assert!(repeated_no_submit.contains("model ended turn without submitting"));
+        assert!(repeated_no_submit.contains("Inspect the saved attempt"));
+        assert!(repeated_no_submit.contains("tm --resume <session>"));
+        assert!(!repeated_no_submit.contains("something went wrong"));
+
+        ticket.failures.push(FailureRecord {
+            class: FailureClass::VerificationFailed,
+            detail: "tests failed".to_string(),
+            at: now,
+            attempt: 3,
+        });
+        let test_failure = run_outcome(&ticket, 2).unwrap_err().to_string();
+        assert!(test_failure.contains("Run `tm run T-1` again to retry."));
     }
 
     #[test]
