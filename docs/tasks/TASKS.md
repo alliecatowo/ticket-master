@@ -1512,7 +1512,7 @@ is based on.
 
 ## AA — Groomed from trial-inbox passes 6 (2357) and 7 (0129) (2026-09-26); 12 of 14 raw findings duplicated open V/X/Z-section tasks, folded in as evidence
 
-- [ ] **t20260926-agent-submit-schema-verification-variant** — Fix the `ticket.submit`/artifact-store schema mismatch producing `unknown variant \`verification\``
+- [x] **t20260926-agent-submit-schema-verification-variant** — Fix the `ticket.submit`/artifact-store schema mismatch producing `unknown variant \`verification\`` (landed a90cca1)
   model: sonnet · severity: high · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/tools.rs`, `crates/tm-cli/src/agent.rs`, `crates/tm-core/src/store.rs`
   change: Distinct from the generic-phrasing/wording cluster tracked elsewhere (`t20260925-1314-gohugoio-hugo-15360-actionable-tool-errors`, landed 12c4ec6): the model is naturally producing a `verification` result-kind variant when storing a test/verification artifact, and the store's schema rejects it outright with `unknown variant \`verification\``, forcing a retry. Either accept the variant the model naturally produces (add it to the accepted enum) or, if it's genuinely invalid, have the artifact-store tool's own schema/description list the exact accepted variants so the model doesn't have to discover the mismatch by trial and error. Also align the `ticket.submit` evidence-empty invariant message ("Submitting a ticket needs at least one piece of evidence" / "operation state was inconsistent") to name a concrete artifact id it should attach, per the same evidence.
