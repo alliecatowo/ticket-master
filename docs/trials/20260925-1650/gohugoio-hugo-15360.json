@@ -1,0 +1,48 @@
+{
+  "issue": "https://github.com/gohugoio/hugo/issues/15360",
+  "base_sha": "1d87ee5b7005a38d83cb841471245b9ae7f914bd",
+  "merge_sha": "cb6a7072230920fb47ece28f67501a2c15934ade",
+  "fix_pr": 15364,
+  "test_files": [
+    "common/hugio/hugio_integration_test.go",
+    "common/hugio/readers_test.go",
+    "hugolib/rebuild_test.go",
+    "parser/pageparser/pageparser_intro_test.go",
+    "tpl/openapi/openapi3/openapi3_integration_test.go"
+  ],
+  "verification_command": "go test ./parser/metadecoders/...",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 509.06,
+      "tokens": 1696094,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run should surface a concise plan and avoid repeatedly reading and searching broad repository context before editing; the usage record shows 1,696,094 input tokens over 509 seconds. It stopped with ‘model ended turn without submitting’ after spending that time, and no patch was present to validate. A clearer failure summary should distinguish the unsuccessful agent run from the later independent test result. Here the prescribed hidden-test command passed mechanically, but it did not exercise the reported UnmarshalToMap BOM regression, so the result should not be presented as proof that the issue was fixed."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 66.57,
+      "tokens": 24343,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "A direct regression test for UnmarshalToMap across the issue’s stated formats, or use of the issue’s original config integration test, would make verification more decisive: the required merged-PR test files plus go test ./parser/metadecoders/... passed, but those merged-PR tests do not target this specific regression. The run otherwise located the relevant decoder quickly, added targeted TOML/YAML/JSON cases, ran the package tests, and reported the checks accurately."
+    }
+  ]
+}

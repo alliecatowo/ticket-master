@@ -1,0 +1,43 @@
+{
+  "issue": {
+    "number": 3822,
+    "title": "`click.Path` should be generic on `path_type`",
+    "url": "https://github.com/pallets/click/issues/3822"
+  },
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 206.399,
+      "tokens": 1139896,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run found the right implementation area, but progress repeatedly reported reads of src/click/types.py and ended without a patch after the model failed to submit. The final message did identify the failure and suggested rerunning T-2, but it did not clearly summarize that no changes or verification were produced, or surface the 177-second/1,139,896-input-token usage shown by tm stats. Avoid repeated full-file context where possible, and provide a concise failed-run summary with usage, verification state, and a reliable recovery action."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 118.318,
+      "tokens": 22724,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The implementation was focused, propagated the selected path type, and was validated with mypy, pyright, Ruff, and focused runtime tests; after the hidden fix tests were installed, both added runtime and typing tests passed. It could be improved by avoiding an extra unsuccessful ty invocation or ensuring the optional checker is installed before running it, though the final response accurately disclosed that limitation."
+    }
+  ]
+}

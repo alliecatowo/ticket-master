@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 4,
+      "tokens": 0,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm init created a project whose role table could not serve coder.fast: tm run reported ‘provider was unavailable’ and ‘provider not registered: devpass’ even though the prescribed environment file had been sourced, then suggested running the same command again. The agent never began, so there was no navigation, plan, or verification. Before dispatch/run, tm should validate the effective role candidates against registered providers and available credentials, explain the specific repair command/configuration, and avoid offering a retry that cannot change the provider setup. Once that is resolved, the scheduler should run in the foreground or clearly explain the no-worker/lease-expiry path rather than leaving the user to infer whether work is progressing."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 171,
+      "tokens": 28375,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 5,
+        "cost_time": 5
+      },
+      "better": "OpenCode found source/utils/body.ts and test/stream.ts quickly, stated a scoped plan, implemented the completion event and a focused regression test, recovered from an initially hanging test stream by closing the ReadableStream controller, and reported the outcome accurately. It could be better by avoiding the first broad stream test run that hung, and by checking whether the repository's full npm test pipeline can pass before invoking it; the full pipeline did stop at an unrelated existing lint error in test/http-error.ts:218, which it disclosed."
+    }
+  ]
+}

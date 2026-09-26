@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 1112.03,
+      "tokens": 5216210,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 1
+      },
+      "better": "tm located the right completion code and ultimately produced a passing fix, but the run repeatedly reread completions.go and completions_test.go, rewrote and reverted test edits, and made exploratory test-file edits before stabilizing the implementation. The progress output exposes low-level action summaries rather than a clear plan, and the messages ‘hit an unexpected internal problem’ and ‘got a response it couldn't understand’ do not say which operation failed or what the user should do; they were followed by ‘Saved a result’ and ‘Submitted the ticket’ without explaining recovery. A concise initial plan, deduplicated file context, focused regression test earlier, and error messages that identify the failed action plus the recovery would make the run much more efficient and easier to trust."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 64.9,
+      "tokens": 23274,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly traced the mutation to append sharing the args backing array, made a narrow copy-before-append fix, added a regression test, and ran go test ./... successfully. It could be better by reproducing the issue through Execute with the supplied command shape and asserting the callback-observed os.Args output directly, rather than using an isolated getCompletions slice sentinel; that would align the regression test more closely with the report."
+    }
+  ]
+}

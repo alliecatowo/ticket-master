@@ -1,0 +1,48 @@
+{
+  "issue": {
+    "number": 7432,
+    "url": "https://github.com/psf/requests/issues/7432",
+    "title": "`prepare_body` stream detection regression",
+    "fix_pr": 7433,
+    "test_files": [
+      "tests/test_requests.py"
+    ],
+    "hidden_test_command": ".venv/bin/python -m pytest tests/test_requests.py -q -k getattr_proxy_stream_follows_redirect"
+  },
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 545.443,
+      "tokens": 6026090,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the right implementation area and edited the relevant stream-detection condition, but repeatedly reread the same model and test files, spent substantial context probing several Python environments, and never submitted before its 64-step ceiling. The user sees `error: agent turn failed: Ticket T-1: something went wrong: step limit (64) reached without submitting. Run tm run T-1 again to retry.` after more than nine minutes; that generic failure plus a blind retry recommendation leaves it unclear whether the implementation is usable or what to do next. Improve repeated-read/context control and expose progress toward the step ceiling, stop promptly when an interpreter or test dependency is missing, and offer a resume/retry path that preserves completed work."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 36.346,
+      "tokens": 19191,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly located `PreparedRequest.prepare_body()`, made the correct compatibility change, and added focused delegated-attribute coverage. Its progress was clear and it accurately disclosed that its in-run tests could not import the environment dependencies, but it could have selected the prepared virtual environment instead of trying the global pytest and then `PYTHONPATH` variants. Pointing verification at the project venv would have allowed a meaningful test run before finishing."
+    }
+  ]
+}
