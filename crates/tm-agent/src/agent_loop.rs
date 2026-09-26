@@ -253,6 +253,7 @@ pub const DEFAULT_MAX_EVENTS_PER_TICKET: u32 = 5000;
 /// `tm_context::sections::build_budget`'s "affordable tiers" menu can never silently price a
 /// step differently from each other.
 const MAX_TOKENS_PER_STEP: u32 = tm_context::sections::STEP_MAX_OUTPUT_TOKENS;
+const TOOL_RESULT_COMPACTION_CHARS: usize = 4_000;
 
 /// How long, in total, one provider call waits for fabric capacity before the loop gives up and
 /// reports [`FailureClass::ProviderUnavailable`] (`docs/decisions/D-023-capacity-wait-is-not-a-failed-attempt.md`).
@@ -1353,6 +1354,10 @@ impl AgentLoop {
                 }
             };
 
+            let cumulative_tokens = steps
+                .iter()
+                .fold(0u64, |total, step| total.saturating_add(step.spend.tokens));
+
             // Refuse to start an effect this loop cannot afford to finish (`SPEC.md` §31.2,
             // `docs/audit-2026-09-18-fable.md` B-10), rather than issuing the call and
             // discovering the shortfall only after it returns. `MAX_TOKENS_PER_STEP` — the same
@@ -1367,6 +1372,32 @@ impl AgentLoop {
             // `MAX_TOKENS_PER_STEP` output tokens times its output price) to see which still fit
             // what's left of the ticket's dollar budget.
             let prompt_tokens = estimate_prompt_tokens(Some(rendered.system.as_str()), &messages);
+            let projected_tokens = cumulative_tokens.saturating_add(prompt_tokens);
+            let token_limit = effective_budget.tokens;
+            let warning_percent = std::env::var("TM_AGENT_TOKEN_WARNING_PERCENT")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .filter(|value| (1..100).contains(value))
+                .unwrap_or(80);
+            if token_limit != u64::MAX
+                && projected_tokens.saturating_mul(100)
+                    >= token_limit.saturating_mul(warning_percent)
+            {
+                tracing::warn!(
+                    projected_tokens,
+                    token_limit,
+                    warning_percent,
+                    "attempt is approaching its token budget"
+                );
+            }
+            if token_limit != u64::MAX && projected_tokens > token_limit {
+                tracing::warn!(
+                    projected_tokens,
+                    token_limit,
+                    "attempt stopped before the next provider call because its token budget would be exceeded"
+                );
+                return self.budget_handoff_outcome(task, steps, BudgetDimension::Tokens);
+            }
             let remaining_dollars_micros = effective_budget.remaining().dollars_micros;
             let affordable = self.fabric.affordable_candidates(
                 self.role,
@@ -1943,7 +1974,10 @@ fn push_step_messages(
             .zip(&step_ref.tool_call_states)
             .map(|(tc, state)| {
                 let (text, is_error) = match state {
-                    pruning::ToolCallState::Full => tool_result_text(&tc.resolution),
+                    pruning::ToolCallState::Full => {
+                        let (text, error) = tool_result_text(&tc.resolution);
+                        (compact_tool_result(text), error)
+                    }
                     pruning::ToolCallState::Superseded { by_step } => {
                         (format!("[superseded by step {by_step}]"), false)
                     }
@@ -1960,6 +1994,30 @@ fn push_step_messages(
             content: result_blocks,
         });
     }
+}
+
+/// Bound old tool output in provider requests while leaving the durable result untouched.
+fn compact_tool_result(text: String) -> String {
+    if text.len() <= TOOL_RESULT_COMPACTION_CHARS {
+        return text;
+    }
+    let edge = TOOL_RESULT_COMPACTION_CHARS / 2;
+    tracing::info!(
+        original_bytes = text.len(),
+        retained_bytes = TOOL_RESULT_COMPACTION_CHARS,
+        "compacted tool result in request context; full output remains in the recorded transcript"
+    );
+    format!(
+        "{}\n[context compacted: {} bytes omitted; full output retained in the run record]\n{}",
+        &text[..(0..=edge)
+            .rev()
+            .find(|index| text.is_char_boundary(*index))
+            .unwrap_or(0)],
+        text.len().saturating_sub(TOOL_RESULT_COMPACTION_CHARS),
+        &text[(text.len().saturating_sub(edge)..=text.len())
+            .find(|index| text.is_char_boundary(*index))
+            .unwrap_or(text.len())..]
+    )
 }
 
 /// Render one [`crate::outcome::ToolCallResolution`] as the text (and error flag) a provider's
@@ -2328,6 +2386,16 @@ mod tests {
             artifact: None,
         });
         assert!(!is_error);
+    }
+
+    #[test]
+    fn compacted_tool_result_keeps_evidence_ends_and_reports_omission() {
+        let original = format!("{}MIDDLE{}", "a".repeat(5_000), "z".repeat(5_000));
+        let compacted = compact_tool_result(original);
+        assert!(compacted.starts_with(&"a".repeat(2_000)));
+        assert!(compacted.ends_with(&"z".repeat(2_000)));
+        assert!(compacted.contains("context compacted"));
+        assert!(compacted.len() < 5_000);
     }
 
     #[test]

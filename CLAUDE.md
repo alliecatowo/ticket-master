@@ -280,6 +280,11 @@ files or ranges. Parse failures also show a short diagnostic and suggest retryin
 inconsistent-state failures show their short diagnostic and suggest one retry, then reporting
 the failure if it persists. Detailed errors remain in logs.
 
+Agent attempts compact oversized tool results in provider context while retaining their full
+recorded output. The loop warns as a finite token budget approaches (default 80%; configure with
+`TM_AGENT_TOKEN_WARNING_PERCENT`) and hands off before issuing a call whose projected context
+would exceed the token budget.
+
 Every build/test/clippy call in these tasks is already capped at `-j 2` — this is an 8GB Mac,
 concurrent full-workspace compiles have caused real disk-space incidents. If you're driving
 several agents/worktrees at once, don't override that cap.
