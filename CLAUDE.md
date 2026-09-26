@@ -270,6 +270,11 @@ stored with the index; changing embedders clears stale vectors and re-embeds the
 Env override `TM_EMBEDDER=hash|potion` (whitespace/case-insensitive), download opt-out
 `TM_EMBEDDER_DOWNLOAD=0`. See `docs/decisions/D-025-potion-semantic-embedder.md`.
 
+Plain `tm run` progress reports include the attempted tool action. Parse failures also show a
+short diagnostic and suggest retrying the operation (checking its input if it fails again);
+inconsistent-state failures show their short diagnostic and suggest one retry, then reporting
+the failure if it persists. Detailed errors remain in logs.
+
 Every build/test/clippy call in these tasks is already capped at `-j 2` — this is an 8GB Mac,
 concurrent full-workspace compiles have caused real disk-space incidents. If you're driving
 several agents/worktrees at once, don't override that cap.

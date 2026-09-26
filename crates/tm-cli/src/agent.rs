@@ -2417,15 +2417,39 @@ fn plain_tool_action(tool_name: &str, input: &serde_json::Value) -> String {
 /// (`crates/tm-types/src/error.rs`), which is deliberately terse for logs/`Debug`-adjacent
 /// contexts (`"io: {0}"`, `"parse: {0}"`, `"invariant violated: {0}"`, ...) rather than written
 /// for a person — this maps each known prefix to a short plain phrase instead of surfacing that
-/// text verbatim. An unrecognized shape (no known prefix — a provider-specific message, say)
-/// falls back to a generic phrase rather than guessing at unfamiliar internals.
+/// text verbatim. Parse and invariant errors retain a bounded diagnostic plus a recovery step;
+/// other recognized errors use a generic phrase. An unrecognized shape (no known prefix — a
+/// provider-specific message, say) also falls back to a generic phrase rather than guessing.
 fn plain_tool_error(detail: &str) -> String {
+    const MAX_DIAGNOSTIC_CHARS: usize = 120;
+    let concise_diagnostic = |prefix: &str| {
+        let diagnostic = detail
+            .strip_prefix(prefix)
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let diagnostic: String = diagnostic.chars().take(MAX_DIAGNOSTIC_CHARS).collect();
+        if diagnostic.is_empty() {
+            "the operation failed".to_string()
+        } else if diagnostic.chars().count() == MAX_DIAGNOSTIC_CHARS {
+            format!("{diagnostic}…")
+        } else {
+            diagnostic
+        }
+    };
     let phrase = if detail.starts_with("io: ") {
         "couldn't read or write a file"
     } else if detail.starts_with("parse: ") {
-        "got a response it couldn't understand"
+        return format!(
+            "error: couldn't parse the result ({}); retry the operation, and check its input if it fails again",
+            concise_diagnostic("parse: ")
+        );
     } else if detail.starts_with("invariant violated: ") {
-        "hit an unexpected internal problem"
+        return format!(
+            "error: operation state was inconsistent ({}); retry once, then report this failure if it persists",
+            concise_diagnostic("invariant violated: ")
+        );
     } else if detail.starts_with("authority denied: ") {
         "wasn't allowed to do that"
     } else if detail.starts_with("budget exhausted: ") {
@@ -4064,6 +4088,24 @@ mod tests {
                 "expected {line:?} to not contain the raw tool identifier"
             );
         }
+    }
+
+    #[test]
+    fn plain_tool_error_keeps_parse_diagnostic_and_recovery_step() {
+        let rendered = plain_tool_error("parse: unknown variant `test-output`, expected `patch`");
+        assert!(rendered.contains("unknown variant `test-output`, expected `patch`"));
+        assert!(rendered.contains("retry the operation"));
+        assert!(!rendered.contains("parse:"));
+    }
+
+    #[test]
+    fn plain_tool_error_keeps_invariant_diagnostic_and_recovery_step() {
+        let rendered = plain_tool_error(
+            "invariant violated: submission requires at least one evidence artifact",
+        );
+        assert!(rendered.contains("submission requires at least one evidence artifact"));
+        assert!(rendered.contains("report this failure if it persists"));
+        assert!(!rendered.contains("invariant violated:"));
     }
 
     /// Regression guard for u1-run-progress-shows-args: live `tm run` progress must show what
