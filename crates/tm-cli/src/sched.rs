@@ -463,9 +463,8 @@ struct InterruptWatcher {
 impl InterruptWatcher {
     #[cfg(unix)]
     fn new() -> tm_types::Result<Self> {
-        let sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .map_err(|e| tm_types::TmError::Io(e.to_string()))?;
+        let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| tm_types::TmError::Io(e.to_string()))?;
         Ok(InterruptWatcher { sigterm })
     }
 

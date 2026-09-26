@@ -2021,7 +2021,11 @@ fn build_mock_fabric(clock: Arc<dyn Clock>, recording: Option<&RecordingSpec>) -
     let fabric = Fabric::new(table, clock.clone());
     let model = ModelId::new("mock", "m1");
     let block = std::env::var_os(TEST_MOCK_PROVIDER_BLOCK_ENV).is_some();
-    let provider = ScriptedMockProvider { model, clock, block };
+    let provider = ScriptedMockProvider {
+        model,
+        clock,
+        block,
+    };
     register_recordable(&fabric, Arc::new(provider), recording);
     fabric
 }
