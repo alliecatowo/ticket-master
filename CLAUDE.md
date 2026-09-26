@@ -274,9 +274,10 @@ stored with the index; changing embedders clears stale vectors and re-embeds the
 Env override `TM_EMBEDDER=hash|potion` (whitespace/case-insensitive), download opt-out
 `TM_EMBEDDER_DOWNLOAD=0`. See `docs/decisions/D-025-potion-semantic-embedder.md`.
 
-Plain `tm run` progress reports include the attempted tool action; consecutive identical reads of
-the same file are counted together so repeated context reads are visible without hiding different
-files or ranges. Parse failures also show a short diagnostic and suggest retrying the operation (checking its input if it fails again);
+Plain `tm run` progress reports include the attempted tool action; failed result saves and ticket
+submissions are labeled as attempts rather than successes until persistence succeeds. Consecutive
+identical reads of the same file are counted together so repeated context reads are visible without
+hiding different files or ranges. Parse failures also show a short diagnostic and suggest retrying the operation (checking its input if it fails again);
 inconsistent-state failures show their short diagnostic and suggest one retry, then reporting
 the failure if it persists. Detailed errors remain in logs.
 

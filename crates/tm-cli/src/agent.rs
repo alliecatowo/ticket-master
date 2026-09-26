@@ -2352,7 +2352,14 @@ pub(crate) fn format_tool_call(call: &ToolCallRecord) -> String {
             format!("  * {action} -> not allowed: {reason}")
         }
         ToolCallResolution::Errored { detail } => {
-            format!("  * {action} -> {}", plain_tool_error(detail))
+            let attempted_action = match call.tool_name.as_str() {
+                // These operations can look like durable success in a transcript even when
+                // validation or persistence rejected them. Keep the failed attempt explicit.
+                "artifact.store" => "Tried to save a result",
+                "ticket.submit" => "Tried to submit the ticket",
+                _ => action.as_str(),
+            };
+            format!("  * {attempted_action} -> {}", plain_tool_error(detail))
         }
     }
 }
@@ -4375,5 +4382,33 @@ mod tests {
         assert_eq!(rendered.matches("Read src/b.rs").count(), 1);
         assert!(rendered.contains("Read src/a.rs:1-2"));
         assert!(rendered.contains("Read src/a.rs:2-3"));
+    }
+
+    #[test]
+    fn failed_result_save_and_submission_do_not_claim_success() {
+        let failed_call = |tool_name: &str, detail: &str| ToolCallRecord {
+            tool_use_id: "call-1".to_string(),
+            tool_name: tool_name.to_string(),
+            input: serde_json::Value::Null,
+            resolution: ToolCallResolution::Errored {
+                detail: detail.to_string(),
+            },
+        };
+
+        let bad_result = format_tool_call(&failed_call(
+            "artifact.store",
+            "parse: unknown variant `invalid`, expected `report`",
+        ));
+        assert!(bad_result.contains("Tried to save a result"));
+        assert!(!bad_result.contains("Saved a result"));
+        assert!(bad_result.contains("Retry with a supported kind"));
+
+        let missing_evidence = format_tool_call(&failed_call(
+            "ticket.submit",
+            "invariant violated: Submitting a ticket needs at least one piece of evidence",
+        ));
+        assert!(missing_evidence.contains("Tried to submit the ticket"));
+        assert!(!missing_evidence.contains("Submitted the ticket"));
+        assert!(missing_evidence.contains("store a report or other evidence artifact"));
     }
 }
