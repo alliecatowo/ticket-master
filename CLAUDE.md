@@ -127,6 +127,8 @@ never drift between sessions:
   silently dropping the milestone when `<M>` doesn't exist. `tm ticket new`/`tm ticket edit` take
   `--due YYYY-MM-DD` (`--due none` clears it on `edit`); `tm ticket show`/`tm ticket list` show
   it, and `tm milestone show` shows the max due date of its member tickets.
+- `tm ticket new` keeps the full objective for workers and ticket details, while ticket-created
+  summaries and human-readable ticket lists use the first meaningful line, shortened when needed.
 - `tm --help` groups the ~16 commands used day to day — daily (`init`, `status`, `tickets`,
   `ticket`, `run`, `search`, `symbol`, `doctor`), planning (`milestone`, `dep`, `decision`),
   serving (`serve`, `mcp`), plus `provider`/`auth` — and folds the rest of the tree (`lease`,

@@ -35,6 +35,25 @@ fn parse_due_flag(s: &str) -> tm_types::Result<Option<time::Date>> {
         .map_err(TmError::parse)
 }
 
+/// Keep ticket summaries to the first meaningful line of an objective, capped to a readable
+/// length. The complete objective remains available in ticket detail and to the worker.
+fn ticket_title(objective: &str) -> String {
+    const MAX_CHARS: usize = 80;
+    let line = objective
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    if line.chars().count() > MAX_CHARS {
+        format!(
+            "{}...",
+            line.chars().take(MAX_CHARS - 3).collect::<String>()
+        )
+    } else {
+        line.to_string()
+    }
+}
+
 /// One dependency edge, serializable for `--json` rendering (unlike
 /// [`tm_core::graph::DependencyEdge`], which intentionally carries no serde impl).
 #[derive(serde::Serialize)]
@@ -239,7 +258,12 @@ pub fn tickets_list(
             });
             last_group = Some(row.group);
         }
-        text.push_str(&format!("  {}  {}  {}\n", row.id, row.title, row.summary));
+        text.push_str(&format!(
+            "  {}  {}  {}\n",
+            row.id,
+            ticket_title(&row.objective),
+            row.summary
+        ));
     }
     if rows.is_empty() {
         text.push_str("No open tickets.");
@@ -388,7 +412,7 @@ pub fn ticket_list(
                         .due
                         .map(tm_core::ticket::format_due_date)
                         .unwrap_or_else(|| "-".to_string()),
-                    o.objective.clone(),
+                    ticket_title(&o.objective),
                 ])
             })
             .collect();
@@ -604,7 +628,7 @@ pub fn ticket_new(
 
     let events = project.store.create_ticket(
         kind,
-        args.objective.clone(),
+        ticket_title(&args.objective),
         parent,
         milestone,
         authority,
@@ -621,6 +645,13 @@ pub fn ticket_new(
 
     if let Some(event) = events.first() {
         if let Some(created_id) = event_ticket_id(&event.subject) {
+            // `ticket.created` carries the concise display title. Store the full prompt as the
+            // objective immediately afterward so workers and detail views retain all context.
+            project.store.update_ticket(
+                &created_id,
+                serde_json::json!({ "objective": args.objective }),
+                project.actor.clone(),
+            )?;
             if let Some(due) = due {
                 project.store.update_ticket(
                     &created_id,
@@ -628,7 +659,14 @@ pub fn ticket_new(
                     project.actor.clone(),
                 )?;
             }
-            renderer.emit(&created_id, &format!("Created ticket {}", created_id))?;
+            renderer.emit(
+                &created_id,
+                &format!(
+                    "Created ticket {}: {}",
+                    created_id,
+                    ticket_title(&args.objective)
+                ),
+            )?;
         }
     }
 
@@ -2145,6 +2183,21 @@ mod tests {
 
         let view = project.store.view().expect("view");
         assert_eq!(view.tickets.len(), 1);
+    }
+
+    #[test]
+    fn ticket_new_uses_a_short_title_but_keeps_the_full_objective() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = test_project(dir.path());
+        let renderer = Renderer::new(false, true, true, false);
+        let objective = "Fix the broken upload flow\n\nSteps to reproduce:\n1. Upload a file";
+
+        ticket_new(&new_args_with_objective(objective), &project, &renderer).expect("ticket new");
+
+        let view = project.store.view().expect("view");
+        let ticket = view.tickets.values().next().expect("ticket created");
+        assert_eq!(ticket.objective, objective);
+        assert_eq!(ticket_title(objective), "Fix the broken upload flow");
     }
 
     #[test]
