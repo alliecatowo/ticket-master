@@ -1763,19 +1763,16 @@ async fn run_genesis_stages(
 /// `tm genesis [--prompt <text>|-]`: turn a prompt into a running project via the Genesis stage
 /// driver.
 pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> {
-    // Resolve the provider before touching the filesystem at all. This used to be a plain
-    // `require_anthropic_api_key()?` right here, before any `.tm/` directory got created, so a
-    // genesis run that fails on provider selection must keep failing before that side effect —
-    // not after creating a half-initialized project directory the caller then has to clean up by
-    // hand. A single candidate stands in for "the fabric": `GenesisDriver` takes one `Provider`
-    // for its whole run (every stage, regardless of role), so there is no per-call routing
-    // decision for a `Fabric` to make here. See `resolve_genesis_provider` for how that one
-    // provider gets picked — whatever `RoleTable::default_table`'s `VisionFrontier` candidate
-    // names (Anthropic today) when that provider is configured, falling back to a reachable
-    // zero-signup local provider when it is not.
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
-    let (provider, fallback_note) = resolve_genesis_provider(clock)?;
-    if let Some(note) = &fallback_note {
+    // Keep fresh runs from creating project state when provider selection fails. Explicit resume
+    // must first inspect its saved state so an absent snapshot is reported before provider setup.
+    let provider_before_open = if args.resume {
+        None
+    } else {
+        let (provider, note) = resolve_genesis_provider(clock.clone())?;
+        Some((provider, note))
+    };
+    if let Some((_, Some(note))) = &provider_before_open {
         renderer.note(note);
     }
 
@@ -1799,10 +1796,30 @@ pub fn genesis(args: &GenesisArgs, renderer: &Renderer) -> tm_types::Result<()> 
         match tm_genesis::GenesisDriver::resume(project.store.as_ref()) {
             Ok(state) => Some(state),
             Err(TmError::NotFound { .. }) if !args.resume => None,
+            Err(TmError::NotFound { .. }) => {
+                return Err(TmError::not_found(
+                    "genesis run",
+                    "No stopped genesis run to resume here. Start one with `tm genesis --prompt \"…\"`.",
+                ));
+            }
             Err(e) => return Err(e),
         }
     } else {
         None
+    };
+
+    // A single candidate stands in for "the fabric": GenesisDriver takes one provider for its
+    // whole run. Resume lookup happens first so a missing snapshot has a useful, credential-free
+    // error instead of an unrelated provider setup failure.
+    let provider = match provider_before_open {
+        Some((provider, _)) => provider,
+        None => {
+            let (provider, fallback_note) = resolve_genesis_provider(clock)?;
+            if let Some(note) = &fallback_note {
+                renderer.note(note);
+            }
+            provider
+        }
     };
 
     // `GenesisState::project` is the only channel `GenesisDriver` has for threading the raw
@@ -4098,6 +4115,33 @@ mod tests {
         assert!(
             project.code_intel().is_ok(),
             "a git repo with no commits yet must still open cleanly, refresh degraded to a warning"
+        );
+    }
+
+    #[test]
+    fn genesis_resume_without_snapshot_reports_guidance_before_provider_lookup() {
+        let _env_guard = ENV_GUARD.lock().unwrap();
+        let _cwd_guard = CWD_GUARD.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        tm_core::Store::open(&root).unwrap();
+        let previous_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&root).unwrap();
+
+        let result = genesis(
+            &GenesisArgs {
+                prompt: None,
+                resume: true,
+                run: false,
+            },
+            &test_renderer(),
+        );
+
+        std::env::set_current_dir(previous_cwd).unwrap();
+        let error = result.unwrap_err().to_string();
+        assert!(
+            error.contains("No stopped genesis run to resume here. Start one with `tm genesis --prompt \"…\"`."),
+            "unexpected error: {error}"
         );
     }
 }

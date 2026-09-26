@@ -191,7 +191,9 @@ never drift between sessions:
   (or a ticket escalates), then continue Genesis automatically. Re-run with `tm genesis --resume` to
   continue a stopped run from its
   persisted stage instead of starting over (an omitted `--prompt` auto-detects a persisted
-  snapshot the same way; `--resume` with no snapshot yet is a real error). See
+  snapshot the same way; explicit `--resume` with no snapshot reports that there is no stopped
+  run and suggests starting with `tm genesis --prompt "…"`, before checking provider credentials.
+  See
   `docs/decisions/D-027-genesis-cli-stops-for-work.md`. Under
   `TM_TEST_MOCK_PROVIDER=1` (the same offline test hook `tm run` and chat turns honor via
   `crate::agent::TEST_MOCK_PROVIDER_ENV`), `tm genesis` skips provider resolution entirely:
