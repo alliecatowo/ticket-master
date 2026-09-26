@@ -1446,7 +1446,7 @@ is based on.
 
 ## W — Real-task trial finding: the dominant token-cost bug (2026-09-25)
 
-- [~] (claimed: subagent) **u1-shell-run-command-field-bypasses-pruning** — Pruning's shell.run dedup key ignores the `command` field, so build/test loops resend ~24KB blobs forever instead of collapsing repeats
+- [ ] **u1-shell-run-command-field-bypasses-pruning** — Pruning's shell.run dedup key ignores the `command` field, so build/test loops resend ~24KB blobs forever instead of collapsing repeats
   model: sonnet · severity: critical · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/pruning.rs`, `crates/tm-agent/src/tools.rs`
   change: `pruning::addressable_for` (pruning.rs, the `shell.run`/`build.run`/`test.run` arm) derives its dedup key only from `input.get("argv")`. But `tools.rs::command_argv` (~line 385) accepts either `argv` or a `command` shell-line string, and the tool's own description tells the model it can pass either. A call issued as `{"command": "go test ./..."}` — the natural form for build/test — makes `addressable_for` return `None` (falls through the `_ => None` arm), so `working_set()` never supersedes it: the same ~24KB-capped shell.run result (tools.rs's `inline_output` caps: 4KB+12KB stdout, 2KB+6KB stderr) gets replayed in full at every later step for the rest of the run, no matter how many times the identical command reruns. Fix `addressable_for`'s shell.run arm to derive the same canonical key from either `command` or `argv` — reuse or mirror `tools.rs::command_argv`'s own resolution logic so the two never drift apart, rather than reimplementing a second parse of the same two fields.
