@@ -1603,7 +1603,7 @@ is based on.
   acceptance: A CLI test runs bare `tm events` with recorded events and asserts it prints the snapshot and exits successfully without hanging; existing `tm events tail` follow and `--no-follow` behavior remains covered.
   test: `cargo test -p tm-cli events_tail`
   evidence: `/tmp/tm-trials/20260926-0821/pallets-click-3822/tm.log:12-34` — the protocol's `tm events` invocation printed only “The durable event log: tail, inspect, replay, and verify the hash chain” and usage, so I had to discover and invoke `events tail --from 1 --no-follow` to capture the actual events.
-- [ ] **t20260926-0821-psf-requests-7432-resume-no-submit-investigation** — Recover a no-submit run using the investigation already performed
+- [x] **t20260926-0821-psf-requests-7432-resume-no-submit-investigation** — Recover a no-submit run using the investigation already performed (landed d6be9df)
   model: sonnet · severity: high · builds Rust: yes · area: agent
   deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
