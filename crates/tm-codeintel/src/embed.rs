@@ -219,8 +219,9 @@ pub const TM_EMBEDDER_ENV: &str = "TM_EMBEDDER";
 /// This never downloads the Potion model: it only picks Potion when it is already present in
 /// the local HuggingFace cache (`crate::potion::PotionEmbedder::try_load_offline`), even when
 /// explicitly requested via `"potion"`. Deliberately conservative, not just cautious: this
-/// function backs `CodeIntel::open_auto`/`open_at_auto`, which real command paths use, and it
-/// must stay safe to call from anywhere, including a future test that forgets this — a caller
+/// function backs `CodeIntel::open_auto`/`open_at_auto`, used by CLI project/indexing and
+/// dispatch paths, plus MCP and Genesis indexing. It must stay safe to call from anywhere,
+/// including a future test that forgets this — a caller
 /// that wants to *download* the model when missing should call
 /// `crate::potion::PotionEmbedder::try_load()` directly (e.g. from `tm doctor` or an explicit
 /// `tm index --embedder potion` verb) and pass the result to `CodeIntel::open_with_embedder`.

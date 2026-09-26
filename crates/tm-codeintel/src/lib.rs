@@ -10,8 +10,10 @@
 //!   index. [`api::CodeIntel::open`]/[`api::CodeIntel::open_at`] keep the deterministic,
 //!   no-network [`embed::LocalHashEmbedder`] as their default so existing tests stay
 //!   network-free; [`api::CodeIntel::open_auto`]/[`api::CodeIntel::open_at_auto`] instead pick
-//!   [`potion::PotionEmbedder`] (real static embeddings) when it's already cached locally —
-//!   see [`embed::build_default_embedder`] and D-025.
+//!   [`potion::PotionEmbedder`] (real static embeddings) when it's already cached locally.
+//!   CLI project/indexing and dispatch paths, MCP, and Genesis use these auto-opening methods;
+//!   see [`embed::build_default_embedder`] and D-025. When the selected embedder identifier
+//!   changes, incremental indexing re-embeds existing files to avoid mixing vector spaces.
 //! - **symbols** ([`symbols`]) — tree-sitter-derived definitions, references, and resolution.
 //! - **history** ([`history`]) — git commits, blame, and message/diff search via `git2`.
 //!

@@ -94,10 +94,13 @@ deliberate scope boundary, not an oversight — see "What this costs" below.
   would have changed retrieval-dependent test behavior across the whole workspace on any machine
   where the model happens to be cached (this dev machine has it cached already), which is exactly
   the kind of untested, wide-blast-radius change this task's instructions said not to risk.
-  `open_auto`/`open_at_auto` are now used by the real CLI, dispatcher, MCP and Genesis indexing
-  paths. Unit tests pass an explicit `hash` override so their retrieval behavior remains stable
-  regardless of whether Potion is cached on the machine running them. Direct `open`/`open_at`
-  calls continue to use the hash embedder.
+  `open_auto`/`open_at_auto` are used by the CLI project/indexing and dispatch paths, MCP, and
+  Genesis indexing. Unit tests pass an explicit `hash` override so their retrieval behavior
+  remains stable regardless of whether Potion is cached on the machine running them. Direct
+  `open`/`open_at` calls continue to use the hash embedder. Incremental indexing persists the
+  selected embedder identifier and re-embeds walked files when it changes, avoiding vectors from
+  different embedding spaces being mixed in one index; indexes without a stored identifier are
+  re-embedded once on their first update.
 - **No download ever happens through `open_auto`/`open_at_auto`, even on explicit request.**
   `build_default_embedder` calls `PotionEmbedder::try_load_offline`, not `try_load`, specifically
   to keep every existing and new call site of it network-free by construction. A real "index with
