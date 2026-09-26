@@ -2549,9 +2549,14 @@ fn plain_tool_error(detail: &str) -> String {
             concise_diagnostic_with_budget("io: ", MAX_IO_DIAGNOSTIC_CHARS)
         );
     } else if detail.starts_with("parse: ") {
+        let diagnostic = concise_diagnostic("parse: ");
+        if diagnostic.contains("unknown variant `verification`") {
+            return format!(
+                "error: couldn't parse the result ({diagnostic}); valid result kinds are command_output, patch, file, report, index, benchmark, transcript, and workspace_snapshot. Use report for verification results, then retry artifact.store with kind `report`"
+            );
+        }
         return format!(
-            "error: couldn't parse the result ({}); retry the operation, and check its input if it fails again",
-            concise_diagnostic("parse: ")
+            "error: couldn't parse the result ({diagnostic}); use one of the supported result kinds: command_output, patch, file, report, verification, index, benchmark, transcript, or workspace_snapshot. Retry with a supported kind, and check the input if it fails again"
         );
     } else if detail.starts_with("invariant violated: ") {
         if detail.contains("attach its returned artifact ID") {
@@ -4205,8 +4210,22 @@ mod tests {
     fn plain_tool_error_keeps_parse_diagnostic_and_recovery_step() {
         let rendered = plain_tool_error("parse: unknown variant `test-output`, expected `patch`");
         assert!(rendered.contains("unknown variant `test-output`, expected `patch`"));
-        assert!(rendered.contains("retry the operation"));
+        assert!(rendered.contains("supported result kinds"));
+        assert!(rendered.contains("command_output"));
+        assert!(rendered.contains("workspace_snapshot"));
+        assert!(rendered.contains("Retry with a supported kind"));
         assert!(!rendered.contains("parse:"));
+    }
+
+    #[test]
+    fn unsupported_verification_result_kind_maps_to_report() {
+        let rendered = plain_tool_error(
+            "parse: unknown variant `verification`, expected one of `command_output`, `patch`, `file`, `report`, `index`, `benchmark`, `transcript`, `workspace_snapshot`",
+        );
+        assert!(rendered.contains("valid result kinds are command_output, patch, file, report"));
+        assert!(rendered.contains("Use report for verification results"));
+        assert!(rendered.contains("kind `report`"));
+        assert!(!rendered.contains("retry the operation"));
     }
 
     #[test]
