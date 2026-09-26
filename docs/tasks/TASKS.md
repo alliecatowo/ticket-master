@@ -1589,7 +1589,7 @@ is based on.
   acceptance: An evidence-free submission produces a user-facing instruction to create and attach evidence, and the agent run completes submission with that evidence without an unhelpful retry loop.
   test: `cargo test -p tm-cli plain_tool_error_keeps_invariant_diagnostic_and_recovery_step`
   evidence: `/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm.log:17` — “Submitted the ticket -> error: operation state was inconsistent (Submitting a ticket needs at least one piece of evidence); retry once, then report this failure if it persists”
-- [ ] **t20260926-0821-BurntSushi-ripgrep-3376-recover-empty-agent-turn** — Recover automatically when a model ends a turn without submitting work
+- [x] **t20260926-0821-BurntSushi-ripgrep-3376-recover-empty-agent-turn** — Recover automatically when a model ends a turn without submitting work (landed eb1b126)
   model: sonnet · severity: high · builds Rust: yes · area: run/recovery · deps: none
   files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: When a transient agent-turn failure leaves a ready ticket with no patch or evidence, continue using the ticket's retry policy within the current `tm run` invocation when budget permits; otherwise report the scheduled retry time, current attempt count, and exact next command instead of ending after a generic model-turn failure.
