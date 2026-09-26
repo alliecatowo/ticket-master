@@ -1,15 +1,24 @@
 //! Record/replay cassettes.
 //!
 //! [`RecordingProvider`] wraps a real [`Provider`] and appends one [`CassetteEntry`] per
-//! successful [`Provider::complete`] call to an in-memory cassette, which [`Cassette::write_jsonl`]
-//! persists as JSONL. [`crate::mock::MockProvider::script_from_cassette`] loads a cassette back
-//! for a deterministic, network-free replay that serves entries in order (not by exact-hash
-//! match — see [`normalize_request`]'s docs for why) and reports any mismatch through
+//! successful [`Provider::complete`] call, both to an in-memory list (for
+//! [`RecordingProvider::into_cassette`]) and, when opened with [`RecordingProvider::create`], to a
+//! [`CassetteWriter`] that fsyncs each entry straight to disk as it happens. That incremental write
+//! is what makes a recording survive a kill mid-run (a wall-clock bound, `SIGTERM`, a crash): the
+//! header lands on disk before the first provider call is even made, and every completed entry
+//! after it is durable the moment that call returns, rather than only ever written once at the very
+//! end via [`Cassette::write_jsonl`]. [`Cassette::read_jsonl`] reads either shape back — a whole
+//! file written by `write_jsonl`, or one left behind by a killed [`CassetteWriter`] — tolerating a
+//! last line cut off mid-write (no trailing newline) by treating the recording as having ended at
+//! the last complete entry instead of failing the whole read.
+//! [`crate::mock::MockProvider::script_from_cassette`] loads a cassette back for a deterministic,
+//! network-free replay that serves entries in order (not by exact-hash match — see
+//! [`normalize_request`]'s docs for why) and reports any mismatch through
 //! [`crate::mock::MockProvider::divergences`] instead of failing outright.
 //!
 //! See `docs/decisions/D-028-record-replay-harness.md`.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -95,33 +104,73 @@ pub enum CassetteError {
 impl Cassette {
     /// Read a cassette from `path`: the first line is the [`CassetteHeader`], every following
     /// non-empty line one [`CassetteEntry`], in order.
+    ///
+    /// Tolerant of a file left behind by a [`CassetteWriter`] killed mid-write: reads raw bytes
+    /// (not [`BufRead::lines`], which errors on invalid UTF-8 — a real risk here, since a
+    /// completion cut off mid-write can land inside a multi-byte character) and, only when the
+    /// file's last byte is not a newline (meaning the very last line was never finished), treats a
+    /// parse failure on that last line as truncation rather than corruption: the recording is read
+    /// as having ended at the last complete entry instead of failing the whole read. A parse
+    /// failure anywhere else — including the header — is still a real, reported error, since the
+    /// file has a complete line there that simply isn't valid JSON in the expected shape.
     pub fn read_jsonl(path: &Path) -> Result<Cassette, CassetteError> {
-        let file = std::fs::File::open(path)?;
-        let reader = io::BufReader::new(file);
-        let mut lines = reader.lines();
+        let bytes = std::fs::read(path)?;
+        if bytes.is_empty() {
+            return Err(CassetteError::MissingHeader);
+        }
+        // Every fsynced write from `CassetteWriter`/`write_jsonl` ends in `\n`; a file whose last
+        // byte is not `\n` was cut off mid-write to its final line.
+        let complete = bytes.last() == Some(&b'\n');
+        let mut raw_lines: Vec<&[u8]> = bytes.split(|&b| b == b'\n').collect();
+        if complete {
+            // `split` leaves a trailing empty slice after the final newline; drop it so the last
+            // real line is what `.peek()` below sees as "last".
+            raw_lines.pop();
+        }
 
-        let header_line = lines.next().ok_or(CassetteError::MissingHeader)??;
-        let header: CassetteHeader = serde_json::from_str(&header_line)
-            .map_err(|source| CassetteError::Malformed { line: 1, source })?;
+        let mut lines = raw_lines.into_iter().enumerate().peekable();
+        let (_, header_bytes) = lines.next().ok_or(CassetteError::MissingHeader)?;
+        let header: CassetteHeader = match serde_json::from_slice(header_bytes) {
+            Ok(header) => header,
+            Err(source) => {
+                if !complete && lines.peek().is_none() {
+                    // The header itself was the file's only, unfinished line: nothing was ever
+                    // durably recorded, so there is nothing to salvage as a partial read.
+                    return Err(CassetteError::MissingHeader);
+                }
+                return Err(CassetteError::Malformed { line: 1, source });
+            }
+        };
 
         let mut entries = Vec::new();
-        for (idx, line) in lines.enumerate() {
-            let line = line?;
-            if line.trim().is_empty() {
+        while let Some((idx, line_bytes)) = lines.next() {
+            if line_bytes.iter().all(|b| b.is_ascii_whitespace()) {
                 continue;
             }
-            let entry: CassetteEntry =
-                serde_json::from_str(&line).map_err(|source| CassetteError::Malformed {
-                    line: idx + 2,
-                    source,
-                })?;
-            entries.push(entry);
+            match serde_json::from_slice::<CassetteEntry>(line_bytes) {
+                Ok(entry) => entries.push(entry),
+                Err(source) => {
+                    if !complete && lines.peek().is_none() {
+                        // Cut off mid-write to this, the file's last line: stop here rather than
+                        // erroring the whole read.
+                        break;
+                    }
+                    return Err(CassetteError::Malformed {
+                        line: idx + 1,
+                        source,
+                    });
+                }
+            }
         }
 
         Ok(Cassette { header, entries })
     }
 
-    /// Write this cassette to `path` as JSONL: the header, then one line per entry, in order.
+    /// Write this cassette to `path` as JSONL in one shot: the header, then one line per entry, in
+    /// order. Prefer [`CassetteWriter`] for a recording made incrementally over time (e.g. during a
+    /// live `tm run --record`), since this truncates and rewrites the whole file and so offers no
+    /// protection against a kill mid-write; this method mainly serves tests and any one-shot
+    /// caller that already has every entry in hand.
     pub fn write_jsonl(&self, path: &Path) -> Result<(), CassetteError> {
         let mut file = std::fs::File::create(path)?;
         let header_json = serde_json::to_string(&self.header).map_err(CassetteError::Serialize)?;
@@ -130,6 +179,43 @@ impl Cassette {
             let entry_json = serde_json::to_string(entry).map_err(CassetteError::Serialize)?;
             writeln!(file, "{entry_json}")?;
         }
+        Ok(())
+    }
+}
+
+/// Appends a cassette to disk one entry at a time, fsyncing each write so the file on disk never
+/// falls behind what's actually been recorded — the fix for a recording that a kill (wall-clock
+/// bound, `SIGTERM`, crash) mid-run used to lose entirely, since [`Cassette::write_jsonl`] only
+/// ever wrote the whole file once, at the very end. Every write is `write_all` immediately followed
+/// by `File::sync_data`, so a completed [`Provider::complete`] call is durable before the caller
+/// moves on to the next one. That fsync-per-entry cost is negligible in practice: a provider call
+/// it follows already took whole seconds over the network, so an extra sub-millisecond fsync is
+/// noise, not a bottleneck — the pattern optimizes for "never lose a finished call", not raw
+/// append throughput.
+pub struct CassetteWriter {
+    file: std::fs::File,
+}
+
+impl CassetteWriter {
+    /// Create `path` and durably write `header` as its first line before returning, so even a kill
+    /// immediately after this call still leaves a valid (if entry-less) cassette on disk instead of
+    /// no file at all.
+    pub fn create(path: &Path, header: &CassetteHeader) -> Result<Self, CassetteError> {
+        let mut file = std::fs::File::create(path)?;
+        let header_json = serde_json::to_string(header).map_err(CassetteError::Serialize)?;
+        file.write_all(header_json.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.sync_data()?;
+        Ok(CassetteWriter { file })
+    }
+
+    /// Append one entry and fsync before returning, so it's durable on disk the instant this call
+    /// completes.
+    pub fn append(&mut self, entry: &CassetteEntry) -> Result<(), CassetteError> {
+        let entry_json = serde_json::to_string(entry).map_err(CassetteError::Serialize)?;
+        self.file.write_all(entry_json.as_bytes())?;
+        self.file.write_all(b"\n")?;
+        self.file.sync_data()?;
         Ok(())
     }
 }
@@ -211,21 +297,26 @@ pub struct Divergence {
 }
 
 /// Wraps a [`Provider`] and records every successful [`Provider::complete`] call into an
-/// in-memory cassette, for later [`Cassette::write_jsonl`]. `embed()` delegates straight through
-/// and is never recorded: replay only ever needs to reproduce completions, and an embedder is
-/// already deterministic and network-free via [`crate::mock::MockProvider::embed`] when a test
-/// needs one.
+/// in-memory cassette, for later [`Cassette::write_jsonl`], and — when built with
+/// [`RecordingProvider::create`] — also incrementally to a [`CassetteWriter`], so the recording
+/// survives a kill mid-run instead of existing only in memory until [`RecordingProvider::into_cassette`]
+/// is called. `embed()` delegates straight through and is never recorded: replay only ever needs
+/// to reproduce completions, and an embedder is already deterministic and network-free via
+/// [`crate::mock::MockProvider::embed`] when a test needs one.
 pub struct RecordingProvider<P: Provider> {
     inner: P,
     role: Role,
     root: std::path::PathBuf,
     clock: std::sync::Arc<dyn Clock>,
     entries: Mutex<Vec<CassetteEntry>>,
+    writer: Option<Mutex<CassetteWriter>>,
 }
 
 impl<P: Provider> RecordingProvider<P> {
     /// Wrap `inner`, recording every successful completion as made for `role`, with `root`
-    /// normalized out of the recorded hash (see [`normalize_request`]).
+    /// normalized out of the recorded hash (see [`normalize_request`]), in memory only. Prefer
+    /// [`RecordingProvider::create`] for any real (non-test) recording, since a process killed
+    /// before [`RecordingProvider::into_cassette`] runs loses everything recorded this way.
     pub fn new(
         inner: P,
         role: Role,
@@ -238,7 +329,36 @@ impl<P: Provider> RecordingProvider<P> {
             root: root.into(),
             clock,
             entries: Mutex::new(Vec::new()),
+            writer: None,
         }
+    }
+
+    /// Wrap `inner` like [`RecordingProvider::new`], additionally opening a [`CassetteWriter`] at
+    /// `path` up front (its header is durably written before this returns) and appending each
+    /// entry to it as it's recorded, so a kill at any point after this call still leaves a valid,
+    /// readable-by-[`Cassette::read_jsonl`] cassette on disk with every entry recorded so far.
+    pub fn create(
+        inner: P,
+        role: Role,
+        root: impl Into<std::path::PathBuf>,
+        clock: std::sync::Arc<dyn Clock>,
+        path: &Path,
+        harness_epoch: Option<u64>,
+    ) -> Result<Self, CassetteError> {
+        let header = CassetteHeader {
+            format_version: CASSETTE_FORMAT_VERSION,
+            harness_epoch,
+            recorded_at: clock.now(),
+        };
+        let writer = CassetteWriter::create(path, &header)?;
+        Ok(RecordingProvider {
+            inner,
+            role,
+            root: root.into(),
+            clock,
+            entries: Mutex::new(Vec::new()),
+            writer: Some(Mutex::new(writer)),
+        })
     }
 
     /// The entries recorded so far, in order.
@@ -273,14 +393,22 @@ impl<P: Provider> Provider for RecordingProvider<P> {
             let hash = hash_normalized_request(&req, &self.root);
             let mut entries = self.entries.lock();
             let seq = entries.len() as u64;
-            entries.push(CassetteEntry {
+            let entry = CassetteEntry {
                 seq,
                 role: self.role,
                 provider_id: self.inner.id().to_string(),
                 request_hash: hash,
                 request: req,
                 completion: completion.clone(),
-            });
+            };
+            // Best-effort: a disk write failure here (e.g. the cassette's directory disappeared
+            // mid-run) shouldn't fail the completion the caller is actually waiting on. It just
+            // means this one entry, and any after it, won't be durable on disk — the in-memory
+            // `entries` list below still has it for a normal, non-killed finish.
+            if let Some(writer) = &self.writer {
+                let _ = writer.lock().append(&entry);
+            }
+            entries.push(entry);
         }
         result
     }
