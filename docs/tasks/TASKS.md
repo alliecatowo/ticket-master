@@ -1596,7 +1596,7 @@ is based on.
   acceptance: A simulated model-ended-turn-without-submission failure either recovers and completes within the configured retry budget or prints the retry schedule and an unambiguous next step; it never implies work was completed or tests passed.
   test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
   evidence: `/tmp/tm-trials/20260926-0821/BurntSushi-ripgrep-3376/tm.log:54` — `agent turn failed: Ticket T-1: no patch or evidence was submitted ... model ended turn without submitting. Run tm run T-1 again to retry.`; `/tmp/tm-trials/20260926-0821/BurntSushi-ripgrep-3376/tm.log:193` — retry was only scheduled after this run failed.
-- [ ] **t20260926-0821-pallets-click-3822-events-snapshot-default** — Make `tm events` useful for a one-shot event inspection
+- [x] **t20260926-0821-pallets-click-3822-events-snapshot-default** — Make `tm events` useful for a one-shot event inspection (landed 5f3e2fb)
   model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: When `tm events` is invoked without a subcommand, render the current event log snapshot and exit instead of printing command usage; retain `tm events tail` for live-follow behavior and expose an explicit follow option only when requested.
