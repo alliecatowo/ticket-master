@@ -565,14 +565,34 @@ pub async fn run_ticket(
         dispatcher
     } else {
         match &args.record {
-            Some(_) => crate::dispatch::build_dispatcher_with_recording(
-                project,
-                tokio::runtime::Handle::current(),
-                exec_root,
-                Some(step_tx),
-                ticket_state.executor.role,
-                cassette_sink.clone(),
-            )?,
+            Some(path) => {
+                // Opened (and its header durably written) before the run is even dispatched, so
+                // a kill in the window between this and the first completion still leaves a
+                // valid, header-only cassette rather than no file at all.
+                let writer = tm_provider::cassette::CassetteWriter::create(
+                    path,
+                    &CassetteHeader {
+                        format_version: CASSETTE_FORMAT_VERSION,
+                        harness_epoch: Some(current_harness_epoch(project)),
+                        recorded_at: project.clock.now(),
+                    },
+                )
+                .map_err(|e| {
+                    tm_types::TmError::Io(format!(
+                        "couldn't open the cassette at {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                crate::dispatch::build_dispatcher_with_recording(
+                    project,
+                    tokio::runtime::Handle::current(),
+                    exec_root,
+                    Some(step_tx),
+                    ticket_state.executor.role,
+                    cassette_sink.clone(),
+                    Some(Arc::new(std::sync::Mutex::new(writer))),
+                )?
+            }
             None => crate::dispatch::build_dispatcher(
                 project,
                 tokio::runtime::Handle::current(),
@@ -750,6 +770,20 @@ fn preflight_fabric_or_fail(
 /// `tm-scheduler`'s own dispatch computes it (the last promoted epoch, or the genesis epoch `0`
 /// if none has promoted yet), so a cassette recorded this way carries the same epoch a scheduler-
 /// dispatched run would have stamped on it.
+/// The last promoted harness epoch, or the genesis epoch `0` if none has promoted yet — the same
+/// rule `tm-scheduler`'s own dispatch uses, so any cassette header stamped with this carries the
+/// epoch a scheduler-dispatched run would have. Shared by [`write_recording_cassette`]'s final
+/// write and the incremental [`tm_provider::cassette::CassetteWriter`] created before the run
+/// even starts, so both ever write the same epoch for one `tm run --record` invocation.
+fn current_harness_epoch(project: &Project) -> u64 {
+    project
+        .store
+        .harness_epochs()
+        .ok()
+        .and_then(|epochs| epochs.last().map(|epoch| epoch.epoch))
+        .unwrap_or(0)
+}
+
 fn write_recording_cassette(
     project: &Project,
     ticket: &TicketId,
@@ -757,12 +791,7 @@ fn write_recording_cassette(
     cassette_sink: &crate::agent::CassetteSink,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
-    let harness_epoch = project
-        .store
-        .harness_epochs()
-        .ok()
-        .and_then(|epochs| epochs.last().map(|epoch| epoch.epoch))
-        .unwrap_or(0);
+    let harness_epoch = current_harness_epoch(project);
     let entries = cassette_sink
         .lock()
         .expect("cassette sink mutex poisoned")
@@ -2007,6 +2036,7 @@ mod tests {
                 None,
                 ticket_state.executor.role,
                 cassette_sink.clone(),
+                None,
             );
             std::env::remove_var(crate::agent::TEST_MOCK_PROVIDER_ENV);
             dispatcher.expect("dispatcher")
@@ -2079,6 +2109,7 @@ mod tests {
                 None,
                 ticket_state.executor.role,
                 cassette_sink.clone(),
+                None,
             );
             std::env::remove_var(crate::agent::TEST_MOCK_PROVIDER_ENV);
             dispatcher.expect("dispatcher")

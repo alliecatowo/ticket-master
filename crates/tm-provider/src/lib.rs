@@ -29,8 +29,8 @@ pub mod wire_names;
 
 pub use anthropic::AnthropicProvider;
 pub use cassette::{
-    Cassette, CassetteEntry, CassetteError, CassetteHeader, Divergence, RecordingProvider,
-    CASSETTE_FORMAT_VERSION,
+    Cassette, CassetteEntry, CassetteError, CassetteHeader, CassetteWriter, Divergence,
+    RecordingProvider, CASSETTE_FORMAT_VERSION,
 };
 pub use decide::{
     Answer, AnswerValue, DecideLimits, DecideRequest, DecideResponse, DecisionProvider, LevelSpec,

@@ -514,6 +514,96 @@ mod tests {
         assert_eq!(read_back.entries, entries);
     }
 
+    #[test]
+    fn cassette_writer_survives_being_dropped_mid_recording() {
+        // Proves the first half of u1-record-flush-incremental's acceptance criteria: a writer
+        // that is dropped (simulating a kill) without ever calling `Cassette::write_jsonl`
+        // still leaves every entry it appended readable back.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cassette.jsonl");
+        let header = CassetteHeader {
+            format_version: CASSETTE_FORMAT_VERSION,
+            harness_epoch: Some(3),
+            recorded_at: Timestamp::EPOCH,
+        };
+        let mut writer = CassetteWriter::create(&path, &header).expect("create");
+        let entries = vec![
+            CassetteEntry {
+                seq: 0,
+                role: Role::CoderFast,
+                provider_id: "test".to_string(),
+                request_hash: 1,
+                request: make_request("/tmp/a"),
+                completion: make_completion("one"),
+            },
+            CassetteEntry {
+                seq: 1,
+                role: Role::CoderFast,
+                provider_id: "test".to_string(),
+                request_hash: 2,
+                request: make_request("/tmp/a"),
+                completion: make_completion("two"),
+            },
+            CassetteEntry {
+                seq: 2,
+                role: Role::CoderFast,
+                provider_id: "test".to_string(),
+                request_hash: 3,
+                request: make_request("/tmp/a"),
+                completion: make_completion("three"),
+            },
+        ];
+        for entry in &entries {
+            writer.append(entry).expect("append");
+        }
+        drop(writer); // never call write_jsonl -- this is the point of the test
+
+        let read_back = Cassette::read_jsonl(&path).expect("read a writer-only file");
+        assert_eq!(read_back.header, header);
+        assert_eq!(read_back.entries, entries);
+    }
+
+    #[test]
+    fn read_jsonl_tolerates_a_last_entry_cut_off_mid_write() {
+        // The other half: a file left behind by a `CassetteWriter` killed mid-`append` (no
+        // trailing newline on its last line) reads back every complete entry before the cut,
+        // instead of failing the whole read.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cassette.jsonl");
+        let header = CassetteHeader {
+            format_version: CASSETTE_FORMAT_VERSION,
+            harness_epoch: Some(3),
+            recorded_at: Timestamp::EPOCH,
+        };
+        let complete_entry = CassetteEntry {
+            seq: 0,
+            role: Role::CoderFast,
+            provider_id: "test".to_string(),
+            request_hash: 1,
+            request: make_request("/tmp/a"),
+            completion: make_completion("one"),
+        };
+
+        let mut writer = CassetteWriter::create(&path, &header).expect("create");
+        writer.append(&complete_entry).expect("append");
+        drop(writer);
+
+        // Simulate a kill mid-`append` of a *second* entry: append raw, truncated JSON with no
+        // trailing newline directly, bypassing `CassetteWriter` (which always writes a complete
+        // line before returning).
+        let mut raw = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open for raw append");
+        raw.write_all(br#"{"seq":1,"role":"coder.fast","incomple"#)
+            .expect("write truncated bytes");
+        drop(raw);
+
+        let read_back = Cassette::read_jsonl(&path).expect("tolerate the truncated last line");
+        assert_eq!(read_back.header, header);
+        assert_eq!(read_back.entries, vec![complete_entry]);
+    }
+
     #[tokio::test]
     async fn recording_provider_writes_lines_that_read_back_matching() {
         let clock = std::sync::Arc::new(FixedClock::epoch());

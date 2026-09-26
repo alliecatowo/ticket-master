@@ -1765,6 +1765,14 @@ pub(crate) struct RecordingSpec {
     /// project root/tempdir change.
     pub(crate) root: std::path::PathBuf,
     pub(crate) sink: CassetteSink,
+    /// Durable, incremental twin of `sink`: when set, every entry appended to `sink` is also
+    /// fsynced to disk immediately via [`tm_provider::cassette::CassetteWriter`], so a `tm run
+    /// --record` killed mid-run (a wall-clock bound, `SIGTERM`, a crash) still leaves a valid
+    /// partial cassette instead of nothing at all — `sched.rs`'s `write_recording_cassette` only
+    /// ever wrote the whole file once, at the very end, which is what this fixes. `None` when a
+    /// caller only wants the in-memory `sink` (there is no such caller in production today, but
+    /// nothing requires a real file to exist for `RecordingSpec` to be constructed).
+    pub(crate) writer: Option<Arc<Mutex<tm_provider::cassette::CassetteWriter>>>,
 }
 
 /// Wraps a registered [`tm_provider::Provider`] so a successful `complete` call also appends a
@@ -1779,6 +1787,7 @@ struct RecordingProviderWrapper {
     role: Role,
     root: std::path::PathBuf,
     sink: CassetteSink,
+    writer: Option<Arc<Mutex<tm_provider::cassette::CassetteWriter>>>,
 }
 
 #[async_trait::async_trait]
@@ -1794,16 +1803,34 @@ impl tm_provider::Provider for RecordingProviderWrapper {
         let result = self.inner.complete(req.clone()).await;
         if let Ok(completion) = &result {
             let hash = tm_provider::cassette::hash_normalized_request(&req, &self.root);
-            let mut entries = self.sink.lock().expect("cassette sink mutex poisoned");
-            let seq = entries.len() as u64;
-            entries.push(tm_provider::CassetteEntry {
-                seq,
-                role: self.role,
-                provider_id: self.inner.id().to_string(),
-                request_hash: hash,
-                request: req,
-                completion: completion.clone(),
-            });
+            let entry = {
+                let mut entries = self.sink.lock().expect("cassette sink mutex poisoned");
+                let entry = tm_provider::CassetteEntry {
+                    seq: entries.len() as u64,
+                    role: self.role,
+                    provider_id: self.inner.id().to_string(),
+                    request_hash: hash,
+                    request: req,
+                    completion: completion.clone(),
+                };
+                entries.push(entry.clone());
+                entry
+            };
+            // Fsynced immediately, independent of the run's own outcome: this is what makes the
+            // cassette survive a kill mid-run instead of only ever existing in `sink` until
+            // `write_recording_cassette` writes it once at the very end. A disk write failure
+            // here must not fail the completion that already succeeded -- log and carry on, the
+            // same way a failed workspace-snapshot capture elsewhere in this codebase degrades
+            // rather than aborting a run.
+            if let Some(writer) = &self.writer {
+                if let Err(e) = writer
+                    .lock()
+                    .expect("cassette writer mutex poisoned")
+                    .append(&entry)
+                {
+                    tracing::warn!(error = %e, "failed to durably append a cassette entry");
+                }
+            }
         }
         result
     }
@@ -1830,6 +1857,7 @@ fn register_recordable(
             role: spec.role,
             root: spec.root.clone(),
             sink: spec.sink.clone(),
+            writer: spec.writer.clone(),
         })),
         None => fabric.register_provider(provider),
     }
@@ -2005,6 +2033,15 @@ fn fabric_model_for(fabric: &Fabric, slug: &str) -> Option<String> {
 /// request's own `ContentBlock::ToolResult` text instead of predicting the exact
 /// `CompletionRequest` `AgentLoop::drive` builds (which depends on the rendered system
 /// prompt/context pack).
+/// Alongside [`TEST_MOCK_PROVIDER_ENV`]: the 1-indexed call number at which
+/// [`ScriptedMockProvider::complete`] stops playing its script and blocks forever instead —
+/// every call before it is served normally. Exists for an integration test
+/// (`crates/tm-provider/src/cassette.rs`'s `u1-record-flush-incremental`) that needs `tm run
+/// --record` to have durably recorded at least one real completion before it sends a kill, so
+/// there is something on disk to prove survived: unlike blocking on the very first call, this
+/// lets the run make genuine progress first.
+const TEST_MOCK_PROVIDER_BLOCK_AFTER_ENV: &str = "TM_TEST_MOCK_PROVIDER_BLOCK_AFTER";
+
 fn build_mock_fabric(clock: Arc<dyn Clock>, recording: Option<&RecordingSpec>) -> Fabric {
     let table = RoleTable::parse(
         "[coder_fast]\ncandidates = [{ provider = \"mock\", model = \"m1\", max_concurrency = 1 }]\n",
@@ -2012,7 +2049,15 @@ fn build_mock_fabric(clock: Arc<dyn Clock>, recording: Option<&RecordingSpec>) -
     .expect("this crate's own static mock role table always parses");
     let fabric = Fabric::new(table, clock.clone());
     let model = ModelId::new("mock", "m1");
-    let provider = ScriptedMockProvider { model, clock };
+    let block_after_calls = std::env::var(TEST_MOCK_PROVIDER_BLOCK_AFTER_ENV)
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let provider = ScriptedMockProvider {
+        model,
+        clock,
+        block_after_calls,
+        call_count: std::sync::atomic::AtomicUsize::new(0),
+    };
     register_recordable(&fabric, Arc::new(provider), recording);
     fabric
 }
@@ -2038,6 +2083,10 @@ fn build_mock_fabric(clock: Arc<dyn Clock>, recording: Option<&RecordingSpec>) -
 struct ScriptedMockProvider {
     model: ModelId,
     clock: Arc<dyn Clock>,
+    /// [`TEST_MOCK_PROVIDER_BLOCK_AFTER_ENV`]: block forever starting at this 1-indexed call.
+    block_after_calls: Option<usize>,
+    /// How many calls `complete` has served so far, checked against `block_after_calls`.
+    call_count: std::sync::atomic::AtomicUsize,
 }
 
 impl ScriptedMockProvider {
@@ -2086,6 +2135,15 @@ impl tm_provider::fabric::Provider for ScriptedMockProvider {
         &self,
         req: tm_provider::CompletionRequest,
     ) -> Result<tm_provider::Completion, tm_provider::ProviderError> {
+        let call = self
+            .call_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        if self.block_after_calls == Some(call) {
+            // Deliberately never resolves; see `TEST_MOCK_PROVIDER_BLOCK_AFTER_ENV`'s doc
+            // comment. Every call before this one still falls through to the real script below.
+            std::future::pending::<()>().await;
+        }
         let model = req.model_or(&self.model);
         let has_ticket = req
             .system

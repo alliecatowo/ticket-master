@@ -307,7 +307,10 @@ pub fn build_dispatcher_with_human(
 /// [`tm_core::ticket::ExecutorRequirements::role`] (a single `tm run` dispatches one ticket, so
 /// one role for the whole recording); `sink` is shared across every wrapped provider rather than
 /// each keeping its own private cassette, so a mid-run fallback across candidates still lands in
-/// one ordered recording instead of splitting across several.
+/// one ordered recording instead of splitting across several. `writer`, when the caller has one
+/// open on the real `--record <path>`, makes every entry appended to `sink` also durable on disk
+/// immediately, so a kill mid-run still leaves a valid partial cassette (`u1-record-flush-
+/// incremental`) instead of only ever writing the whole file once, at the very end.
 pub(crate) fn build_dispatcher_with_recording(
     project: &Project,
     handle: tokio::runtime::Handle,
@@ -315,12 +318,18 @@ pub(crate) fn build_dispatcher_with_recording(
     steps: Option<tokio::sync::mpsc::UnboundedSender<tm_agent::StepRecord>>,
     role: Role,
     sink: crate::agent::CassetteSink,
+    writer: Option<std::sync::Arc<std::sync::Mutex<tm_provider::cassette::CassetteWriter>>>,
 ) -> tm_types::Result<Arc<ExecutorDispatcher>> {
     let root = execution_root(&project.root, exec_root).to_path_buf();
     let fabric = crate::agent::build_fabric_for_project_recording(
         project,
         project.clock.clone(),
-        crate::agent::RecordingSpec { role, root, sink },
+        crate::agent::RecordingSpec {
+            role,
+            root,
+            sink,
+            writer,
+        },
     )?;
     let human = Arc::new(StdinApprovalSink {
         store: project.store.clone(),
