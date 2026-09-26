@@ -1215,7 +1215,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-events && mise run test:crate -- tm-cli`
   evidence: The dogfood forensics needed `sqlite3 .tm/project.db` to see that 18 calls cost 1.03M tokens. `tm stats` only showed `T-1 S-2 18 1025330 not priced 203`.
 
-- [ ] **u1-record-flush-incremental** — `tm run --record` must write the cassette incrementally so a killed or timed-out run still leaves one
+- [x] **u1-record-flush-incremental** (landed 218abf3) — `tm run --record` must write the cassette incrementally so a killed or timed-out run still leaves one
   model: sonnet · severity: medium · builds Rust: yes · area: replay · deps: none
   files: `crates/tm-provider/src/cassette.rs`, `crates/tm-cli/src/agent.rs`, `crates/tm-cli/src/sched.rs`, `crates/tm-cli/src/dispatch.rs`
   change: `tm run T-2 --record /tmp/x.cassette` killed by SIGTERM at a 580s bound left no file at all. Two layers need the fix, not one:
@@ -1225,7 +1225,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-provider && mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/dogfood3.log ends `TIMEOUT after 580s / EXIT 124`, and `ls /tmp/tm-audit/dog2.cassette` gives No such file.
 
-- [ ] **u1-run-sigterm-releases-lease** — On SIGINT/SIGTERM, `tm run` should release its lease and record an interrupted attempt instead of leaving the ticket `active`
+- [x] **u1-run-sigterm-releases-lease** (landed 2ecbb9c) — On SIGINT/SIGTERM, `tm run` should release its lease and record an interrupted attempt instead of leaving the ticket `active`
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: u1-run-progress-shows-args
   files: `crates/tm-cli/src/agent.rs`, `crates/tm-cli/src/sched.rs`
   change: After `tm run T-2` was killed with SIGTERM, `tm ticket list` still shows `T-2 work active`. A prior, externally-stopped subagent got this ~95% done on branch `salvage/stopped-agent-agent-a3eaaae5ebb3f0ec8-20260925190937` — review it before writing this from scratch: it adds `InterruptWatcher` (SIGINT+SIGTERM via `tokio::signal`) and `handle_run_interrupt` to `sched.rs`'s `run_ticket` poll loop, which on the first signal calls `Store::record_failure(FailureClass::ExecutorCrash, "interrupted by user")` (releases the lease and drives the normal retry-vs-escalate path — reuses existing machinery rather than reinventing lease release) and exits 130, and on a second signal exits immediately without waiting on the cleanup task. It also adds `TEST_MOCK_PROVIDER_BLOCK_ENV`/`ScriptedMockProvider.block` (`agent.rs`) so a mock completion can be made to never resolve, specifically to support a deterministic integration test. That test itself — `crates/tm-cli/tests/run_interrupt.rs`, referenced by the salvaged code's own doc comments — was never actually written before the subagent was stopped; this is the one real gap left.

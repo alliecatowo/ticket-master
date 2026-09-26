@@ -442,6 +442,99 @@ const RUN_TICKET_MAX_WAIT: Duration = Duration::from_secs(1800);
 /// this waits on (patch/artifact storage, `git stash create`, session teardown) does network I/O.
 const WORKTREE_COMPLETION_GRACE: Duration = Duration::from_secs(30);
 
+/// The exit code [`run_ticket`] uses when a foreground run is interrupted by a signal — the
+/// conventional "killed by signal 2" code (128 + `SIGINT`), reused for `SIGTERM` too since this
+/// process has no distinct "stopped early on purpose" code of its own and 130 is already the
+/// familiar one from every other interactive CLI a person kills with ctrl-c.
+const RUN_TICKET_INTERRUPTED_EXIT_CODE: i32 = 130;
+
+/// Waits for a `SIGINT`/`SIGTERM`-shaped interrupt during [`run_ticket`]'s foreground poll loop.
+/// `tokio::signal::ctrl_c` alone only ever covers `SIGINT` (and, on Windows, ctrl-break); a `tm
+/// run` a scheduler or supervisor stops with a plain `SIGTERM` (no controlling terminal at all,
+/// e.g. `kill <pid>`) would otherwise leave the ticket stuck `Leased`/`Running` forever once its
+/// process is gone, exactly the dogfood symptom this exists to fix. `recv` can be awaited
+/// repeatedly, so the same watcher also detects a *second* signal arriving while
+/// [`handle_run_interrupt`]'s cleanup is still in flight.
+struct InterruptWatcher {
+    #[cfg(unix)]
+    sigterm: tokio::signal::unix::Signal,
+}
+
+impl InterruptWatcher {
+    #[cfg(unix)]
+    fn new() -> tm_types::Result<Self> {
+        let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| tm_types::TmError::Io(e.to_string()))?;
+        Ok(InterruptWatcher { sigterm })
+    }
+
+    #[cfg(not(unix))]
+    fn new() -> tm_types::Result<Self> {
+        Ok(InterruptWatcher {})
+    }
+
+    #[cfg(unix)]
+    async fn recv(&mut self) {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = self.sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    async fn recv(&mut self) {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// [`run_ticket`]'s interrupt handling: the first `SIGINT`/`SIGTERM` records an "interrupted by
+/// user" attempt failure via [`tm_core::Store::record_failure`], which (see that method's own
+/// doc comment) both releases every lease the ticket currently holds *and* drives the same
+/// retry-vs-escalate decision any other failed attempt goes through — so an interrupted ticket
+/// returns to `Ready` exactly the way a crashed or expired-lease attempt already does, rather
+/// than sitting `Leased`/`Running` forever (the dogfood symptom this exists to fix: a killed `tm
+/// run T-2` left `tm ticket list` showing `T-2 work active` with no way back to `Ready` short of
+/// a manual lease sweep). The write runs on a blocking task specifically so a *second* signal
+/// arriving before it finishes can still win the race below and exit immediately without waiting
+/// on it — there is no in-process handle to cancel the dispatched agent loop itself (`tm-core`'s
+/// `Executor::cancel` is an unimplemented stub everywhere today), so "cancel the agent loop" here
+/// means stopping this foreground process, which is the only thing actually driving the wait;
+/// the background task the scheduler dispatched keeps running until the process exit below tears
+/// it down, and any write it still attempts after that races harmlessly against the ticket's
+/// already-changed state the same way a lease-expiry race already does elsewhere in this file.
+async fn handle_run_interrupt(
+    project: &Project,
+    ticket: &TicketId,
+    renderer: &Renderer,
+    interrupts: &mut InterruptWatcher,
+) -> ! {
+    renderer.note(&format!(
+        "Interrupted -- recording a failure and releasing the lease for {ticket}..."
+    ));
+    let store = project.store.clone();
+    let ticket_for_cleanup = ticket.clone();
+    let actor = project.actor.clone();
+    let mut cleanup = tokio::task::spawn_blocking(move || {
+        store.record_failure(
+            &ticket_for_cleanup,
+            tm_core::FailureClass::ExecutorCrash,
+            "interrupted by user".to_string(),
+            actor,
+        )
+    });
+    tokio::select! {
+        result = &mut cleanup => {
+            if let Ok(Err(e)) = result {
+                tracing::warn!(ticket = %ticket, error = %e, "failed to record the interrupted attempt");
+            }
+        }
+        _ = interrupts.recv() => {
+            renderer.note("Interrupted again -- exiting immediately without waiting for cleanup.");
+        }
+    }
+    std::process::exit(RUN_TICKET_INTERRUPTED_EXIT_CODE);
+}
+
 /// `tm run <ticket>`: execute one ticket to completion in the foreground, outside the scheduler
 /// loop — the single-ticket path a human runs interactively or in CI. Dispatches through the
 /// same [`crate::dispatch::build_dispatcher`] `tm sched run` uses (`SPEC.md` §24, audit
@@ -565,14 +658,34 @@ pub async fn run_ticket(
         dispatcher
     } else {
         match &args.record {
-            Some(_) => crate::dispatch::build_dispatcher_with_recording(
-                project,
-                tokio::runtime::Handle::current(),
-                exec_root,
-                Some(step_tx),
-                ticket_state.executor.role,
-                cassette_sink.clone(),
-            )?,
+            Some(path) => {
+                // Opened (and its header durably written) before the run is even dispatched, so
+                // a kill in the window between this and the first completion still leaves a
+                // valid, header-only cassette rather than no file at all.
+                let writer = tm_provider::cassette::CassetteWriter::create(
+                    path,
+                    &CassetteHeader {
+                        format_version: CASSETTE_FORMAT_VERSION,
+                        harness_epoch: Some(current_harness_epoch(project)),
+                        recorded_at: project.clock.now(),
+                    },
+                )
+                .map_err(|e| {
+                    tm_types::TmError::Io(format!(
+                        "couldn't open the cassette at {}: {e}",
+                        path.display()
+                    ))
+                })?;
+                crate::dispatch::build_dispatcher_with_recording(
+                    project,
+                    tokio::runtime::Handle::current(),
+                    exec_root,
+                    Some(step_tx),
+                    ticket_state.executor.role,
+                    cassette_sink.clone(),
+                    Some(Arc::new(std::sync::Mutex::new(writer))),
+                )?
+            }
             None => crate::dispatch::build_dispatcher(
                 project,
                 tokio::runtime::Handle::current(),
@@ -617,6 +730,7 @@ pub async fn run_ticket(
     let mut detached = false;
     let mut final_state = None;
     let mut outcome = None;
+    let mut interrupts = InterruptWatcher::new()?;
     loop {
         if project.clock.now() >= deadline {
             renderer.note(&format!(
@@ -626,7 +740,12 @@ pub async fn run_ticket(
             detached = true;
             break;
         }
-        tokio::time::sleep(RUN_TICKET_POLL_INTERVAL).await;
+        tokio::select! {
+            _ = tokio::time::sleep(RUN_TICKET_POLL_INTERVAL) => {}
+            _ = interrupts.recv() => {
+                handle_run_interrupt(project, &ticket, renderer, &mut interrupts).await;
+            }
+        }
         // Live progress: each step the run has taken since the last poll, as `tm -p` prints it.
         while let Ok(step) = step_rx.try_recv() {
             renderer.note(&crate::agent::format_step(&step));
@@ -750,6 +869,20 @@ fn preflight_fabric_or_fail(
 /// `tm-scheduler`'s own dispatch computes it (the last promoted epoch, or the genesis epoch `0`
 /// if none has promoted yet), so a cassette recorded this way carries the same epoch a scheduler-
 /// dispatched run would have stamped on it.
+/// The last promoted harness epoch, or the genesis epoch `0` if none has promoted yet — the same
+/// rule `tm-scheduler`'s own dispatch uses, so any cassette header stamped with this carries the
+/// epoch a scheduler-dispatched run would have. Shared by [`write_recording_cassette`]'s final
+/// write and the incremental [`tm_provider::cassette::CassetteWriter`] created before the run
+/// even starts, so both ever write the same epoch for one `tm run --record` invocation.
+fn current_harness_epoch(project: &Project) -> u64 {
+    project
+        .store
+        .harness_epochs()
+        .ok()
+        .and_then(|epochs| epochs.last().map(|epoch| epoch.epoch))
+        .unwrap_or(0)
+}
+
 fn write_recording_cassette(
     project: &Project,
     ticket: &TicketId,
@@ -757,12 +890,7 @@ fn write_recording_cassette(
     cassette_sink: &crate::agent::CassetteSink,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
-    let harness_epoch = project
-        .store
-        .harness_epochs()
-        .ok()
-        .and_then(|epochs| epochs.last().map(|epoch| epoch.epoch))
-        .unwrap_or(0);
+    let harness_epoch = current_harness_epoch(project);
     let entries = cassette_sink
         .lock()
         .expect("cassette sink mutex poisoned")
@@ -2007,6 +2135,7 @@ mod tests {
                 None,
                 ticket_state.executor.role,
                 cassette_sink.clone(),
+                None,
             );
             std::env::remove_var(crate::agent::TEST_MOCK_PROVIDER_ENV);
             dispatcher.expect("dispatcher")
@@ -2079,6 +2208,7 @@ mod tests {
                 None,
                 ticket_state.executor.role,
                 cassette_sink.clone(),
+                None,
             );
             std::env::remove_var(crate::agent::TEST_MOCK_PROVIDER_ENV);
             dispatcher.expect("dispatcher")
