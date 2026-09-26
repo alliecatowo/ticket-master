@@ -1286,6 +1286,7 @@ impl AgentLoop {
         // one returns `AgentOutcome::Failed` right there — see below), so this count is exact
         // even across a suspend/resume boundary, without any extra state of its own.
         let mut nudges_sent: u32 = steps.iter().filter(|s| s.tool_calls.is_empty()).count() as u32;
+        let mut exploration_nudge_sent = false;
 
         loop {
             if steps.len() as u32 >= self.max_steps {
@@ -1410,6 +1411,13 @@ impl AgentLoop {
             }
 
             let mut system = rendered.system.clone();
+            if !exploration_nudge_sent {
+                if let Some(nudge) = repeated_exploration_nudge(&steps) {
+                    system.push_str("\n\n");
+                    system.push_str(&nudge);
+                    exploration_nudge_sent = true;
+                }
+            }
             let remaining = self.max_steps.saturating_sub(steps.len() as u32);
             if task.conversation.is_none() && !steps.is_empty() && remaining <= 3 {
                 system.push_str("\n\nThis attempt is close to its step limit. Prioritize finishing verification and calling ticket.submit with the available completion evidence now. Do not repeat completed investigation. If submission fails, use the error to make one focused correction before the limit.");
@@ -1715,6 +1723,13 @@ impl AgentLoop {
                     at: self.clock.now(),
                 },
             );
+            if let Some(dependency) = missing_toolchain_dependency(&steps) {
+                return Ok(AgentOutcome::Failed {
+                    steps,
+                    class: FailureClass::Other,
+                    detail: format!("Required toolchain dependency is unavailable: {dependency}. Install or configure it, then retry the task."),
+                });
+            }
         }
     }
 
@@ -1957,6 +1972,101 @@ pub(crate) fn tool_result_text(resolution: &ToolOutcome) -> (String, bool) {
         ToolOutcome::Denied { reason } => (format!("denied: {reason}"), true),
         ToolOutcome::Errored { detail } => (format!("error: {detail}"), true),
     }
+}
+
+/// Recognize a stalled streak of identical inspection calls from the durable transcript. The
+/// same call appearing three times is enough to interrupt the cycle, while any distinct action
+/// (including a write, verification, or new inspection) breaks the streak.
+fn repeated_exploration_nudge(steps: &[StepRecord]) -> Option<String> {
+    let calls = steps.iter().flat_map(|step| &step.tool_calls);
+    let mut streak: Vec<&ToolCallRecord> = Vec::new();
+    for call in calls {
+        if !is_exploration_call(call) {
+            streak.clear();
+            continue;
+        }
+        if streak
+            .last()
+            .is_some_and(|last| last.tool_name == call.tool_name && last.input == call.input)
+        {
+            streak.push(call);
+        } else {
+            streak.clear();
+            streak.push(call);
+        }
+        if streak.len() >= 3 {
+            let inspected = streak
+                .iter()
+                .map(|c| format!("{} {}", c.tool_name, c.input))
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Some(format!("You have repeated the same inspection without making progress. Already inspected: {inspected}. Use the findings already in the conversation to take one concrete next step toward the task goal: make a focused edit, run a relevant verification, or explain the specific blocker. Do not repeat this inspection."));
+        }
+    }
+    None
+}
+
+fn is_exploration_call(call: &ToolCallRecord) -> bool {
+    matches!(
+        call.tool_name.as_str(),
+        "fs.read"
+            | "fs.read_range"
+            | "search.exact"
+            | "search.semantic"
+            | "search.regex"
+            | "search.hybrid"
+            | "shell.run"
+            | "build.run"
+            | "test.run"
+    )
+}
+
+/// Return the concrete missing executable when toolchain discovery output says the command could
+/// not be found. This is deliberately limited to shell discovery calls, not ordinary source
+/// search results that happen to mention an absent dependency.
+fn missing_toolchain_dependency(steps: &[StepRecord]) -> Option<String> {
+    for call in steps.iter().flat_map(|step| &step.tool_calls) {
+        if !matches!(
+            call.tool_name.as_str(),
+            "shell.run" | "build.run" | "test.run"
+        ) {
+            continue;
+        }
+        let command = call.input.to_string();
+        let result = match &call.resolution {
+            crate::outcome::ToolCallResolution::Completed { result, .. } => result.to_string(),
+            crate::outcome::ToolCallResolution::Errored { detail } => detail.clone(),
+            crate::outcome::ToolCallResolution::Denied { .. } => continue,
+        };
+        let lower = result.to_ascii_lowercase();
+        if !(lower.contains("not found")
+            || lower.contains("no such file or directory")
+            || lower.contains("is not recognized"))
+        {
+            continue;
+        }
+        let Some(executable) = command
+            .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            .find(|word| {
+                matches!(
+                    *word,
+                    "go" | "rustc"
+                        | "cargo"
+                        | "node"
+                        | "npm"
+                        | "pnpm"
+                        | "python"
+                        | "python3"
+                        | "swift"
+                        | "make"
+                )
+            })
+        else {
+            continue;
+        };
+        return Some(executable.to_string());
+    }
+    None
 }
 
 fn outcome_truncated(resolution: &ToolOutcome) -> Option<bool> {
@@ -4881,5 +4991,82 @@ mod step_limit_detail_tests {
             ToolCallResolution::Completed { result, .. }
                 if result["stdout"] == "all tests passed"
         ));
+    }
+}
+
+#[cfg(test)]
+mod unproductive_exploration_tests {
+    use super::*;
+    use crate::outcome::{ToolCallRecord, ToolCallResolution};
+
+    fn call(name: &str, input: serde_json::Value, result: serde_json::Value) -> ToolCallRecord {
+        ToolCallRecord {
+            tool_use_id: "call".to_string(),
+            tool_name: name.to_string(),
+            input,
+            resolution: ToolCallResolution::Completed {
+                result,
+                artifact: None,
+            },
+        }
+    }
+
+    fn step(calls: Vec<ToolCallRecord>) -> StepRecord {
+        StepRecord {
+            index: 1,
+            served_by: "mock/test".to_string(),
+            assistant_text: None,
+            tool_calls: calls,
+            spend: Spend::default(),
+            at: tm_types::Timestamp::from_unix_nanos(0),
+        }
+    }
+
+    #[test]
+    fn repeated_identical_inspections_produce_goal_focused_nudge() {
+        let repeated = || {
+            call(
+                "fs.read",
+                serde_json::json!({"path":"src/main.rs"}),
+                serde_json::json!({"text":"found target"}),
+            )
+        };
+        let nudge = repeated_exploration_nudge(&[step(vec![repeated(), repeated(), repeated()])])
+            .expect("third repeat should be recognized");
+        assert!(nudge.contains("src/main.rs"));
+        assert!(nudge.contains("concrete next step"));
+    }
+
+    #[test]
+    fn distinct_progress_resets_inspection_streak() {
+        let read = || {
+            call(
+                "fs.read",
+                serde_json::json!({"path":"src/main.rs"}),
+                serde_json::json!({}),
+            )
+        };
+        let edit = call(
+            "edit.apply_patch",
+            serde_json::json!({"path":"src/main.rs"}),
+            serde_json::json!({}),
+        );
+        assert!(
+            repeated_exploration_nudge(&[step(vec![read(), read(), edit, read(), read()])])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn missing_toolchain_command_names_dependency() {
+        let command = call(
+            "shell.run",
+            serde_json::json!({"command":"go test ./..."}),
+            serde_json::json!({"stderr":"go: command not found"}),
+        );
+        assert_eq!(
+            missing_toolchain_dependency(&[step(vec![command])]).as_deref(),
+            Some("go")
+        );
     }
 }

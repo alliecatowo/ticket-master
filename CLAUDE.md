@@ -456,6 +456,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    Workers receive explicit finalization guidance near the step limit. If a final submission fails,
    the failure names the submit error and step limit, retains the attempt's work and verification
    results for review, and makes clear that the ticket was not submitted.
+  Within one attempt, three identical consecutive file reads, searches, or shell/build/test
+  commands trigger one concise goal-focused nudge naming the repeated inspections and asking for
+  a concrete next action. A command reporting a missing common toolchain executable (such as
+  `go`, `cargo`, or `node`) instead ends the attempt with that dependency named.
   Before leasing or
   dispatching anything, `tm run <T>` also checks that the ticket's required role actually has a
   registered/credentialed provider candidate (`sched::preflight_provider_or_fail`,
