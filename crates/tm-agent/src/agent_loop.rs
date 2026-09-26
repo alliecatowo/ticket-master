@@ -2036,47 +2036,74 @@ pub(crate) fn tool_result_text(resolution: &ToolOutcome) -> (String, bool) {
 /// same call appearing three times is enough to interrupt the cycle, while any distinct action
 /// (including a write, verification, or new inspection) breaks the streak.
 fn repeated_exploration_nudge(steps: &[StepRecord]) -> Option<String> {
-    let calls = steps.iter().flat_map(|step| &step.tool_calls);
-    let mut streak: Vec<&ToolCallRecord> = Vec::new();
-    for call in calls {
-        if !is_exploration_call(call) {
-            streak.clear();
+    let mut counts = BTreeMap::<String, usize>::new();
+    for call in steps.iter().flat_map(|step| &step.tool_calls) {
+        if is_progress_call(call) {
+            counts.clear();
             continue;
         }
-        if streak
-            .last()
-            .is_some_and(|last| last.tool_name == call.tool_name && last.input == call.input)
-        {
-            streak.push(call);
-        } else {
-            streak.clear();
-            streak.push(call);
-        }
-        if streak.len() >= 3 {
-            let inspected = streak
-                .iter()
-                .map(|c| format!("{} {}", c.tool_name, c.input))
-                .collect::<Vec<_>>()
-                .join("; ");
-            return Some(format!("You have repeated the same inspection without making progress. Already inspected: {inspected}. Use the findings already in the conversation to take one concrete next step toward the task goal: make a focused edit, run a relevant verification, or explain the specific blocker. Do not repeat this inspection."));
+        let Some(key) = exploration_target(call) else {
+            continue;
+        };
+        let count = counts.entry(key.clone()).or_default();
+        *count += 1;
+        if *count >= 3 {
+            return Some(format!("You have repeatedly explored the same source or history target without making progress. Already investigated: {key}. Summarize the findings already in the conversation and take one concrete next step: make a focused edit, run relevant verification, or state the specific blocker. Do not reopen or compare the same material unless new evidence makes a targeted reread necessary."));
         }
     }
     None
 }
 
-fn is_exploration_call(call: &ToolCallRecord) -> bool {
-    matches!(
-        call.tool_name.as_str(),
+fn is_progress_call(call: &ToolCallRecord) -> bool {
+    call.tool_name.starts_with("edit.")
+        || matches!(
+            call.tool_name.as_str(),
+            "git.commit" | "build.run" | "test.run"
+        )
+}
+
+/// Normalize inspection identity to its target rather than exact arguments: a different line
+/// range or historical revision is still reopening the same source/history subject. Distinct
+/// range/line inputs remain visible in tool results, so an explicitly targeted reread is allowed.
+fn exploration_target(call: &ToolCallRecord) -> Option<String> {
+    let name = call.tool_name.as_str();
+    if !matches!(
+        name,
         "fs.read"
             | "fs.read_range"
+            | "history.why"
+            | "history.search"
+            | "history.deleted"
+            | "git.diff"
+            | "git.log"
             | "search.exact"
             | "search.semantic"
             | "search.regex"
             | "search.hybrid"
             | "shell.run"
-            | "build.run"
-            | "test.run"
-    )
+    ) {
+        return None;
+    }
+    let target_key = if matches!(
+        name,
+        "fs.read" | "fs.read_range" | "history.why" | "git.diff" | "git.log"
+    ) {
+        "path"
+    } else {
+        "query"
+    };
+    let target = call
+        .input
+        .get(target_key)
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| call.input.get("path").and_then(serde_json::Value::as_str))
+        .or_else(|| call.input.get("query").and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            call.input
+                .get("revision")
+                .and_then(serde_json::Value::as_str)
+        })?;
+    Some(format!("{name} {target}"))
 }
 
 /// Return the concrete missing executable when toolchain discovery output says the command could
@@ -5123,6 +5150,51 @@ mod unproductive_exploration_tests {
             repeated_exploration_nudge(&[step(vec![read(), read(), edit, read(), read()])])
                 .is_none()
         );
+    }
+
+    #[test]
+    fn repeated_source_and_history_targets_trigger_nudge_despite_changed_ranges_or_revisions() {
+        let read = |range| {
+            call(
+                "fs.read_range",
+                serde_json::json!({"path":"src/requests.py", "start":range}),
+                serde_json::json!({"text":"existing findings"}),
+            )
+        };
+        let diff = |revision| {
+            call(
+                "git.diff",
+                serde_json::json!({"path":"src/requests.py", "revision":revision}),
+                serde_json::json!({"diff":"existing history"}),
+            )
+        };
+        let nudge = repeated_exploration_nudge(&[step(vec![
+            read(1),
+            diff("HEAD~1"),
+            read(20),
+            diff("HEAD~2"),
+            read(40),
+        ])])
+        .expect("same source target should be bounded despite changed ranges/revisions");
+        assert!(nudge.contains("Summarize the findings"));
+        assert!(nudge.contains("src/requests.py"));
+    }
+
+    #[test]
+    fn focused_reread_of_another_target_remains_available() {
+        let call_for = |path: &str| {
+            call(
+                "fs.read",
+                serde_json::json!({"path":path}),
+                serde_json::json!({"text":"new evidence"}),
+            )
+        };
+        assert!(repeated_exploration_nudge(&[step(vec![
+            call_for("src/requests.py"),
+            call_for("tests/test_requests.py"),
+            call_for("src/requests.py"),
+        ])])
+        .is_none());
     }
 
     #[test]

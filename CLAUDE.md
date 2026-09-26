@@ -471,9 +471,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    Workers receive explicit finalization guidance near the step limit. If a final submission fails,
    the failure names the submit error and step limit, retains the attempt's work and verification
    results for review, and makes clear that the ticket was not submitted.
-  Within one attempt, three identical consecutive file reads, searches, or shell/build/test
-   commands trigger one concise goal-focused nudge naming the repeated inspections and asking for
-   a concrete next action. An evidence-free ticket submission tells the worker to store a report
+   Within one attempt, reopening the same source or history target three times (even with changed
+    ranges or revisions) triggers one concise nudge to summarize existing findings and take a
+    concrete next step; edits and verification reset the count, and a different targeted reread is
+    still allowed when new evidence requires it. An evidence-free ticket submission tells the worker to store a report
    or other evidence artifact and cite the returned artifact ID when submitting, rather than
    recommending a blind retry. A command reporting a missing common toolchain executable (such as
   `go`, `cargo`, or `node`) instead ends the attempt with that dependency named.
