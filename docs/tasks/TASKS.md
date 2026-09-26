@@ -1589,3 +1589,104 @@ is based on.
   acceptance: An evidence-free submission produces a user-facing instruction to create and attach evidence, and the agent run completes submission with that evidence without an unhelpful retry loop.
   test: `cargo test -p tm-cli plain_tool_error_keeps_invariant_diagnostic_and_recovery_step`
   evidence: `/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm.log:17` — “Submitted the ticket -> error: operation state was inconsistent (Submitting a ticket needs at least one piece of evidence); retry once, then report this failure if it persists”
+- [ ] **t20260926-0821-BurntSushi-ripgrep-3376-recover-empty-agent-turn** — Recover automatically when a model ends a turn without submitting work
+  model: sonnet · severity: high · builds Rust: yes · area: run/recovery · deps: none
+  files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  change: When a transient agent-turn failure leaves a ready ticket with no patch or evidence, continue using the ticket's retry policy within the current `tm run` invocation when budget permits; otherwise report the scheduled retry time, current attempt count, and exact next command instead of ending after a generic model-turn failure.
+  acceptance: A simulated model-ended-turn-without-submission failure either recovers and completes within the configured retry budget or prints the retry schedule and an unambiguous next step; it never implies work was completed or tests passed.
+  test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
+  evidence: `/tmp/tm-trials/20260926-0821/BurntSushi-ripgrep-3376/tm.log:54` — `agent turn failed: Ticket T-1: no patch or evidence was submitted ... model ended turn without submitting. Run tm run T-1 again to retry.`; `/tmp/tm-trials/20260926-0821/BurntSushi-ripgrep-3376/tm.log:193` — retry was only scheduled after this run failed.
+- [ ] **t20260926-0821-pallets-click-3822-events-snapshot-default** — Make `tm events` useful for a one-shot event inspection
+  model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  change: When `tm events` is invoked without a subcommand, render the current event log snapshot and exit instead of printing command usage; retain `tm events tail` for live-follow behavior and expose an explicit follow option only when requested.
+  acceptance: A CLI test runs bare `tm events` with recorded events and asserts it prints the snapshot and exits successfully without hanging; existing `tm events tail` follow and `--no-follow` behavior remains covered.
+  test: `cargo test -p tm-cli events_tail`
+  evidence: `/tmp/tm-trials/20260926-0821/pallets-click-3822/tm.log:12-34` — the protocol's `tm events` invocation printed only “The durable event log: tail, inspect, replay, and verify the hash chain” and usage, so I had to discover and invoke `events tail --from 1 --no-follow` to capture the actual events.
+- [ ] **t20260926-0821-psf-requests-7432-resume-no-submit-investigation** — Recover a no-submit run using the investigation already performed
+  model: sonnet · severity: high · builds Rust: yes · area: agent
+  deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  change: When a run has substantial relevant tool activity but ends without `ticket.submit`, carry a concise actionable investigation summary into the recovery attempt and tell the user what was retained and what remains unverified instead of only returning “model ended turn without submitting.”
+  acceptance: A regression test simulates a relevant investigation followed by a no-submit ending and proves the retry receives the findings without repeating the same discovery calls; the final CLI error names the missing deliverable and the next recovery action.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260926-0821/psf-requests-7432/tm.log:4-51` — T-3 used 35 tool calls across repeated source/history inspection, then failed “no patch or evidence was submitted … model ended turn without submitting”; `tm stats --json` in the same log records 392 wall seconds and 2,751,047 input tokens.
+- [ ] **t20260926-0821-psf-requests-7432-bound-repeated-source-exploration** — Bound repeated source and history exploration during ticket runs
+  model: sonnet · severity: medium · builds Rust: yes · area: agent
+  deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  change: Track repeated file reads and historical diff probes in an investigation, then have the agent summarize existing evidence and move to a concrete edit or an explicit blocker instead of reopening the same files and comparisons.
+  acceptance: An agent-loop test fixture with duplicate read/history calls demonstrates that the run reuses its first findings, bounds redundant exploration, and still permits a targeted reread when new evidence requires it.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260926-0821/psf-requests-7432/tm.log:6-49` — T-3 repeatedly read `src/requests/models.py`, `src/requests/utils.py`, and `tests/test_requests.py` and compared several historical revisions before failing without a patch; `tm stats --json` records 35 tool calls, 392 seconds, and 2,751,047 input tokens.
+- [ ] **t20260926-0821-sindresorhus-ky-878-result-persistence-recovery** — Recover cleanly from agent result/evidence persistence errors
+  model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-cli/src/agent.rs`
+  change: When ticket submission reports missing evidence or a result save fails to parse, give the agent a concrete recovery action and ensure a later success message only appears after durable evidence/result persistence succeeds; preserve a concise indication of whether the ticket was actually submitted.
+  acceptance: A run that first encounters the evidence invariant and an invalid result shape retries with valid evidence/result data, and its transcript contains neither a misleading success claim nor an unqualified final submitted message while persistence is incomplete.
+  test: `cargo test -p tm-cli`
+  evidence: `/tmp/tm-trials/20260926-0821/sindresorhus-ky-878/tm.log` lines 44–47 — “Submitting a ticket needs at least one piece of evidence”; “couldn't parse the result”; then “Saved a result” and “Ticket T-2 submitted its work.”
+- [ ] **t20260926-0821-spf13-cobra-2257-events-snapshot-default** — Make `tm events` useful for one-shot event inspection
+  model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  change: When `tm events` is invoked without a subcommand, render the current event log snapshot and exit instead of printing command usage; retain `tm events tail` for live-follow behavior and `--no-follow` for snapshots from a chosen sequence.
+  acceptance: A CLI test runs bare `tm events` with recorded events and asserts it prints the snapshot and exits successfully without hanging; existing `tm events tail` follow and `--no-follow` behavior remains covered.
+  test: `cargo test -p tm-cli events_tail`
+  evidence: `/tmp/tm-trials/20260926-0821/spf13-cobra-2257/tm.log:71-86` — protocol's bare `tm events` invocation printed “The durable event log: tail, inspect, replay, and verify the hash chain” followed by usage, so I had to discover `events tail --from 1 --no-follow` to capture the event log.
+- [ ] **t20260926-0821-spf13-cobra-2257-no-submit-recovery** — Make no-submit retry guidance explain what is retained
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/sched.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  change: For a failed run with no patch or evidence, supplement the generic `tm run <ticket> again` recommendation with whether the working-tree edits were retained and what retrying will do, so a user can choose a recovery action without guessing.
+  acceptance: CLI tests cover a no-submit failure with retained edits and one without edits; each message states the accurate workspace state and a concrete next action, while preserving the distinction from test failures.
+  test: `cargo test -p tm-cli run_outcome`
+  evidence: `/tmp/tm-trials/20260926-0821/spf13-cobra-2257/tm.log:69` — after 1160.07 seconds the run ended “no patch or evidence was submitted ... Run `tm run T-1` again to retry,” without indicating whether the workspace contained recoverable edits.
+- [ ] **t20260926-0821-spf13-cobra-2257-reuse-read-context** — Avoid repeating unchanged file reads during ticket runs
+  model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-agent/src/prompt.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  change: Add worker guidance to reuse file contents already present in the conversation and repeat a read only when the file changed, a needed range was omitted, or a tool requires a fresh hash; before rereading, identify the specific missing information.
+  acceptance: Prompt tests assert the worker instructions explicitly direct reuse of unchanged file context and give concrete reasons that justify rereading; a replay test with repeated read calls shows the worker proceeds to the next relevant action instead of issuing redundant identical reads.
+  test: `cargo test -p tm-agent prompt`
+  evidence: `/tmp/tm-trials/20260926-0821/spf13-cobra-2257/tm.log:7-21` — before changing any files, the run repeatedly emitted “Read command.go” and “Read completions.go” across 17 tool actions, after it had already found and inspected the completion append path.
+- [ ] **t20260926-1044-BurntSushi-ripgrep-3376-recover-empty-agent-turn** — Make empty agent turns recoverable and actionable
+  model: sonnet · severity: high · builds Rust: yes · area: run/recovery · deps: none
+  files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  change: When a model ends a turn without submitting a patch or evidence, use the remaining retry budget within the same `tm run` invocation when possible. If the run cannot recover, report the attempt count, current ticket state, why the turn failed, whether/when an automatic retry is scheduled, and a precise next command; distinguish provider-turn failure from test failure.
+  acceptance: A simulated model-ended-turn-without-submission either recovers and completes under the configured retry budget or prints the scheduled retry and exact next action; output never leaves a user unsure whether the failed ticket will resume automatically.
+  test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
+  evidence: `/tmp/tm-trials/20260926-1044/BurntSushi-ripgrep-3376/tm.log:77` — `agent turn failed: Ticket T-1: no patch or evidence was submitted (this was not a test failure). Failure: something went wrong: model ended turn without submitting. Run tm run T-1 again to retry.`; `/tmp/tm-trials/20260926-1044/BurntSushi-ripgrep-3376/tm.log:245` — `168  ticket.failed T-1`; `/tmp/tm-trials/20260926-1044/BurntSushi-ripgrep-3376/tm.log:251` — `174  ticket.retry_scheduled T-1`
+- [ ] **t20260926-1044-pallets-click-3822-actionable-empty-turn-recovery** — Give actionable recovery guidance when an agent turn submits no patch or evidence
+  model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-cli/src/sched.rs`
+  change: When a model turn ends without a patch or evidence, report the concrete failed-turn state and useful completed work, distinguish transient/provider errors from a model that simply stopped without submitting, and avoid recommending an unconditional rerun when the run made no progress.
+  acceptance: A scripted empty-turn run prints an actionable message identifying that no repository change or evidence was submitted and gives a recovery step appropriate to the failure; it does not tell the user only that something went wrong or recommend repeating an unchanged no-progress run.
+  test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
+  evidence: `/tmp/tm-trials/20260926-1044/pallets-click-3822/tm.log` — `wall_seconds=324`; `tokens_in`: 732981; then `Failure: something went wrong: model ended turn without submitting. Run \`tm run T-1\` again to retry.`
+- [ ] **t20260926-1044-psf-requests-7432-stop-no-progress-runs** — Stop repeated no-progress agent runs with actionable recovery context
+  model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: Detect repeated turns/tool work that make no repository or submitted-artifact progress, and stop before exhausting the full step budget; include a concise summary of the last useful actions and the missing submission in the failure detail.
+  acceptance: A scripted agent run that repeats investigations without changing files or submitting evidence terminates at the no-progress threshold, retains its useful work, and reports what it explored and how to continue; a productive multi-step run is not stopped early.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260926-1044/psf-requests-7432/tm.log` — run took 619 seconds / 83,380 tokens, repeated source/history and Python probes, then `error: agent turn failed: Ticket T-1: no patch or evidence was submitted (this was not a test failure). Failure: something went wrong: model ended turn without submitting.`
+- [ ] **t20260926-1044-parse-error-corrective-guidance** — Give corrective guidance for invalid artifact inputs instead of recommending a blind retry
+  model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-cli/src/agent.rs`
+  change: In `plain_tool_error`, distinguish correctable parse/enum errors and inconsistent tool arguments from transient failures; preserve the expected values and tell the model to change the offending input rather than retry the same operation. Keep the current specific evidence-submission guidance.
+  acceptance: When `artifact.store` receives an unsupported kind, the rendered error identifies the invalid kind, shows accepted kinds, and directs the agent to correct and retry the input; it does not recommend replaying the unchanged call. Existing empty-submission guidance remains specific.
+  test: `cargo test -p tm-cli plain_tool_error`
+  evidence: `/tmp/tm-trials/20260926-1044/sindresorhus-ky-878/tm.log` — lines 22–23 and 115: submission retry reported “operation state was inconsistent” and artifact storage reported `unknown variant 'verification'` without actionable correction guidance.
+
+- [ ] **t20260926-1044-shell-result-path-recovery** — Make shell tool path parsing recover from absolute result paths
+  model: sonnet · severity: low · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-agent/src/tools.rs`
+  change: When parsing command output that contains an absolute path under the current project root, canonicalize it to a repository-relative path before validation; continue rejecting paths outside the root and retain a clear recovery hint.
+  acceptance: A shell command producing an in-repository absolute path is captured without a tool error, while a path outside the project is still rejected with the expected boundary explanation.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260926-1044/sindresorhus-ky-878/tm.log` — line 20: `npx ava test/stream.ts test/body-size.ts` result parsing failed with “path ... must be repository-relative”; the agent had to repeat the command.
+- [ ] **t20260926-1044-spf13-cobra-2257-actionable-turn-failure** — Make no-submission failures actionable and avoid blind retries
+  model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-cli/src/sched.rs`
+  change: When an agent turn ends without submitting a patch or evidence, preserve the useful no-submission distinction while including the concrete turn failure and a clear next-step command; avoid scheduling a retry that merely repeats the same failure without new context.
+  acceptance: A simulated model-ended-without-submit run prints a human-readable, specific cause and an unambiguous recovery action; retry behavior is bounded and visible, with no duplicate full-context attempt when no recovery condition changed.
+  test: `cargo test -p tm-cli`
+  evidence: `/tmp/tm-trials/20260926-1044/spf13-cobra-2257/tm.log:69` — `no patch or evidence was submitted (this was not a test failure). Failure: something went wrong: model ended turn without submitting. Run tm run T-3 again to retry.` The run metrics in lines 700–716 show 840 seconds and 3,661,274 input tokens for the initial run; a subsequent retry also failed without a patch.
