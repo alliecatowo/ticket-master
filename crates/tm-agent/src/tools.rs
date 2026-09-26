@@ -382,7 +382,7 @@ fn action_run_argv(input: &Value) -> Result<Action> {
 /// element is a whole command line, the most common way a model gets `argv` wrong. Any other
 /// `argv` executes exactly as given, with no shell. Authority checks see this effective argv, so
 /// an authority that doesn't allow `sh` can't be sidestepped by the string form.
-fn command_argv(input: &Value) -> Result<Vec<String>> {
+pub(crate) fn command_argv(input: &Value) -> Result<Vec<String>> {
     let shell = |line: &str| vec!["/bin/sh".to_string(), "-c".to_string(), line.to_string()];
     if let Some(line) = input.get("command").and_then(Value::as_str) {
         return Ok(shell(line));
@@ -656,7 +656,7 @@ fn default_retry_policy() -> RetryPolicy {
 /// cacheable call is only reused across identical invocations, never invalidated by an
 /// intervening repository change; callers that need that invalidation should mark their call
 /// non-cacheable.
-fn deterministic_command_key(argv: &[String], cwd: &str) -> String {
+pub(crate) fn deterministic_command_key(argv: &[String], cwd: &str) -> String {
     let mut key = String::new();
     for arg in argv {
         key.push_str(arg);
