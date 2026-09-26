@@ -1538,7 +1538,7 @@ is based on.
   test: `cargo test -p tm-cli`
   evidence: gohugoio-hugo-15360 pass 8 (docs/trials/20260926-0240/gohugoio-hugo-15360/tm.log): `error: conflict: T-2 is already being worked by agent:builtin/T-2 until 2026-09-26T11:42:28.870292Z`; the event log shows `ticket.leased T-2` and `session.started S-1` had already happened, but `tm ticket new`'s own output only printed `Created ticket T-2` with no indication a worker had already picked it up.
 
-- [ ] **t20260926-usage-token-split-not-fabricated** — Don't fabricate an input/output token split when a provider only reports an aggregate
+- [x] **t20260926-usage-token-split-not-fabricated** — Don't fabricate an input/output token split when a provider only reports an aggregate (landed b8d0641)
   model: sonnet · severity: medium · builds Rust: yes · area: telemetry · deps: none
   files: `crates/tm-harness/src/metrics.rs`
   change: `usage.recorded` events currently fold a provider's aggregate-only token count entirely into `tokens_in`, reporting `tokens_out: 0` even when real output tokens were produced — `tm stats --json` then presents a fabricated, misleadingly precise split rather than an honest aggregate/unavailable-split. Preserve the provider's actual input/output counts when it reports them separately; when it only reports an aggregate, expose that as an aggregate figure (or an explicit unavailable-split marker) instead of assigning the whole amount to `tokens_in`.
