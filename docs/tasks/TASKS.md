@@ -1281,7 +1281,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: /tmp/tm-audit/chatgen outputs of `tm workflow list` and `tm templates list`.
 
-- [ ] **u1-cli-help-global-flags-once** — Stop repeating the 5 global flags in every subcommand's `--help`
+- [x] **u1-cli-help-global-flags-once** — Stop repeating the 5 global flags in every subcommand's `--help` (landed 0d1207b)
   model: sonnet · severity: low · builds Rust: yes · area: cli-ux · deps: u1-bare-text-starts-chat
   files: `crates/tm-cli/src/args.rs`
   change: Every subcommand help (`tm ticket new --help`, `tm run --help`, ...) lists `--json --quiet --no-color --plain --project` with their full paragraphs, pushing the command's own options off screen. Keep them `global = true`, but put them under a separate `help_heading = "Global options"` and shorten their text (e.g. `--project <PATH>  Use this project root`), with the long form only in `tm --help`.
