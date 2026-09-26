@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 392,
+      "tokens": 2751047,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm located PreparedRequest.prepare_body and the redirect rewind path, but then spent 35 tool calls and 2.75 million input tokens comparing old revisions and revisiting models.py, utils.py, and tests/test_requests.py before ending without a patch. Its final message, ‘no patch or evidence was submitted … model ended turn without submitting,’ accurately says no tests passed, but does not explain the practical next step beyond retrying and provides no usable partial finding. It would be better if tm summarized the useful diagnosis from the investigation, made one tightly scoped recovery attempt that resumes from that summary, and surfaced whether a patch or test evidence was ultimately produced in a concise final status."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 52,
+      "tokens": 20593,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a relevant plan, quickly found the single implementation point, changed the stream detection, and produced a focused delegated-wrapper regression test. It honestly reported that its pytest attempts failed because its chosen test commands did not see the dependencies, but the requested setup had installed them in the clone’s .venv; it should have rerun through .venv/bin/python -m pytest rather than stopping after system pytest and PYTHONPATH attempts. The independent hidden-test run with the prepared venv passed."
+    }
+  ]
+}

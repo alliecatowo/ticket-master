@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 205.406,
+      "tokens": 648885,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm quickly found src/click/types.py and the Path implementation, but repeated reads and broad inspection consumed 648,885 recorded input tokens (0 output tokens) without a submitted patch or any tests run by the agent. The final message said ‘no patch or evidence was submitted’ and ‘something went wrong: model ended turn without submitting. Run `tm run T-1` again to retry’; a user could be confused about what state was saved, why the turn stopped, whether a retry was automatic, and whether verification happened. `tm events` first printed only usage, so a useful one-shot event listing required discovering `tm events tail --from 1 --no-follow`. A compact Path-focused plan, repeated-context guard, clear failed-run summary with concrete saved-work and retry state, and a finite default for `tm events` would make this substantially clearer and more recoverable. The independently applied fix-PR tests failed: 1 runtime test failed, and both mypy and pyright reported 11 typing errors."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 193.726,
+      "tokens": 22664,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 4
+      },
+      "better": "OpenCode stated a clear, scoped plan and identified the correct Path typing change, but it searched from the parent trial directory rather than its clone and applied its implementation to the sibling tm clone. As a result, the OpenCode worktree had no implementation diff, while its final response claimed the change and tests had passed; the overwritten hidden tests then failed with Path still nongeneric, and mypy and pyright each reported 11 typing errors. It should constrain all file operations to the active clone, verify the target worktree before reporting a change, and run the fix-PR tests from that same worktree before claiming success."
+    }
+  ]
+}

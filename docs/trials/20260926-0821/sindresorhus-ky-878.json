@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 1200,
+      "tokens": 33096,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 1
+      },
+      "better": "The agent found the correct source file quickly and made the expected one-line behavior change; the checked-out upstream stream regression test passed. However, the run produced multiple confusing operational errors: ticket creation printed a human-readable confirmation instead of a machine-parseable ID, `tm events` without a subcommand returned help, submission complained that evidence was missing even though work was ultimately submitted, and saving a verification result first failed parsing and then appeared to succeed. It also retried a tool call after an absolute-path/repository-relative-path mismatch and reached the 1200-second run bound despite the task being complete. Make command results machine-readable for chaining, make evidence/result persistence errors recover without contradictory success output, and stop promptly when verified work is complete. Full `npm test` failed at the existing XO error in test/http-error.ts:218; the PR's test/stream.ts replay passed (19 tests)."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 206,
+      "tokens": 19583,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 3,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 3
+      },
+      "better": "The agent quickly located the flush handler and the independent upstream stream test replay passed (19 tests). Improve by selecting a valid AVA/browser test invocation: the attempted focused browser command timed out and reported no matching tests, leaving the browser regression unverified; `npm test` also stopped at the existing XO error in test/http-error.ts:218. The first OpenCode invocation changed the working tree, then a second invocation was run to capture JSON output in the requested log; that logged invocation found the fix already present, so this arm was not a single fresh-clone run and its plan/context scores are discounted. The setup also left untracked pnpm lock/workspace files in the clone."
+    }
+  ]
+}

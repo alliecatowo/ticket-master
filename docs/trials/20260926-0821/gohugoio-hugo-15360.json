@@ -1,0 +1,1 @@
+{"skipped":"No merged fix PR with an issue-specific regression test exists. PR #15361 fixes #15360 and adds TestSiteConfigWithBOM, but it was closed unmerged; the merged PR #15364 does not include that test file or test case."}

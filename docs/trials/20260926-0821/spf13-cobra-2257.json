@@ -1,0 +1,41 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "fix_pr": 2356,
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 1160.07,
+      "tokens": 3234277,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the relevant append in completions.go, but spent nearly the full 20-minute bound repeatedly reading command.go and completions.go and ended without submitting any patch or verification. Its failure output did say this was not a test failure, but the generic instruction to run tm run again did not tell the user what work, if any, was retained. `tm events` by itself printed usage rather than a one-shot event snapshot, adding a command-discovery step. A clear pre-action plan, tighter reuse of already-read file context, a concise no-submit recovery message, and a snapshot form of `tm events` would make the run materially more efficient and recoverable."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 168.709,
+      "tokens": 25713,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode quickly traced the mutation to append(finalArgs, \"--\"), changed the temporary parse to append to a copy, and reported its verification accurately. It could improve by adding a focused regression test during the agent run rather than relying on the externally supplied merged-PR test, and by stating a brief human-readable plan before searching; the merged regression test nevertheless passed mechanically."
+    }
+  ]
+}

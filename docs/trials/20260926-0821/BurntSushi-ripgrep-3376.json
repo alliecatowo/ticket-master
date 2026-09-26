@@ -1,0 +1,47 @@
+{
+  "issue": {
+    "url": "https://github.com/BurntSushi/ripgrep/issues/3376",
+    "title": "`.gitignore` not taken into account when multiple search paths are provided",
+    "fix_pr": 3420,
+    "fix_test_files": ["crates/ignore/src/dir.rs"],
+    "test_file_note": "The PR changes a source file that contains both implementation and unit tests. Checking out this file from the merge SHA overwrites the agent implementation as well as importing the regression test, so the post-checkout pass/fail is mechanical but does not independently validate the agent's implementation. Both arms pass after this required checkout.",
+    "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+    "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151"
+  },
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 330.445,
+      "tokens": 1635916,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 3,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm found the relevant ignore matcher and walker files, but then re-read several large files repeatedly and made 22 tool calls while using 1,635,916 recorded tokens. The run ended with ‘no patch or evidence was submitted’ after the model ended its turn, despite the ticket having a retry path; the user is told to rerun but tm does not recover within this run or state that the retry is delayed/scheduled. A concise upfront diagnosis/plan, bounded snippets instead of repeated full reads, and an automatic continuation or explicit actionable retry status when the model ends without a submission would make the run substantially more useful. Verification was not attempted and tm did not claim a fix or test pass. The mechanical post-checkout crate test passed, but the PR's changed dir.rs contains implementation code too, so this result is not evidence that tm's unfinished patch passes the regression test."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 124.865,
+      "tokens": 41390,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly narrowed the issue to the parent matcher cache, implemented a root-scoped key, added a regression test, and ran cargo test -p ignore before clearly reporting the result. It also recovered from unavailable indexed search by switching to exact repository search. The post-run cargo checks initially produced intermittent failures while both arms were testing concurrently; serialized reruns passed. A benchmark runner should avoid overlapping test processes and record final isolated verification outcomes. The required post-run checkout of crates/ignore/src/dir.rs also imports the reference implementation alongside its test, so the mechanical pass cannot prove the agent-written fix independently."
+    }
+  ]
+}
