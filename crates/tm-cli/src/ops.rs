@@ -3236,18 +3236,27 @@ pub async fn dispatch_events(
 
 /// Show a bounded snapshot of the most recent durable events.
 fn events_recent(project: &Project, renderer: &Renderer) -> tm_types::Result<()> {
-    const RECENT_EVENTS: u64 = 20;
     let log = tm_events::EventLog::open(&project.state_dir.join("project.db"))?;
-    let head = log.head()?;
-    if head == 0 {
-        println!("No events recorded yet. Create a ticket with `tm ticket new`, then run it with `tm run <ticket>`.");
+    let events = recent_events(&log)?;
+    if events.is_empty() {
+        renderer.note("No events recorded yet. Create a ticket with `tm ticket new`, then run it with `tm run <ticket>`.");
         return Ok(());
     }
-    let from = head.saturating_sub(RECENT_EVENTS - 1).max(1);
-    for event in log.read_from(from, RECENT_EVENTS as usize)? {
-        emit_event(renderer, &event)?;
+    for event in &events {
+        emit_event(renderer, event)?;
     }
     Ok(())
+}
+
+/// Read at most the twenty most recent events for the one-shot `tm events` view.
+fn recent_events(log: &tm_events::EventLog) -> tm_types::Result<Vec<tm_events::Event>> {
+    const RECENT_EVENTS: u64 = 20;
+    let head = log.head()?;
+    if head == 0 {
+        return Ok(Vec::new());
+    }
+    let from = head.saturating_sub(RECENT_EVENTS - 1).max(1);
+    log.read_from(from, RECENT_EVENTS as usize)
 }
 
 /// How often `tm events tail`'s follow mode re-reads the log for new events. `EventLog::subscribe`
@@ -4995,6 +5004,41 @@ tests_pass = {}
         let err = events_show(&EventsShowArgs { seq: 999 }, &project, &renderer)
             .expect_err("no event at seq 999");
         assert!(matches!(err, tm_types::TmError::NotFound { .. }));
+    }
+
+    #[test]
+    fn events_bare_snapshot_reads_recorded_events_and_is_bounded() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project = test_project(tmp.path());
+        for index in 0..25 {
+            project
+                .store
+                .create_ticket(
+                    tm_core::TicketKind::Work,
+                    format!("Snapshot ticket {index}"),
+                    None,
+                    None,
+                    tm_types::Authority::worker(),
+                    Vec::new(),
+                    crate::tickets::default_executor_requirements(),
+                    Vec::new(),
+                    Vec::new(),
+                    tm_core::VerificationPolicy::Single,
+                    tm_types::Budget::unlimited(),
+                    crate::tickets::default_retry_policy(),
+                    0,
+                    project.actor.clone(),
+                )
+                .expect("record ticket event");
+        }
+
+        let log = tm_events::EventLog::open(&project.state_dir.join("project.db"))
+            .expect("open event log");
+        let head = log.head().expect("read event-log head");
+        let snapshot = recent_events(&log).expect("read snapshot");
+        assert_eq!(snapshot.len(), 20);
+        assert_eq!(snapshot.first().expect("first event").seq, head - 19);
+        assert_eq!(snapshot.last().expect("last event").seq, head);
     }
 
     #[test]
