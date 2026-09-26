@@ -97,7 +97,7 @@ never drift between sessions:
   runs the matching ones), `/events` (the last 20 events), `/replay <path>` (reruns the attached
   ticket offline from a saved cassette, like `tm run <T> --replay`), `/genesis <prompt>` (starts
   `tm genesis` in the background);
-  quit is Ctrl+C twice, Ctrl+D on an
+  quit is Ctrl+C twice (the first press closes an open overlay before arming quit), Ctrl+D on an
   empty prompt, or `/exit`. The
   tickets screen is Claude Code's `claude agents` view with tickets as rows
   (`docs/decisions/D-019-claude-code-parity-shell.md` §2 and its "Implemented: tickets screen"):

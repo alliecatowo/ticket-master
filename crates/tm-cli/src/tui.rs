@@ -1164,6 +1164,12 @@ impl Component for App {
                 }
                 // The only two global chords. Neither is a printable key.
                 if is_ctrl(key, 'c') {
+                    // Overlays get dismissed by the first press, but the app owns the quit
+                    // sequence so the next press still quits instead of being swallowed there.
+                    if self.current == ScreenId::Tickets && self.tickets.close_overlay() {
+                        self.ctrl_c_at = Some(now);
+                        return Propagation::Consumed;
+                    }
                     // On the tickets screen the first Ctrl+C clears a half-typed task, as in
                     // Claude Code's agent view; only on an empty input does it count toward quit.
                     if self.current == ScreenId::Tickets && self.tickets.clear_input() {

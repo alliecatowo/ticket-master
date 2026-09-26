@@ -531,6 +531,24 @@ impl TicketsScreen {
         self.peek_open
     }
 
+    /// Whether a modal overlay currently owns the tickets screen.
+    pub fn has_overlay(&self) -> bool {
+        self.help_open || self.peek_open
+    }
+
+    /// Close the active tickets overlay, if any.
+    pub fn close_overlay(&mut self) -> bool {
+        if self.help_open {
+            self.help_open = false;
+            return true;
+        }
+        if self.peek_open {
+            self.peek_open = false;
+            return true;
+        }
+        false
+    }
+
     /// Clear the dispatch input (Ctrl+C's first press). Returns whether there was anything to
     /// clear, so a second press on an empty input can mean "exit" instead.
     pub fn clear_input(&mut self) -> bool {
@@ -2350,5 +2368,16 @@ mod tests {
         press(&mut s, &env, KeyCode::Char('?'));
         let text = render(&s, 100, 40, true).join("\n");
         insta::assert_snapshot!("empty_tickets_shortcuts", text);
+    }
+
+    #[test]
+    fn close_overlay_dismisses_shortcuts_before_dispatch_input_can_be_cleared() {
+        let mut s = screen();
+        let env = Env::new(true);
+        press(&mut s, &env, KeyCode::Char('?'));
+        assert!(s.has_overlay());
+        assert!(s.close_overlay());
+        assert!(!s.has_overlay());
+        assert!(!s.close_overlay());
     }
 }
