@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 242,
+      "tokens": 602712,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 2,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm quickly landed on src/click/types.py and the relevant typing test, but repeatedly reread the same large module and never presented a scoped plan. It ended with no submitted patch and a generic ‘something went wrong: model ended turn without submitting’ message, leaving the user unsure whether changes were saved or how to continue; tm's suggested retry command is present but the trial had already failed. The requested bare `tm events` command only printed usage because events requires a subcommand, so a user following that command could not capture the event log. Better behavior would preserve and summarize any proposed work on a turn-ending failure, offer an actionable retry/resume command without implying work was submitted, clarify or support the natural `tm events` inspection command, and report token usage in a directly interpretable field (stats reported 602,712 input tokens and 0 output tokens)."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 254,
+      "tokens": 24791,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode stated a clear inspection/implementation/verification plan, found the right typing surfaces, and finished with a concise summary. It added useful pathlib.Path and bytes assertions and verified mypy, pyright, and focused runtime tests; the hidden PR runtime and typing tests also pass after being restored. It could improve by avoiding a long-running combined mypy/pyright invocation that hit the tool timeout after mypy had already passed, and by having the initial completion include the exact hidden-test pass status once benchmark verification runs."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 778,
+      "tokens": 3542417,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm located the relevant body preparation and rewind code, but spent 778 seconds and 3,542,417 reported input tokens before ending without submitting a change. The user-facing recovery says to run `tm run T-1` again even though the event log scheduled a retry, leaving it unclear whether a retry will happen automatically or the user must restart it; the retry path should instead make bounded progress, preserve a compact investigation summary, and clearly expose retry status and next action. The requested hidden-test check mechanically failed because the focused test selection included tests with recursively dependent httpbin fixtures under pytest 9; tm did not reach verification."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 43,
+      "tokens": 35965,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly identified the compatibility regression, changed stream detection back to `hasattr(data, \"__iter__\")`, and attempted focused verification. It also authored a small regression test, though that file was later overwritten per protocol. Its test commands first lacked the activated virtual environment and then failed on missing installed packages; its final message accurately reported that limitation. The independent hidden-test selection then hit recursive httpbin-fixture errors, so the mechanical result remains failed. Better setup discovery would activate the already-prepared clone environment automatically and select only the relevant self-contained hidden test or resolve the fixture compatibility issue."
+    }
+  ]
+}

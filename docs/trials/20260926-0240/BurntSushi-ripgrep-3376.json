@@ -1,0 +1,41 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "fix_pr": 3420,
+  "test_files": ["crates/ignore/src/dir.rs"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 1163.233,
+      "tokens": 10865871,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The first attempt repeatedly reread the same ignore and walker code, exhausted 64 steps, and only surfaced `Run tm run T-1 again to retry`; the second attempt repeated broad exploration and was manually stopped at its 600-second share of the 1200-second cap without submitting or reporting a final result. Reduce repeated file context, expose progress and remaining step/time budget, and make retry resume the existing investigation or give a clear continuation summary. The event stream recorded about 10.9 million tokens across 96 usage events. Verification pass is only mechanical: PR #3420 changed one file (`crates/ignore/src/dir.rs`) containing both implementation and regression test, so the required checkout of that file overwrote the agent's implementation with the fix before `cargo test -p ignore`; it cannot establish that tm's implementation passed the hidden regression test."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 220.119,
+      "tokens": 34810,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The initial semantic index lookup was unavailable and one guessed source path was wrong; the agent recovered using exact search and relevant crate files, implemented the cache-key change, added a multiple-root regression test, and ran the crate suite successfully. It could be more efficient by falling back immediately from unavailable semantic search and by focusing the initial investigation on `crates/ignore/src/dir.rs` and the walker tests. Mechanical hidden-test verification also has the same PR-file limitation: the checked-out file contains implementation and tests together, so the post-run checkout supplied the fix itself."
+    }
+  ]
+}

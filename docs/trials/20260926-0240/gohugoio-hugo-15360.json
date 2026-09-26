@@ -1,0 +1,46 @@
+{
+  "issue": "https://github.com/gohugoio/hugo/issues/15360",
+  "fix_pr": 15364,
+  "base_sha": "1d87ee5b7005a38d83cb841471245b9ae7f914bd",
+  "merge_sha": "cb6a7072230920fb47ece28f67501a2c15934ade",
+  "test_files": [
+    "common/hugio/hugio_integration_test.go",
+    "common/hugio/readers_test.go",
+    "hugolib/rebuild_test.go",
+    "tpl/openapi/openapi3/openapi3_integration_test.go"
+  ],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 1.4,
+      "tokens": 0,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 1,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run did not reach code navigation or implementation: ticket creation caused a background worker to lease T-2, so the explicitly requested `tm run T-2` immediately failed with an already-worked conflict. The `Created ticket T-2` output did not disclose that the ticket had become active or identify the worker/session, and `tm status` later said nothing happened while the lease remained held. Make ticket creation/activation ownership visible and have `tm run` follow or clearly direct users to the active session, including a usable progress/resume action; then emit a complete run transcript and usage summary. Verification passed mechanically, but the issue's exact config regression test was not part of the merged PR's changed test files."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 233.9,
+      "tokens": 21837,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 5,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The agent quickly located `UnmarshalToMap` and its table-driven decoder tests, then made a narrowly scoped change with TOML, YAML, and JSON BOM cases. It reported the focused package test and diff check accurately. It could improve by adding an explicit plan in its final progress narration and by running the requested package subtree command after the hidden tests are applied; measured verification was `go test ./parser/metadecoders`, which passed before grading."
+    }
+  ]
+}
