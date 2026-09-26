@@ -1231,7 +1231,7 @@ Gate: `mise run verify`
   test: `mise run test:crate -- tm-cli`
   evidence: The dogfood T-2 kill left `T-2 work active 0 - In crates/tm-cli/src/project.rs, ...` in `tm ticket list`.
 
-- [ ] **u1-hub-shortcuts-panel-tabs** — List Tab/Shift+Tab (switch view) in the tickets screen's `?` panel, and fix the misleading "enter to collapse" footer hint
+- [x] **u1-hub-shortcuts-panel-tabs** — List Tab/Shift+Tab (switch view) in the tickets screen's `?` panel, and fix the misleading "enter to collapse" footer hint (landed 3d0e49c)
   model: haiku · severity: low · builds Rust: yes · area: tui · deps: u1-hub-board-display-labels
   files: `crates/tm-tui/src/screens/tickets.rs`
   change: The tickets screen's `?` panel lists `ctrl+b open the Kanban board`, but not Tab/Shift+Tab, which `tab_cycle_key` (crates/tm-cli/src/tui.rs:618) binds to cycle Tickets/Board/Milestones/Timeline/Graph. The footer says "enter to collapse" while the dispatch input has focus and there are no tickets. Add a `tab / shift+tab  switch view` row, and make the footer hint depend on focus ("enter to dispatch" when the input is non-empty or the list is empty).
