@@ -380,8 +380,10 @@ pub(crate) fn build_dispatcher_with_fabric(
     // every command, including read-only ones with no ticket file authority at stake at all.
     crate::project::reject_ambiguous_sibling_root(
         exec_root,
-        "Pass `--project <dir>` naming the one you mean explicitly, or run this command from \
-         inside it.",
+        "A ticket in a project rooted here cannot be dispatched. Recreate it in the repository \
+         you mean: `cd` into it, run `tm init`, then `tm ticket new ...`. `--project <repo>`, or \
+         running from inside a repo, opens a *different* project that does not contain this \
+         ticket.",
     )?;
     let (index_root, index_state_dir) = index_root_and_state_dir(project, exec_root);
     let ci = Arc::new(open_and_refresh_code_intel(

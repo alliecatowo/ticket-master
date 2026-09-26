@@ -481,10 +481,14 @@ pub fn resolve_scope(explicit: Option<&Path>, cwd: &Path) -> tm_types::Result<Re
             reject_ambiguous_sibling_root(
                 &found,
                 &format!(
-                    "Remove the stray `{}` (it names an ambiguous parent, not a real single \
-                     project), or run `tm init` inside the specific repository you mean so its \
-                     own `.tm/` takes precedence, or pass `--project <dir>` explicitly.",
-                    found.join(".tm").display()
+                    "`{tm}` names an ambiguous parent, not a real single project — if it holds \
+                     tickets/history worth keeping, rename it aside first (`mv {tm} {tm}.ambiguous`) \
+                     rather than deleting it outright, since removing it discards that project's \
+                     tickets and event log; the intended repository may already have its own \
+                     `.tm/`, so moving straight into it could overwrite that one instead. Then \
+                     run `tm init` inside the specific repository you mean, so its own `.tm/` \
+                     takes precedence, or pass `--project <dir>` explicitly.",
+                    tm = found.join(".tm").display()
                 ),
             )?;
             return Ok(Resolved {
