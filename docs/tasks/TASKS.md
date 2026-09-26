@@ -1502,7 +1502,7 @@ is based on.
   test: `cargo test -p tm-agent --lib`
   evidence: psf-requests-7432 pass 5 (docs/trials/20260925-2206): `tm stats --json` for T-1 records `tokens_in: 2786544`, 43 tool calls, 241 wall seconds. pallets-click-3822 pass 6 (docs/trials/20260925-2357): `wall_seconds: 278`, `tokens_in: 744357`, `tokens_out: 0` after only 18 tool calls with no visible warning at any point during the run.
 
-- [ ] **t20260926-events-bare-command-quick-view** — Give the bare `tm events` command a useful non-following recent-event view
+- [x] **t20260926-events-bare-command-quick-view** — Give the bare `tm events` command a useful non-following recent-event view (landed e8760cc)
   model: haiku · severity: low · builds Rust: yes · area: cli-ux · deps: none
   files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs`
   change: Running bare `tm events` in a project with real events currently prints usage/subcommand help instead of anything from the durable event log — a user has to already know to run `tm events tail`. Add a non-following recent-event view (or a dedicated quick-view subcommand) that prints a bounded list of the most recent events and exits; print an actionable hint (not just an empty list) when the log has no events yet. Keep `tm events tail` for live streaming, unchanged.
