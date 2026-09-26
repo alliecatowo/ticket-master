@@ -3300,7 +3300,7 @@ pub async fn events_tail(
         emit_event(renderer, event)?;
     }
 
-    if !args.no_follow {
+    if args.follow {
         let mut stop = std::pin::pin!(tokio::signal::ctrl_c());
         loop {
             tokio::select! {
@@ -5340,6 +5340,7 @@ tests_pass = {}
             from: None,
             kind: Some("not.a.real.kind".to_string()),
             ticket: None,
+            follow: false,
             no_follow: true,
         };
         let err = events_tail(&args, &project, &renderer)

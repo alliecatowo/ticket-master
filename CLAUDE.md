@@ -404,7 +404,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
 - Every session's real state lives under `Project.state_dir` (see
   `docs/decisions/D-003-project-scope.md`) — `sqlite3 <state_dir>/project.db` is a legitimate way
   to inspect what actually got written, and bare `tm events` prints the latest 20 entries from
-  that same durable log and exits; `tm events tail` remains the live-following view.
+  that same durable log and exits; `tm events tail` prints the current backlog and exits by
+  default, while `tm events tail --follow` waits for new events. `--no-follow` remains available
+  as an explicit snapshot option, including with `--from`.
 - `tm sched run`/`tm run` pop a real desktop notification on `approval.requested`/
   `ticket.escalated` (`docs/decisions/D-007-desktop-notifications.md`, `crates/tm-notify`). Set
   `TM_NOTIFY=0` (or `false`/`off`/`no`) to opt out in headless/CI/server contexts — a notification

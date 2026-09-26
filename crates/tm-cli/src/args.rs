@@ -1283,9 +1283,12 @@ pub struct EventsTailArgs {
     /// Only show events about this ticket (or other id, e.g. `T-12`).
     #[arg(long)]
     pub ticket: Option<String>,
+    /// Continue waiting for new events after printing the current backlog.
+    #[arg(long, conflicts_with = "no_follow")]
+    pub follow: bool,
     /// Stop at the current head instead of waiting for new events (add `--from 1` to see
-    /// everything so far).
-    #[arg(long)]
+    /// everything so far). This is the default; retained as an explicit snapshot option.
+    #[arg(long, conflicts_with = "follow")]
     pub no_follow: bool,
 }
 
