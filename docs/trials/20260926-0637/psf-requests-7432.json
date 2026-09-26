@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": ["tests/test_requests.py"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 313.9,
+      "tokens": 2547146,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm did identify the relevant implementation and redirect rewind path, but spent more than five minutes and 2,547,146 input tokens on repeated source/history/environment probing, then ended without submitting a patch or test evidence. The user-facing error accurately says no patch/evidence was submitted, but its only next step is to rerun the same ticket; it should explain that the model stopped without submitting and offer a useful recovery path (such as inspecting the saved work/artifacts or resuming with the specific test failure). A visible, ordered plan and earlier use of the prepared project virtualenv would also reduce wasted investigation. The independently applied hidden test failed against tm's unchanged implementation."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 67.66,
+      "tokens": 190226,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly found the stream-detection condition, replaced the class-based Iterable check with the required dynamic __iter__ check, and initially added a direct regression test. Its first test attempts exposed that its shell wasn't using the preinstalled virtualenv; it reported those failures rather than claiming a pass. After the fix PR's test file was independently overlaid, the hidden redirect regression passed. It would be better if the initial verification automatically used the prepared virtualenv and if the submitted test directly exercised the issue's 307 redirect behavior instead of only checking body rewind."
+    }
+  ]
+}

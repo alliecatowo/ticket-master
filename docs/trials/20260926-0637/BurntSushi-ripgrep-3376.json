@@ -1,0 +1,1 @@
+{"skipped":"No merged fix PR with changed test files exists for issue #3376. Candidate PRs #3417 and #3380 were closed unmerged; merged PR #3420 changes only crates/ignore/src/dir.rs and fixes #3419, not #3376."}

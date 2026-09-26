@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 56.46,
+      "tokens": 425563,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 3
+      },
+      "better": "The agent found the correct implementation quickly and made the intended fix, but the run consumed 425,563 input tokens for this narrow change. Its visible action log included a repository-relative-path parsing error, a result-schema parsing error, and a submission-without-evidence error before eventual submission, without explaining those failures in user-facing terms; it also attempted `pnpm test`, which pnpm rejected because dependency build scripts were ignored. Improve tool argument/schema guidance and recovery messaging, surface a concise plan and test status, avoid repeatedly reprocessing large context, and recognize or explain the pnpm approval prerequisite."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 137.81,
+      "tokens": 24207,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 3
+      },
+      "better": "The agent scoped the change accurately, found the relevant implementation and regression-test location, stated an ordered plan, and accurately explained its initial build/typecheck and browser results. It should identify that pnpm's ignored-build policy blocks the project's prescribed verification, and explicitly distinguish a successful Chromium run from the required post-run hidden-test verification. The hidden-test verification command mechanically failed before tests ran because pnpm rejected ignored build scripts."
+    }
+  ]
+}
