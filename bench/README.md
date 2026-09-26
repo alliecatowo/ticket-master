@@ -39,7 +39,7 @@ every mode that does is opt-in and named below.
 
 **`cargo xtask bench-cross [--tools tm,opencode,codex,claude] [--task <filter>] [--out <dir>]
 [--model <provider/model>] [--task-timeout <secs>] [--max-cost-usd <amount>]
-[--real-claude-auth]`** (`mise run bench:cross` is the alias; see
+[--tm-binary <path>] [--real-claude-auth] [--help|-h]`** (`mise run bench:cross` is the alias; see
 `docs/decisions/D-033-cross-tool-benchmark.md`) runs this same task set identically through `tm`'s
 own live path and through one or more external coding CLIs, and reports pass/fail, score, cost,
 tool calls and wall time for every `(tool, task)` pair side by side. Also opt-in, also never part
@@ -51,8 +51,15 @@ of `mise run verify`/`hygiene`.
 - `claude` additionally requires `--real-claude-auth` — without it, `bench-cross` refuses to run
   rather than silently reaching a real, metered Anthropic API or an interactive Claude Code
   session by default.
-- Requires the requested tools' own binaries (`tm`, `opencode`, `codex`, `claude`) to already be
+- Requires the requested tools' own binaries (`opencode`, `codex`, `claude`) to already be
   installed and authenticated on `$PATH`; `bench-cross` does not install or configure any of them.
+  `tm` is the exception: since a normal from-source dev workflow never installs this workspace's
+  own compiled `tm` onto `$PATH`, the `tm` adapter resolves its binary itself rather than trusting
+  a bare `tm` name — `--tm-binary <path>` overrides it explicitly when it exists (a mistyped or
+  stale `--tm-binary` warns on stderr and falls through instead); if the flag is absent or not a
+  real file it looks for a `tm`/`tm.exe` next to this `xtask` binary's own `current_exe()` (the
+  common case, since `xtask` and `tm` are built into the same `target/<profile>/` directory),
+  falling back to a `$PATH` search only if neither resolves to a real file.
 - Every non-`tm` adapter now runs under a real edit/bash permission posture instead of a headless
   no-op: `claude -p --permission-mode bypassPermissions`, `codex exec --sandbox workspace-write`,
   `opencode run --auto`. `tm` needs no such flag — it always runs the ticket loop directly inside
