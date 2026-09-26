@@ -937,6 +937,7 @@ mod tests {
             wall_seconds: 5,
             tokens_in,
             tokens_out: 0,
+            tokens_total: 0,
             dollars_micros,
             tool_calls,
             searches_before_first_relevant_hit: 0,

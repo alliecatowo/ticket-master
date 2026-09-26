@@ -66,7 +66,7 @@ struct LiveMetrics {
     dollars_micros: u64,
     /// Real tool-call count, folded from `tool_call.completed` events.
     tool_calls: u32,
-    /// Real `tokens_in + tokens_out`, folded from `usage.recorded` events. `TaskResult` has no
+    /// Real aggregate token count, folded from `usage.recorded` events. `TaskResult` has no
     /// dedicated tokens field, so [`LiveSeededProvider::apply_live_metrics`] stores this in
     /// `context_bytes`, the closest "how much did this run move" number the report has.
     tokens: u64,
@@ -184,7 +184,10 @@ impl<'a> LiveSeededProvider<'a> {
                 LiveMetrics {
                     dollars_micros: metrics.dollars_micros,
                     tool_calls: metrics.tool_calls,
-                    tokens: metrics.tokens_in.saturating_add(metrics.tokens_out),
+                    tokens: metrics
+                        .tokens_in
+                        .saturating_add(metrics.tokens_out)
+                        .saturating_add(metrics.tokens_total),
                 },
             );
 

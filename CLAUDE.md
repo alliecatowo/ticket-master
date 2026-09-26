@@ -522,7 +522,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   four to one ticket. A
   `0` cost means the serving candidate has no price configured (`not priced`), not that the call
   was free. It folds the whole event log fresh on every run — nothing is cached or persisted
-  separately (`docs/decisions/D-030-local-telemetry.md`).
+  separately (`docs/decisions/D-030-local-telemetry.md`). Per-ticket JSON keeps aggregate token
+  counts in `tokens_total` when the event log has no input/output split; `tokens_in`/`tokens_out`
+  are reserved for separately reported counts.
 
 ## Background and parallel subagents
 

@@ -368,7 +368,10 @@ pub fn dispatch_stats(
                             m.ticket.to_string(),
                             session_label(&m.session),
                             m.tool_calls.to_string(),
-                            m.tokens_in.to_string(),
+                            m.tokens_in
+                                .saturating_add(m.tokens_out)
+                                .saturating_add(m.tokens_total)
+                                .to_string(),
                             format_dollars(m.dollars_micros),
                             m.wall_seconds.to_string(),
                             format!(
@@ -569,9 +572,9 @@ mod tests {
         let rows = stats_by_ticket(&events, None);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].ticket, t2);
-        assert_eq!(rows[0].tokens_in, 10);
+        assert_eq!(rows[0].tokens_total, 10);
         assert_eq!(rows[1].ticket, t1);
-        assert_eq!(rows[1].tokens_in, 20);
+        assert_eq!(rows[1].tokens_total, 20);
     }
 
     #[test]
@@ -785,7 +788,7 @@ mod tests {
         let all_events = read_all_events(&project).expect("read events");
         let by_ticket = stats_by_ticket(&all_events, Some(&ticket_id));
         assert_eq!(by_ticket.len(), 1);
-        assert_eq!(by_ticket[0].tokens_in, 42);
+        assert_eq!(by_ticket[0].tokens_total, 42);
 
         let by_model = stats_by_model(&all_events);
         assert_eq!(by_model.len(), 1);

@@ -27,6 +27,8 @@ pub struct TicketMetrics {
     pub tokens_in: u64,
     /// Tokens produced as output across all model calls for this ticket.
     pub tokens_out: u64,
+    /// Aggregate tokens when the event log does not retain an input/output split.
+    pub tokens_total: u64,
     /// Total spend, in micro-dollars.
     pub dollars_micros: u64,
     /// Total tool calls issued.
@@ -69,15 +71,15 @@ fn placeholder_session() -> SessionId {
 ///
 /// Only events whose payload names `ticket` are folded; everything else (including events for
 /// other tickets) is ignored. What each event kind contributes:
-/// - `usage.recorded`: `wall_seconds` and `dollars_micros` fold in directly. `tokens` has no
-///   input/output split at the event-log level, so the whole amount lands in `tokens_in`;
-///   `tokens_out` is one of the fields this fold cannot derive (see below).
+/// - `usage.recorded`: `wall_seconds`, `dollars_micros` and aggregate `tokens` fold in directly.
+///   The event has no input/output split, so `tokens_in` and `tokens_out` remain zero and the
+///   count is exposed as `tokens_total`.
 /// - `tool_call.completed`: one `tool_calls` increment per matching event.
 /// - `command.completed`: `commands_rerun` increments each time a `command` string repeats for
 ///   this ticket, on the theory that an identical argv run twice is very likely the same command
 ///   re-attempted rather than two unrelated commands that happen to coincide.
 ///
-/// `harness_epoch`, `tokens_out`, `searches_before_first_relevant_hit`,
+/// `harness_epoch`, the input/output split, `searches_before_first_relevant_hit`,
 /// `verification_failures`, `retries`, `context_bytes` and `human_interventions` have no event
 /// in this fold's input to derive them from, so they stay `0`. `session` is the session carried
 /// by the first matching event that names one (event or payload, in that preference order);
@@ -87,7 +89,7 @@ pub fn ticket_metrics_from_events(ticket: &TicketId, events: &[Event]) -> Ticket
     let mut session: Option<SessionId> = None;
     let mut recorded_at = Timestamp::EPOCH;
     let mut wall_seconds = 0u64;
-    let mut tokens_in = 0u64;
+    let mut tokens_total = 0u64;
     let mut dollars_micros = 0u64;
     let mut tool_calls = 0u32;
     let mut commands_rerun = 0u32;
@@ -100,7 +102,7 @@ pub fn ticket_metrics_from_events(ticket: &TicketId, events: &[Event]) -> Ticket
                     return None;
                 }
                 wall_seconds = wall_seconds.saturating_add(p.wall_seconds);
-                tokens_in = tokens_in.saturating_add(p.tokens);
+                tokens_total = tokens_total.saturating_add(p.tokens);
                 dollars_micros = dollars_micros.saturating_add(p.dollars_micros);
                 Some(p.session.clone())
             }),
@@ -137,8 +139,9 @@ pub fn ticket_metrics_from_events(ticket: &TicketId, events: &[Event]) -> Ticket
         session: session.unwrap_or_else(placeholder_session),
         harness_epoch: 0,
         wall_seconds,
-        tokens_in,
+        tokens_in: 0,
         tokens_out: 0,
+        tokens_total,
         dollars_micros,
         tool_calls,
         searches_before_first_relevant_hit: 0,
@@ -179,6 +182,8 @@ pub struct AggregateMetrics {
     pub tokens_in: u64,
     /// Sum of `tokens_out`.
     pub tokens_out: u64,
+    /// Sum of aggregate token counts with no available input/output split.
+    pub tokens_total: u64,
     /// Sum of `dollars_micros`.
     pub dollars_micros: u64,
     /// Sum of `tool_calls`.
@@ -205,6 +210,7 @@ impl AggregateMetrics {
             wall_seconds: 0,
             tokens_in: 0,
             tokens_out: 0,
+            tokens_total: 0,
             dollars_micros: 0,
             tool_calls: 0,
             searches_before_first_relevant_hit: 0,
@@ -222,6 +228,7 @@ impl AggregateMetrics {
         self.wall_seconds = self.wall_seconds.saturating_add(metrics.wall_seconds);
         self.tokens_in = self.tokens_in.saturating_add(metrics.tokens_in);
         self.tokens_out = self.tokens_out.saturating_add(metrics.tokens_out);
+        self.tokens_total = self.tokens_total.saturating_add(metrics.tokens_total);
         self.dollars_micros = self.dollars_micros.saturating_add(metrics.dollars_micros);
         self.tool_calls = self.tool_calls.saturating_add(metrics.tool_calls as u64);
         self.searches_before_first_relevant_hit = self
@@ -359,6 +366,7 @@ mod tests {
             wall_seconds,
             tokens_in,
             tokens_out,
+            tokens_total: 0,
             dollars_micros,
             tool_calls,
             searches_before_first_relevant_hit,
@@ -440,6 +448,7 @@ mod tests {
             wall_seconds: u64::MAX,
             tokens_in: u64::MAX,
             tokens_out: u64::MAX,
+            tokens_total: u64::MAX,
             dollars_micros: u64::MAX,
             tool_calls: u64::MAX,
             searches_before_first_relevant_hit: u64::MAX,
@@ -459,6 +468,7 @@ mod tests {
         assert_eq!(agg.wall_seconds, u64::MAX);
         assert_eq!(agg.tokens_in, u64::MAX);
         assert_eq!(agg.tokens_out, u64::MAX);
+        assert_eq!(agg.tokens_total, u64::MAX);
         assert_eq!(agg.dollars_micros, u64::MAX);
         assert_eq!(agg.tool_calls, u64::MAX);
     }
@@ -693,6 +703,7 @@ mod tests {
             wall_seconds: 225,
             tokens_in: 2250,
             tokens_out: 1125,
+            tokens_total: 0,
             dollars_micros: 11250,
             tool_calls: 23,
             searches_before_first_relevant_hit: 3,
@@ -839,8 +850,9 @@ mod tests {
                 session: session.clone(),
                 harness_epoch: 0,
                 wall_seconds: 120,
-                tokens_in: 1500,
+                tokens_in: 0,
                 tokens_out: 0,
+                tokens_total: 1500,
                 dollars_micros: 4000,
                 tool_calls: 2,
                 searches_before_first_relevant_hit: 0,
