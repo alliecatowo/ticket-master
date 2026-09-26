@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 1107,
+      "tokens": 3114837,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the relevant prepare_body logic quickly, but repeatedly reread the same source files, spent 3.1 million reported tokens and over 18 minutes, and ended without a patch. Its event trail exposed low-level activity but did not give the user a practical recovery step when the run failed. Add a repeated-context recovery guard that summarizes why the loop is repeating, bounds further tool calls and token/time use, and gives a clear resume command."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 64,
+      "tokens": 22665,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped three-step plan, located the detection check, and implemented the compatibility change quickly. It recovered from an initial failing regression test by improving the test wrapper, but its own final focused test still failed because the test process imported the sibling tm checkout; it did not rerun using the clone's venv. The independent hidden PR regression test passed. It would be better to verify with the repo-local interpreter after correcting that path issue, then report both the initial failure and the successful rerun precisely."
+    }
+  ]
+}

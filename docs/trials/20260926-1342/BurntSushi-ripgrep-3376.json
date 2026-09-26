@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 99.356,
+      "tokens": 332740,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 2
+      },
+      "better": "tm located the right implementation file on its second ticket, but execution then stopped with 'Required toolchain dependency is unavailable: cargo' even though Cargo was present in the trial shell. Earlier it similarly stopped for python3, and its actionable message made no distinction between a missing executable and a command environment that could not resolve it. The initial empty ticket also caused unnecessary exploration of unrelated runner artifacts in the parent directory. Better command-environment diagnostics, and a final summary that tells the user what was actually verified, would make the run much easier to recover. Post-run tests pass after checking out the merged dir.rs; because the PR's test is embedded in that production file, this checkout also restores the production fix and is not an independent implementation score."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 242.144,
+      "tokens": 54261,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode stated a focused plan, traced the root-scoped matcher cache, implemented the cache-key change, and iterated after its first regression test had an incorrect path expectation. It clearly reported both the focused and crate test results, and independently ran cargo test -p ignore successfully before the hidden-test checkout. It could improve context efficiency by falling back from its unavailable indexed-search tool immediately to exact search, and by avoiding an invalid read-tool call. Post-run tests pass after checking out the merged dir.rs; because the PR's test is embedded in that production file, this checkout also restores the production fix and is not an independent implementation score."
+    }
+  ]
+}

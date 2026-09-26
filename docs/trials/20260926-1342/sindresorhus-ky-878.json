@@ -1,0 +1,53 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "fix_pr": 881,
+  "test_files": ["test/browser.ts", "test/stream.ts"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 53.65,
+      "tokens": 277270,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 4,
+        "cost_time": 2
+      },
+      "better": "The source lookup was direct and the implementation was correct, but the run spent a very large reported 277,270 tokens and gave no concise plan or final verification summary. Its transcript says `Submitted the ticket -> error: submission needs evidence; store a report or other evidence artifact, then cite the artifact ID returned by artifact.store in ticket.submit`, followed by `Saved a result` and another successful submission; the intermediate error is actionable but makes the user wonder whether the run failed until later output appears. Surface recovered submission attempts as such and finish with one plain-language summary of changed files, checks, and their outcomes."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 44.93,
+      "tokens": 20926,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "The run stated a focused plan, found the relevant stream flush quickly, made a minimal change, added a regression test, and accurately reported that all 18 stream tests passed. It could improve by explicitly noting the browser-level regression coverage as well and separating environmental test limitations from implementation status; independent verification passed the hidden stream tests and Chromium regression test, while Firefox/WebKit were unavailable and the full pnpm test command was blocked by pnpm's ignored-build policy."
+    }
+  ],
+  "verification": {
+    "method": "After overwriting test/browser.ts and test/stream.ts from the merge SHA, ran `npx ava test/stream.ts` and the targeted Chromium empty-body test in test/browser.ts for each arm.",
+    "tm": "19 stream tests passed; targeted Chromium browser regression passed. Full browser test file also attempted; Firefox and WebKit failed because their Playwright executables are missing. `pnpm test` is blocked by pnpm 11 ERR_PNPM_IGNORED_BUILDS.",
+    "opencode": "19 stream tests passed; targeted Chromium browser regression passed. Full browser test file also attempted; Firefox and WebKit failed because their Playwright executables are missing. `pnpm test` is blocked by pnpm 11 ERR_PNPM_IGNORED_BUILDS.",
+    "passed_is_false_because": "The full merged PR verification suite did not complete successfully on this machine: non-Chromium Playwright browsers are unavailable and pnpm test exits during pnpm 11's ignored-build check. The directly runnable merged stream tests and Chromium regression both passed in each arm."
+  },
+  "logs": {
+    "tm": "/tmp/tm-trials/20260926-1342/sindresorhus-ky-878/tm.log",
+    "opencode": "/tmp/tm-trials/20260926-1342/sindresorhus-ky-878/opencode.log",
+    "tm_verification": "/tmp/tm-trials/20260926-1342/sindresorhus-ky-878/verify.log",
+    "opencode_verification": "/tmp/tm-trials/20260926-1342/sindresorhus-ky-878/opencode-verify.log"
+  }
+}
