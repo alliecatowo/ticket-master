@@ -1655,6 +1655,14 @@ fn read_line<R: BufRead>(reader: &mut R, buf: &mut String) -> tm_types::Result<u
 /// `crate::project::mock_genesis_provider`), so `tm genesis` gets the same offline path.
 pub(crate) const TEST_MOCK_PROVIDER_ENV: &str = "TM_TEST_MOCK_PROVIDER";
 
+/// Alongside [`TEST_MOCK_PROVIDER_ENV`]: when set, [`ScriptedMockProvider::complete`] never
+/// returns instead of playing its scripted reply. Exists for an integration test that needs a
+/// `tm run` it can send a real SIGTERM/SIGINT to while an attempt is still genuinely in flight
+/// (`crates/tm-cli/tests/run_interrupt.rs`) — without this, the scripted turn finishes too fast
+/// for a test process to reliably land the signal before the ticket already left
+/// `Leased`/`Running` on its own.
+pub(crate) const TEST_MOCK_PROVIDER_BLOCK_ENV: &str = "TM_TEST_MOCK_PROVIDER_BLOCK";
+
 /// Build the fabric this session issues completions through, registered against the workspace's
 /// default role table ([`RoleTable::default_table`]) — or, when [`TEST_MOCK_PROVIDER_ENV`] is
 /// set, a deterministic mock (see that constant's docs).
@@ -2049,12 +2057,14 @@ fn build_mock_fabric(clock: Arc<dyn Clock>, recording: Option<&RecordingSpec>) -
     .expect("this crate's own static mock role table always parses");
     let fabric = Fabric::new(table, clock.clone());
     let model = ModelId::new("mock", "m1");
+    let block = std::env::var_os(TEST_MOCK_PROVIDER_BLOCK_ENV).is_some();
     let block_after_calls = std::env::var(TEST_MOCK_PROVIDER_BLOCK_AFTER_ENV)
         .ok()
         .and_then(|s| s.parse().ok());
     let provider = ScriptedMockProvider {
         model,
         clock,
+        block,
         block_after_calls,
         call_count: std::sync::atomic::AtomicUsize::new(0),
     };
@@ -2083,6 +2093,8 @@ fn build_mock_fabric(clock: Arc<dyn Clock>, recording: Option<&RecordingSpec>) -
 struct ScriptedMockProvider {
     model: ModelId,
     clock: Arc<dyn Clock>,
+    /// [`TEST_MOCK_PROVIDER_BLOCK_ENV`]: when true, `complete` never resolves.
+    block: bool,
     /// [`TEST_MOCK_PROVIDER_BLOCK_AFTER_ENV`]: block forever starting at this 1-indexed call.
     block_after_calls: Option<usize>,
     /// How many calls `complete` has served so far, checked against `block_after_calls`.
@@ -2139,9 +2151,10 @@ impl tm_provider::fabric::Provider for ScriptedMockProvider {
             .call_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        if self.block_after_calls == Some(call) {
-            // Deliberately never resolves; see `TEST_MOCK_PROVIDER_BLOCK_AFTER_ENV`'s doc
-            // comment. Every call before this one still falls through to the real script below.
+        if self.block || self.block_after_calls == Some(call) {
+            // Deliberately never resolves; see `TEST_MOCK_PROVIDER_BLOCK_ENV`'s and
+            // `TEST_MOCK_PROVIDER_BLOCK_AFTER_ENV`'s doc comments. Every call before
+            // `block_after_calls` still falls through to the real script below.
             std::future::pending::<()>().await;
         }
         let model = req.model_or(&self.model);

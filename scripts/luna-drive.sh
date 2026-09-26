@@ -69,6 +69,19 @@ for id in ${ONLY:-$(open_ids)}; do
   n=$((n + 1))
   block=$(task_block "$id")
   [ -z "$block" ] && { log "$id: not found"; continue; }
+  # `open_ids()` above is a one-time snapshot taken when this whole loop started, not re-checked
+  # per id -- on a long run, another actor (a landed subagent, a manual push) can land or claim
+  # this exact id in the meantime. Re-check the live marker right before dispatching, so a
+  # since-landed/-claimed task is skipped instead of wastefully re-implemented (or, worse, handed
+  # to the model with its own "(landed <sha>)" text still in the prompt, confusing it into either
+  # redoing finished work or doing nothing productive with a wasted turn either way).
+  case "$block" in
+    "- [ ]"*) ;;
+    *)
+      log "$id: skipped, no longer open (landed or claimed elsewhere since this pass started)"
+      continue
+      ;;
+  esac
   title=$(printf '%s\n' "$block" | head -1 | sed 's/^- \[.\] \*\*[^*]*\*\* — //')
   log "$id: start ($title)"
   prompt="Implement this task in the ticket-master Rust workspace (see CLAUDE.md and SPEC.md section 0).
