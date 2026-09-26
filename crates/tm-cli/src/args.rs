@@ -92,31 +92,31 @@ pub struct Cli {
 /// Flags every subcommand accepts, declared once and flattened everywhere via `global = true`.
 #[derive(Debug, Clone, Args)]
 pub struct GlobalOpts {
-    /// Print machine-readable JSON instead of human-formatted output. The JSON shape is
-    /// stable; the human-readable output may change.
-    #[arg(long, global = true)]
+    /// Print JSON output
+    #[arg(long, global = true, help_heading = "Global options")]
     pub json: bool,
 
-    /// Suppress non-essential output; errors and explicitly requested data still print.
-    #[arg(long, global = true)]
+    /// Suppress non-essential output
+    #[arg(long, global = true, help_heading = "Global options")]
     pub quiet: bool,
 
-    /// Disable ANSI color, regardless of whether stdout is a terminal.
-    #[arg(long = "no-color", global = true)]
+    /// Disable color output
+    #[arg(long = "no-color", global = true, help_heading = "Global options")]
     pub no_color: bool,
 
     // D-002, "Terminal surface quality bar".
-    /// Use plain, line-by-line output instead of the full-screen TUI, even in a real terminal:
-    /// same information, no cursor movement, no alternate screen. For scripting, logging, and
-    /// screen readers.
-    #[arg(long, global = true)]
+    /// Use plain output
+    #[arg(long, global = true, help_heading = "Global options")]
     pub plain: bool,
 
     // D-003: always repo scope at exactly this path (crate::project::resolve_scope / locate).
-    /// The project root to use, creating it if it doesn't already exist. Without this flag, tm
-    /// finds the project from the current directory: walking up for a `.tm` directory, then
-    /// falling back to a project kept under `$TM_HOME` outside the workspace.
-    #[arg(long, global = true, value_name = "PATH")]
+    /// Use this project root
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        help_heading = "Global options"
+    )]
     pub project: Option<PathBuf>,
 }
 
