@@ -1462,6 +1462,14 @@ strictly better than that harness rediscovering the codebase itself.
 
 So harness choice is a routing decision, not an architectural one.
 
+`docs/decisions/D-036-no-submit-attempt-memory.md` is a partial exception to "every executor
+receives the same compiled artifact": the no-submit investigation memory it adds lives inside
+`BuiltinExecutor` itself, not `tm_context::pack::compile`, so only `BuiltinExecutor`-driven runs get
+it — `tm ticket context <ID>` (which previews `pack::compile`'s own output) does not show it, and a
+different executor (e.g. `tm_acp::AcpExecutor`, already used for `codex`/`pi`/`opencode`-backed
+tickets per B-12) would not see it at all. See that decision's own
+"What this costs" section.
+
 ### 24.2 The trait
 
 ```rust
