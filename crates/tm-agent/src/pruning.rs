@@ -102,11 +102,14 @@ fn str_field<'a>(input: &'a serde_json::Value, field: &str) -> Option<&'a str> {
 /// - `search.semantic`/`search.hybrid`/`search.exact`/`history.search`/`history.deleted`: the
 ///   normalized `query` field.
 /// - `search.regex`: the normalized `pattern` field (its input has no `query` field).
-/// - `shell.run`/`build.run`/`test.run`: a canonical key over `argv`+`cwd` — the same two fields
-///   `tools.rs::command_key`/`deterministic_command_key` already treat as a command's identity for
-///   its own (unrelated) output-cache keying. Re-derived here from the raw unresolved `input`
-///   rather than reused directly, since pruning runs with no `CallContext`/root available to
-///   resolve `cwd` against.
+/// - `shell.run`/`build.run`/`test.run`: a canonical key over `argv`+`cwd`, via the exact same
+///   `tools.rs::command_argv`/`deterministic_command_key` the tool dispatcher itself uses to
+///   resolve a call's effective argv (whether the caller passed `argv` or a `command` shell-line
+///   string — the tool's own schema accepts either) and to key its own, unrelated output cache.
+///   Reusing those functions directly (rather than re-parsing `command`/`argv` a second time here)
+///   is what keeps a `{"command": "go test ./..."}` call de-duplicable the same way an
+///   `{"argv": [...]}` call already was — pruning runs with no `CallContext`/root available, but
+///   `cwd` resolution isn't needed for the dedup key itself, only the raw `cwd` string.
 ///
 /// Every other tool (`edit.*`, `git.*`, `ticket.*`, `decision.record`, `artifact.store`,
 /// `evidence.attach`, `ask.human`) returns `None`: each call is its own distinct action rather
@@ -167,17 +170,12 @@ fn addressable_for(tool_name: &str, input: &serde_json::Value) -> Option<Address
             })
         }
         "shell.run" | "build.run" | "test.run" => {
-            let argv = input.get("argv")?.as_array()?;
-            let argv: Option<Vec<&str>> = argv.iter().map(serde_json::Value::as_str).collect();
-            let argv = argv?;
+            let argv = crate::tools::command_argv(input).ok()?;
             let cwd = str_field(input, "cwd").unwrap_or(".");
-            let mut key = format!("{tool_name}:");
-            for arg in &argv {
-                key.push_str(arg);
-                key.push('\u{1}');
-            }
-            key.push('\u{1e}');
-            key.push_str(cwd);
+            let key = format!(
+                "{tool_name}:{}",
+                crate::tools::deterministic_command_key(&argv, cwd)
+            );
             Some(Addressable {
                 key,
                 path_dependency: None,
@@ -386,6 +384,20 @@ mod tests {
         }
     }
 
+    /// A `shell.run` call carrying the `command` shell-line form (no `argv` field), the shape
+    /// `u1-shell-run-command-field-bypasses-pruning` was filed against.
+    fn shell_run_command(id: &str, command: &str) -> ToolCallRecord {
+        ToolCallRecord {
+            tool_use_id: id.to_string(),
+            tool_name: "shell.run".to_string(),
+            input: serde_json::json!({"command": command}),
+            resolution: ToolCallResolution::Completed {
+                result: serde_json::json!({"exit_code": 0, "output": "x".repeat(200)}),
+                artifact: None,
+            },
+        }
+    }
+
     #[test]
     fn a_second_read_of_the_same_path_supersedes_the_first() {
         let steps = vec![
@@ -423,6 +435,26 @@ mod tests {
         ];
         let ws = working_set(&steps);
         assert_eq!(ws.steps[0].tool_call_states[0], ToolCallState::Full);
+    }
+
+    /// `u1-shell-run-command-field-bypasses-pruning`'s acceptance case: a `shell.run` call issued
+    /// with a `command` shell-line string (no `argv` field, the natural form the tool's own
+    /// description offers for build/test) must be superseded by an identical later call, the same
+    /// as the already-covered `argv` form -- instead of falling through `addressable_for`'s
+    /// `_ => None` arm and replaying the same capped-but-large result at every later step.
+    #[test]
+    fn a_second_identical_command_form_shell_run_supersedes_the_first() {
+        let steps = vec![
+            step(1, None, vec![shell_run_command("c1", "go test ./...")]),
+            step(2, None, vec![shell_run_command("c2", "go test ./...")]),
+        ];
+        let ws = working_set(&steps);
+        assert_eq!(
+            ws.steps[0].tool_call_states[0],
+            ToolCallState::Superseded { by_step: 2 }
+        );
+        assert_eq!(ws.steps[1].tool_call_states[0], ToolCallState::Full);
+        assert!(ws.bytes_pruned > 0);
     }
 
     #[test]
@@ -514,6 +546,98 @@ mod tests {
         )
         .unwrap();
         assert_eq!(a.key, c.key, "identical argv+cwd must collide");
+
+        // Regression pin: the argv-form key must stay byte-identical to the old, pre-fix
+        // formula now that it's derived via `tools.rs::deterministic_command_key` instead of
+        // being built inline -- no behavior change for calls already using the argv form.
+        let d = addressable_for(
+            "shell.run",
+            &serde_json::json!({"argv": ["cargo", "test"], "cwd": "."}),
+        )
+        .unwrap();
+        assert_eq!(d.key, "shell.run:cargo\u{1}test\u{1}\u{1e}.");
+    }
+
+    /// The bug this module exists to fix: a `shell.run`/`build.run`/`test.run` call issued with a
+    /// `command` shell-line string (no `argv` field at all — the natural form for build/test, per
+    /// `tools.rs::command_argv`'s own doc comment) must still be addressable, so an identical
+    /// later call supersedes it instead of replaying the same capped-but-still-large result at
+    /// every subsequent step for the rest of the run.
+    #[test]
+    fn shell_run_command_field_is_addressable_like_argv() {
+        let a = addressable_for(
+            "shell.run",
+            &serde_json::json!({"command": "go test ./..."}),
+        )
+        .expect("a command-form call must resolve to an addressable key, not None");
+        let b = addressable_for(
+            "shell.run",
+            &serde_json::json!({"command": "go test ./..."}),
+        )
+        .unwrap();
+        assert_eq!(a.key, b.key, "identical command strings must collide");
+
+        let c =
+            addressable_for("shell.run", &serde_json::json!({"command": "go vet ./..."})).unwrap();
+        assert_ne!(a.key, c.key, "different command strings must not collide");
+    }
+
+    /// When a call carries both fields, `tools.rs::command_argv` resolves `command` first and
+    /// never looks at `argv` at all -- so the call actually *executes* as `/bin/sh -c <command>`,
+    /// ignoring `argv` entirely. Dedup must follow execution here: keying on `argv` instead would
+    /// let two calls that run completely different commands (same `argv`, different `command`)
+    /// collide onto the same pruning key, which is exactly the cross-command collision the task's
+    /// adversarial self-review asks to rule out. (The task description's acceptance text assumed
+    /// `argv` wins in this case; the real `tools.rs` dispatcher resolves `command` first, so
+    /// dedup mirrors that instead.)
+    #[test]
+    fn shell_run_command_takes_priority_over_argv_matching_execution() {
+        let argv_only = addressable_for(
+            "shell.run",
+            &serde_json::json!({"argv": ["cargo", "test"], "cwd": "."}),
+        )
+        .unwrap();
+        // `command` takes priority over `argv` per `tools.rs::command_argv`, so a call carrying
+        // both fields is keyed on `command`, exactly matching how the tool itself would execute
+        // it -- no drift between what runs and what gets deduplicated.
+        let both_fields = addressable_for(
+            "shell.run",
+            &serde_json::json!({"command": "cargo build", "argv": ["cargo", "test"], "cwd": "."}),
+        )
+        .unwrap();
+        assert_ne!(
+            argv_only.key, both_fields.key,
+            "a call with a different command must not collide with a plain argv call"
+        );
+
+        let command_form = addressable_for(
+            "shell.run",
+            &serde_json::json!({"command": "cargo build", "cwd": "."}),
+        )
+        .unwrap();
+        assert_eq!(
+            both_fields.key, command_form.key,
+            "when both fields are present, the key must match the command-only form, since \
+             tools.rs::command_argv resolves both the same way"
+        );
+    }
+
+    /// The one argv-form input whose key *does* change versus the pre-fix inline formula:
+    /// `tools.rs::command_argv` shell-wraps a single-element `argv` whose only element contains
+    /// whitespace (the most common way a model gets `argv` wrong, per that function's own doc
+    /// comment), so it executes -- and must now key -- identically to the equivalent `command`
+    /// string, not as a literal one-argument argv.
+    #[test]
+    fn shell_run_single_element_whitespace_argv_keys_like_the_equivalent_command() {
+        let one_element_argv =
+            addressable_for("shell.run", &serde_json::json!({"argv": ["cargo test"]})).unwrap();
+        let command_form =
+            addressable_for("shell.run", &serde_json::json!({"command": "cargo test"})).unwrap();
+        assert_eq!(
+            one_element_argv.key, command_form.key,
+            "command_argv shell-wraps a whole-line single-element argv, so both execute \
+             identically and must dedup together"
+        );
     }
 
     // -----------------------------------------------------------------------------------------
