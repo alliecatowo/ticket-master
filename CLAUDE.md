@@ -229,13 +229,15 @@ never drift between sessions:
   [--model <provider/model>] [--task-timeout <secs>] [--max-cost-usd <amount>]
   [--real-claude-auth]` (`cargo xtask bench-cross`) runs the same `bench/tasks/*.toml` suite
   identically through `tm`'s own live path and through configured external coding CLIs, and
-  reports pass/fail, score, cost, tool calls and wall time for every tool side by side
+  reports pass/fail, score, model, tokens, cost, tool calls and wall time for every tool side by
+  side, where the tool reports those usage details
   (`crates/xtask/src/bench_cross.rs`). Defaults to `--tools tm` alone; `opencode`/`codex` read
   their own already-cheap credential from the environment, but `claude` is refused unless
   `--real-claude-auth` is also passed, so a real, metered Claude/Anthropic API call is never the
   accidental default. Every non-`tm` adapter runs under a real edit/bash permission posture
   (`claude -p --permission-mode bypassPermissions`, `codex exec --sandbox workspace-write`,
-  `opencode run --auto`) rather than a headless no-op that used to make `tm` win by default;
+  `opencode run --auto`) rather than a headless no-op that used to make `tm` win by default; all
+  adapters receive closed stdin so tools cannot wait indefinitely for piped input;
   `--model` pins every tool (including `tm`, via a scratch `providers.toml` role candidate) to the
   same model; `--task-timeout` kills a hung adapter's whole process group and marks that pair
   `TIMEOUT`; `--max-cost-usd` stops scheduling further pairs once cumulative reported spend
