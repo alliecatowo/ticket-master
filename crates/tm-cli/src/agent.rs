@@ -2251,8 +2251,23 @@ pub(crate) fn format_step(step: &StepRecord) -> String {
     if let Some(text) = &step.assistant_text {
         lines.push(text.clone());
     }
-    for call in &step.tool_calls {
+    let mut index = 0;
+    while index < step.tool_calls.len() {
+        let call = &step.tool_calls[index];
+        let mut end = index + 1;
+        if call.tool_name == "fs.read" {
+            while end < step.tool_calls.len()
+                && step.tool_calls[end].tool_name == "fs.read"
+                && step.tool_calls[end].input == call.input
+            {
+                end += 1;
+            }
+        }
         lines.push(format_tool_call(call));
+        if end - index > 1 {
+            lines.push(format!("    (repeated {} times in a row)", end - index));
+        }
+        index = end;
     }
     lines.join("\n")
 }
@@ -4172,5 +4187,43 @@ mod tests {
             line,
             "  * Read crates/tm-cli/src/project.rs -> error: couldn't read or write a file"
         );
+    }
+
+    #[test]
+    fn format_step_counts_consecutive_identical_reads_but_keeps_distinct_reads() {
+        let read = |tool_name: &str, input: serde_json::Value| ToolCallRecord {
+            tool_use_id: "call-1".to_string(),
+            tool_name: tool_name.to_string(),
+            input,
+            resolution: ToolCallResolution::Completed {
+                result: serde_json::Value::Null,
+                artifact: None,
+            },
+        };
+        let step = StepRecord {
+            index: 0,
+            at: tm_types::Timestamp::EPOCH,
+            assistant_text: None,
+            served_by: "test".to_string(),
+            spend: Default::default(),
+            tool_calls: vec![
+                read("fs.read", serde_json::json!({"path":"src/a.rs"})),
+                read("fs.read", serde_json::json!({"path":"src/a.rs"})),
+                read("fs.read", serde_json::json!({"path":"src/b.rs"})),
+                read(
+                    "fs.read_range",
+                    serde_json::json!({"path":"src/a.rs","byte_start":1,"byte_end":2}),
+                ),
+                read(
+                    "fs.read_range",
+                    serde_json::json!({"path":"src/a.rs","byte_start":2,"byte_end":3}),
+                ),
+            ],
+        };
+        let rendered = format_step(&step);
+        assert!(rendered.contains("Read src/a.rs\n    (repeated 2 times in a row)"));
+        assert_eq!(rendered.matches("Read src/b.rs").count(), 1);
+        assert!(rendered.contains("Read src/a.rs:1-2"));
+        assert!(rendered.contains("Read src/a.rs:2-3"));
     }
 }
