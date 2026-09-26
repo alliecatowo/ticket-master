@@ -1560,7 +1560,7 @@ is based on.
   acceptance: A CLI test for repeated `model ended turn without submitting` failures asserts the output names the cause and offers artifact-inspection or focused-resume guidance, while test failures retain their existing retry instructions.
   test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
   evidence: `/private/tmp/tm-trials/20260926-0637/pallets-click-3822/tm.log:51` and `:167` — both attempts ended “no patch or evidence was submitted … Failure: something went wrong: model ended turn without submitting. Run `tm run T-1` again to retry.”
-- [ ] **t20260926-0637-psf-requests-7432-no-submit-recovery-guidance** — Give actionable recovery guidance when a run ends without a patch
+- [~] **t20260926-0637-psf-requests-7432-no-submit-recovery-guidance** — Give actionable recovery guidance when a run ends without a patch (needs another pass: the worker made no changes)
   model: sonnet · severity: medium · builds Rust: yes · area: cli
   deps: none
   files: `crates/tm-cli/src/sched.rs`
