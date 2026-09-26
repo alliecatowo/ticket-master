@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 1026.4,
+      "tokens": 3601360,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm located the backing-array append in completions.go, and its retained implementation passed the hidden PR tests. However, the run spent 1,026 seconds and reported 3,601,360 total tokens, repeatedly reopening completions.go and command.go and issuing overlapping searches before hitting the 64-step limit without submitting. The live progress messages were useful at first, but the repeated generic ‘Read completions.go’ entries and truncated command text stopped showing what new information each step added. The ending said the ticket was not submitted and suggested retrying, but offered no bounded continuation or concise account of the retained implementation and verification; that makes the expensive run hard to recover from. A guard against repeated unchanged reads/searches, earlier steering toward a minimal patch and submission, and a short terminal summary distinguishing retained work from submitted work would make this substantially more efficient and understandable."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 59.9,
+      "tokens": 21820,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 5,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode made a concise plan, quickly traced the completion parsing path, copied the argument slice before appending the sentinel, added a focused regression test, and reported that go test ./... passed. Its first semantic search was unavailable because the trial clone had no persistent index; it recovered immediately with ordinary filename and symbol searches, so this caused little disruption. A brief note that the attempted semantic route was unavailable could make the fallback more transparent, but the final summary was accurate and the run was efficient."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 621.131,
+      "tokens": 1445727,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 3,
+        "recoverability": 2,
+        "cost_time": 1
+      },
+      "better": "tm found the relevant prepare_body code, but the event transcript shows repeated reads of src/requests/models.py and extensive history/type exploration before it stopped without submitting a patch; 41 tool calls and 1,445,727 recorded tokens over 621 seconds produced no implementation. The final message correctly said no patch or evidence was submitted and suggested `tm ticket show T-1` and resuming, but a user would still have to discover the actual saved session identifier and reconstruct the remaining work after a long run. Detect repeated context/tool cycles earlier, stop or ask for focused recovery before that much time and context are spent, and present a copyable resume command with the saved session ID."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 58.682,
+      "tokens": 24410,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode located the stream check and related regression tests quickly, wrote the implementation and a focused test, corrected its initial test-fixture mistake, and reported the successful focused test accurately. It could be better by preserving the established `isinstance(data, Iterable)` check and adding the `hasattr(data, \"__iter__\")` fallback as the merged fix does; its initial broad test attempt also exposed a test design issue that was subsequently corrected."
+    }
+  ]
+}

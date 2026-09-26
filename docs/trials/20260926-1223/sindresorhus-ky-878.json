@@ -1,0 +1,34 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "test_files": ["test/browser.ts", "test/stream.ts"],
+  "status": "incomplete",
+  "reason": "Benchmark protocol could not be completed: tm was not run; pnpm setup returned ERR_PNPM_IGNORED_BUILDS in both clones; OpenCode ran, but its transcript log was not persisted as requested. No tm UX grades or inbox tasks were fabricated.",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": null,
+      "wall_seconds": null,
+      "tokens": null,
+      "scores": null,
+      "better": "Not run. Setup ended with ERR_PNPM_IGNORED_BUILDS (esbuild and unrs-resolver); agent execution and the prescribed post-run tests were therefore not performed."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 66,
+      "tokens": 22935,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The targeted regression passed (1 test). OpenCode correctly reported that the full npm test command stopped at an existing lint error, then ran the focused AVA test directly and succeeded. It could improve by avoiding an initial broad lint/test path when the repository’s setup hooks are blocked, and by keeping the verification path focused from the outset. The merge-SHA test `empty response body completes download progress` also passed mechanically after the agent run."
+    }
+  ]
+}

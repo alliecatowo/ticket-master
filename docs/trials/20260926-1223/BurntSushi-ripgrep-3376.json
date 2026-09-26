@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 328,
+      "tokens": 1487843,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "The run should diagnose why its toolchain check reports Cargo unavailable when cargo is installed and usable in the trial shell, and should identify the failed command and actionable remediation before retrying. Its trace also reread large portions of walk.rs and dir.rs repeatedly, consuming about 1.49 million tokens without completing a fix; targeted file/line navigation, a short pre-edit plan, and earlier escalation of the toolchain blocker would make this substantially more efficient and recoverable. The mechanical hidden-test pass is not evidence that tm implemented the fix: the PR's only changed path, crates/ignore/src/dir.rs, contains both production code and its regression tests, so the required checkout restored the fix itself."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 195.26,
+      "tokens": 34372,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode quickly connected the CLI's multi-root walker to the ignore matcher cache, then implemented the production fix by keying cached parent matchers with both the parent directory and absolute search-root base. It recovered from an invalid test target, an incorrectly constructed fixture, and output-order/format assumptions, and eventually ran formatting, the ignore crate suite, and its regression test. It could improve by using the issue reproduction more literally and ensuring the regression test remains independent of implementation-level hidden tests; here the PR changes only crates/ignore/src/dir.rs, so checking that path out afterward reinstated the production fix and makes the protocol pass unsuitable as an independent measure."
+    }
+  ]
+}
