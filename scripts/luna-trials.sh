@@ -31,8 +31,18 @@ while :; do
   dir="$ROOT/$pass"; mkdir -p "$dir/bin"
   cp "$INTEG/target/debug/tm" "$dir/bin/tm" || { sleep 600; continue; }
   log "pass $pass on $(git -C "$INTEG" rev-parse --short "$head")"
+  # Trials run up to 2 at a time (each already isolated in its own $dir/$slug); a
+  # separate mutex additionally caps rust/go trials (real compiler builds) to 1 at a
+  # time, so at most one heavy build and one light (python/typescript) trial overlap.
+  SEMDIR="$dir/.sem"; HEAVYLOCK="$dir/.heavylock"; mkdir -p "$SEMDIR"
+  acquire_slot() { while :; do n=$(ls "$SEMDIR" 2>/dev/null | wc -l | tr -d ' '); [ "$n" -lt 2 ] && { : >"$SEMDIR/$1"; return; }; sleep 5; done; }
+  release_slot() { rm -f "$SEMDIR/$1"; }
+  acquire_heavy() { while ! mkdir "$HEAVYLOCK" 2>/dev/null; do sleep 5; done; }
+  release_heavy() { rmdir "$HEAVYLOCK" 2>/dev/null; }
   printf '%s\n' "$TRIALS" | while read -r issue lang; do
     slug=$(echo "$issue" | tr '/#' '--')
+    ( acquire_slot "$slug"
+      case "$lang" in rust|go) acquire_heavy ;; esac
     log "$slug: start"
     limit 5400 opencode run -m "$MODEL" --auto --dir "$dir" "You run one benchmark trial and grade it. Work only under $dir/$slug. Issue: https://github.com/$issue ($lang). Protocol:
 1. With gh, find the PR that fixed the issue; note its base SHA and merge SHA and the test files it changed. If no merged fix with tests exists, write $dir/$slug.json with {\"skipped\": \"<why>\"} and stop.
@@ -52,9 +62,14 @@ while :; do
   test: <command>
   evidence: <log file + line/quote>
 Read the tm source in $INTEG to point at real files; never edit it." </dev/null >"$dir/$slug.runner.txt" 2>&1
-    log "$slug: done ($(test -f "$dir/$slug.json" && echo graded || echo 'no result'))"
-    rm -rf "$dir/$slug/tm/target" "$dir/$slug/opencode/target" "$dir/$slug/tm/node_modules" "$dir/$slug/opencode/node_modules"
+      log "$slug: done ($(test -f "$dir/$slug.json" && echo graded || echo 'no result'))"
+      rm -rf "$dir/$slug/tm/target" "$dir/$slug/opencode/target" "$dir/$slug/tm/node_modules" "$dir/$slug/opencode/node_modules"
+      case "$lang" in rust|go) release_heavy ;; esac
+      release_slot "$slug"
+    ) &
   done
+  wait
+  rm -rf "$SEMDIR" "$HEAVYLOCK"
   limit 1800 opencode run -m "$MODEL" --auto --dir "$dir" "Read every $dir/*.json trial result and write $dir/SCOREBOARD.md: a table per tool (pass rate, mean score per rubric dimension, median wall time and tokens), tm vs OpenCode per trial, and the 5 biggest things tm should improve, citing trials. Plain English." </dev/null >"$dir/scoreboard.runner.txt" 2>&1
   mkdir -p "$INTEG/docs/trials/$pass" && cp "$dir"/*.json "$dir/SCOREBOARD.md" "$INTEG/docs/trials/$pass/" 2>/dev/null
   git -C "$INTEG" add "docs/trials/$pass" && git -C "$INTEG" commit -qm "docs(trials): real-task trial pass $pass" -- "docs/trials/$pass" && log "committed docs/trials/$pass"
