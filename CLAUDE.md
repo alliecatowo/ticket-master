@@ -540,7 +540,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   `tm_provider::Fabric::preflight_role`) — a `providers.toml` candidate naming a provider that was
   never wired up used to only surface after a full lease cycle had already been burned dispatching
   an agent turn that failed immediately; now it fails fast and names the missing provider plus
-  `tm provider list`/`providers.toml` as the fix, not a blind "run again" retry. Skipped for
+  `tm provider list`/`providers.toml` as the fix, with instructions to configure the missing
+  provider (`tm auth <provider>`) or replace the candidate with one shown as registered; retrying
+  unchanged configuration cannot work. Skipped for
   `--replay` (served by a `MockProvider` regardless of configuration), `human_required` tickets
   (routed to a human, never the fabric), and a role `acp.toml` overrides to an external agent.
   `tm sched run`/`tm serve`/the TUI's in-process runner don't yet have this same preflight — they

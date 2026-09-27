@@ -366,9 +366,11 @@ impl Fabric {
         Err(format!(
             "no candidate can serve role {}: provider not registered: {unregistered}. Check \
              `[{}]`'s candidates in providers.toml and run `tm provider list` to see which \
-             providers are actually registered and credentialed, then fix the candidate (or its \
-             credential) before retrying — rerunning with this same configuration will fail \
-             identically every time.",
+             providers are actually registered and credentialed. To use `{unregistered}`, \
+             configure its credentials with `tm auth {unregistered}` (or the setup instructions \
+             it prints) so the provider can be registered; otherwise edit that role's candidate \
+             in providers.toml to use a provider shown by `tm provider list`. Retrying without \
+             changing the provider setup or candidate cannot work.",
             role.as_str(),
             role.config_key()
         ))
@@ -940,6 +942,20 @@ mod tests {
         assert!(
             err.contains("tm provider list"),
             "points at a real repair path, not a blind retry: {err}"
+        );
+        assert!(
+            err.contains("tm auth devpass") && err.contains("configure its credentials"),
+            "explains how to configure the missing provider: {err}"
+        );
+        assert!(
+            err.contains("edit that role's candidate")
+                && err.contains("providers.toml")
+                && err.contains("use a provider shown by `tm provider list`"),
+            "explains how to replace it with a registered provider: {err}"
+        );
+        assert!(
+            err.contains("cannot work"),
+            "warns that unchanged configuration cannot be fixed by retrying: {err}"
         );
         assert!(
             !err.to_lowercase().contains("run `tm run"),
