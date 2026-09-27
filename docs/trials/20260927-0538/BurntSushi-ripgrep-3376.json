@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "test_files": ["crates/ignore/src/dir.rs"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 205.438,
+      "tokens": 613326,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the right ignore matcher files, but its three automatic attempts repeated substantially the same inspections and each stopped without a repository change, consuming 613,326 reported tokens total. Make the no-progress budget cumulative across retries, carry forward already-read findings so a retry does not reread the same source, and show one final aggregate failure with the exact next command and total usage. During the first attempt it also ran cargo build twice and then searched the filesystem from / for an rg binary after target/debug was empty; surface Cargo's configured target directory/build artifacts early so the agent can diagnose that mismatch without a broad filesystem scan."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 235.530,
+      "tokens": 37347,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 4
+      },
+      "better": "OpenCode started with a scoped plan, located the parallel walker and Ignore matcher, and reported its inability to verify honestly. It edited the parallel walker but changed the regression setup repeatedly after failures, then removed its own failing regression test; the independent hidden test still fails against the final implementation. A stronger diagnosis should distinguish parallel walking from the reported single-threaded multi-root behavior, inspect the shared matcher cache/root-relative path handling before editing, and keep a focused test in place while correcting the implementation."
+    }
+  ]
+}

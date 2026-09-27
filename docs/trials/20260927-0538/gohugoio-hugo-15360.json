@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/gohugoio/hugo/issues/15360",
+  "base_sha": "1d87ee5b7005a38d83cb841471245b9ae7f914bd",
+  "merge_sha": "cb6a7072230920fb47ece28f67501a2c15934ade",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 392.6,
+      "tokens": 996809,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm quickly found parser/metadecoders/decoder.go and UnmarshalToMap, but then repeatedly reread the same decoder and historical diffs across three attempts per ticket. With a corrected verbatim issue-text ticket, it still submitted no change or test evidence; across both tickets it used 996,809 reported tokens. The failure messages accurately said no patch/evidence was submitted, but a user would be confused by repeated ‘Continue the saved session with tm --resume S-N’ guidance alongside automatic retry scheduling and the final ‘Run tm ticket retry T-N’ instruction; the first run also produced a /tm/null shell-start error. The first ticket invocation was malformed by shell interpretation of Markdown backticks; I created a corrected ticket and reran. Improve no-progress handling by converting findings into a focused edit/test continuation, set a much tighter cumulative context budget, and end with one recovery command consistent with ticket state."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 74.745,
+      "tokens": 26938,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode identified UnmarshalToMap, made a narrow BOM trim, added TOML/YAML/JSON regression cases, and ran go test ./parser/metadecoders successfully. It reported that focused test result and a clean diff check accurately. After the merged PR's changed test files were overlaid, the broader affected-package test command failed to compile common/hugio and tpl/openapi/openapi3 because those tests require additional production APIs introduced by the broader PR. The harness result is therefore mechanically failing for the overlaid test set, despite the focused package passing. It could make the test scope explicit in its final summary and report token totals/cost."
+    }
+  ]
+}

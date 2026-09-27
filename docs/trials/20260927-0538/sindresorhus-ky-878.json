@@ -1,0 +1,47 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "test_files": ["test/browser.ts", "test/stream.ts"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 96.4,
+      "tokens": 218913,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 3,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "The agent found the stream transform quickly, added the fix and a regression test, and recovered from an initially failing test setup before reporting its passing run. The full repository verification command failed in the pre-existing XO lint step at test/http-error.ts:218 (@typescript-eslint/no-meaningless-void-operator), so the arm is marked not passed despite the hidden stream test passing independently. The Ticketmaster CLI output was generally clear: ticket creation named T-1, and `tm run` explicitly said the ticket was submitted for review. A clearer run summary that distinguishes submitted work from accepted/completed work, and reports the agent's test result alongside the final ticket state, would make the handoff even easier to interpret."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 181.4,
+      "tokens": 23486,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 3
+      },
+      "better": "OpenCode stated a concise three-step plan, traced the progress transform, implemented the small flush change, and added a focused regression test. It encountered and diagnosed a failing test fixture (Response(null) has a null body), corrected it, then reported 18 passing stream tests. The independent required `pnpm test` run stopped at the repository's XO lint error in test/http-error.ts:218, and the post-checkout focused stream run timed out while AVA failed to exit; thus the full arm cannot be graded as passing. It would be stronger to rerun and report the exact hidden-test files after checkout and distinguish the successful focused regression run from the full-suite lint failure."
+    }
+  ],
+  "verification": {
+    "command": "pnpm test",
+    "tm_exit": "failed at XO lint: test/http-error.ts:218, @typescript-eslint/no-meaningless-void-operator",
+    "opencode_exit": "failed at XO lint: test/http-error.ts:218, @typescript-eslint/no-meaningless-void-operator",
+    "tm_focused": "npx ava test/stream.ts: passed, 19 tests",
+    "opencode_focused": "npx ava test/stream.ts: timed out while running tests; failed to exit"
+  }
+}

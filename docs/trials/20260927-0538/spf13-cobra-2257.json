@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 105.47,
+      "tokens": 535499,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm initialized and indexed the repository, and its progress messages named the inspected files, but three automatic attempts repeated overlapping reads and searches without a visible plan, code change, or verification. The final regression test mechanically failed because os.Args[2] was `--` instead of `x`. The failure was candid, but instructions to continue a saved session with `tm --resume S-1/S-2/S-3` appeared alongside `A retry is scheduled`, then the run ended escalated and suggested `tm ticket retry T-1`; a user would not know whether to wait, resume, or retry. Carry findings into a bounded, materially different focused attempt, stop redundant exploration before it consumes another large token budget, and finish with one recovery command consistent with the actual retry state."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 55.54,
+      "tokens": 18871,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a focused three-step plan, followed the relevant completion argument path, and fixed the append backing-array alias by copying finalArgs before appending the sentinel. Its initial semantic-search call was unavailable because the workspace had no index, but it promptly used exact grep and file reads as fallback. It ran go test ./... successfully before the hidden test was installed, reported the verification accurately, and the independent hidden-test run also passed. It could be even more efficient by relying directly on exact search for this clearly identified Go source issue and by adding a direct focused unit run after the hidden test was installed."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 104.66,
+      "tokens": 456874,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm should turn its repeated-inspection stop into a useful recovery instead of allowing the same investigation to restart. This run re-read prepare_body across three attempts, made no edit, and consumed 456,874 tokens. The messages first told the user to continue with `tm --resume S-1`, while the scheduler automatically retried twice and the final message instead instructed `tm ticket retry T-1`; these commands and automatic behavior are confusing together. Carry the retained diagnosis into a focused next step, avoid an automatic retry that repeats the same searches, and present one clear command for the user's next action."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 109.63,
+      "tokens": 289624,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 5,
+        "cost_time": 4
+      },
+      "better": "OpenCode found the stream check and wrote a focused implementation and regression test. It corrected its first test fixture after a failing run, and the hidden redirect test passed after the merged test file was installed. It could improve by explicitly calling out the first failed fixture and its correction in the final summary, and by checking early that the wrapper actually exposes `__iter__` through delegation while remaining non-Iterable according to the ABC."
+    }
+  ]
+}
