@@ -1929,6 +1929,7 @@ fn submit_summary(input: &serde_json::Value) -> String {
 /// Describe a hard step-limit stop without hiding a failed final submission. The complete steps
 /// remain attached to `AgentOutcome::Failed`, preserving command output and other review evidence.
 fn step_limit_detail(max_steps: u32, steps: &[StepRecord]) -> String {
+    let checkpoint = exploration_checkpoint(steps);
     let failed_submit = steps.last().and_then(|step| {
         step.tool_calls.iter().find_map(|call| {
             if call.tool_name == TICKET_SUBMIT {
@@ -1941,13 +1942,54 @@ fn step_limit_detail(max_steps: u32, steps: &[StepRecord]) -> String {
     });
     if let Some(cause) = failed_submit {
         format!(
-            "step limit ({max_steps}) reached after ticket submission failed: {cause}. The work and verification results from this attempt are retained; review the submit error and retry the ticket without repeating completed work. The ticket was not submitted."
+            "step limit ({max_steps}) reached after ticket submission failed: {cause}. The work and verification results from this attempt are retained; {checkpoint} Retry with this next step: address the submit error using the retained evidence, then submit again. The ticket was not submitted."
         )
     } else {
         format!(
-            "step limit ({max_steps}) reached without submitting. Review the retained work and verification results, then retry the ticket and submit it with evidence. The ticket was not submitted."
+            "step limit ({max_steps}) reached without submitting. The work and verification results from this attempt are retained; {checkpoint} Retry with this next step: continue from the checkpoint, make one focused change or test, then submit with evidence. The ticket was not submitted."
         )
     }
+}
+
+/// Compact handoff for the next attempt after a step-limit stop: inspected source paths, the
+/// latest stated hypothesis (or a finding from retained reads), and one concrete action.
+fn exploration_checkpoint(steps: &[StepRecord]) -> String {
+    let mut paths = std::collections::BTreeSet::new();
+    let mut finding = None;
+    let mut hypothesis = None;
+    for step in steps {
+        if let Some(text) = step
+            .assistant_text
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            hypothesis = Some(concise_finding(text));
+        }
+        for call in &step.tool_calls {
+            if matches!(call.tool_name.as_str(), "fs.read" | "fs.read_range") {
+                if let Some(path) = call.input.get("path").and_then(serde_json::Value::as_str) {
+                    paths.insert(path.to_string());
+                }
+            }
+            if let ToolOutcome::Completed { result, .. } = &call.resolution {
+                if matches!(call.tool_name.as_str(), "fs.read" | "fs.read_range") {
+                    let rendered = result.to_string();
+                    if !rendered.trim().is_empty() {
+                        finding = Some(concise_finding(&rendered));
+                    }
+                }
+            }
+        }
+    }
+    let inspected = if paths.is_empty() {
+        "no source paths recorded".to_string()
+    } else {
+        paths.into_iter().take(5).collect::<Vec<_>>().join(", ")
+    };
+    let hypothesis = hypothesis
+        .or(finding)
+        .unwrap_or_else(|| "no hypothesis recorded".to_string());
+    format!("Checkpoint: inspected {inspected}; current hypothesis/finding: {hypothesis}.")
 }
 
 /// The project root threaded through [`tm_types::CallContext::root`] — a `PatchEngine` applies
@@ -2180,7 +2222,7 @@ fn repeated_exploration_nudge(steps: &[StepRecord]) -> Option<String> {
             } else {
                 format!("Retained finding: {}", entry.1)
             };
-            return Some(format!("You have repeatedly explored the same source or search target without making progress. Already inspected: {key}. {finding} Use this retained result to make the smallest implementation that meets the goal, then run focused verification. Do not reread or repeat this exploration; if you are blocked, state the specific missing information."));
+            return Some(format!("You have repeatedly explored the same source or search target without making progress. Already inspected: {key}. {finding} Use this retained result and reuse the returned evidence instead of repeating these reads or nearby ranges. Move now to a concrete reproducer, the smallest implementation that meets the goal, or a focused test, then run focused verification. If blocked, state the specific missing information."));
         }
     }
     None
@@ -5361,6 +5403,33 @@ mod step_limit_detail_tests {
             ToolCallResolution::Completed { result, .. }
                 if result["stdout"] == "all tests passed"
         ));
+    }
+
+    #[test]
+    fn step_limit_detail_carries_a_compact_actionable_checkpoint() {
+        let steps = vec![StepRecord {
+            index: 1,
+            served_by: "mock/test".to_string(),
+            assistant_text: Some("The parser likely mishandles escaped delimiters.".to_string()),
+            tool_calls: vec![ToolCallRecord {
+                tool_use_id: "read".to_string(),
+                tool_name: "fs.read_range".to_string(),
+                input: serde_json::json!({"path":"src/parser.rs", "start":10, "end":30}),
+                resolution: ToolCallResolution::Completed {
+                    result: serde_json::json!({"text":"parser implementation"}),
+                    artifact: None,
+                },
+            }],
+            spend: Spend::default(),
+            at: tm_types::Timestamp::from_unix_nanos(0),
+        }];
+
+        let detail = step_limit_detail(2, &steps);
+
+        assert!(detail.contains("src/parser.rs"), "{detail}");
+        assert!(detail.contains("escaped delimiters"), "{detail}");
+        assert!(detail.contains("Retry with this next step"), "{detail}");
+        assert!(detail.contains("focused change or test"), "{detail}");
     }
 }
 

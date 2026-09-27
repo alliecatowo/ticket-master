@@ -2131,7 +2131,7 @@ mod tests {
 
         // A subsequent ordinary test failure keeps its existing retry advice.
         let retained = vec!["* Read src/click/types.py:1-120".to_string()];
-        ticket.failures[1].detail = "step limit (64) reached without submitting".to_string();
+        ticket.failures[1].detail = "step limit (64) reached without submitting. Checkpoint: inspected src/click/types.py; current hypothesis/finding: escaped type parsing. Retry with this next step: make one focused change or test, then submit with evidence.".to_string();
         let step_limit_progress = vec![
             "* Edited src/click/types.py".to_string(),
             "* Ran `pytest tests/test_types.py` (passed)".to_string(),
@@ -2149,6 +2149,8 @@ mod tests {
         assert!(step_limit.contains("Working-tree edits were retained"));
         assert!(step_limit.contains("Verification ran"));
         assert!(step_limit.contains("step limit (64) reached without submitting"));
+        assert!(step_limit.contains("Checkpoint: inspected src/click/types.py"));
+        assert!(step_limit.contains("make one focused change or test"));
         assert!(step_limit.contains("tm ticket retry T-1 --guidance"));
         assert!(!step_limit.contains("Run `tm run T-1` again"));
 

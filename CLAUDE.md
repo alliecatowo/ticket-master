@@ -494,9 +494,12 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    A step-limit failure without submission also summarizes retained edits and whether verification
    produced a result, preserves the stop reason, and gives one bounded `tm ticket retry` command
    with focused guidance instead of an unqualified rerun suggestion.
+   Agent step-limit details also carry a compact checkpoint of inspected source paths, the latest
+   stated hypothesis or retained finding, and one focused next action for that retry.
    Within one attempt, reopening the same source or history target three times (even with changed
-    ranges or revisions) triggers one concise nudge that includes the latest retained result and
-    directs the worker to use it for a concrete next step; edits and verification reset the count,
+     ranges or revisions) triggers one concise nudge that includes the latest retained result and
+     directs the worker to reuse returned evidence and move to a reproducer, code change, or focused
+     test; edits and verification reset the count,
     and a different targeted reread is still allowed when new evidence requires it. The no-submit
     recovery summary is carried into the next attempt so repeated dispatches do not restart cold.
     An evidence-free ticket submission tells the worker to store a report
