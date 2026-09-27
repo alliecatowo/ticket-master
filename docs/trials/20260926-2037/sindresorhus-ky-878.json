@@ -1,0 +1,44 @@
+{
+  "issue": {
+    "number": 878,
+    "title": "`onDownloadProgress` never emits `percent: 1` for empty response bodies",
+    "url": "https://github.com/sindresorhus/ky/issues/878",
+    "body": "### Summary\n\nWhen a response has an empty body (for example a `200` with `Content-Length: 0`), `onDownloadProgress` never fires with `percent: 1`. The documented guarantee is that `onDownloadProgress` always reports completion, but for empty bodies the final event is skipped.\n\n### Root cause\n\nIn `source/utils/body.ts`, the transform stream's `flush()` only emits the final progress event inside an `if (previousChunk)` block. For an empty body no chunk is ever read, so `previousChunk` stays `undefined` and the final `{ percent: 1 }` event is never emitted.\n\n### Reproduction\n\n```js\nimport ky from 'ky';\n\nlet lastPercent = 0;\nawait ky.get('https://example.com/empty', { // a 200 with Content-Length: 0\n  onDownloadProgress: (progress) => { lastPercent = progress.percent; }\n});\nconsole.log(lastPercent); // 0 — expected 1\n```\n\n### Proposed fix\n\nMove the final progress emission out of the `if (previousChunk)` guard so it always fires on flush, using an empty `Uint8Array` when the body was empty:\n\n```js\nonProgress?.({percent: 1, totalBytes: Math.max(totalBytes, transferredBytes), transferredBytes}, previousChunk ?? new Uint8Array());\n```\n\nI have a branch ready with the fix and a red→green test (18/18 passing): `pacocartones:fix/ondownloadprogress-empty-body`. Happy to open a PR if you'd like."
+  },
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 105,
+      "tokens": 183531,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 2,
+        "plan_quality": 3,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 4
+      },
+      "better": "The agent located and edited the right transform quickly, and the merged stream regression tests passed against its implementation. However, `tm ticket new` printed `Created ticket T-1: ...` to stdout; treating that whole line as the ticket ID made the prescribed shell sequence fail with a parser error, so a machine-readable ID/output mode would avoid user guesswork. The run then retried into provider 429 failures and ended escalated after editing the implementation; its failure report offered retry/resume guidance but no successful final handoff or trustworthy verification report. The event payload exposed a diagnostic claiming 170,893 tokens for a stalled attempt plus 12,638 recorded tokens on the final failed attempt, so usage reporting could be clearer. Mechanically, `npx ava test/stream.ts` passed 19/19 after hidden-test overwrite, but the required `pnpm test` failed in XO on the untouched `test/http-error.ts:218` (`no-meaningless-void-operator`); browser tests also could not launch because Playwright browser binaries were not installed."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 79,
+      "tokens": 20821,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 5,
+        "recoverability": 5,
+        "cost_time": 5
+      },
+      "better": "The agent reached `source/utils/body.ts` quickly, implemented the flush behavior, added a focused empty-body regression test, and ran `npx ava test/stream.ts` with 18 passing tests before giving a concise, accurate result. Its initial glob missed tests, but it corrected course by searching for the progress test and then editing the right file; it could improve context efficiency slightly by using the exact task and existing test layout earlier. The hidden merged stream tests passed after overwrite (`npx ava test/stream.ts`: 19/19), but the required `pnpm test` verification failed at XO on the pre-existing untouched `test/http-error.ts:218` rule violation, and `npx ava test/browser.ts` could not complete because Playwright browser binaries were not installed."
+    }
+  ]
+}

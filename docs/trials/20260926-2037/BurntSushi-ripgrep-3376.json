@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 136,
+      "tokens": null,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 2
+      },
+      "better": "The agent found the right ignore and walker files quickly, but spent repeated cycles re-reading walker code and never stated a clear plan before the provider stopped the run. tm's progress output said `Ticket T-1 dispatched for execution.` three times, which looks like duplicate work without explaining a retry/attempt number; the actual stopping message did identify HTTP 429 and suggested `tm ticket retry T-1`, but the preceding `Ran a command -> error: couldn't find that` hides the failed operation and gives the user no diagnostic. The run produced no patch or verification, and tokens were unavailable in the plain `tm events` output. A clearer one-time dispatch message with attempt/retry context, actionable command errors that retain a concise cause, and a surfaced token total would make this easier to trust and recover from."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 177,
+      "tokens": 34898,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode traced the cache reuse to `Ignore::add_parents`, produced a focused fix and regression coverage for both root orders and sequential/parallel walking, and reported the focused and package-level test runs. One early semantic-search tool attempt failed because the clone had no zvec index; it fell back to exact search and continued. The final test checkout overwrote `dir.rs`, which contains both production changes and inline tests, so the required post-run test result is mechanically passing but is not an independent check of the agent's final patch. A more reliable protocol would separate the fix's tests from production code or otherwise apply only test hunks when the merged PR bundles them in one file."
+    }
+  ]
+}

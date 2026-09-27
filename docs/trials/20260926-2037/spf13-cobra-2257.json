@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 84,
+      "tokens": 129206,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 3,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 2
+      },
+      "better": "tm found completions.go and command.go quickly, but several repeated reads produced no patch before the provider returned HTTP 429. The repeated 'Ticket T-1 dispatched for execution' notices did not explain whether another attempt had actually started, and the run ended with a raw provider-unavailable error plus a retry command but no automatic recovery. Add bounded backoff/retry for rate-limit responses and make progress messages distinguish a newly dispatched attempt from a scheduler tick or retry; report a clear recovery state and next action when retries are exhausted."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 85,
+      "tokens": 30689,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 3,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped plan, found the append side effect in completions.go, made a focused defensive-copy fix with a regression test, formatted the files, and ran go test ./.... Its first semantic search failed because no workspace index existed, after which it switched to lexical search and completed without getting stuck. Avoid the failed index call when the requested code lookup can be answered by direct repository search, and keep the regression test aligned with the public Execute/os.Args behavior rather than only an internal slice helper."
+    }
+  ]
+}

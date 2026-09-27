@@ -1,0 +1,43 @@
+{
+  "issue": {
+    "url": "https://github.com/psf/requests/issues/7432",
+    "title": "`prepare_body` stream detection regression"
+  },
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": ["tests/test_requests.py"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 92,
+      "tokens": 103467,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm should interrupt its repeated-read loop with a useful next action before the six-inspection cutoff; this run never stated an implementation plan or made a change. Its stop message lists `tm --resume S-3` and `tm ticket retry T-1` as adjacent options without explaining their relationship, then claimed 7 seconds while the wall-clock run took 92 seconds. A single copyable, state-accurate recovery sequence and consistent elapsed-time reporting would make the failure easier to understand and recover from."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 106,
+      "tokens": 37494,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode found `PreparedRequest.prepare_body()` quickly and made the change after encountering a failed first regression test, then refined its test and reported the focused pass. It also attempted a broad test-file run that exposed the checkout's pytest-httpbin fixture configuration issue; installing the declared test dependencies and independently applying the PR test afterward confirmed the target regression test passes. It would be more efficient to derive the regression test directly from the issue's delegated-attribute behavior and avoid spending iterations on a locally invented rewind test before validating its exact protocol shape."
+    }
+  ]
+}

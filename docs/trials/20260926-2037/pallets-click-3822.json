@@ -1,0 +1,48 @@
+{
+  "issue": {
+    "number": 3822,
+    "title": "`click.Path` should be generic on `path_type`",
+    "url": "https://github.com/pallets/click/issues/3822",
+    "body": "Click 8.5.0 made `click.prompt` and `click.ParamType` generic, so the return type of `click.prompt` is now normally clever enough to reveal the actual type of the value as converted from raw input.\n\nHowever, `click.Path` has a `path_type` parameter to which the input is converted, but  that information is not reflected in the return type of `click.Path.convert`, so it's always typed as `str | bytes | os.PathLike[str]`, regardless of the value of `path_type`.\n\n```python\n# mre.py\nimport pathlib\n\nfrom typing_extensions import assert_type\n\nimport click\n\nmy_type = click.Path(file_okay=False, path_type=pathlib.Path)\npath = click.prompt(\"Enter a name\", type=my_type)\n\n# expected: pathlib.Path, actual: str | bytes | os.PathLike[str]\nassert_type(path, pathlib.Path)\n```\n\nI checked the above MRE with mypy and pyright, as well as ty for completeness, on a local clone of the repo @ `main`:\n\n```console\n$ uv run mypy mre.py\nmre.py:12: error: Expression is of type \"str | bytes | PathLike[str]\", not \"Path\"  [assert-type]\n    assert_type(path, pathlib.Path)\n    ^\nFound 1 error in 1 file (checked 1 source file)\n```\n\n```console\n$ uv run pyright mre.py\nWARNING: there is a new pyright version available (v1.1.408 -> v1.1.411).\nPlease install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`\n\n/Users/edgarramirez/Contrib/pallets/click/mre.py\n  /Users/edgarramirez/Contrib/pallets/click/mre.py:12:13 - error: \"assert_type\" mismatch: expected \"Path\" but received \"str | bytes | PathLike[str]\" (reportAssertTypeFailure)\n1 error, 0 warnings, 0 informations\n```\n\n```console\n$ uv run ty check mre.py\nerror[type-assertion-failure]: Argument does not have asserted type `Path`\n  --> mre.py:12:1\n   |\n12 | assert_type(path, pathlib.Path)\n   | ^^^^^^^^^^^^----^^^^^^^^^^^^^^^\n   |             |\n   |             Inferred type is `str | bytes | PathLike[str]`\ninfo: `Path` and `str | bytes | PathLike[str]` are not equivalent types\n\nFound 1 diagnostic\n```\n\nI expect the return type of `click.prompt` to match the `path_type` value passed to `click.Path`.\n\nEnvironment:\n\n- Python version: 3.14\n- Click version: 8.5.0"
+  },
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "test_files": [
+    "tests/test_types/test_Path.py",
+    "tests/typing/typing_path.py"
+  ],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 78.686,
+      "tokens": null,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm should distinguish an exhausted provider 429 from other provider failures, expose useful retry timing or state when the run escalates, and avoid leaving the user to infer the next step from raw provider text. In this run it activated and dispatched the ticket repeatedly, then exited on a 429 with no implementation; it left `tm ticket retry T-1` as the recovery action, which was not attempted during this trial. A bounded, clearly narrated recovery path and a compact final summary of what changed, what was verified, and what remains would make the flow easier to trust."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 127.749,
+      "tokens": 26931,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode found the right implementation quickly, recovered from an initial mypy failure by changing the TypeVar strategy, and clearly summarized its focused checks. It should also have verified Click's default `Path()` typing, not only `path_type=...`: the hidden PR typing file reports two `Never` mismatches for the unparameterized default case. Running the whole typing fixture after its local assertion would have exposed that gap before the final success claim."
+    }
+  ]
+}
