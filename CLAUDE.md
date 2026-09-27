@@ -467,7 +467,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    submitting, `tm run` reports the failure and recovery action without immediately starting an
    identical foreground attempt; a scheduler retry, when permitted, is visible in the ticket state
    and uses the saved investigation summary. Resume the saved session with a focused next step
-   when useful findings exist. If it cannot recover, the error identifies the failed
+   when useful findings exist. The no-submit summary includes a short trail of retained progress,
+   gives the saved session's exact resume command when available, and states when no edits or tests
+   were produced. Ticket workers receive a focused path-first plan and guidance to avoid repeating
+   unchanged reads, run a relevant check, and submit evidence. If it cannot recover, the error
+   identifies the failed
     attempt, current ticket state, provider-turn failure reason (separate from test failures),
     whether another retry is scheduled, and the exact next command. A no-submit failure retains a concise summary of the
     investigation for the next attempt and tells the user that the findings are unverified; it

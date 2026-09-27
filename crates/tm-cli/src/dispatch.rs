@@ -60,7 +60,11 @@ impl ContextPackSource for ProjectContextPackSource {
             &[],
             &crate::ops::load_role_table_for_state_dir(&self.state_dir)?,
         )?;
-        Ok(tm_agent::render_task_prompt(ticket, &pack))
+        let mut prompt = tm_agent::render_task_prompt(ticket, &pack);
+        prompt.push_str(
+            "\n\nKeep the investigation focused on the ticket's named paths. Start with a short plan, record concrete findings, and do not reread unchanged files or repeat searches unless new evidence requires it. After investigation, make the smallest useful change, run a relevant check, and submit the result with evidence. If blocked, state what was learned and the exact next action.",
+        );
+        Ok(prompt)
     }
 }
 
