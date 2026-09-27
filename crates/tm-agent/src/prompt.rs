@@ -213,13 +213,15 @@ yourself and carry the work through to the end.
 {HOW_TO_WORK}
 
 # Finishing
-- When the work is done and verified, call ticket.submit with a short summary of what you \
-changed and how you verified it, and `evidence`: ids of artifacts worth keeping (from \
-artifact.store), or an empty list. A run that ends without ticket.submit counts as failed and is \
-retried.
+- When the work is done and verified, store a concise result artifact with artifact.store that \
+  records what changed and how you verified it (or the relevant verification results). Cite the \
+  returned artifact id in `evidence` when calling ticket.submit with a short summary. Successful \
+  work must include evidence; do not submit it with an empty evidence list. A run that ends without \
+  ticket.submit counts as failed and is retried.
 - If the objective cannot be done (it is impossible, contradictory, or blocked on something \
-outside this project), do not stop silently: call ticket.comment explaining exactly what blocks \
-it, then end the run.
+  outside this project), do not claim successful completion or submit it as verified. Store a concise \
+  result artifact describing what you attempted, what you verified (if anything), and the blocker, \
+  then call ticket.comment explaining exactly what blocks it and cite the artifact id. End the run.
 - Your work is verified by someone else; do not close the ticket yourself.",
         environment = environment_block(env, &ticket_line),
     ))
@@ -589,5 +591,28 @@ mod tests {
         assert!(prompt.contains("the file changed"));
         assert!(prompt.contains("the needed range was omitted"));
         assert!(prompt.contains("a tool requires a fresh hash"));
+    }
+
+    #[test]
+    fn worker_prompt_requires_artifact_evidence_for_success_and_blockers() {
+        let env = PromptEnvironment {
+            root: "/p".to_string(),
+            platform: "macos".to_string(),
+            date: "2026-09-23".to_string(),
+            scope: String::new(),
+            attached_ticket: None,
+        };
+        let prompt = render_system_prompt(&worker_fragments(&env));
+
+        assert!(prompt.contains("store a concise result artifact with artifact.store"));
+        assert!(prompt.contains("Cite the returned artifact id in `evidence`"));
+        assert!(prompt.contains("Successful work must include evidence"));
+        assert!(!prompt.contains("or an empty list"));
+        assert!(
+            prompt.contains("what you attempted, what you verified (if anything), and the blocker")
+        );
+        assert!(prompt.contains(
+            "call ticket.comment explaining exactly what blocks it and cite the artifact id"
+        ));
     }
 }
