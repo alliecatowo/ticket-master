@@ -485,6 +485,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    or other evidence artifact and cite the returned artifact ID when submitting, rather than
    recommending a blind retry. A command reporting a missing common toolchain executable (such as
   `go`, `cargo`, or `node`) instead ends the attempt with that dependency named.
+  Ticketed runs also stop after 10 consecutive steps without a successful edit, commit, or stored
+  evidence artifact. This bounds repeated investigations before the full step limit; the retained
+  failure detail summarizes explored targets and the latest finding, says no patch or evidence was
+  submitted, and directs the worker to make a focused change, verify it, and submit with evidence.
+  A successful write resets the consecutive-step counter.
   Before leasing or
   dispatching anything, `tm run <T>` also checks that the ticket's required role actually has a
   registered/credentialed provider candidate (`sched::preflight_provider_or_fail`,

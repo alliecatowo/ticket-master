@@ -55,6 +55,9 @@ pub const DEFAULT_MAX_STEPS: u32 = 64;
 /// [`AgentLoop::with_max_submit_nudges`] to change it per loop.
 pub const DEFAULT_MAX_SUBMIT_NUDGES: u32 = 1;
 
+/// Consecutive ticketed steps without a successful repository or evidence write before stopping.
+const NO_PROGRESS_STEP_LIMIT: usize = 10;
+
 /// The user message appended after a ticketed run's text-only turn, once per nudge budgeted by
 /// [`AgentLoop::max_submit_nudges`] (see [`DEFAULT_MAX_SUBMIT_NUDGES`]).
 const SUBMIT_NUDGE_TEXT: &str = "You ended your turn without calling ticket.submit. If the work \
@@ -1754,6 +1757,16 @@ impl AgentLoop {
                     at: self.clock.now(),
                 },
             );
+            if task.ticket.is_some() && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT {
+                let summary = InvestigationSummary::from_steps(&steps).render();
+                return Ok(AgentOutcome::Failed {
+                    steps,
+                    class: FailureClass::Other,
+                    detail: format!(
+                        "stopped after {NO_PROGRESS_STEP_LIMIT} steps without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Continue from these findings, make a focused change, run the relevant checks, and submit the result with evidence."
+                    ),
+                });
+            }
             if let Some(dependency) = missing_toolchain_dependency(&steps) {
                 return Ok(AgentOutcome::Failed {
                     steps,
@@ -1790,6 +1803,33 @@ impl AgentLoop {
             summary,
         }
     }
+}
+
+/// Count the trailing steps that contain no successful repository or artifact write. Reads,
+/// searches, and commands remain useful investigation, but cannot alone justify consuming the
+/// entire step budget on a ticketed run.
+fn no_progress_steps(steps: &[StepRecord]) -> usize {
+    steps
+        .iter()
+        .rev()
+        .take_while(|step| !step_made_progress(step))
+        .count()
+}
+
+fn step_made_progress(step: &StepRecord) -> bool {
+    step.tool_calls.iter().any(|call| match &call.resolution {
+        crate::outcome::ToolCallResolution::Completed { result, .. }
+            if call.tool_name.starts_with("edit.") =>
+        {
+            result.get("applied").and_then(serde_json::Value::as_bool) == Some(true)
+        }
+        crate::outcome::ToolCallResolution::Completed { .. }
+            if call.tool_name == "git.commit" || call.tool_name == "artifact.store" =>
+        {
+            true
+        }
+        _ => false,
+    })
 }
 
 /// Pull the human-readable summary out of a `ticket.submit` tool call's own arguments, the same
@@ -5208,5 +5248,63 @@ mod unproductive_exploration_tests {
             missing_toolchain_dependency(&[step(vec![command])]).as_deref(),
             Some("go")
         );
+    }
+}
+
+#[cfg(test)]
+mod no_progress_tests {
+    use super::*;
+    use crate::outcome::{ToolCallRecord, ToolCallResolution};
+
+    fn step(index: u32, name: &str, path: &str) -> StepRecord {
+        StepRecord {
+            index,
+            served_by: "mock/test".to_string(),
+            assistant_text: Some("Found the relevant implementation".to_string()),
+            tool_calls: vec![ToolCallRecord {
+                tool_use_id: format!("call-{index}"),
+                tool_name: name.to_string(),
+                input: serde_json::json!({"path": path}),
+                resolution: ToolCallResolution::Completed {
+                    result: if name.starts_with("edit.") {
+                        serde_json::json!({"applied": true})
+                    } else {
+                        serde_json::json!({"text": "useful finding"})
+                    },
+                    artifact: None,
+                },
+            }],
+            spend: Spend::default(),
+            at: tm_types::Timestamp::from_unix_nanos(0),
+        }
+    }
+
+    #[test]
+    fn repeated_investigation_hits_bounded_threshold_and_keeps_actionable_summary() {
+        let steps: Vec<_> = (1..=NO_PROGRESS_STEP_LIMIT as u32)
+            .map(|i| step(i, "fs.read", "crates/tm-agent/src/agent_loop.rs"))
+            .collect();
+        assert_eq!(no_progress_steps(&steps), NO_PROGRESS_STEP_LIMIT);
+        let summary = InvestigationSummary::from_steps(&steps).render();
+        assert!(summary.contains("crates/tm-agent/src/agent_loop.rs"));
+        assert!(summary.contains("Found the relevant implementation"));
+    }
+
+    #[test]
+    fn successful_edit_resets_no_progress_streak() {
+        let mut steps = vec![step(1, "fs.read", "src/lib.rs")];
+        steps.push(step(2, "edit.apply_patch", "src/lib.rs"));
+        steps.extend((3..=5).map(|i| step(i, "shell.run", "cargo test")));
+        assert_eq!(no_progress_steps(&steps), 3);
+    }
+
+    #[test]
+    fn edit_conflict_does_not_count_as_progress() {
+        let mut edit = step(1, "edit.write_file", "src/lib.rs");
+        edit.tool_calls[0].resolution = ToolCallResolution::Completed {
+            result: serde_json::json!({"applied": false}),
+            artifact: None,
+        };
+        assert_eq!(no_progress_steps(&[edit]), 1);
     }
 }
