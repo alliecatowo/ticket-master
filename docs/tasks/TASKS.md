@@ -1812,7 +1812,7 @@ is based on.
   acceptance: Replaying this investigation finds `source/utils/body.ts` and `test/stream.ts` once, then does not issue repeated identical `onDownloadProgress` searches or five consecutive full reads of `test/stream.ts`; a reread after editing still returns the current file contents.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1521/sindresorhus-ky-878/tm.log:7-18` (duplicate searches and browser reads); `/tmp/tm-trials/20260926-1521/sindresorhus-ky-878/tm.log:27-40` (repeated stream-file reads after the target was located)
-- [ ] **t20260926-1521-sindresorhus-ky-878-suggest-extension-near-match** — Recover from guessed source extensions without a directory-listing detour
+- [x] **t20260926-1521-sindresorhus-ky-878-suggest-extension-near-match** — Recover from guessed source extensions without a directory-listing detour (landed 02044f7)
   model: sonnet · severity: medium · builds Rust: yes · area: agent/tools · deps: none
   files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/tools.rs`
   change: Extend the not-found path hinting used by `fs_io_error` to consider a unique same-stem candidate with a different source extension (for example `.js` to `.ts`) and include it as a safe correction; retain the existing project-root guidance when candidates are ambiguous.
