@@ -1791,7 +1791,7 @@ is based on.
   acceptance: Replaying the Click #3822 investigation pattern surfaces a nudge after repeated `src/click/types.py` reads, avoids another full cycle of overlapping reads with no new finding, and preserves a concise investigation summary for recovery; productive read-then-edit runs are not interrupted.
   test: `cargo test -p tm-agent repeated_exploration_nudge && cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1521/pallets-click-3822/tm.log:10-38` (repeated searches and wide/overlapping `types.py` reads); `/tmp/tm-trials/20260926-1521/pallets-click-3822/tm.log:40-120` (the same exploration pattern repeats across dispatches); `/tmp/tm-trials/20260926-1521/pallets-click-3822/tm.log:122-123` (final no-patch/no-evidence failure)
-- [ ] **t20260926-1521-psf-requests-7432-reduce-repeated-source-context** — Reduce repeated source reads and report context cost during runs
+- [x] **t20260926-1521-psf-requests-7432-reduce-repeated-source-context** — Reduce repeated source reads and report context cost during runs (landed be76672)
   model: sonnet · severity: medium · builds Rust: yes · area: agent/context · deps: none
   files: `crates/tm-agent/src/pruning.rs`
   change: Audit the run-time working-set pruning behavior for repeated reads/searches, ensure a same-path reread does not keep redundant full result content in subsequent provider context, and expose cumulative token usage to the run summary so operators can spot disproportionate context consumption.
