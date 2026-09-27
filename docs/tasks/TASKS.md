@@ -1819,7 +1819,7 @@ is based on.
   acceptance: A read request for `test/helpers/create-http-test-server.js` in a project containing only `test/helpers/create-http-test-server.ts` returns the precise `.ts` suggestion and the agent can continue without listing the project root; ambiguous matches do not auto-select a path.
   test: `cargo test -p tm-agent fs_io_error`
   evidence: `/tmp/tm-trials/20260926-1521/sindresorhus-ky-878/tm.log:16-17` (the guessed `.js` path failed and required a separate directory listing before finding the `.ts` helper)
-- [ ] **t20260926-1521-spf13-cobra-2257-child-toolchain-preflight** — Diagnose Go availability in the actual agent execution environment before starting edits
+- [x] **t20260926-1521-spf13-cobra-2257-child-toolchain-preflight** — Diagnose Go availability in the actual agent execution environment before starting edits (landed 2e0f952)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-runtime · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: When a shell/build/test call reports a missing toolchain executable, distinguish an actually absent binary from a PATH/environment mismatch and include the failing command plus the child process PATH/toolchain lookup in the surfaced recovery message; do not issue an unqualified “Install or configure it” message when the binary is available to the caller but not the agent child.
