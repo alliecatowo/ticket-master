@@ -1647,7 +1647,7 @@ is based on.
   acceptance: Prompt tests assert the worker instructions explicitly direct reuse of unchanged file context and give concrete reasons that justify rereading; a replay test with repeated read calls shows the worker proceeds to the next relevant action instead of issuing redundant identical reads.
   test: `cargo test -p tm-agent prompt`
   evidence: `/tmp/tm-trials/20260926-0821/spf13-cobra-2257/tm.log:7-21` — before changing any files, the run repeatedly emitted “Read command.go” and “Read completions.go” across 17 tool actions, after it had already found and inspected the completion append path.
-- [ ] **t20260926-1044-BurntSushi-ripgrep-3376-recover-empty-agent-turn** — Make empty agent turns recoverable and actionable
+- [x] **t20260926-1044-BurntSushi-ripgrep-3376-recover-empty-agent-turn** — Make empty agent turns recoverable and actionable (landed 56acca3)
   model: sonnet · severity: high · builds Rust: yes · area: run/recovery · deps: none
   files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: When a model ends a turn without submitting a patch or evidence, use the remaining retry budget within the same `tm run` invocation when possible. If the run cannot recover, report the attempt count, current ticket state, why the turn failed, whether/when an automatic retry is scheduled, and a precise next command; distinguish provider-turn failure from test failure.
