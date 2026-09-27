@@ -1748,7 +1748,7 @@ is based on.
   acceptance: Replaying the Click #3822 investigation pattern stops the repeated `src/click/types.py` reads/searches from consuming another full context window, tells the user what was established and what remains, and includes a usable resume command after no-submit; normal runs still submit patches and evidence.
   test: `cargo test -p tm-agent repeated_exploration_nudge && cargo test -p tm-cli repeated_no_submit_failure_gets_focused_recovery_guidance`
   evidence: `/tmp/tm-trials/20260926-1342/pallets-click-3822/tm.log:8-18` (repeated reads of `src/click/types.py` and overlapping ranges); `/tmp/tm-trials/20260926-1342/pallets-click-3822/tm.log:97-123` (continued rereads, then “model ended turn without submitting” and the escalation); `/tmp/tm-trials/20260926-1342/pallets-click-3822/tm.log:260-280` (stats report 1,691,000 tokens and 54 tool calls)
-- [ ] **t20260926-1342-psf-requests-7432-bound-redundant-context-loops** — Stop repetitive context exploration before a ticket burns excessive time and tokens
+- [x] **t20260926-1342-psf-requests-7432-bound-redundant-context-loops** — Stop repetitive context exploration before a ticket burns excessive time and tokens (landed aca6ee9)
   model: sonnet · severity: high · builds Rust: yes · area: agent
   deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
