@@ -1273,9 +1273,32 @@ fn run_outcome(
                 .to_string()
         }
         tm_core::TicketState::Escalated if did_not_submit => {
+            let edits = if workspace_edits_retained {
+                "Working-tree edits were retained; inspect them with `git status` and `git diff`."
+            } else {
+                "No working-tree edits were retained, so this run made no repository change."
+            };
+            let resume = session.as_deref().map_or_else(
+                || format!("Inspect the saved attempt with `tm ticket show {}` and resume its saved session with `tm --resume <session>`.", ticket.id),
+                |session| format!("Inspect the saved attempt with `tm ticket show {}` and resume it with `tm --resume {session}`.", ticket.id),
+            );
+            let findings = if progress.is_empty() {
+                "No source findings were retained from this attempt.".to_string()
+            } else {
+                format!(
+                    "Progress retained: {}.",
+                    progress
+                        .iter()
+                        .rev()
+                        .take(3)
+                        .rev()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            };
             format!(
-                "Working-tree edits were retained. Inspect them with `git status` and `git diff`, then use `tm ticket retry {}` to start another attempt with those edits still present.",
-                ticket.id
+                "No patch or evidence was submitted. {edits} {resume} Use the retained findings for one focused change, run its targeted check, and submit evidence. {findings}"
             )
         }
         tm_core::TicketState::Escalated => {
@@ -2097,6 +2120,15 @@ mod tests {
         assert!(repeated_no_submit.contains("git status` and `git diff"));
         assert!(!repeated_no_submit.contains("something went wrong"));
 
+        ticket.state = TicketState::Escalated;
+        let escalated_no_submit = run_outcome(&ticket, 1, true, &retained, Some("S-4".to_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(escalated_no_submit.contains("No patch or evidence was submitted"));
+        assert!(escalated_no_submit.contains("tm --resume S-4"));
+        assert!(escalated_no_submit.contains("src/click/types.py"));
+
+        ticket.state = TicketState::Ready;
         let clean_no_submit = run_outcome(&ticket, 1, false, &retained, Some("S-4".to_string()))
             .unwrap_err()
             .to_string();

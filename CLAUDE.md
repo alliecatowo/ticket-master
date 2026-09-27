@@ -275,9 +275,10 @@ Env override `TM_EMBEDDER=hash|potion` (whitespace/case-insensitive), download o
 `TM_EMBEDDER_DOWNLOAD=0`. See `docs/decisions/D-025-potion-semantic-embedder.md`.
 
 Plain `tm run` progress reports include the attempted tool action; failed result saves and ticket
-submissions are labeled as attempts rather than successes until persistence succeeds. Consecutive
-identical reads of the same file are counted together so repeated context reads are visible without
-hiding different files or ranges. Parse failures also show a short diagnostic, preserve expected
+submissions are labeled as attempts rather than successes until persistence succeeds. Repeated reads
+of the same file, including whole-file and overlapping range reads, share a repetition count; older
+superseded read results become short markers in provider context instead of being resent. Parse
+failures also show a short diagnostic, preserve expected
 enum values, and direct the agent to correct the invalid input before retrying; inconsistent-state
 failures show their short diagnostic and direct the agent to inspect and correct the offending
 input or state before retrying. Detailed errors remain in logs.

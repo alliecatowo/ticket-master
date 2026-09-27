@@ -2188,10 +2188,14 @@ fn exploration_target(call: &ToolCallRecord) -> Option<String> {
     ) {
         return None;
     }
-    let target_key = if matches!(
-        name,
-        "fs.read" | "fs.read_range" | "history.why" | "git.diff" | "git.log"
-    ) {
+    if matches!(name, "fs.read" | "fs.read_range") {
+        let path = call.input.get("path")?.as_str()?;
+        // A whole-file read and any number of overlapping range reads are all revisits to the
+        // same source. Counting them together catches the costly pattern where the model changes
+        // ranges (or alternates read tools) without adding a finding.
+        return Some(format!("source {path}"));
+    }
+    let target_key = if matches!(name, "history.why" | "git.diff" | "git.log") {
         "path"
     } else {
         "query"
@@ -5334,6 +5338,31 @@ mod unproductive_exploration_tests {
         assert!(nudge.contains("smallest implementation"));
         assert!(nudge.contains("focused verification"));
         assert!(nudge.contains("src/requests.py"));
+    }
+
+    #[test]
+    fn whole_file_and_overlapping_range_reads_share_a_repetition_budget() {
+        let calls = vec![
+            call(
+                "fs.read",
+                serde_json::json!({"path":"src/click/types.py"}),
+                serde_json::json!({"text":"existing findings"}),
+            ),
+            call(
+                "fs.read_range",
+                serde_json::json!({"path":"src/click/types.py", "start":1, "end":80}),
+                serde_json::json!({"text":"existing findings"}),
+            ),
+            call(
+                "fs.read_range",
+                serde_json::json!({"path":"src/click/types.py", "start":40, "end":120}),
+                serde_json::json!({"text":"existing findings"}),
+            ),
+        ];
+        let nudge = repeated_exploration_nudge(&[step(calls)])
+            .expect("overlapping reads must count as revisiting one source");
+        assert!(nudge.contains("src/click/types.py"));
+        assert!(nudge.contains("Use the findings already in the conversation"));
     }
 
     #[test]
