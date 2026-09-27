@@ -1690,7 +1690,7 @@ is based on.
   acceptance: A simulated model-ended-without-submit run prints a human-readable, specific cause and an unambiguous recovery action; retry behavior is bounded and visible, with no duplicate full-context attempt when no recovery condition changed.
   test: `cargo test -p tm-cli`
   evidence: `/tmp/tm-trials/20260926-1044/spf13-cobra-2257/tm.log:69` — `no patch or evidence was submitted (this was not a test failure). Failure: something went wrong: model ended turn without submitting. Run tm run T-3 again to retry.` The run metrics in lines 700–716 show 840 seconds and 3,661,274 input tokens for the initial run; a subsequent retry also failed without a patch.
-- [ ] **t20260926-1223-BurntSushi-ripgrep-3376-cargo-detection-false-positive** — Diagnose and explain unavailable Cargo before aborting a Rust task
+- [x] **t20260926-1223-BurntSushi-ripgrep-3376-cargo-detection-false-positive** — Diagnose and explain unavailable Cargo before aborting a Rust task (landed 6b78f94)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: When `missing_toolchain_dependency` classifies a Cargo failure as unavailable, verify that the executable is actually missing from the agent command environment and include the failed command/output and detected PATH in the task failure; do not label an unrelated build failure as missing Cargo.
