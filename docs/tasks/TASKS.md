@@ -1712,7 +1712,7 @@ is based on.
   acceptance: A scripted agent run that repeatedly reads the same file and submits no patch is bounded by the guard, ends with a clear reason and usage/time totals, and offers a directly copyable resume command containing the saved session ID; productive runs remain unaffected.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1223/psf-requests-7432/tm.log` lines 15–66 show repeated reads/exploration and lines 67–70 record no patch after 621.131 seconds; `tm stats --json` recorded 1,445,727 tokens and 41 tool calls.
-- [ ] **t20260926-1223-spf13-cobra-2257-stop-repeated-investigation** — Detect unproductive repeated source reads before exhausting the run step budget
+- [x] **t20260926-1223-spf13-cobra-2257-stop-repeated-investigation** — Detect unproductive repeated source reads before exhausting the run step budget (landed 65de56c)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: Track repeated reads and searches that return substantially the same paths/ranges without an intervening edit or verification, then issue a concise goal-directed nudge that names already-inspected files and asks for the smallest implementation plus focused verification. Do not continue the identical exploration pattern to the hard step limit.
