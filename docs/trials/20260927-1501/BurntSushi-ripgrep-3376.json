@@ -1,0 +1,24 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "test_files": ["crates/ignore/src/dir.rs"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 134,
+      "tokens": 558210,
+      "scores": {"navigation_quality": 2, "context_efficiency": 1, "plan_quality": 3, "verification_honesty": 3, "ux_copy_clarity": 2, "recoverability": 1, "cost_time": 2},
+      "better": "Avoid repeating overlapping inspections across retries, and make a no-progress retry focus on a concrete hypothesis and change. Report token totals that are consistent with provider usage instead of implausibly large per-attempt counts. Recovery text should present one valid next action: output alternated between resuming saved sessions and retrying the ticket, which is confusing; distinguish those commands and their effects."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 61,
+      "tokens": 20025,
+      "scores": {"navigation_quality": 3, "context_efficiency": 2, "plan_quality": 3, "verification_honesty": 3, "ux_copy_clarity": 3, "recoverability": 2, "cost_time": 3},
+      "better": "After locating the multiple-root traversal and ignore matcher code, form a specific causal hypothesis and inspect only the relevant matcher caching path. The run spent time revisiting broad walker context and ended without a change, regression test, or test execution; it should time-box exploration and move to an implementation and targeted verification."
+    }
+  ]
+}

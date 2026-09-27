@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": ["tests/test_requests.py"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 89.71,
+      "tokens": 315055,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm repeatedly inspected the same prepare_body source and never reached an edit or test; its stop message was transparent about the lack of a patch, but saying to resume the saved session while announcing an automatic retry was confusing. The existing repeated-investigation guard should retain findings and prevent fresh retries from redoing the same exploration, while the user-facing recovery instruction should match whether retry is queued."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 108.47,
+      "tokens": 21865,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode stated a scoped plan, located the body preparation path, implemented the compatibility fix, and accurately reported the focused regression test passing; it also disclosed that ruff was unavailable. It recovered from two failed attempts at writing the regression test by refining the test double and invoking pytest with PYTHONPATH=src. It could be more efficient by checking the available test dependencies and test-double behavior before the first test run, and by avoiding unnecessary complexity in the regression test."
+    }
+  ]
+}

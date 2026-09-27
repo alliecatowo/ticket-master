@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 116.295,
+      "tokens": 501751,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the right completion code quickly, but then repeated overlapping inspections/searches across three attempts and never made a change or ran a test; the hidden regression test failed after the fix test file was applied. Improve the no-progress recovery so the existing repeated-exploration nudge becomes a concrete next action grounded in the inspected code (here: copy finalArgs before appending the sentinel), and avoid replaying the same searches on automatic retries. The final message says to continue with `tm --resume S-1`, but a user would be confused that tm already ran three attempts, escalated the ticket, and gave no direct indication of what happened to automatic recovery or how much work remains. The run reported 501,751 tokens and took 116 seconds without a patch."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 205.680,
+      "tokens": 32990,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode traced the append side effect, copied finalArgs before adding the sentinel, ran `go test ./...` successfully, and summarized the fix and verification clearly. It could be better by adding a focused regression test during the run, rather than relying on the later-overwritten test file for final evaluation, and by reducing redundant discovery: its first glob found no matching files and semantic search had no index, though it recovered with exact search."
+    }
+  ]
+}

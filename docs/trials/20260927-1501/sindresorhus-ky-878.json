@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 176.53,
+      "tokens": 386454,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 2,
+        "plan_quality": 3,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 4,
+        "cost_time": 2
+      },
+      "better": "The second attempt found the right transform-stream flush and produced the fix, and the independent stream/browser regressions passed in all browser engines. The experience would improve by exposing a small, explicit plan before dispatch, making the malformed-input error actionable at the tool-call level, and explaining that a failed attempt is automatically being retried (rather than simultaneously recommending `tm --resume`). The first attempt stopped after 10 steps without a patch and the run recorded 386,454 tokens overall; a targeted continuation or tighter context accounting would make this substantially more efficient."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 275.02,
+      "tokens": 29641,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "The agent located the stream flush quickly, added the implementation and regression coverage, and clearly disclosed that the full `npm test` run was blocked by an unrelated lint error while reporting focused verification. It could improve by scoping test execution to the hidden regression earlier and ensuring setup installs or documents the required browser engines so the browser test does not fail on a clean machine."
+    }
+  ]
+}
