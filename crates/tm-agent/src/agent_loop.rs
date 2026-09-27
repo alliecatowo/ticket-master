@@ -58,6 +58,10 @@ pub const DEFAULT_MAX_SUBMIT_NUDGES: u32 = 1;
 /// Consecutive ticketed steps without a successful repository or evidence write before stopping.
 const NO_PROGRESS_STEP_LIMIT: usize = 10;
 
+/// Consecutive ticketed tool calls without a successful repository or evidence write. Unlike the
+/// step ceiling, this also bounds turns that return many repeated or varied inspection calls.
+const NO_PROGRESS_TOOL_CALL_LIMIT: usize = 24;
+
 /// Repeated inspections of one target with no productive action are stopped before the broader
 /// no-progress step ceiling, which exists for varied-but-unproductive exploration.
 const REPEATED_EXPLORATION_LIMIT: usize = 6;
@@ -1775,6 +1779,20 @@ impl AgentLoop {
                     ),
                 });
             }
+            if task.ticket.is_some()
+                && no_progress_tool_calls(&steps) >= NO_PROGRESS_TOOL_CALL_LIMIT
+            {
+                let summary = InvestigationSummary::from_steps(&steps).render();
+                let totals = run_totals(&steps);
+                return Ok(AgentOutcome::Failed {
+                    steps,
+                    class: FailureClass::Other,
+                    detail: format!(
+                        "stopped after {NO_PROGRESS_TOOL_CALL_LIMIT} tool calls without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds. Continue the saved session with `tm --resume {}` and make one focused change, run the relevant checks, then submit with evidence.",
+                        totals.tokens, totals.tool_calls, totals.wall_seconds, task.session
+                    ),
+                });
+            }
             if task.ticket.is_some() && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT {
                 let summary = InvestigationSummary::from_steps(&steps).render();
                 let totals = run_totals(&steps);
@@ -1841,6 +1859,18 @@ fn no_progress_steps(steps: &[StepRecord]) -> usize {
         .rev()
         .take_while(|step| !step_made_progress(step))
         .count()
+}
+
+/// Count tool calls in the current trailing streak of steps that made no successful repository
+/// or evidence write. This catches oversized inspection turns as well as varied exploration that
+/// does not revisit one particular target often enough to trip the repeated-target guard.
+fn no_progress_tool_calls(steps: &[StepRecord]) -> usize {
+    steps
+        .iter()
+        .rev()
+        .take_while(|step| !step_made_progress(step))
+        .map(|step| step.tool_calls.len())
+        .sum()
 }
 
 fn step_made_progress(step: &StepRecord) -> bool {
@@ -5482,6 +5512,34 @@ mod no_progress_tests {
         steps.push(step(2, "edit.apply_patch", "src/lib.rs"));
         steps.extend((3..=5).map(|i| step(i, "shell.run", "cargo test")));
         assert_eq!(no_progress_steps(&steps), 3);
+    }
+
+    #[test]
+    fn varied_unproductive_exploration_is_bounded_by_tool_calls() {
+        let steps: Vec<_> = (1..=NO_PROGRESS_TOOL_CALL_LIMIT as u32)
+            .map(|i| step(i, "fs.read", &format!("src/file-{i}.rs")))
+            .collect();
+        assert_eq!(no_progress_tool_calls(&steps), NO_PROGRESS_TOOL_CALL_LIMIT);
+        let totals = run_totals(&steps);
+        assert_eq!(totals.tool_calls, NO_PROGRESS_TOOL_CALL_LIMIT);
+    }
+
+    #[test]
+    fn successful_edit_resets_unproductive_tool_call_streak() {
+        let mut steps: Vec<_> = (1..=NO_PROGRESS_TOOL_CALL_LIMIT as u32 - 1)
+            .map(|i| step(i, "fs.read", &format!("src/file-{i}.rs")))
+            .collect();
+        steps.push(step(
+            NO_PROGRESS_TOOL_CALL_LIMIT as u32,
+            "edit.apply_patch",
+            "src/lib.rs",
+        ));
+        steps.push(step(
+            NO_PROGRESS_TOOL_CALL_LIMIT as u32 + 1,
+            "fs.read",
+            "src/after.rs",
+        ));
+        assert_eq!(no_progress_tool_calls(&steps), 1);
     }
 
     #[test]

@@ -507,6 +507,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   failure detail summarizes explored targets and the latest finding, says no patch or evidence was
   submitted, and directs the worker to make a focused change, verify it, and submit with evidence.
   A successful write resets the consecutive-step counter.
+  They also stop after 24 consecutive tool calls without a successful edit, commit, or stored
+  evidence artifact, bounding turns that contain many inspections and exploration across many
+  targets. The failure reports usage totals and the saved session's directly copyable resume
+  command. A successful write resets this tool-call counter too.
   A ticketed run also stops earlier after six inspections of the same source/history/search target
   without a productive action. That failure reports accumulated tokens, tool calls, and provider
   time, and gives the saved session's directly copyable `tm --resume <session>` command. A successful
