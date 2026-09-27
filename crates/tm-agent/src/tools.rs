@@ -660,6 +660,9 @@ fn find_by_suffix_under(root: &Path, requested: &str) -> NameHint {
     let Some(&wanted_last) = wanted.last() else {
         return NameHint::None;
     };
+    let wanted_file = Path::new(wanted_last);
+    let wanted_stem = wanted_file.file_stem().and_then(|s| s.to_str());
+    let wanted_extension = wanted_file.extension().and_then(|s| s.to_str());
 
     fn matches_suffix(candidate: &[&str], wanted: &[&str]) -> bool {
         let take = wanted.len().min(candidate.len());
@@ -669,12 +672,38 @@ fn find_by_suffix_under(root: &Path, requested: &str) -> NameHint {
         candidate[candidate.len() - take..] == wanted[wanted.len() - take..]
     }
 
+    fn matches_other_extension(
+        candidate: &[&str],
+        wanted: &[&str],
+        wanted_stem: Option<&str>,
+        wanted_extension: Option<&str>,
+    ) -> bool {
+        let (Some(wanted_stem), Some(wanted_extension), Some(candidate_last)) =
+            (wanted_stem, wanted_extension, candidate.last())
+        else {
+            return false;
+        };
+        if candidate.len() < wanted.len()
+            || (wanted.len() > 1
+                && candidate[candidate.len() - wanted.len()..candidate.len() - 1]
+                    != wanted[..wanted.len() - 1])
+        {
+            return false;
+        }
+        let candidate_file = Path::new(candidate_last);
+        candidate_file.file_stem().and_then(|s| s.to_str()) == Some(wanted_stem)
+            && candidate_file.extension().and_then(|s| s.to_str()) != Some(wanted_extension)
+            && candidate_file.extension().is_some()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn walk(
         dir: &Path,
         root: &Path,
         wanted: &[&str],
         wanted_last: &str,
+        wanted_stem: Option<&str>,
+        wanted_extension: Option<&str>,
         depth: usize,
         budget: &mut usize,
         matches: &mut Vec<String>,
@@ -697,13 +726,28 @@ fn find_by_suffix_under(root: &Path, requested: &str) -> NameHint {
             }
             let path = entry.path();
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-            if file_name.to_str() == Some(wanted_last) {
+            let filename_matches = file_name.to_str() == Some(wanted_last)
+                || (wanted_stem.is_some()
+                    && wanted_extension.is_some()
+                    && Path::new(&file_name).file_stem().and_then(|s| s.to_str()) == wanted_stem
+                    && Path::new(&file_name)
+                        .extension()
+                        .and_then(|s| s.to_str())
+                        .is_some_and(|extension| Some(extension) != wanted_extension));
+            if filename_matches {
                 if let Ok(rel) = path.strip_prefix(root) {
                     let rel_components: Vec<&str> = rel
                         .components()
                         .filter_map(|c| c.as_os_str().to_str())
                         .collect();
-                    if matches_suffix(&rel_components, wanted) {
+                    if matches_suffix(&rel_components, wanted)
+                        || matches_other_extension(
+                            &rel_components,
+                            wanted,
+                            wanted_stem,
+                            wanted_extension,
+                        )
+                    {
                         matches.push(rel.to_string_lossy().into_owned());
                     }
                 }
@@ -711,7 +755,17 @@ fn find_by_suffix_under(root: &Path, requested: &str) -> NameHint {
             // Never cross into a separate repository's own tree: a hint that did would defeat
             // the exact isolation this whole recovery-hint mechanism exists to preserve.
             if is_dir && !path.join(".git").exists() {
-                walk(&path, root, wanted, wanted_last, depth - 1, budget, matches);
+                walk(
+                    &path,
+                    root,
+                    wanted,
+                    wanted_last,
+                    wanted_stem,
+                    wanted_extension,
+                    depth - 1,
+                    budget,
+                    matches,
+                );
             }
         }
     }
@@ -723,6 +777,8 @@ fn find_by_suffix_under(root: &Path, requested: &str) -> NameHint {
         root,
         &wanted,
         wanted_last,
+        wanted_stem,
+        wanted_extension,
         MAX_DEPTH,
         &mut budget,
         &mut matches,
@@ -3617,6 +3673,33 @@ mod tests {
             }
             NameHint::None => panic!("expected a unique hint, got None"),
         }
+    }
+
+    #[test]
+    fn find_by_suffix_under_suggests_unique_alternate_source_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("test/helpers")).unwrap();
+        std::fs::write(root.join("test/helpers/create-http-test-server.ts"), "").unwrap();
+
+        assert!(matches!(
+            find_by_suffix_under(root, "test/helpers/create-http-test-server.js"),
+            NameHint::Unique(found) if found == "test/helpers/create-http-test-server.ts"
+        ));
+    }
+
+    #[test]
+    fn find_by_suffix_under_does_not_guess_between_alternate_extensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("test/helpers")).unwrap();
+        std::fs::write(root.join("test/helpers/server.ts"), "").unwrap();
+        std::fs::write(root.join("test/helpers/server.jsx"), "").unwrap();
+
+        assert!(matches!(
+            find_by_suffix_under(root, "test/helpers/server.js"),
+            NameHint::Ambiguous(candidates) if candidates.len() == 2
+        ));
     }
 
     /// More than one plausible match is reported as ambiguous rather than silently picking
