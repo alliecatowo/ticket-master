@@ -1640,7 +1640,7 @@ is based on.
   acceptance: CLI tests cover a no-submit failure with retained edits and one without edits; each message states the accurate workspace state and a concrete next action, while preserving the distinction from test failures.
   test: `cargo test -p tm-cli run_outcome`
   evidence: `/tmp/tm-trials/20260926-0821/spf13-cobra-2257/tm.log:69` — after 1160.07 seconds the run ended “no patch or evidence was submitted ... Run `tm run T-1` again to retry,” without indicating whether the workspace contained recoverable edits.
-- [ ] **t20260926-0821-spf13-cobra-2257-reuse-read-context** — Avoid repeating unchanged file reads during ticket runs
+- [x] **t20260926-0821-spf13-cobra-2257-reuse-read-context** — Avoid repeating unchanged file reads during ticket runs (landed 956f48b)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/prompt.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: Add worker guidance to reuse file contents already present in the conversation and repeat a read only when the file changed, a needed range was omitted, or a tool requires a fresh hash; before rereading, identify the specific missing information.
