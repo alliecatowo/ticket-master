@@ -154,6 +154,13 @@ impl AgentOutcome {
         }
     }
 
+    /// Total provider tokens used by the recorded steps in this run.
+    pub fn tokens_used(&self) -> u64 {
+        self.steps()
+            .iter()
+            .fold(0u64, |total, step| total.saturating_add(step.spend.tokens))
+    }
+
     /// How many bytes of tool-result content the working set has pruned from this run's
     /// transcript, relative to re-sending every step's tool output verbatim
     /// (`docs/audit-2026-09-18-fable.md` B-08, `SPEC.md` §30.4).

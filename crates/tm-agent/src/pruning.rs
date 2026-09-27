@@ -415,6 +415,64 @@ mod tests {
     }
 
     #[test]
+    fn repeated_large_source_reads_keep_only_the_newest_full_result_in_context() {
+        let content = "large source line\n".repeat(2_000);
+        let make_read = |id: &str, content: &str| ToolCallRecord {
+            tool_use_id: id.to_string(),
+            tool_name: "fs.read".to_string(),
+            input: serde_json::json!({"path": "requests/models.py"}),
+            resolution: ToolCallResolution::Completed {
+                result: serde_json::json!({"content": content}),
+                artifact: None,
+            },
+        };
+        let steps = vec![
+            step(1, None, vec![make_read("read-1", &content)]),
+            step(2, None, vec![make_read("read-2", &content)]),
+            step(3, None, vec![make_read("read-3", "newest source contents")]),
+        ];
+
+        let working_set = working_set(&steps);
+        assert_eq!(
+            working_set.steps[0].tool_call_states[0],
+            ToolCallState::Superseded { by_step: 2 }
+        );
+        assert_eq!(
+            working_set.steps[1].tool_call_states[0],
+            ToolCallState::Superseded { by_step: 3 }
+        );
+        assert_eq!(
+            working_set.steps[2].tool_call_states[0],
+            ToolCallState::Full
+        );
+
+        let messages = crate::agent_loop::rebuild_messages("task", &steps);
+        let rendered_results: Vec<_> = messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .filter_map(|block| match block {
+                tm_provider::ContentBlock::ToolResult { content, .. } => Some(content),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|block| match block {
+                tm_provider::ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rendered_results.len(),
+            3,
+            "every action remains paired in context"
+        );
+        assert!(rendered_results[0].starts_with("[superseded by step 2]"));
+        assert!(rendered_results[1].starts_with("[superseded by step 3]"));
+        assert!(rendered_results[2].contains("newest source contents"));
+        assert!(!rendered_results[0].contains("large source line"));
+        assert!(!rendered_results[1].contains("large source line"));
+    }
+
+    #[test]
     fn a_read_before_a_completed_edit_to_the_same_path_goes_stale_without_a_reread() {
         let steps = vec![
             step(1, None, vec![read("c1", "a.rs")]),

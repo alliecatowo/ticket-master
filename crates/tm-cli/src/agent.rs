@@ -2598,7 +2598,7 @@ fn plain_tool_error(detail: &str) -> String {
 
 /// Render a terminal (non-`AwaitingApproval`) outcome's one-line summary.
 pub(crate) fn format_outcome_summary(outcome: &AgentOutcome) -> String {
-    match outcome {
+    let summary = match outcome {
         AgentOutcome::Submitted { evidence, .. } => format!("submitted: {}", evidence.summary),
         // The reply text itself was already rendered as the turn's final step.
         AgentOutcome::Replied { .. } => String::new(),
@@ -2612,6 +2612,11 @@ pub(crate) fn format_outcome_summary(outcome: &AgentOutcome) -> String {
         AgentOutcome::AwaitingApproval { pending_call, .. } => {
             format_pending_approval(pending_call)
         }
+    };
+    if summary.is_empty() {
+        summary
+    } else {
+        format!("{summary} ({} cumulative tokens)", outcome.tokens_used())
     }
 }
 
