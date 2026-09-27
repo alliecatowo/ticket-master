@@ -1668,7 +1668,7 @@ is based on.
   acceptance: A scripted agent run that repeats investigations without changing files or submitting evidence terminates at the no-progress threshold, retains its useful work, and reports what it explored and how to continue; a productive multi-step run is not stopped early.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1044/psf-requests-7432/tm.log` — run took 619 seconds / 83,380 tokens, repeated source/history and Python probes, then `error: agent turn failed: Ticket T-1: no patch or evidence was submitted (this was not a test failure). Failure: something went wrong: model ended turn without submitting.`
-- [ ] **t20260926-1044-parse-error-corrective-guidance** — Give corrective guidance for invalid artifact inputs instead of recommending a blind retry
+- [x] **t20260926-1044-parse-error-corrective-guidance** — Give corrective guidance for invalid artifact inputs instead of recommending a blind retry (landed f25760a)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-cli/src/agent.rs`
   change: In `plain_tool_error`, distinguish correctable parse/enum errors and inconsistent tool arguments from transient failures; preserve the expected values and tell the model to change the offending input rather than retry the same operation. Keep the current specific evidence-submission guidance.
