@@ -142,13 +142,24 @@ fn events_for_ticket(events: &[Event], ticket: &TicketId) -> Vec<Event> {
 /// `events`, in which case every field but `ticket` stays at its zero default -- matching
 /// `ticket_metrics_from_events`'s own documented behavior on an empty fold).
 pub fn stats_by_ticket(events: &[Event], only: Option<&TicketId>) -> Vec<TicketMetrics> {
-    match only {
+    let mut rows = match only {
         Some(ticket) => vec![ticket_metrics_from_events(ticket, events)],
         None => distinct_tickets(events)
             .iter()
             .map(|ticket| ticket_metrics_from_events(ticket, events))
             .collect(),
+    };
+
+    // Keep the CLI's published total anchored directly to the usage events, independently of
+    // the broader harness metrics fold. Usage records are the source of truth for this value.
+    for row in &mut rows {
+        row.tokens_total = events
+            .iter()
+            .filter_map(|event| event.payload.as_usage_recorded())
+            .filter(|usage| usage.ticket.as_ref() == Some(&row.ticket))
+            .fold(0u64, |sum, usage| sum.saturating_add(usage.tokens));
     }
+    rows
 }
 
 /// Per-day rollup over every `usage.recorded`/`tool_call.completed` event, sorted by day
@@ -586,6 +597,53 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].ticket, missing);
         assert_eq!(rows[0].tokens_in, 0);
+    }
+
+    #[test]
+    fn stats_by_ticket_json_total_matches_all_usage_turns_for_that_ticket() {
+        let t1 = ticket("T-1");
+        let t2 = ticket("T-2");
+        let events = vec![
+            usage_event(
+                1,
+                Timestamp::EPOCH,
+                &t1,
+                76_192,
+                0,
+                Some("codex"),
+                Some("gpt-5"),
+            ),
+            usage_event(
+                2,
+                Timestamp::EPOCH,
+                &t2,
+                900_000,
+                0,
+                Some("codex"),
+                Some("gpt-5"),
+            ),
+            usage_event(
+                3,
+                Timestamp::EPOCH,
+                &t1,
+                76_853,
+                0,
+                Some("anthropic"),
+                Some("sonnet"),
+            ),
+        ];
+
+        let expected_tokens = events
+            .iter()
+            .filter_map(|event| event.payload.as_usage_recorded())
+            .filter(|usage| usage.ticket.as_ref() == Some(&t1))
+            .map(|usage| usage.tokens)
+            .sum::<u64>();
+        let rows = stats_by_ticket(&events, Some(&t1));
+        let json = serde_json::to_value(&rows).expect("serialize stats JSON");
+
+        assert_eq!(expected_tokens, 153_045);
+        assert_eq!(json[0]["tokens_total"], expected_tokens);
     }
 
     #[test]
