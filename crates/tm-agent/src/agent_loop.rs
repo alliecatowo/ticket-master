@@ -1787,12 +1787,18 @@ impl AgentLoop {
                     ),
                 });
             }
-            if let Some((dependency, command, output, path)) = missing_toolchain_dependency(&steps)
+            if let Some((dependency, command, output, path, available)) =
+                missing_toolchain_dependency(&steps)
             {
+                let diagnosis = if available {
+                    format!("{dependency} is available on the agent process PATH, but the command environment could not resolve it. Check how the command runner sets PATH and ensure it includes the directory containing {dependency}.")
+                } else {
+                    format!("Required toolchain dependency is unavailable: {dependency}. Install it or add its executable directory to the command environment's PATH, then retry the task.")
+                };
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: format!("Required toolchain dependency is unavailable: {dependency}. Install or configure it, then retry the task. Failed command: {command}. Output: {output}. PATH: {path}"),
+                    detail: format!("{diagnosis} Failed command: {command}. Output: {output}. Agent process PATH: {path}"),
                 });
             }
         }
@@ -2207,14 +2213,16 @@ fn exploration_target(call: &ToolCallRecord) -> Option<String> {
 /// Return the concrete missing executable when toolchain discovery output says the command could
 /// not be found. This is deliberately limited to shell discovery calls, not ordinary source
 /// search results that happen to mention an absent dependency.
-fn missing_toolchain_dependency(steps: &[StepRecord]) -> Option<(String, String, String, String)> {
+fn missing_toolchain_dependency(
+    steps: &[StepRecord],
+) -> Option<(String, String, String, String, bool)> {
     missing_toolchain_dependency_on_path(steps, &std::env::var("PATH").unwrap_or_default())
 }
 
 fn missing_toolchain_dependency_on_path(
     steps: &[StepRecord],
     path: &str,
-) -> Option<(String, String, String, String)> {
+) -> Option<(String, String, String, String, bool)> {
     for call in steps.iter().flat_map(|step| &step.tool_calls) {
         if !matches!(
             call.tool_name.as_str(),
@@ -2269,13 +2277,35 @@ fn missing_toolchain_dependency_on_path(
         if !says_missing {
             continue;
         }
-        let found = std::env::split_paths(path).any(|dir| dir.join(executable).is_file());
-        if found {
-            continue;
-        }
-        return Some((executable.to_string(), command, result, path.to_string()));
+        let found = executable_resolves_on_path(executable, path);
+        return Some((
+            executable.to_string(),
+            command,
+            result,
+            path.to_string(),
+            found,
+        ));
     }
     None
+}
+
+fn executable_resolves_on_path(executable: &str, path: &str) -> bool {
+    std::env::split_paths(path).any(|dir| {
+        let candidate = dir.join(executable);
+        candidate.is_file() && {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::metadata(candidate)
+                    .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
+            }
+            #[cfg(not(unix))]
+            {
+                true
+            }
+        }
+    })
 }
 
 fn outcome_truncated(resolution: &ToolOutcome) -> Option<bool> {
@@ -5332,7 +5362,7 @@ mod unproductive_exploration_tests {
         );
         assert_eq!(
             missing_toolchain_dependency_on_path(&[step(vec![command])], "")
-                .map(|(dep, _, _, _)| dep),
+                .map(|(dep, _, _, _, _)| dep),
             Some("go".to_string())
         );
     }
@@ -5354,12 +5384,27 @@ mod unproductive_exploration_tests {
             serde_json::json!({"command":"cargo build"}),
             serde_json::json!({"stderr":"sh: cargo: command not found"}),
         );
-        let (dependency, failed_command, output, path) =
+        let (dependency, failed_command, output, path, available) =
             missing_toolchain_dependency_on_path(&[step(vec![command])], "").unwrap();
         assert_eq!(dependency, "cargo");
         assert_eq!(failed_command, "cargo build");
         assert!(output.contains("command not found"));
         assert!(path.is_empty());
+        assert!(!available);
+    }
+
+    #[test]
+    fn host_toolchain_on_path_is_reported_as_environment_mismatch() {
+        let command = call(
+            "shell.run",
+            serde_json::json!({"command":"cargo test"}),
+            serde_json::json!({"stderr":"sh: cargo: command not found"}),
+        );
+        let process_path = std::env::var("PATH").unwrap_or_default();
+        let (dependency, _, _, _, available) =
+            missing_toolchain_dependency_on_path(&[step(vec![command])], &process_path).unwrap();
+        assert_eq!(dependency, "cargo");
+        assert!(available);
     }
 }
 
