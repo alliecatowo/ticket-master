@@ -58,6 +58,10 @@ pub const DEFAULT_MAX_SUBMIT_NUDGES: u32 = 1;
 /// Consecutive ticketed steps without a successful repository or evidence write before stopping.
 const NO_PROGRESS_STEP_LIMIT: usize = 10;
 
+/// Repeated inspections of one target with no productive action are stopped before the broader
+/// no-progress step ceiling, which exists for varied-but-unproductive exploration.
+const REPEATED_EXPLORATION_LIMIT: usize = 6;
+
 /// The user message appended after a ticketed run's text-only turn, once per nudge budgeted by
 /// [`AgentLoop::max_submit_nudges`] (see [`DEFAULT_MAX_SUBMIT_NUDGES`]).
 const SUBMIT_NUDGE_TEXT: &str = "You ended your turn without calling ticket.submit. If the work \
@@ -1757,13 +1761,29 @@ impl AgentLoop {
                     at: self.clock.now(),
                 },
             );
-            if task.ticket.is_some() && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT {
+            if task.ticket.is_some()
+                && repeated_exploration_count(&steps) >= REPEATED_EXPLORATION_LIMIT
+            {
                 let summary = InvestigationSummary::from_steps(&steps).render();
+                let totals = run_totals(&steps);
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
                     detail: format!(
-                        "stopped after {NO_PROGRESS_STEP_LIMIT} steps without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Continue from these findings, make a focused change, run the relevant checks, and submit the result with evidence."
+                        "stopped after {REPEATED_EXPLORATION_LIMIT} repeated inspections without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds. Continue the saved session with `tm --resume {}` and make one focused change, run the relevant checks, then submit with evidence.",
+                        totals.tokens, totals.tool_calls, totals.wall_seconds, task.session
+                    ),
+                });
+            }
+            if task.ticket.is_some() && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT {
+                let summary = InvestigationSummary::from_steps(&steps).render();
+                let totals = run_totals(&steps);
+                return Ok(AgentOutcome::Failed {
+                    steps,
+                    class: FailureClass::Other,
+                    detail: format!(
+                        "stopped after {NO_PROGRESS_STEP_LIMIT} steps without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds. Continue the saved session with `tm --resume {}` and make a focused change, run the relevant checks, then submit with evidence.",
+                        totals.tokens, totals.tool_calls, totals.wall_seconds, task.session
                     ),
                 });
             }
@@ -2093,6 +2113,43 @@ fn repeated_exploration_nudge(steps: &[StepRecord]) -> Option<String> {
         }
     }
     None
+}
+
+fn repeated_exploration_count(steps: &[StepRecord]) -> usize {
+    let mut counts = BTreeMap::<String, usize>::new();
+    let mut maximum = 0;
+    for call in steps.iter().flat_map(|step| &step.tool_calls) {
+        if is_progress_call(call) {
+            counts.clear();
+            maximum = 0;
+            continue;
+        }
+        let Some(key) = exploration_target(call) else {
+            continue;
+        };
+        let count = counts.entry(key).or_default();
+        *count += 1;
+        maximum = maximum.max(*count);
+    }
+    maximum
+}
+
+struct RunTotals {
+    tokens: u64,
+    tool_calls: usize,
+    wall_seconds: u64,
+}
+
+fn run_totals(steps: &[StepRecord]) -> RunTotals {
+    RunTotals {
+        tokens: steps
+            .iter()
+            .fold(0u64, |total, step| total.saturating_add(step.spend.tokens)),
+        tool_calls: steps.iter().map(|step| step.tool_calls.len()).sum(),
+        wall_seconds: steps.iter().fold(0u64, |total, step| {
+            total.saturating_add(step.spend.wall_seconds)
+        }),
+    }
 }
 
 fn is_progress_call(call: &ToolCallRecord) -> bool {
@@ -5359,5 +5416,32 @@ mod no_progress_tests {
             artifact: None,
         };
         assert_eq!(no_progress_steps(&[edit]), 1);
+    }
+
+    #[test]
+    fn repeated_source_inspections_have_an_early_run_level_bound() {
+        let steps: Vec<_> = (1..=REPEATED_EXPLORATION_LIMIT as u32)
+            .map(|i| step(i, "fs.read", "src/repeated.rs"))
+            .collect();
+        assert_eq!(
+            repeated_exploration_count(&steps),
+            REPEATED_EXPLORATION_LIMIT
+        );
+        let totals = run_totals(&steps);
+        assert_eq!(totals.tool_calls, REPEATED_EXPLORATION_LIMIT);
+    }
+
+    #[test]
+    fn productive_action_resets_the_repeated_inspection_bound() {
+        let mut steps = vec![step(1, "fs.read", "src/repeated.rs")];
+        steps.push(step(2, "edit.apply_patch", "src/repeated.rs"));
+        steps.extend(
+            (3..=REPEATED_EXPLORATION_LIMIT as u32 + 2)
+                .map(|i| step(i, "fs.read", "src/repeated.rs")),
+        );
+        assert_eq!(
+            repeated_exploration_count(&steps),
+            REPEATED_EXPLORATION_LIMIT
+        );
     }
 }

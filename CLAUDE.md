@@ -499,6 +499,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   failure detail summarizes explored targets and the latest finding, says no patch or evidence was
   submitted, and directs the worker to make a focused change, verify it, and submit with evidence.
   A successful write resets the consecutive-step counter.
+  A ticketed run also stops earlier after six inspections of the same source/history/search target
+  without a productive action. That failure reports accumulated tokens, tool calls, and provider
+  time, and gives the saved session's directly copyable `tm --resume <session>` command. A successful
+  edit, commit, test run, or stored evidence resets this repeated-target bound.
   Before leasing or
   dispatching anything, `tm run <T>` also checks that the ticket's required role actually has a
   registered/credentialed provider candidate (`sched::preflight_provider_or_fail`,
