@@ -1808,11 +1808,7 @@ impl AgentLoop {
             if let Some((dependency, command, output, path, available)) =
                 missing_toolchain_dependency(&steps)
             {
-                let diagnosis = if available {
-                    format!("{dependency} is available on the agent process PATH, but the command environment could not resolve it. Check how the command runner sets PATH and ensure it includes the directory containing {dependency}.")
-                } else {
-                    format!("Required toolchain dependency is unavailable: {dependency}. Install it or add its executable directory to the command environment's PATH, then retry the task.")
-                };
+                let diagnosis = missing_toolchain_diagnosis(&dependency, available);
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
@@ -2340,6 +2336,14 @@ fn executable_resolves_on_path(executable: &str, path: &str) -> bool {
             }
         }
     })
+}
+
+fn missing_toolchain_diagnosis(dependency: &str, available_on_agent_path: bool) -> String {
+    if available_on_agent_path {
+        format!("{dependency} is installed and available on the agent's PATH, but the command environment could not resolve it. Update the command runner's PATH to include the directory containing {dependency}, then retry the command.")
+    } else {
+        format!("Required toolchain dependency is not installed or available on the agent's PATH: {dependency}. Install it and make its executable directory available to the agent and command environment, then retry the command.")
+    }
 }
 
 fn outcome_truncated(resolution: &ToolOutcome) -> Option<bool> {
@@ -5450,6 +5454,9 @@ mod unproductive_exploration_tests {
         assert!(output.contains("command not found"));
         assert!(path.is_empty());
         assert!(!available);
+        let diagnosis = missing_toolchain_diagnosis(&dependency, available);
+        assert!(diagnosis.contains("not installed or available on the agent's PATH"));
+        assert!(diagnosis.contains("Install it"));
     }
 
     #[test]
@@ -5464,6 +5471,10 @@ mod unproductive_exploration_tests {
             missing_toolchain_dependency_on_path(&[step(vec![command])], &process_path).unwrap();
         assert_eq!(dependency, "cargo");
         assert!(available);
+        let diagnosis = missing_toolchain_diagnosis(&dependency, available);
+        assert!(diagnosis.contains("available on the agent's PATH"));
+        assert!(diagnosis.contains("command environment could not resolve it"));
+        assert!(diagnosis.contains("Update the command runner's PATH"));
     }
 }
 
