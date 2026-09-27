@@ -1798,7 +1798,7 @@ is based on.
   acceptance: A scripted run that reads the same source file repeatedly retains all actions in its event log but sends only the newest full result plus superseded stubs to later model turns; its final run summary includes cumulative tokens. Add a regression covering a repeated large file read.
   test: `cargo test -p tm-agent pruning`
   evidence: `/tmp/tm-trials/20260926-1521/psf-requests-7432/tm.log:14-20` and `:33-39` show repeated models.py reads; `tm stats --json` for T-1 reported `tokens_total: 2030788` and 53 tool calls.
-- [ ] **t20260926-1521-psf-requests-7432-summarize-recovered-submission** — Explain recovered ticket-submission failures in final run output
+- [x] **t20260926-1521-psf-requests-7432-summarize-recovered-submission** — Explain recovered ticket-submission failures in final run output (landed 042a852)
   model: sonnet · severity: low · builds Rust: yes · area: cli/ux · deps: none
   files: `crates/tm-cli/src/agent.rs`
   change: When the agent's first ticket.submit fails for missing evidence and a later artifact.store plus ticket.submit succeeds, render the sequence as a recovered submission and include that recovery in the final run summary, rather than leaving the user to infer success from separate generic progress lines.
