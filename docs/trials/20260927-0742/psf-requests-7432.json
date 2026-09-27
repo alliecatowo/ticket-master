@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 92,
+      "tokens": 355058,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm repeatedly inspected the same implementation without turning its findings into an edit or test. The per-attempt stop messages were transparent about the failure, but telling the user to resume manually was undermined by automatic retries, which repeated the same loop and ended in escalation. Usage also reported 355,058 tokens for a short run, making it difficult to trust or control context cost. It would be better to detect repeated reads/searches across attempts, carry forward the useful investigation into a concrete next action, and avoid launching another identical retry when no progress signal has changed."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 118,
+      "tokens": 24423,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode found the stream-detection regression, implemented the narrowly scoped hasattr restoration, added a delegated-wrapper regression test, recovered after its first test fixture failed to model Python's special-method lookup, and reran focused tests successfully. It could improve by checking the canonical hidden regression test name from the issue's likely fix path before choosing the verification selector; its stated first selector did not include the fix PR's actual test. The mechanically applied PR test passed independently against the implementation."
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"skipped":"No merged fix PR with tests exists. The only issue-linked candidate, PR #15361, was closed unmerged (mergeCommit is null); although it adds TestSiteConfigWithBOM in config/allconfig/allconfig_integration_test.go, it does not meet the merged-fix requirement."}

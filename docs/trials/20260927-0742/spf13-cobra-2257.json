@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 106.08,
+      "tokens": 520318,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found completions.go quickly and reported honestly that no patch or evidence was submitted, but three attempts reread the same files and repeated the same searches without making a change or running tests. The user-facing `Attempt N failed` and `A retry is scheduled` messages imply forward progress, while each attempt then says to resume the saved session and make a focused change; after attempt three the ticket is escalated. The reported usage of 156,991, 178,679, and 184,648 tokens for 9–10 tool calls and 10–24 seconds each is alarming and was not surfaced as a clear budget warning. Make retry attempts carry forward findings and prior search history, require a materially new next action after a no-progress stop, and clearly label token units and cumulative spend so a user can intervene before repeated exploration consumes the run."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 105.55,
+      "tokens": 230238,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode quickly traced the issue to `append(finalArgs, \"--\")`, recognized the possible shared backing array, copied the arguments before adding the sentinel, and ran `go test ./...` successfully. Its brief final report accurately described the code and test result. It could be even more surgical by using the already available PR regression test instead of adding a second test, and by stating explicitly that the agent-added test is overwritten by the independent hidden-test verification step."
+    }
+  ]
+}

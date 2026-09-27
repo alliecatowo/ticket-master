@@ -1,0 +1,46 @@
+{
+  "issue": {
+    "number": 3376,
+    "title": "`.gitignore` not taken into account when multiple search paths are provided",
+    "url": "https://github.com/BurntSushi/ripgrep/issues/3376"
+  },
+  "fix_pr": 3420,
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "test_files": ["crates/ignore/src/dir.rs"],
+  "verification": "Both arms: git checkout of crates/ignore/src/dir.rs from the merge SHA followed by cargo test -p ignore; both serialized runs exited 0 (140 unit tests, integration tests, and doctests passed). The PR's sole changed file contains implementation as well as tests, so this mandated overwrite also replaced each arm's implementation; these post-overwrite passes do not establish that either arm's own patch passes. OpenCode also passed cargo fmt --check and cargo test -p ignore on its implementation before overwrite. Verification logs: tm.verify.log and opencode.verify.log.",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 332.65,
+      "tokens": 614227,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run never moved from investigation to a patch: three 10-step attempts repeatedly read the same two ignore files and searched for the rg executable, including probes at an unrelated Ticket Master target path. It consumed 614,227 reported tokens without submitting evidence. The required post-overwrite test passed only because checking out crates/ignore/src/dir.rs restored the PR's implementation too, so the green result does not validate tm's nonexistent change. The failure output did surface explored files and a resume command, but it also recommended continuing saved sessions while retries were automatically scheduled and repeated the investigation. tm would be better if repeated inspection/no-progress detection redirected the next attempt into a focused edit using retained findings, stopped searching unrelated global paths for a binary, and surfaced cumulative token/retry cost clearly before another attempt."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 202.21,
+      "tokens": 40676,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode set out a scoped plan, located Ignore::add_parents and the compiled-parent cache, changed reuse behavior only when the absolute search-path base matched, and added a focused regression test. Its attempted semantic index lookup was unavailable, but it recovered with file search and direct reads. Both focused tests, formatting, and the full ignore crate suite passed on its implementation. The post-overwrite suite also passed mechanically, but restoring the sole changed PR file restored the implementation along with the tests, so it does not independently validate OpenCode's patch. Separating regression-test restoration from implementation restoration would make the final mechanical result measure the agent's fix while retaining the hidden-test check."
+    }
+  ]
+}

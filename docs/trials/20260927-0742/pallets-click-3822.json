@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 105,
+      "tokens": 455165,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 1,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "The run should identify Path's existing typing contract quickly, then make a focused generic change and validate it with the typing fixture. Instead, three attempts repeated inspection of the same two files and consumed 455,165 reported tokens without a patch. The stop messages were confusing: they told the user to resume different session IDs, simultaneously claimed a retry was scheduled, and the final output then said no retry was scheduled and suggested another retry command. One suggested shell command also failed because `/bin/sh` could not start in a generated `/tm/null` directory. Keep findings across attempts, prevent repeated discovery loops, validate the working directory before launching shell commands, and make recovery instructions match the ticket's actual retry state."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 241,
+      "tokens": 42149,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode found the Path type definition promptly, implemented the generic return contract, and verified the runtime and typing behavior. It could be more precise by avoiding an unrelated edit to the existing typing prompt test and by running the full project typing suite rather than only the source and focused typing file; final independent validation of the restored PR tests passed (8 runtime tests, 1 skipped, plus mypy and pyright)."
+    }
+  ]
+}
