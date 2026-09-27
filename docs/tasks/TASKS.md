@@ -1784,7 +1784,7 @@ is based on.
   acceptance: A run whose host has Cargo but whose agent shell cannot resolve Cargo reports the command/PATH discrepancy and actionable recovery; an ordinary cargo build failure is not classified as missing Cargo; genuinely absent Cargo still receives the dependency-specific message.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1521/BurntSushi-ripgrep-3376/tm.log:79-80` — the agent ran `cargo build --bin rg ...` and then terminated with “Required toolchain dependency is unavailable: cargo. Install or configure it, then retry the task.”
-- [ ] **t20260926-1521-pallets-click-3822-repeated-exploration-stall-feedback** — Surface a focused progress nudge before repeated source exploration consumes another run
+- [x] **t20260926-1521-pallets-click-3822-repeated-exploration-stall-feedback** — Surface a focused progress nudge before repeated source exploration consumes another run (landed 64e0bdc)
   model: sonnet · severity: high · builds Rust: yes · area: agent/context · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/executor.rs`
   change: Strengthen repeated-exploration detection to trigger an actionable, user-visible nudge as soon as a turn repeatedly rereads the same source file or overlapping ranges without a new finding. Include a short retained-findings summary and a concrete next step, and carry that context into a resumed attempt instead of allowing another long reread loop.
