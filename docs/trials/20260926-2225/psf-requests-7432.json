@@ -1,0 +1,46 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": ["tests/test_requests.py"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 125.9,
+      "tokens": 393181,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 3,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The agent located the relevant function quickly, but then repeated file reads and searches through three attempts without changing code or running a test, consuming 393,181 reported tokens in under two minutes. The repeated-inspection recovery should drive a different, concrete next step (inspect the exact conditional once, edit, and verify) or stop with an actionable status before spending further context. The CLI messages themselves were understandable: `tm ticket new` clearly returned `T-1`, and `tm run` correctly explained that `ticket` was not a valid ID when the runner's ticket-id extraction was wrong; the user would be confused by the run's high token usage and repeated suggestions to resume sessions that made the same non-progressing inspections."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 72.56,
+      "tokens": 22921,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode identified the class-check regression, stated a scoped plan, implemented the change, and transparently corrected an initial test failure before a successful targeted run. It could be better by treating the initial missing-index search result as a routine cue to use exact local search instead of making the failed semantic query, and by prioritizing the PR's actual redirected-request regression shape rather than first adding a simpler rewind unit test."
+    }
+  ],
+  "verification": {
+    "command": ".venv/bin/python -m pytest -q tests/test_requests.py::TestRequests::test_getattr_proxy_stream_follows_redirect",
+    "tm": "FAIL (1 failed): AttrProxy is incorrectly treated as form data; TypeError: 'AttrProxy' object is not iterable",
+    "opencode": "PASS (1 passed)"
+  },
+  "setup_note": "Both arms ran the requested `pip install -e .[test]`; this repository revision does not define a test extra, so the warning said the extra was unavailable. Installed requirements-dev.txt afterward to provide the project test dependencies for objective verification."
+}

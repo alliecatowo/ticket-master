@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 30,
+      "tokens": 213149,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 2
+      },
+      "better": "With the verbatim issue text, tm never produced a patch or ran verification. Across repeated inspections it reported 213,149 tokens for 11 tool calls in 30 seconds, and ended after 10 repeated no-progress steps; it also hit a provider 429. It reported failure honestly and pointed to `tm --resume S-6`, but a user may be confused by the internal `meta-contributor` provider error and by the instruction to resume rather than a clear retry action for transient rate limiting. Improve repeated-inspection detection so rereading the same source cannot consume a huge token budget, and provide a visible, bounded backoff/retry path for provider rate limits. Setup warned that the requested `[test]` extra does not exist; verification required installing test/type-check tools manually."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 100,
+      "tokens": 25306,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode found the implementation quickly, attempted both mypy and pyright, corrected the typing issues they reported, added an assert_type check, and clearly distinguished static typing checks from pytest collection. After the fix PR's tests were overwritten into place, the Path tests passed (8 passed, 1 skipped), and both mypy and pyright passed against the PR typing test. It could improve its initial discovery by directly locating the test files rather than first trying a nonmatching glob, and should preserve the issue's prescribed standalone typing test rather than adding coverage to an existing typing_prompt.py file."
+    }
+  ]
+}

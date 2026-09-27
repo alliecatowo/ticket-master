@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719211c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 144.115,
+      "tokens": 612969,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm should put `crates/ignore/src/dir.rs` and the `add_parents` cache behavior at the center of the initial investigation instead of spending three attempts reading `walk.rs` repeatedly. Its concrete UX was understandable through messages such as `Attempt 1 failed` and `No patch or evidence was submitted`, but the repeated `10 steps ... Continue the saved session with tm --resume S-1` guidance was confusing alongside `A retry is scheduled`: three attempts replayed discovery, accumulated 612,969 tokens, and left the ticket escalated without a patch or test run. A no-progress retry should either stop for the user or carry the prior findings into a materially different focused attempt. The mechanical hidden-test check passed only after the PR's entire changed `dir.rs`—including production fix code—was applied, so it does not show that tm solved the issue."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 61.738,
+      "tokens": 32797,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 4,
+        "plan_quality": 2,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 2,
+        "cost_time": 5
+      },
+      "better": "OpenCode searched relevant ignore and walker code, ran `cargo test -p ignore`, and accurately reported that those passing existing tests did not cover the reproduction; it did not locate or change the `add_parents` cache implementation. A short explicit plan and a focused inspection of `crates/ignore/src/dir.rs` would likely have turned its concise, honest run into a solution. The mechanical hidden-test check passed only after the PR's entire changed `dir.rs`—including production fix code—was applied, so it does not show that OpenCode solved the issue."
+    }
+  ]
+}

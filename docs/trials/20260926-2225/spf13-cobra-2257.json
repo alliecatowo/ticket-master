@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 95,
+      "tokens": 176997,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm initialized and indexed the clone, then reported ‘Read completions.go’ and ‘Searched for os.Args’, but repeated those same inspections and never produced a patch or ran tests. Its no-progress message accurately said no patch or evidence was submitted, but the instruction to continue with `tm --resume S-2` conflicted with ‘A retry is scheduled’; after the retry sequence the final message only said to run `tm ticket retry T-2` again. The run also surfaced provider 429s after the task had already spent about 95 seconds. Better behavior would convert the completed investigation into one focused edit before declaring no progress, distinguish automatic retry from the specific manual recovery action, and stop/retry provider failures with actionable rate-limit guidance."
+    },
+    {
+      "tool": "OpenCode",
+      "passed": true,
+      "wall_seconds": 97,
+      "tokens": 23631,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped three-step plan, found the sentinel append in completions.go quickly, and copied finalArgs before appending `--`. It ran `go test ./...` successfully and accurately reported that result; after the hidden test file was overlaid, the same full suite passed mechanically. It could be improved by adding a focused regression test in its own run, since the successful initial suite did not yet include the newly merged hidden test."
+    }
+  ]
+}

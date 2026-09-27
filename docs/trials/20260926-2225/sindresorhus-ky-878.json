@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 145,
+      "tokens": 666298,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 3,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 1
+      },
+      "better": "TM ultimately found the correct implementation, applied the empty-body completion behavior, and its independent hidden-test check passed. This needed an automatic retry after a no-progress run that consumed 170,850 tokens in 10 calls, then more exploration and test attempts; the final `tm stats --json` reported 666,298 tokens total for the ticket. The transcript's `couldn't parse the input (missing or malformed field n)`, `Tried to submit the ticket -> error: couldn't find that`, and later bare 'Submitted the ticket' make recovery status difficult for a user to follow. Improve the agent's early no-progress recovery so it avoids repeatedly probing incompatible commands, ensure submission errors say what identifier/action failed and how to recover, and report consolidated wall-time/token use across retries clearly."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 153,
+      "tokens": 28823,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode identified `source/utils/body.ts`, made the localized fix, and added a focused regression test. The first version of its test did not actually exercise stream completion; it recognized the failing test, refined the empty stream setup and consumed the response body, then reported the focused test and lint passing while honestly noting that the broader stream test timed out during shutdown. The independently overlaid PR tests passed. It could be better by choosing a realistic empty-body stream fixture at the outset and explicitly summarizing the required hidden-test verification once that check is run."
+    }
+  ]
+}
