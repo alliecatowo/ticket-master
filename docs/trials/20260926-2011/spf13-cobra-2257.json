@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 31,
+      "tokens": 389211,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The initial navigation reached the relevant append in completions.go, but the run repeated searches and reads across three attempts and consumed 389,211 tokens before a provider 429 ended it. The failure output did expose the underlying rate-limit error and a retry command, which is actionable, but it did not preserve the useful investigation as a clear human-facing summary or produce a verified fix; the hidden test then failed. Carry forward the already identified location and next-step plan when recovering from transient provider failures, and make transient rate-limit recovery bounded and explicit so users are not sent through another full investigation."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 62,
+      "tokens": 23960,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 5,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a focused plan, located the aliasing append in getCompletions, copied finalArgs before appending, and added a regression test. It ran go test ./... successfully, then the independently checked-out PR test file also passed go test ./.... The investigation included some redundant searches and a broad read of completions_test.go; starting from the append-with-terminator call found by its initial exact search would tighten context further. Its progress and final summary clearly explained the change and verification."
+    }
+  ]
+}

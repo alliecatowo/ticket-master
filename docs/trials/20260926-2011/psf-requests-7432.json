@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 117.05,
+      "tokens": 169075,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 1
+      },
+      "better": "Ticket Master found the relevant prepare_body implementation but repeated reads and historical searches without changing the repository, using 169,075 tokens in the run before stopping with no evidence. Its failure message was candid and included useful context, but it told the user to continue with `tm --resume S-3` without giving the direct `tm ticket retry T-1` recovery command; the log itself says to retry the ticket elsewhere. A better run would surface the specific file/function and the likely hasattr-based compatibility fix early, preserve the completed investigation while automatically offering or performing one focused retry, and finish by running the targeted regression test."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 82.08,
+      "tokens": 299243,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 2,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a focused plan, changed stream detection, and ultimately passed the independently applied hidden regression test. It spent time exploring broad file/history results, and its self-authored test attempt was invalid because pytest imported the neighboring tm checkout; it noticed and clearly disclosed that problem, but did not rerun using this checkout's `src` import path. Running tests with `PYTHONPATH=src` from the outset would have made its verification immediately meaningful and avoided extra failed attempts."
+    }
+  ]
+}
