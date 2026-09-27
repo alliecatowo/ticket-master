@@ -2125,11 +2125,10 @@ pub(crate) fn tool_result_text(resolution: &ToolOutcome) -> (String, bool) {
     }
 }
 
-/// Recognize a stalled streak of identical inspection calls from the durable transcript. The
-/// same call appearing three times is enough to interrupt the cycle, while any distinct action
-/// (including a write, verification, or new inspection) breaks the streak.
+/// Recognize repeated inspection of one target from the durable transcript. The same call
+/// appearing three times is enough to interrupt the cycle; a write or verification resets it.
 fn repeated_exploration_nudge(steps: &[StepRecord]) -> Option<String> {
-    let mut counts = BTreeMap::<String, usize>::new();
+    let mut counts = BTreeMap::<String, (usize, String)>::new();
     for call in steps.iter().flat_map(|step| &step.tool_calls) {
         if is_progress_call(call) {
             counts.clear();
@@ -2138,13 +2137,35 @@ fn repeated_exploration_nudge(steps: &[StepRecord]) -> Option<String> {
         let Some(key) = exploration_target(call) else {
             continue;
         };
-        let count = counts.entry(key.clone()).or_default();
-        *count += 1;
-        if *count >= 3 {
-            return Some(format!("You have repeatedly explored the same source or search target without making progress. Already inspected: {key}. Use the findings already in the conversation to make the smallest implementation that meets the goal, then run focused verification. Do not repeat this exploration; if you are blocked, state the specific missing information."));
+        let entry = counts.entry(key.clone()).or_default();
+        entry.0 += 1;
+        if let crate::outcome::ToolCallResolution::Completed { result, .. } = &call.resolution {
+            let rendered = result.to_string();
+            if !rendered.trim().is_empty() {
+                entry.1 = concise_finding(&rendered);
+            }
+        }
+        if entry.0 >= 3 {
+            let finding = if entry.1.is_empty() {
+                "No new finding was recorded from the repeated inspection.".to_string()
+            } else {
+                format!("Retained finding: {}", entry.1)
+            };
+            return Some(format!("You have repeatedly explored the same source or search target without making progress. Already inspected: {key}. {finding} Use this retained result to make the smallest implementation that meets the goal, then run focused verification. Do not reread or repeat this exploration; if you are blocked, state the specific missing information."));
         }
     }
     None
+}
+
+fn concise_finding(text: &str) -> String {
+    const MAX_CHARS: usize = 320;
+    let flattened = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flattened.chars().count() <= MAX_CHARS {
+        return flattened;
+    }
+    let mut summary = flattened.chars().take(MAX_CHARS).collect::<String>();
+    summary.push('…');
+    summary
 }
 
 fn repeated_exploration_count(steps: &[StepRecord]) -> usize {
@@ -5321,6 +5342,8 @@ mod unproductive_exploration_tests {
         let nudge = repeated_exploration_nudge(&[step(vec![repeated(), repeated(), repeated()])])
             .expect("third repeat should be recognized");
         assert!(nudge.contains("src/main.rs"));
+        assert!(nudge.contains("Retained finding:"));
+        assert!(nudge.contains("found target"));
         assert!(nudge.contains("smallest implementation"));
         assert!(nudge.contains("focused verification"));
     }
@@ -5396,7 +5419,9 @@ mod unproductive_exploration_tests {
         let nudge = repeated_exploration_nudge(&[step(calls)])
             .expect("overlapping reads must count as revisiting one source");
         assert!(nudge.contains("src/click/types.py"));
-        assert!(nudge.contains("Use the findings already in the conversation"));
+        assert!(nudge.contains("Retained finding:"));
+        assert!(nudge.contains("existing findings"));
+        assert!(nudge.contains("Use this retained result"));
     }
 
     #[test]

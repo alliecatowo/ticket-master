@@ -494,9 +494,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    produced a result, preserves the stop reason, and gives one bounded `tm ticket retry` command
    with focused guidance instead of an unqualified rerun suggestion.
    Within one attempt, reopening the same source or history target three times (even with changed
-    ranges or revisions) triggers one concise nudge to summarize existing findings and take a
-    concrete next step; edits and verification reset the count, and a different targeted reread is
-    still allowed when new evidence requires it. An evidence-free ticket submission tells the worker to store a report
+    ranges or revisions) triggers one concise nudge that includes the latest retained result and
+    directs the worker to use it for a concrete next step; edits and verification reset the count,
+    and a different targeted reread is still allowed when new evidence requires it. The no-submit
+    recovery summary is carried into the next attempt so repeated dispatches do not restart cold.
+    An evidence-free ticket submission tells the worker to store a report
    or other evidence artifact and cite the returned artifact ID when submitting, rather than
    recommending a blind retry. A command reporting a missing common toolchain executable (such as
    `go`, `cargo`, or `node`) ends the attempt with that dependency named only when it is absent
