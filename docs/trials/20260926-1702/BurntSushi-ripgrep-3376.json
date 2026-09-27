@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719213c2e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 473,
+      "tokens": 4386531,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 3,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm indexed the repo and initially looked in the right ignore-walking code, but the transcript shows repeated reads of `crates/ignore/src/dir.rs` and `walk.rs` (including overlapping ranges) consuming 64 tool steps and 4,386,531 reported tokens before it submitted anything. The user-facing failure says the ticket was not submitted and recommends `tm run T-1` again, but provides no concise carry-forward summary of the explored root cause or next concrete step; making repeated-exploration detection materially stronger and preserving a compact checkpoint for retry would have made this substantially more recoverable. The reported `cargo test -p ignore` pass is not credited as agent verification: it ran against the unmodified base before hidden-test checkout, and the required post-run checkout of `crates/ignore/src/dir.rs` then replaced that implementation/test module with the PR version, making the mechanical pass true but not evidence of the agent's fix."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 86,
+      "tokens": 33137,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 2,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 2,
+        "cost_time": 1
+      },
+      "better": "OpenCode stated a sensible investigation plan, found the relevant walk and ignore modules, and ended with an accurate statement that it had neither confirmed the regression nor implemented a fix. It first attempted indexed search without an index, then did fall back to exact workspace search, but spent most of its exploration on general traversal internals and did not turn the report's concrete multi-root ordering into a reproducer or a scoped cache hypothesis. It should reproduce both path orders early, inspect the ignore-parent matcher cache with that evidence, then either implement the regression test/fix or report a targeted blocker. The prescribed mechanical test pass is not a measure of its patch: the PR's only changed path embeds implementation and tests in `crates/ignore/src/dir.rs`, and the required checkout overwrote the entire file in this arm; the agent made no code changes and correctly reported non-completion."
+    }
+  ]
+}

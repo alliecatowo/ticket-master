@@ -1,0 +1,44 @@
+{
+  "issue": {
+    "number": 7432,
+    "url": "https://github.com/psf/requests/issues/7432",
+    "title": "`prepare_body` stream detection regression"
+  },
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": ["tests/test_requests.py"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 140.495,
+      "tokens": 789281,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 4,
+        "cost_time": 2
+      },
+      "better": "The run eventually produced the right source fix, but it repeatedly reread the same module and explored repository history, ending at 789,281 reported tokens without a clear test-pass report. A tighter initial plan, less repeated source context, and an explicit regression-test/focused-test requirement would make the work more efficient and the result easier to trust. The worker instructions also tell the agent that ticket.submit may use an empty evidence list, while submission rejects that; a user would be confused by that contradiction and by needing an extra artifact-store step after the failed submit."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 102.882,
+      "tokens": 300291,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped plan, found the affected implementation quickly, added a regression test, and transparently recovered from test failures before reporting the passing focused run. It would be better if its first test used this clone's own environment and module path: early attempts imported another Requests checkout through inherited Python path settings, which caused misleading failures and unnecessary retries."
+    }
+  ]
+}

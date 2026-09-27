@@ -1,0 +1,48 @@
+{
+  "issue": {
+    "number": 2257,
+    "title": "Completions modify os.Args",
+    "url": "https://github.com/spf13/cobra/issues/2257"
+  },
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 629.151,
+      "tokens": 3661949,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 2,
+        "plan_quality": 3,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 3,
+        "recoverability": 4,
+        "cost_time": 2
+      },
+      "better": "The final implementation correctly copied the relevant argument slice, and the agent reported its test runs before submitting the ticket. Navigation was competent but involved repeated reads and broad searches for this one-function bug; a more direct search-to-edit flow would reduce context and the 629-second run time. The ending says the work is submitted and explicitly asks the user to review and accept or reject it, so a user expecting `tm run` to complete the change may be unsure whether the task itself is done or whether approval is still required. Token totals were available through `tm stats --ticket T-1 --json` (3,661,949 total), but `tm ticket show --json` showed only the unlimited budget sentinel and zero spent tokens; surfacing recorded usage alongside ticket details would remove that extra lookup and ambiguity. Independent verification passed after overwriting `completions_test.go` from the merge SHA: `go test ./...` (exit 0)."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 148.194,
+      "tokens": 322253,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly traced the append side effect, stated a scoped two-step plan, implemented a defensive copy, and added a regression test. It corrected a misplaced test insertion after the first formatting/test attempt failed, then ran the full suite successfully and reported that result accurately. A tighter test insertion on the first edit and a more surgical directory search would reduce the extra iteration and context consumed. Independent verification passed after overwriting `completions_test.go` from the merge SHA: `go test ./...` (exit 0)."
+    }
+  ],
+  "notes": {
+    "tm_token_count": "3,661,949 total from tm stats --ticket T-1 --json; ticket show JSON itself did not expose actual usage",
+    "opencode_token_count": "sum of OpenCode JSON step total-token fields"
+  }
+}

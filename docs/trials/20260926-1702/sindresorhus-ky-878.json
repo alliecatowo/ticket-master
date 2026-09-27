@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 0.05,
+      "tokens": 0,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 2,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 3,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run stopped before an agent turn because the scratch configuration pointed coder.fast at unregistered provider devpass. The error text was unusually actionable: it named the role, providers.toml, and `tm provider list`, and warned that an identical retry would fail. Make the first-run path more guided by offering an explicit provider/candidate repair route (or selecting an available configured candidate) before ticket execution, and surface a concise blocked-run summary in tm events/stats so users can distinguish zero-work setup failure from an agent failure. The hidden stream suite timed out and the browser suite exited nonzero; neither is evidence of a working fix."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 114.3,
+      "tokens": 22477,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode found source/utils/body.ts and the existing stream tests quickly, made the flush change, and added a regression test. It recovered from a first test design that hung, then reported the targeted test and lint as passing and accurately disclosed the unrelated full-test lint failure. After merged tests were checked out, all 19 stream tests passed and the Chromium empty-body browser test passed; Firefox/WebKit cases could not launch because those Playwright browsers are not installed. Reduce the exploratory test-edit/retry cycle and make the final verification summary distinguish targeted passes from the unavailable browser engines and pnpm's ignored-build failure more explicitly."
+    }
+  ]
+}
