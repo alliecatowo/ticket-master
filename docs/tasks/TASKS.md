@@ -1719,7 +1719,7 @@ is based on.
   acceptance: A deterministic agent-loop test scripts repeated overlapping reads with no progress and asserts the loop nudges before the configured step ceiling; a subsequent focused edit and submission succeeds, while useful distinct reads remain allowed.
   test: `cargo test -p tm-agent agent_loop`
   evidence: `/private/tmp/tm-trials/20260926-1223/spf13-cobra-2257/tm.log:55-145` — repeated reads/searches of completions.go and command.go; `tm stats --json` at lines 170-189 reports 3,601,360 total tokens and 64 tool calls before the step-limit failure.
-- [ ] **t20260926-1223-spf13-cobra-2257-step-limit-summary** — Make step-limit failures actionable when useful work was retained
+- [x] **t20260926-1223-spf13-cobra-2257-step-limit-summary** — Make step-limit failures actionable when useful work was retained (landed 5766d70)
   model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: When an attempt reaches the step limit without ticket submission, render a concise summary that clearly separates retained work from submitted work, states whether verification ran, includes the underlying stop reason, and gives one safe bounded continuation command rather than an unqualified retry suggestion.
