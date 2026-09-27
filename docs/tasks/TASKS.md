@@ -1633,7 +1633,7 @@ is based on.
   acceptance: A CLI test runs bare `tm events` with recorded events and asserts it prints the snapshot and exits successfully without hanging; existing `tm events tail` follow and `--no-follow` behavior remains covered.
   test: `cargo test -p tm-cli events_tail`
   evidence: `/tmp/tm-trials/20260926-0821/spf13-cobra-2257/tm.log:71-86` — protocol's bare `tm events` invocation printed “The durable event log: tail, inspect, replay, and verify the hash chain” followed by usage, so I had to discover `events tail --from 1 --no-follow` to capture the event log.
-- [ ] **t20260926-0821-spf13-cobra-2257-no-submit-recovery** — Make no-submit retry guidance explain what is retained
+- [x] **t20260926-0821-spf13-cobra-2257-no-submit-recovery** — Make no-submit retry guidance explain what is retained (landed 604db60)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/sched.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: For a failed run with no patch or evidence, supplement the generic `tm run <ticket> again` recommendation with whether the working-tree edits were retained and what retrying will do, so a user can choose a recovery action without guessing.
