@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 20,
+      "tokens": 7114,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 4,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm found and read the relevant implementation file, but the first model request hit a provider 429 and the run ended in a failed state instead of recovering within the foreground run. A clear short progress/plan message followed by retry-after-aware automatic retry (with the attempt and wait made visible) would preserve work and avoid asking the user to understand scheduler retry state or manually rerun the ticket."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 96,
+      "tokens": 24395,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode made a strong, scoped change and verified it with mypy, pyright, and the focused pytest file; it noticed and corrected one typing assertion during verification. It could have been more efficient by using exact local searches rather than attempting an unavailable semantic index first, and should have put its regression assertion in the dedicated new typing_path.py file that the project uses for Path typing coverage rather than modifying typing_prompt.py."
+    }
+  ]
+}

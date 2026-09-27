@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 64.352,
+      "tokens": 268751,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm created and dispatched T-1, but the first attempt reread src/requests/models.py repeatedly and repeated overlapping searches before its 10-step no-progress guard failed the ticket without a patch; the retry then hit a provider 429. `tm run` did give the explicit command `Run tm run T-1 again to retry`, but a user would be confused that a retry immediately ended with another failure and that the task had never reached verification. A focused plan, duplicate-read/context guard before the hard step limit, and bounded Retry-After-aware provider recovery would make the run more efficient and recoverable. The independently applied PR test `test_getattr_proxy_stream_follows_redirect` failed."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 87.482,
+      "tokens": 20602,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode made a clear scoped plan and found the relevant stream-detection branch, then applied the implementation and custom test to the other clone (`tm/src/requests/models.py`) instead of its current repository. The custom test passed in that contaminated TM clone and OpenCode accurately reported its focused test result, but the implementation never changed in the OpenCode clone, where the independently applied PR regression test failed. Restricting repository discovery to the current working directory and validating the final diff's repository root before claiming completion would prevent this cross-clone edit."
+    }
+  ]
+}

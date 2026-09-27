@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 86,
+      "tokens": 400221,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 2
+      },
+      "better": "tm quickly found source/utils/body.ts and the relevant stream test. The first run then spent its ten no-progress steps reading, probing, and creating temporary verification scripts before failing; its message said no repository change or evidence was submitted and instructed me to run tm again, even though the failure also scheduled a retry. The second run applied the focused source fix and submitted. The hidden stream tests and TypeScript check pass, but the required full `pnpm test` command fails at an existing XO error in test/http-error.ts, so the mechanical result is false. Make the cutoff summary name the next action consistently with retry_scheduled, report whether a useful source edit exists, and present a compact plan before spending the no-progress budget. Report elapsed time and token usage aggregated across all retry sessions; current stats output identified only session S-1 while this ticket ran S-1 and S-2."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 63,
+      "tokens": 33646,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped plan, made the minimal flush change, and added a browser regression test for an empty 200 response. It reported the browser test limitation honestly because Playwright browser executables were missing. After the prescribed hidden test files were restored, TypeScript compilation and all 19 tests in test/stream.ts passed; the full project pnpm test command still fails mechanically at the same pre-existing XO error in test/http-error.ts, so passed is false. To make this stronger, it could execute the new browser test in an environment with the Playwright browsers installed or provide an equivalent node-level regression test that runs in the available environment."
+    }
+  ]
+}

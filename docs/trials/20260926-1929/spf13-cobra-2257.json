@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 31.03,
+      "tokens": 160718,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm initialized the project and created T-1 with clear command output, but the run repeatedly read completions.go and command.go, then stopped after ten tool steps without producing a patch or running tests. The message says to continue from findings and run `tm run T-1` again, which leaves the user to decide whether a retry is automatic or manual; the event stream also recorded a scheduled retry. Better performance would carry the accumulated investigation into a bounded automatic continuation (or explain precisely that the user must retry), avoid repeating the same file reads, and finish by running the relevant test before reporting completion."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 55.869,
+      "tokens": 59776,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped three-step plan, found the append site quickly after its semantic index lookup failed, made the copy-before-append change, and verified the repository with `go test ./...`. It also added its own focused test, though the hidden PR test was subsequently overwritten as required and passed. It could be more efficient by avoiding broad searches and reading the full large completions.go file; a narrow symbol/range lookup and more directly representative regression test would reduce context and strengthen the demonstration."
+    }
+  ]
+}

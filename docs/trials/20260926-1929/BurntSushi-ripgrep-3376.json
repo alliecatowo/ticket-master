@@ -1,0 +1,1 @@
+{"skipped":"No merged fix PR with tests exists. The issue-linked PR #3417 was closed unmerged. Merged PR #3420 fixes related parent-matcher scoping but changes no test files; the regression tests were added later by direct commit 653d7f5bd13762b97cf0bd6b7c5890cf3f54db4d, not by a merged PR."}
