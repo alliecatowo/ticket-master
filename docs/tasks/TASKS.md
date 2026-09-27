@@ -1770,7 +1770,7 @@ is based on.
   acceptance: Prompt tests cover the guidance, and a replay of this Cobra task's repeated `completions.go`/`command.go` reads shows the agent reuses prior findings and reaches the edit without redundant reads.
   test: `cargo test -p tm-agent prompt`
   evidence: `/tmp/tm-trials/20260926-1342/spf13-cobra-2257/tm.log:6-27` — the run reread `completions.go` repeatedly, including consecutive reads of the same source, and revisited overlapping `command.go` ranges before editing.
-- [ ] **t20260926-1342-cobra-stats-token-reconciliation** — Reconcile per-ticket token totals with recorded usage events
+- [x] **t20260926-1342-cobra-stats-token-reconciliation** — Reconcile per-ticket token totals with recorded usage events (landed ed62c14)
   model: sonnet · severity: high · builds Rust: yes · area: telemetry · deps: none
   files: `crates/tm-cli/src/stats.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: Ensure `tm stats --json --ticket <id>` reports the sum of that ticket's `usage.recorded` token counts; add a diagnostic or test-backed correction path if the rollup can diverge from its source events.
