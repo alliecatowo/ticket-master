@@ -1,0 +1,44 @@
+{
+  "issue": {
+    "url": "https://github.com/psf/requests/issues/7432",
+    "number": 7432,
+    "title": "`prepare_body` stream detection regression"
+  },
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": ["tests/test_requests.py"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 89.619,
+      "tokens": 358691,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The agent repeatedly inspected the same module and exhausted all retries without making an implementation change. Make the no-progress loop respond to repeated reads with a focused action prompt or a different investigation route, and avoid spending a large token budget before failing. The terminal message should distinguish the unavailable resume/retry action after escalation from an actually scheduled retry; this run said ‘Continue the saved session’ while also saying no retry was scheduled."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 92.696,
+      "tokens": 30271,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "Avoid the unnecessary detour through tooling failures: the first targeted pytest invocation resolved the globally shimmed Python instead of the prepared virtual environment, and an initial regression-test draft failed before being corrected. Prefer the project venv interpreter and add a test that matches the reported delegated-wrapper behavior directly. The final implementation passed the PR's hidden redirect test."
+    }
+  ]
+}

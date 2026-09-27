@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 159.42,
+      "tokens": 579262,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the relevant Path and prompt typing files, but the run did not state a scoped plan, repeated discovery across three attempts, and ended without a patch or verification after 579,262 reported tokens. Its messages were candid, but “Continue the saved session with tm --resume S-1” appeared alongside “A retry is scheduled,” which leaves users unsure whether tm is continuing automatically or expects them to intervene; the later attempt repeated reads and ended escalated. The trial worktree briefly contained OpenCode's edits, so I restored those unrelated source edits before grading; against the actual tm result, the hidden runtime and typing checks fail. Carry forward the prior investigation on retry and give one actionable recovery path."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 94.542,
+      "tokens": 23846,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a sensible inspect/implement/verify plan and found the right Click.Path typing code, but it applied its implementation to the other arm's tm clone instead of its own opencode clone. Its reported mypy, pyright, and runtime results covered a modified typing_prompt test, not the PR's hidden tests; after the PR test files were overlaid, pytest failed (1 failed, 7 passed, 1 skipped) and both mypy and pyright reported 11 typing errors. Keep tool edits confined to the requested clone and verify against the PR's typing_path.py before reporting success."
+    }
+  ]
+}

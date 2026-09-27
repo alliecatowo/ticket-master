@@ -1,0 +1,41 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "fix_pr": 2356,
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 55,
+      "tokens": 485153,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm initialized/indexed the clone and surfaced understandable progress such as `Read completions.go`, but it revisited the same files and searches in three attempts, used 485,153 reported tokens, and submitted no patch or evidence. With the hidden regression test applied, `go test ./...` failed at TestCompletionDoesNotMutateOsArgs (`os.Args[2]` expected `x`, got `--`). The stop messages accurately said no patch/evidence was submitted and suggested `tm --resume S-1/S-2/S-3`, but these conflicted with `A retry is scheduled` and the final `Run tm ticket retry T-1 to try again.` A user would be unsure whether to wait for an automatic retry, resume a session, or retry the ticket. Make repeated inspection trigger a focused edit/test continuation using retained findings, cap redundant context spend, and end with one recovery command consistent with actual ticket/retry state."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 9,
+      "tokens": 21741,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode promptly traced the mutation, implemented a targeted copy before the append, added a regression test, and reported the passing full suite; after the PR test file was overwritten from the merge SHA, `go test ./...` passed. It briefly attempted an unavailable indexed search and made an extra edit in command.go that it subsequently reverted, so it could be more direct about the exact vulnerable append site and avoid the transient detour. A test using the issue's exact TraverseChildren/os.Args scenario (rather than only a constructed backing slice) would make the regression coverage even closer to the report."
+    }
+  ]
+}

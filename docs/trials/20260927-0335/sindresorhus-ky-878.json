@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 110,
+      "tokens": 168788,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 1,
+        "recoverability": 3,
+        "cost_time": 2
+      },
+      "better": "The agent found the correct stream implementation and ultimately produced the expected fix, but the ticket command exposed human-readable creation text where the caller needed a bare ID, causing the first `tm run` to fail. During the run, shell and tool-input errors plus repeated exploratory test snippets consumed 168,788 reported tokens before a successful submission. Make ticket creation scriptable with an explicit structured output, make malformed tool calls fail with schema-specific repair guidance, and avoid retrying failed exploratory commands without narrowing the next attempt. Verification should report the actual check outcome, not just that tests ran."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 83,
+      "tokens": 18918,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a concise plan, went directly to `source/utils/body.ts` and the stream tests, added the targeted regression case, and accurately reported that the focused test passed while the full `npm test` was blocked by an existing lint error. The independently checked stream suite passed (19 tests), but the prescribed `pnpm test` failed on that lint error and the browser suite could not launch because Playwright browsers are absent, so the mechanical pass is false. Better setup/reporting would distinguish required hidden-test status from supplementary focused-test success and surface the missing browser executables before attempting the browser suite."
+    }
+  ]
+}

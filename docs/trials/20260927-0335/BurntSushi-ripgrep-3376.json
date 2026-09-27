@@ -1,0 +1,42 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "fix_pr": 3420,
+  "test_files": ["crates/ignore/src/dir.rs"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 183,
+      "tokens": 605187,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm indexed the repository and found the relevant ignore-walking code, but it repeatedly revisited walk.rs and dir.rs, never articulated a useful plan, and ended all three attempts without a change or submitted evidence. Its messages accurately disclosed the failure and listed the inspected files, but the repeated `Attempt N failed`/`Continue the saved session with tm --resume S-N` instructions were confusing because `tm run T-1` automatically dispatched retries, used more than 600k reported tokens across attempts, and then exited failed. The concrete improvement is to stop equivalent exploration loops before each retry and show one actionable next command plus cumulative token/time usage. The mechanical cargo test passed after checking out the merged `dir.rs`; because that path contains both implementation and regression test, this checkout replaced the trial implementation, so this pass does not establish that tm solved the issue."
+    },
+    {
+      "tool": "OpenCode",
+      "passed": true,
+      "wall_seconds": 174,
+      "tokens": 34085,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 3
+      },
+      "better": "OpenCode quickly mapped the cache lookup in `Ignore::add_parents`, changed the cache key to include the root path, added focused regression coverage, recovered from formatting and a first test assertion failure, and ran the full ignore crate suite successfully. It could be more context-efficient by beginning with exact repository searches rather than attempting the unavailable semantic index, and its first custom test asserted non-canonical paths before correcting to canonical paths. The mechanical post-run cargo test passed after checking out the merged `dir.rs`; because the regression test and fix implementation share that path, checkout replaced OpenCode's implementation, so this pass does not independently validate its patch."
+    }
+  ],
+  "verification_note": "Per protocol, `git checkout <merge_sha> -- crates/ignore/src/dir.rs` followed by `cargo test -p ignore` passed in both arms (140 unit, 6 integration, 6 doctests). The test is embedded in the same source file as the fix, so the required file checkout necessarily overwrote each arm's implementation; passed is the mechanical result, not proof the arm's implementation passed the regression test. Both agent execution logs include the unsupported host `timeout` first-attempt error; the actual agent runs were relaunched with Python's 1200-second timeout."
+}
