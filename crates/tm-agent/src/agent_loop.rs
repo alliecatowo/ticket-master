@@ -5494,11 +5494,21 @@ mod unproductive_exploration_tests {
             serde_json::json!({"command":"go test ./..."}),
             serde_json::json!({"stderr":"go: command not found"}),
         );
-        assert_eq!(
-            missing_toolchain_dependency_on_path(&[step(vec![command])], "")
-                .map(|(dep, _, _, _, _)| dep),
-            Some("go".to_string())
+        let (dependency, failed_command, output, path, available) =
+            missing_toolchain_dependency_on_path(&[step(vec![command])], "").unwrap();
+        assert_eq!(dependency, "go");
+        assert_eq!(failed_command, "go test ./...");
+        assert!(output.contains("command not found"));
+        assert!(path.is_empty());
+        assert!(!available);
+        let detail = format!(
+            "{} Failed command: {failed_command}. Output: {output}. Agent process PATH: {path}",
+            missing_toolchain_diagnosis(&dependency, available)
         );
+        assert!(detail.contains("go"));
+        assert!(detail.contains("Install it"));
+        assert!(detail.contains("go test ./..."));
+        assert!(detail.contains("Agent process PATH:"));
     }
 
     #[test]
@@ -5538,6 +5548,7 @@ mod unproductive_exploration_tests {
             serde_json::json!({"stderr":"sh: cargo: command not found"}),
         );
         let process_path = std::env::var("PATH").unwrap_or_default();
+        assert!(executable_resolves_on_path("cargo", &process_path));
         let (dependency, _, _, _, available) =
             missing_toolchain_dependency_on_path(&[step(vec![command])], &process_path).unwrap();
         assert_eq!(dependency, "cargo");
@@ -5546,6 +5557,7 @@ mod unproductive_exploration_tests {
         assert!(diagnosis.contains("available on the agent's PATH"));
         assert!(diagnosis.contains("command environment could not resolve it"));
         assert!(diagnosis.contains("Update the command runner's PATH"));
+        assert!(process_path.split(':').any(|entry| !entry.is_empty()));
     }
 }
 
