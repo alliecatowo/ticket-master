@@ -1733,7 +1733,7 @@ is based on.
   acceptance: A run where host Cargo is installed but agent commands cannot resolve it reports the command-environment/PATH discrepancy and recovery steps; an ordinary cargo build failure is not classified as missing Cargo; a genuinely absent Cargo still gets the dependency-specific message.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1342/BurntSushi-ripgrep-3376/tm.log:53` — “Required toolchain dependency is unavailable: cargo. Install or configure it, then retry the task.” The previous ticket failed identically for python3 at line 20; Cargo was available in the trial shell (`cargo test -p ignore` completed successfully after the agent run).
-- [ ] **t20260926-1342-gohugoio-hugo-15360-surface-attempt-retries** — Surface attempt failures and retries during `tm run`
+- [x] **t20260926-1342-gohugoio-hugo-15360-surface-attempt-retries** — Surface attempt failures and retries during `tm run` (landed 1530b98)
   model: sonnet · severity: medium · builds Rust: yes · area: cli
   deps: none
   files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
