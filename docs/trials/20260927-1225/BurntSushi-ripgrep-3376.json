@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 124.75,
+      "tokens": 489009,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the right subsystem quickly, but then repeated reads and searches across dir.rs and walk.rs without settling on a fix, reproducing the bug, or running a test. It exhausted three attempts and escalated after 124.75 seconds; the attempt usage totals reported in the run output sum to 489,009 tokens. The final message did clearly state that no patch or evidence was submitted, but its recovery advice was confusing: it said to continue with `tm --resume S-3`, while the ticket was escalated with no retry scheduled and the command footer instead instructed the user to run `tm ticket retry T-1`. A focused next-step recommendation that matches ticket state, plus earlier prevention of repeated unchanged inspections and less costly context rereads, would make this run substantially more recoverable. The required post-checkout test command passed, but because the only PR-changed file combines implementation and inline tests, that pass verifies the merged PR file and not tm's absent patch."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 57.19,
+      "tokens": 27997,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 3,
+        "plan_quality": 3,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 2,
+        "cost_time": 4
+      },
+      "better": "OpenCode inspected the relevant walker and ignore-matcher code, and ended with an honest status that it had not confirmed the cause or made a fix. It nevertheless spent its run exploring without first executing the issue's concrete reproduction, then stopped before editing or verifying. It would be better to turn the reproduction steps into a small test immediately, trace the failing behavior from that test, and continue through a focused implementation and test run. The required post-checkout test command passed, but because the only PR-changed file combines implementation and inline tests, that pass verifies the merged PR file and not OpenCode's absent patch."
+    }
+  ]
+}

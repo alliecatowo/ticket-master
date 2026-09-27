@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 99.104,
+      "tokens": 345682,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 1,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm repeatedly inspected src/click/types.py and tests/typing/typing_prompt.py without making a change, triggering three auto-retries and consuming 345,682 reported tokens before escalating T-1. Its messages repeatedly told the user to resume S-1, S-2, then S-3, but the run itself ultimately exited 2 with ‘No retry is scheduled’; there was no clear next-step summary. Make the repeated-inspection guard recognize distinct investigation progress and avoid retrying an unchanged loop; when escalating, show a concise summary, actionable resume command, and final status in one stable message. After the PR tests were restored, runtime tests were 8 passed, 1 skipped, but mypy failed on two default-path typing assertions."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 59.804,
+      "tokens": 183665,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped plan, edited the relevant implementation and typing coverage, ran focused checks, and accurately called out pre-existing full-project pyright errors. The fix still fails the PR's hidden typing test: mypy infers Never for the default click.Path() type in two assertions (the restored runtime test file had 8 passed, 1 skipped). It should give the generic parameter a compatible default or otherwise preserve the established broad default return type, then run the newly restored tests/typing/typing_path.py before declaring verification complete."
+    }
+  ]
+}

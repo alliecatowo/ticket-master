@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 70,
+      "tokens": 313527,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 1
+      },
+      "better": "tm initialized and indexed cleanly, found source/utils/body.ts quickly, and ultimately made the correct flush change. It did not state a scoped plan before editing, spent a reported 313,527 tokens, and its first submission failed because the agent had not stored/cited evidence. The concrete UX problem was contradictory recovery guidance: the no-progress message said to continue S-1 while also saying a retry was scheduled, and the retry ran immediately afterward (tm.log lines 33–35). A user would not know whether to wait or resume manually. Make the no-progress summary choose one next action based on actual retry state and carry forward the findings. The hidden PR test command did not pass as a whole: pnpm test was blocked by pnpm's ignored-build policy, npm test failed on an unrelated existing lint error, and browser tests lacked installed Playwright binaries; the overwritten stream tests passed 19/19 with npx ava."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 86,
+      "tokens": 21792,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode followed a concise plan, located the transform and adjacent stream tests, implemented the empty-body completion event, and added a focused regression test. It caught and corrected two lint problems in its test code, then reported the focused stream suite accurately at 18/18. Its final explanation was clear and disclosed the setup-generated lock/workspace files. The mechanical full-suite check still failed independently of the fix: pnpm test stopped at pnpm's ignored-build policy and npm test hit an unrelated lint violation; after replacing the tests, the focused stream suite passed 19/19, while browser tests could not launch without Playwright browser binaries. It would be better to record elapsed time directly in the JSON run log and call out that the full project's verification remains blocked rather than presenting focused checks as comprehensive verification."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/gohugoio/hugo/issues/15360",
+  "base_sha": "1d87ee5b7005a38d83cb841471245b9ae7f914bd",
+  "merge_sha": "cb6a7072230920fb47ece28f67501a2c15934ade",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 159,
+      "tokens": 452183,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run repeatedly re-read the same decoder and source history, exhausted three attempts without making a change, and escalated without running a test. The failure output did explain that no patch or evidence was submitted, but repeated 'continue with tm --resume S-N' guidance followed by a final 'tm ticket retry T-1' instruction left the recovery path ambiguous. tm should recognize the same no-progress failure across automatic retries, stop spending tokens on duplicate investigations, preserve a compact actionable finding, and present one consistent next command. A much smaller usage footprint and a focused verification attempt would have made this recoverable."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 92,
+      "tokens": 24111,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode found UnmarshalToMap quickly, added leading-BOM trimming and TOML/YAML/JSON regression cases, and ran focused tests successfully. It would be better to check out and verify against the exact merged PR regression-test set before ending: after those test files were overwritten from the merge SHA, the broader command failed to compile because those tests depend on companion production/API changes absent at the base SHA. Calling out that mismatch and distinguishing the focused package pass from the required post-overwrite check would make the verification outcome clearer."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 103.257,
+      "tokens": 141497,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "TM correctly identified the affected file early, but then repeatedly inspected the same source and repeated similar searches across all three attempts without stating a focused implementation plan or making a change. The run ended without passing the hidden regression test. Its failure messages were explicit about the missing patch and included useful resume advice, but the advice to resume conflicted with the automatic retry message, and its displayed token totals were inconsistent. A progress-preserving retry should reuse the already-found location and move directly to the change and a targeted test, with a cumulative token cap and one unambiguous next step."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 62.167,
+      "tokens": 20030,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly traced the Iterable gate, stated its intended fix, implemented duck-typed detection, and added a delegated-stream regression test. Its first focused test run failed because the shell imported Requests from the other trial checkout; it attempted a test adjustment but reran into the same import-path problem, then accurately disclosed that verification had not exercised its source. The independent post-run hidden test passed against its implementation. It would be stronger if it explicitly corrected the environment/path and reran the focused test before declaring the task complete, and avoided modifying the test file because the protocol overwrites it for grading."
+    }
+  ]
+}

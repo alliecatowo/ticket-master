@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 103.15,
+      "tokens": 513981,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the relevant completion code, but repeated reads/searches caused all three attempts to stop before making a change; the hidden regression test consequently failed. Improve the repeated-inspection recovery path so tm suggests or resumes a focused edit rather than retrying essentially the same exploration three times, and avoid describing each reset attempt as a fresh investigation. The message exposes `tm --resume S-1` etc., but users may be confused that a ticket run is marked failed/escalated and requires manual session resumption with a different command."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 43.279,
+      "tokens": 159242,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode identified the shared backing-array append, copied the args before appending, added regression coverage, and clearly reported its targeted test and diff check. The independently checked-out PR test passed. It could be improved by running the full `go test ./...` suite itself rather than only the targeted test; the full suite also passed independently after installing the hidden PR test."
+    }
+  ]
+}
