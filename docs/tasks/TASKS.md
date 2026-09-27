@@ -1697,7 +1697,7 @@ is based on.
   acceptance: With Cargo installed and reachable in the run environment, a failing `cargo build` is reported with its actual cause and does not produce “Required toolchain dependency is unavailable: cargo”; with Cargo absent, the actionable missing-dependency message remains.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1223/BurntSushi-ripgrep-3376/tm.log:16` — “Required toolchain dependency is unavailable: cargo”; `/tmp/tm-trials/20260926-1223/BurntSushi-ripgrep-3376/tm.log:53` shows that the run did invoke `cargo build` before it failed. In the same trial shell, `cargo --version` returned `cargo 1.95.0`.
-- [ ] **t20260926-1223-pallets-click-3822-context-progress-guard** — Bound repeated source reads and surface useful progress on model turn failure
+- [x] **t20260926-1223-pallets-click-3822-context-progress-guard** — Bound repeated source reads and surface useful progress on model turn failure (landed 1ae203c)
   model: sonnet · severity: high · builds Rust: yes · area: agent/context · deps: none
   files: `crates/tm-cli/src/sched.rs`, `crates/tm-cli/src/dispatch.rs`
   change: Detect repeated large-file reads or investigation without new findings during a ticket run, compact/deduplicate previously supplied source context, and expose a small scoped progress/plan plus a no-progress or context-use guard. On a text-only model stop, summarize findings actually retained and state whether a patch or verification evidence exists, along with a concrete resume command.
