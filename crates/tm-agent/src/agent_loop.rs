@@ -2109,7 +2109,7 @@ fn repeated_exploration_nudge(steps: &[StepRecord]) -> Option<String> {
         let count = counts.entry(key.clone()).or_default();
         *count += 1;
         if *count >= 3 {
-            return Some(format!("You have repeatedly explored the same source or history target without making progress. Already investigated: {key}. Summarize the findings already in the conversation and take one concrete next step: make a focused edit, run relevant verification, or state the specific blocker. Do not reopen or compare the same material unless new evidence makes a targeted reread necessary."));
+            return Some(format!("You have repeatedly explored the same source or search target without making progress. Already inspected: {key}. Use the findings already in the conversation to make the smallest implementation that meets the goal, then run focused verification. Do not repeat this exploration; if you are blocked, state the specific missing information."));
         }
     }
     None
@@ -5253,7 +5253,8 @@ mod unproductive_exploration_tests {
         let nudge = repeated_exploration_nudge(&[step(vec![repeated(), repeated(), repeated()])])
             .expect("third repeat should be recognized");
         assert!(nudge.contains("src/main.rs"));
-        assert!(nudge.contains("concrete next step"));
+        assert!(nudge.contains("smallest implementation"));
+        assert!(nudge.contains("focused verification"));
     }
 
     #[test]
@@ -5300,7 +5301,8 @@ mod unproductive_exploration_tests {
             read(40),
         ])])
         .expect("same source target should be bounded despite changed ranges/revisions");
-        assert!(nudge.contains("Summarize the findings"));
+        assert!(nudge.contains("smallest implementation"));
+        assert!(nudge.contains("focused verification"));
         assert!(nudge.contains("src/requests.py"));
     }
 
