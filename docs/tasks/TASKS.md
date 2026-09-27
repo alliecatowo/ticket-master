@@ -1676,7 +1676,7 @@ is based on.
   test: `cargo test -p tm-cli plain_tool_error`
   evidence: `/tmp/tm-trials/20260926-1044/sindresorhus-ky-878/tm.log` — lines 22–23 and 115: submission retry reported “operation state was inconsistent” and artifact storage reported `unknown variant 'verification'` without actionable correction guidance.
 
-- [ ] **t20260926-1044-shell-result-path-recovery** — Make shell tool path parsing recover from absolute result paths
+- [x] **t20260926-1044-shell-result-path-recovery** — Make shell tool path parsing recover from absolute result paths (landed a9b9311)
   model: sonnet · severity: low · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/tools.rs`
   change: When parsing command output that contains an absolute path under the current project root, canonicalize it to a repository-relative path before validation; continue rejecting paths outside the root and retain a clear recovery hint.
