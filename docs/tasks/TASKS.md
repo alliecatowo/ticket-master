@@ -1833,7 +1833,7 @@ is based on.
   acceptance: An integration fixture that first emits a missing-toolchain failure and then succeeds resumes at its saved diagnosis, produces fewer repeated read/search calls than a fresh-context retry, and exits within the configured retry/token budget.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1521/spf13-cobra-2257/tm.log:15,23-43` — toolchain failure followed by repeated reads/searches of `completions.go` and `command.go`; `/tmp/tm-trials/20260926-1521/spf13-cobra-2257/tm.log:69` records 347.15 seconds.
-- [ ] **t20260926-1702-BurntSushi-ripgrep-3376-repeat-exploration-checkpoint** — Stop repeated source reads before exhausting the agent step budget
+- [x] **t20260926-1702-BurntSushi-ripgrep-3376-repeat-exploration-checkpoint** — Stop repeated source reads before exhausting the agent step budget (landed 67874ca)
   model: sonnet · severity: high · builds Rust: yes · area: agent
   deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
