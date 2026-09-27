@@ -1,0 +1,53 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "test_files": [
+    "test/browser.ts",
+    "test/stream.ts"
+  ],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 185,
+      "tokens": 199182,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 4,
+        "cost_time": 2
+      },
+      "better": "The agent located and edited the correct flush path quickly, and independently run hidden stream tests passed 19/19 after overwriting the PR's test files. The requested `pnpm test` did not pass: XO stops on the pre-existing `test/http-error.ts:218` `no-meaningless-void-operator` error, and browser tests could not start because Playwright browser binaries are absent. In the trial orchestration, `tm ticket new` printed `Created ticket T-1: <title>` rather than a bare ID; passing that captured output to `tm run` caused a parser error until the ID was manually extracted. Offer a stable machine-readable ticket ID/output mode, emit a short scoped plan and a final summary with exact checks, and reduce the high 199,182-token usage for this small change."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 97,
+      "tokens": 21784,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The agent stated a concise plan, found the relevant stream helper and tests with focused searches, implemented the fix and regression test, and honestly reported its direct stream-suite result (18/18 passing). After replacing test files with the PR's versions, the independently run stream suite passed 19/19; the full `pnpm test` failed at the same existing XO violation, and browser verification was unavailable because Playwright browser binaries were not installed. It could improve the handoff by distinguishing the passing focused test from the failing full project command and unavailable browser checks in one final verification summary; the implementation and targeted verification were otherwise efficient."
+    }
+  ],
+  "verification": {
+    "command": "pnpm test",
+    "result": "fail for both arms at existing XO error in test/http-error.ts:218 (no-meaningless-void-operator)",
+    "hidden_stream_tests": "pass for both arms: 19/19 via pnpm exec ava test/stream.ts",
+    "browser_tests": "not runnable for both arms: Playwright Firefox/WebKit browser executables absent"
+  },
+  "logs": {
+    "tm": "/private/tmp/tm-trials/20260927-0949/sindresorhus-ky-878/tm.log",
+    "opencode": "/private/tmp/tm-trials/20260927-0949/sindresorhus-ky-878/opencode.log"
+  }
+}

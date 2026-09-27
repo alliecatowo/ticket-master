@@ -1,0 +1,46 @@
+{
+  "issue": {
+    "number": 7432,
+    "title": "`prepare_body` stream detection regression",
+    "url": "https://github.com/psf/requests/issues/7432",
+    "fix_pr": 7433,
+    "test_files": ["tests/test_requests.py"],
+    "verification": "PYTHONPATH=src .venv/bin/python -m pytest tests/test_requests.py -k 'getattr_proxy_stream_follows_redirect'"
+  },
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 122,
+      "tokens": 449461,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run should turn its initial, relevant discovery in src/requests/models.py into a focused edit and a regression check instead of repeatedly rereading the same ranges. After ten steps without a patch, tm said no patch or evidence was submitted and recommended resuming S-1, then automatically retried; later attempts repeated inspections, produced shell cwd errors involving tm/null, and escalated without a change. The user-facing recovery commands were technically explicit, but the retry loop and repeated messages obscured the actionable next step and consumed substantial context."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 37,
+      "tokens": 19729,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode found the implementation and existing rewind tests quickly, made the narrow stream-detection change, and added a delegated-wrapper regression test. Its initial pytest invocation imported the sibling tm checkout and failed; it recognized that attribution, then a subsequent invocation failed because the mise Python shim was unconfigured. It nevertheless marked focused testing complete before its final message correctly disclosed that the fix still needed verification. Running tests via the prepared venv and explicit PYTHONPATH would make verification reliable and the completion status match the actual evidence. The independently applied PR test passed."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 98.361,
+      "tokens": 488329,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm correctly searched the completion code and reported that it had not submitted a patch, but it repeated inspections of completions.go and command.go across three attempts, then stopped without making the focused capacity-safe append change. The attempt messages said a retry was scheduled twice, followed by a final escalation instructing the user to run `tm ticket retry T-1`; that leaves unclear whether the retry is automatic or requires the user. The suggested `tm --resume S-1`/`S-2`/`S-3` recovery path also shifts the recovery work to the user instead of continuing the saved investigation effectively. An explicit scoped plan and a repeated-file inspection guard that transitions to a focused edit or asks one targeted question would improve this run. Token reporting was 168849 + 183734 + 135746 across attempts (488329 total), although all three attempts together finished in 98 seconds. The issue body was mostly supplied, but task construction introduced a malformed escaped quote in the strings.Join code example, so this arm did not receive a byte-for-byte verbatim body."
+    },
+    {
+      "tool": "OpenCode",
+      "passed": true,
+      "wall_seconds": 126.615,
+      "tokens": 20146,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode identified the append/backing-array cause directly, used a short ordered plan, made a focused copy-before-append change, and ran `go test ./...`, which passed after the hidden regression test was installed. It clearly reported the fix and the actual test result. It first tried a semantic search tool that reported a missing local index, then fell back immediately to exact code search; avoiding that unavailable search route would save a small amount of setup/context."
+    }
+  ]
+}

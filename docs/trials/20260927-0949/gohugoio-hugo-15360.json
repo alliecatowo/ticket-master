@@ -1,0 +1,1 @@
+{"skipped":"No merged fix PR with regression tests exists: the issue's fixing PR #15361 is CLOSED but unmerged (mergedAt and mergeCommit are null). Its proposed test file is config/allconfig/allconfig_integration_test.go, but the protocol requires a merged fix with tests."}

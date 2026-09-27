@@ -1,0 +1,43 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "fix_pr": "https://github.com/BurntSushi/ripgrep/pull/3420",
+  "regression_test_pr": "https://github.com/BurntSushi/ripgrep/pull/3468",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "test_files": ["crates/ignore/src/dir.rs"],
+  "hidden_regression_test_file": "tests/misc.rs (from merge 241b87b3377136659ef0f57948b8e0739e9a691b; selected to avoid copying the implementation embedded in dir.rs)",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 139.906,
+      "tokens": 599006,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run found the relevant ignore matcher and walker quickly, but it repeated broad reads and grep searches over three auto-retried attempts, then escalated without a patch; reported token use was 599,006. Make the no-progress guard detect repeated investigation earlier and hand off a focused next action instead of restarting the same exploration. The agent message told the user to continue with `tm --resume S-3`, while the final `tm run` failure told them to run `tm ticket retry T-1`; reconcile those recovery instructions and explicitly explain whether retrying resumes or starts a new round."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 112.111,
+      "tokens": 37914,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The agent traced the root-context cache, fixed reuse across different absolute bases, added a focused two-order regression, corrected a compile error, and ran the crate tests successfully. It also independently ran git diff --check. Tighten the final test-count claim: it reported 151 tests, but the captured `cargo test -p ignore` output shows 140 unit tests, 6 integration tests, and 6 doctests (152 total); state the actual cargo summaries instead of an inaccurate aggregate."
+    }
+  ]
+}
