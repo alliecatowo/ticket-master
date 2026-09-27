@@ -1159,8 +1159,8 @@ fn run_outcome(
         if ticket.state == tm_core::TicketState::Submitted && recovered_submit_error(progress) {
             message.push_str(
                 " The initial ticket submission failed because evidence was missing, but the \
-                 agent stored evidence and successfully submitted afterward; the submission error \
-                 was recovered and the final ticket state is submitted.",
+                 agent stored evidence and submitted afterward; the submission error was \
+                 recovered.",
             );
         }
         return Ok(message);

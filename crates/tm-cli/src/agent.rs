@@ -2340,7 +2340,40 @@ pub(crate) fn format_step(step: &StepRecord) -> String {
         }
         index = end;
     }
+    if step
+        .tool_calls
+        .windows(3)
+        .any(|calls| recovered_submission_line(calls, 0).is_some())
+    {
+        lines.push(
+            "  * Recovered submission: the first attempt needed evidence; the error was resolved after saving a result.".to_string(),
+        );
+    }
     lines.join("\n")
+}
+
+/// Make an evidence-free submission followed by storing evidence and a successful submission
+/// explicit in live progress, rather than presenting the failed attempt as an unresolved error.
+fn recovered_submission_line(calls: &[ToolCallRecord], start: usize) -> Option<()> {
+    let failed = calls.get(start)?;
+    if failed.tool_name != "ticket.submit"
+        || !matches!(&failed.resolution, ToolCallResolution::Errored { detail } if detail.to_ascii_lowercase().contains("evidence"))
+    {
+        return None;
+    }
+    let stored = calls.get(start + 1)?;
+    if stored.tool_name != "artifact.store"
+        || !matches!(stored.resolution, ToolCallResolution::Completed { .. })
+    {
+        return None;
+    }
+    let submitted = calls.get(start + 2)?;
+    if submitted.tool_name != "ticket.submit"
+        || !matches!(submitted.resolution, ToolCallResolution::Completed { .. })
+    {
+        return None;
+    }
+    Some(())
 }
 
 /// Render one resolved tool call as a single summary line.
@@ -4409,5 +4442,43 @@ mod tests {
         assert!(missing_evidence.contains("Tried to submit the ticket"));
         assert!(!missing_evidence.contains("Submitted the ticket"));
         assert!(missing_evidence.contains("store a report or other evidence artifact"));
+    }
+
+    #[test]
+    fn format_step_identifies_a_recovered_ticket_submission() {
+        let completed = |tool_name: &str| ToolCallRecord {
+            tool_use_id: "call-1".to_string(),
+            tool_name: tool_name.to_string(),
+            input: serde_json::Value::Null,
+            resolution: ToolCallResolution::Completed {
+                result: serde_json::Value::Null,
+                artifact: None,
+            },
+        };
+        let step = StepRecord {
+            index: 0,
+            at: tm_types::Timestamp::EPOCH,
+            assistant_text: None,
+            served_by: "test".to_string(),
+            spend: Default::default(),
+            tool_calls: vec![
+                tool_call(
+                    "ticket.submit",
+                    ToolCallResolution::Errored {
+                        detail:
+                            "invariant violated: submission requires at least one evidence artifact"
+                                .to_string(),
+                    },
+                ),
+                completed("artifact.store"),
+                completed("ticket.submit"),
+            ],
+        };
+
+        let rendered = format_step(&step);
+        assert!(rendered.contains("Recovered submission"));
+        assert!(rendered.contains("first attempt needed evidence"));
+        assert_eq!(rendered.matches("Submitted the ticket").count(), 1);
+        assert!(rendered.contains("Tried to submit the ticket"));
     }
 }
