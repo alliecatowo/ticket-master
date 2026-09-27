@@ -1683,7 +1683,7 @@ is based on.
   acceptance: A shell command producing an in-repository absolute path is captured without a tool error, while a path outside the project is still rejected with the expected boundary explanation.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1044/sindresorhus-ky-878/tm.log` — line 20: `npx ava test/stream.ts test/body-size.ts` result parsing failed with “path ... must be repository-relative”; the agent had to repeat the command.
-- [ ] **t20260926-1044-spf13-cobra-2257-actionable-turn-failure** — Make no-submission failures actionable and avoid blind retries
+- [x] **t20260926-1044-spf13-cobra-2257-actionable-turn-failure** — Make no-submission failures actionable and avoid blind retries (landed 6151f00)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: When an agent turn ends without submitting a patch or evidence, preserve the useful no-submission distinction while including the concrete turn failure and a clear next-step command; avoid scheduling a retry that merely repeats the same failure without new context.
