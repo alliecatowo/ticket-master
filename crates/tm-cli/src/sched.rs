@@ -1179,6 +1179,31 @@ fn run_outcome(
         }
         _ => "".to_string(),
     };
+    let attempt_count = ticket.attempts;
+    let state = state_label(ticket.state);
+    let retry_status = if ticket.state == tm_core::TicketState::Ready {
+        let retry_is_scheduled = failure.is_some_and(|f| {
+            matches!(
+                tm_scheduler::retry::decide_retry(ticket, f.class, ticket.updated).outcome,
+                tm_scheduler::RetryOutcome::Retry { .. }
+            )
+        });
+        if retry_is_scheduled {
+            "An automatic retry is scheduled; if it does not start, run `tm sched run`.".to_string()
+        } else {
+            format!(
+                "No automatic retry is scheduled. Run `tm run {}` to try again.",
+                ticket.id
+            )
+        }
+    } else if ticket.state == tm_core::TicketState::Escalated {
+        format!(
+            "No automatic retry is scheduled. Run `tm ticket retry {}` to try again.",
+            ticket.id
+        )
+    } else {
+        String::new()
+    };
     let message = if did_not_submit {
         let resume = if next.is_empty() {
             String::new()
@@ -1186,15 +1211,22 @@ fn run_outcome(
             format!(" {next}")
         };
         format!(
-            "Ticket {}: no patch or evidence was submitted (this was not a test failure). Failure: {}.{}",
+            "Ticket {}: no patch or evidence was submitted (this was not a test failure). Attempt {} ended because: {}. Current state: {}.{}",
             ticket.id,
+            attempt_count,
             reason,
+            state,
             resume
         )
     } else if next.is_empty() {
         format!("Ticket {}: {}.", ticket.id, reason)
     } else {
         format!("Ticket {}: {}. {}", ticket.id, reason, next)
+    };
+    let message = if did_not_submit && !retry_status.is_empty() {
+        format!("{message} {retry_status}")
+    } else {
+        message
     };
     Err(tm_types::TmError::TurnFailed(message))
 }
@@ -1828,6 +1860,9 @@ mod tests {
             assert!(msg.contains("no patch or evidence was submitted"));
             assert!(msg.contains("not a test failure"));
             assert!(msg.contains("model ended turn without submitting"));
+            assert!(msg.contains("Attempt 1"));
+            assert!(msg.contains("Current state: ready"));
+            assert!(msg.contains("An automatic retry is scheduled"));
             // Should contain the ticket ID
             assert!(msg.contains("T-1"));
         } else {

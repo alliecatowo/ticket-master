@@ -464,7 +464,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   show <T>` and, when known, `tm --resume <S>` recovery commands. `tm run` reports a failed attempt
   as an error (exit 2), not as "finished". If the model ends without
     submitting, `tm run` waits for and continues with a scheduled retry when the ticket's retry
-    policy and remaining budget allow it. A no-submit failure retains a concise summary of the
+    policy and remaining budget allow it. If it cannot recover, the error identifies the failed
+    attempt, current ticket state, provider-turn failure reason (separate from test failures),
+    whether another retry is scheduled, and the exact next command. A no-submit failure retains a concise summary of the
     investigation for the next attempt and tells the user that the findings are unverified; it
     reports whether the workspace has edits and recommends continuing the saved session when edits
     remain, or starting another attempt when the workspace is clean. If no
