@@ -1726,7 +1726,7 @@ is based on.
   acceptance: A CLI test simulating a step-limit failure with a retained edit and test result asserts the summary identifies the unsubmitted state, accurately reports verification, preserves the stop cause, and prints the continuation command; a failure with no retained change reports that explicitly.
   test: `cargo test -p tm-cli sched`
   evidence: `/private/tmp/tm-trials/20260926-1223/spf13-cobra-2257/tm.log:145-147` — `step limit (64) reached without submitting` followed by a retry suggestion; preceding lines show an edit and attempted test runs but no submitted ticket.
-- [ ] **t20260926-1342-BurntSushi-ripgrep-3376-toolchain-availability-diagnostics** — Verify missing toolchains in the agent command environment before failing a task
+- [x] **t20260926-1342-BurntSushi-ripgrep-3376-toolchain-availability-diagnostics** — Verify missing toolchains in the agent command environment before failing a task (landed cd5bfb4)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: When `missing_toolchain_dependency` sees “not found” in a shell/build/test result, check executable resolution in the same command environment and preserve the failed command and output in the failure detail. Distinguish a missing executable from a PATH/environment mismatch instead of telling users to install an already-present toolchain.
