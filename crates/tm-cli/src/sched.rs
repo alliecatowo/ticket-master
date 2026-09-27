@@ -804,9 +804,12 @@ pub async fn run_ticket(
             }
         }
         Some(Err(err)) => {
-            // The dispatcher has already recorded the failure and applied the ticket's retry
-            // policy. For no-submit turns, keep this foreground invocation alive until that
-            // scheduled retry is due when the ticket still has retry/budget capacity.
+            // The dispatcher has recorded the failure and applied the ticket's retry policy.
+            // A no-submit turn is deliberately not retried inline: doing so starts another costly
+            // provider turn immediately, even though nothing about the failure or available
+            // context changed. Report the saved session and concrete recovery path instead; a
+            // scheduler retry remains visible in the ticket state and can use the persisted
+            // investigation summary on its next dispatch.
             let retry = project
                 .store
                 .view()
@@ -819,7 +822,7 @@ pub async fn run_ticket(
                             .to_ascii_lowercase()
                             .contains("ended turn without submitting")
                     });
-                    if !no_submit || current.state != tm_core::TicketState::Ready {
+                    if no_submit || current.state != tm_core::TicketState::Ready {
                         return None;
                     }
                     let decision = tm_scheduler::retry::decide_retry(
@@ -836,8 +839,8 @@ pub async fn run_ticket(
                 });
             if let Some(delay) = retry {
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                // A second invocation uses the same ticket, options and project. Its own
-                // failure count bounds this recursion through the ticket retry policy.
+                // Other retryable failures may recover during this foreground invocation.
+                // No-submit outcomes stop above so we don't repeat an unchanged model failure.
                 Box::pin(run_ticket(args, project, renderer)).await
             } else {
                 Err(err)

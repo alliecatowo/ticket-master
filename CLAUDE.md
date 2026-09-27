@@ -464,8 +464,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   holder and session id. If `tm run <T>` races an existing lease, the conflict includes `tm ticket
   show <T>` and, when known, `tm --resume <S>` recovery commands. `tm run` reports a failed attempt
   as an error (exit 2), not as "finished". If the model ends without
-    submitting, `tm run` waits for and continues with a scheduled retry when the ticket's retry
-    policy and remaining budget allow it. If it cannot recover, the error identifies the failed
+   submitting, `tm run` reports the failure and recovery action without immediately starting an
+   identical foreground attempt; a scheduler retry, when permitted, is visible in the ticket state
+   and uses the saved investigation summary. Resume the saved session with a focused next step
+   when useful findings exist. If it cannot recover, the error identifies the failed
     attempt, current ticket state, provider-turn failure reason (separate from test failures),
     whether another retry is scheduled, and the exact next command. A no-submit failure retains a concise summary of the
     investigation for the next attempt and tells the user that the findings are unverified; it
