@@ -1741,7 +1741,7 @@ is based on.
   acceptance: A simulated first attempt that ends with `model ended turn without submitting` prints that reason and whether a retry is scheduled; the final run summary reports the resulting state and resume command. The event log remains authoritative and unchanged.
   test: `cargo test -p tm-cli sched::tests`
   evidence: `/tmp/tm-trials/20260926-1342/gohugoio-hugo-15360/tm.log` — `attempt 1 model ended turn without submitting`; user-facing output proceeded through extensive command listings and ended only when bounded execution was interrupted; retry/failure details were recovered from `tm events`.
-- [ ] **t20260926-1342-pallets-click-3822-repeated-source-read-progress-guard** — Bound repeated source reads and show actionable progress when a run stalls
+- [x] **t20260926-1342-pallets-click-3822-repeated-source-read-progress-guard** — Bound repeated source reads and show actionable progress when a run stalls (landed e0e76e1)
   model: sonnet · severity: high · builds Rust: yes · area: agent/context · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
   change: Detect repeated overlapping reads and searches of the same source during a ticket run, avoid re-sending already available content when there is no new finding, and surface a concise retained-findings summary with a scoped next step. When a model ends without submitting, provide a direct saved-session resume command alongside the honest no-patch/no-evidence status.
