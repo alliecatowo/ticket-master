@@ -469,7 +469,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
     whether another retry is scheduled, and the exact next command. A no-submit failure retains a concise summary of the
     investigation for the next attempt and tells the user that the findings are unverified; it
     reports whether the workspace has edits and recommends continuing the saved session when edits
-    remain, or starting another attempt when the workspace is clean. If no
+    remain. With no edits, it says no repository change was made and directs the user to inspect
+    the saved attempt and resume its session with a focused next step rather than blindly rerunning;
+    provider errors should be fixed before retrying. If no
    retry is available, the final summary names the missing patch or evidence and gives the next
    recovery action;
    this is distinct from a test failure.

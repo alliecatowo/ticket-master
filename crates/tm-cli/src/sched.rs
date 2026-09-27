@@ -1119,7 +1119,9 @@ fn run_outcome(
     let reason = failure
         .map(|f| {
             let class_desc = failure_class_description(f.class);
-            if did_not_submit {
+            if did_not_submit && f.class == tm_core::FailureClass::ProviderUnavailable {
+                format!("provider error: {}", f.detail)
+            } else if did_not_submit {
                 f.detail.clone()
             } else {
                 format!("{class_desc}: {}", f.detail)
@@ -1154,8 +1156,8 @@ fn run_outcome(
                 )
             } else {
                 format!(
-                    "No working-tree edits were retained. Inspect the saved attempt with `tm ticket show {}` and run `tm run {}` again to start a fresh attempt.",
-                    ticket.id, ticket.id
+                    "No working-tree edits were retained, so this run made no repository change. Inspect the saved attempt with `tm ticket show {}` before continuing; if it contains useful findings, resume its saved session with `tm --resume <session>` and give it a focused next step. If the attempt stopped because of a provider error, fix that provider problem before retrying.",
+                    ticket.id
                 )
             }
         }
@@ -1854,7 +1856,9 @@ mod tests {
             assert!(!msg.contains("did not finish:"));
             // Should contain the correct next step for Ready state
             assert!(msg.contains("No working-tree edits were retained"));
-            assert!(msg.contains("run `tm run T-1` again"));
+            assert!(msg.contains("no repository change"));
+            assert!(msg.contains("tm --resume <session>"));
+            assert!(!msg.contains("Run `tm run T-1` again"));
             // Should have plain-English failure reason
             assert!(!msg.contains("something went wrong"));
             assert!(msg.contains("no patch or evidence was submitted"));
@@ -1930,7 +1934,9 @@ mod tests {
 
         let clean_no_submit = run_outcome(&ticket, 1, false).unwrap_err().to_string();
         assert!(clean_no_submit.contains("No working-tree edits were retained"));
-        assert!(clean_no_submit.contains("run `tm run T-1` again"));
+        assert!(clean_no_submit.contains("no repository change"));
+        assert!(clean_no_submit.contains("tm --resume <session>"));
+        assert!(!clean_no_submit.contains("run `tm run T-1` again"));
 
         ticket.failures.push(FailureRecord {
             class: FailureClass::VerificationFailed,
