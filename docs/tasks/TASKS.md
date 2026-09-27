@@ -1805,7 +1805,7 @@ is based on.
   acceptance: A transcript with an evidence-free failed submit followed by a stored report and successful submit says the first attempt was recovered, names the final submitted state once, and does not imply that the run failed.
   test: `cargo test -p tm-cli format_tool_call`
   evidence: `/tmp/tm-trials/20260926-1521/psf-requests-7432/tm.log:71-74` records the evidence-free submit error, `Saved a result`, and success; formatter paths are in `crates/tm-cli/src/agent.rs:2346-2364` and `:2496-2502`.
-- [ ] **t20260926-1521-sindresorhus-ky-878-avoid-redundant-source-rereads** — Stop repeated test-file exploration after the relevant case is found
+- [x] **t20260926-1521-sindresorhus-ky-878-avoid-redundant-source-rereads** — Stop repeated test-file exploration after the relevant case is found (landed 41b8136)
   model: sonnet · severity: high · builds Rust: yes · area: agent/context · deps: none
   files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
   change: Track recent successful reads and searches within a ticket run, and when the agent requests overlapping content again without an intervening edit or a clear new hypothesis, reuse the prior result or prompt it to state what new question the reread answers. Preserve deliberate rereads after edits and when verification requires fresh content.
