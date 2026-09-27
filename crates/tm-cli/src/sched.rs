@@ -761,7 +761,11 @@ pub async fn run_ticket(
             tm_core::ticket::TicketState::Leased | tm_core::ticket::TicketState::Running
         ) {
             final_state = Some(t.state);
-            outcome = Some(run_outcome(t, failures_before));
+            outcome = Some(run_outcome(
+                t,
+                failures_before,
+                workspace_has_changes(exec_root.unwrap_or(&project.root)),
+            ));
             break;
         }
     }
@@ -1089,7 +1093,11 @@ fn report_replay_divergences(
 /// How one `tm run` attempt ended, read from the ticket once it left `Leased`/`Running`: a
 /// forward-progress state is success; anything else is reported as the failure it recorded (with
 /// what happens next), as the error `tm run` exits with — never as a quiet "finished".
-fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Result<String> {
+fn run_outcome(
+    ticket: &tm_core::Ticket,
+    failures_before: usize,
+    workspace_edits_retained: bool,
+) -> tm_types::Result<String> {
     if worktree_run_reached_success(ticket.state) {
         return Ok(if ticket.state == tm_core::TicketState::Submitted {
             format!(
@@ -1139,10 +1147,17 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
                 .to_string()
         }
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked if did_not_submit => {
-            format!(
-                "Inspect the saved attempt with `tm ticket show {}`. To continue its work, resume the saved session with `tm --resume <session>` and ask it to focus on the remaining change, run the relevant checks, and submit evidence; avoid rerunning the unchanged ticket.",
-                ticket.id
-            )
+            if workspace_edits_retained {
+                format!(
+                    "Working-tree edits were retained. Inspect the saved attempt with `tm ticket show {}` and check the edits with `git status` and `git diff`; resume its saved session with `tm --resume <session>` to continue, run checks, and submit evidence instead of starting over.",
+                    ticket.id
+                )
+            } else {
+                format!(
+                    "No working-tree edits were retained. Inspect the saved attempt with `tm ticket show {}` and run `tm run {}` again to start a fresh attempt.",
+                    ticket.id, ticket.id
+                )
+            }
         }
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked => {
             format!("Run `tm run {}` again to retry.", ticket.id)
@@ -1155,7 +1170,7 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
         }
         tm_core::TicketState::Escalated if did_not_submit => {
             format!(
-                "Inspect the saved attempt with `tm ticket show {}`. To continue its work, resume the saved session with `tm --resume <session>` and ask it to focus on the remaining change, run the relevant checks, and submit evidence; avoid retrying the unchanged ticket.",
+                "Working-tree edits were retained. Inspect them with `git status` and `git diff`, then use `tm ticket retry {}` to start another attempt with those edits still present.",
                 ticket.id
             )
         }
@@ -1182,6 +1197,14 @@ fn run_outcome(ticket: &tm_core::Ticket, failures_before: usize) -> tm_types::Re
         format!("Ticket {}: {}. {}", ticket.id, reason, next)
     };
     Err(tm_types::TmError::TurnFailed(message))
+}
+
+fn workspace_has_changes(root: &std::path::Path) -> bool {
+    std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=all"])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
 }
 
 /// Plain-English description of a failure class for user-facing messages.
@@ -1787,7 +1810,7 @@ mod tests {
             updated: now,
         };
 
-        let result = run_outcome(&ticket, 0);
+        let result = run_outcome(&ticket, 0, false);
         assert!(result.is_err());
         if let Err(tm_types::TmError::TurnFailed(msg)) = result {
             // Should not contain debug-printed enum variant
@@ -1798,10 +1821,8 @@ mod tests {
             // Should not have stacked error prefix
             assert!(!msg.contains("did not finish:"));
             // Should contain the correct next step for Ready state
-            assert!(msg.contains("Inspect the saved attempt with `tm ticket show T-1`"));
-            assert!(msg.contains("tm --resume <session>"));
-            assert!(msg.contains("focus on the remaining change"));
-            assert!(!msg.contains("Run `tm run T-1` again to retry."));
+            assert!(msg.contains("No working-tree edits were retained"));
+            assert!(msg.contains("run `tm run T-1` again"));
             // Should have plain-English failure reason
             assert!(!msg.contains("something went wrong"));
             assert!(msg.contains("no patch or evidence was submitted"));
@@ -1866,11 +1887,15 @@ mod tests {
         };
 
         // A subsequent ordinary test failure keeps its existing retry advice.
-        let repeated_no_submit = run_outcome(&ticket, 1).unwrap_err().to_string();
+        let repeated_no_submit = run_outcome(&ticket, 1, true).unwrap_err().to_string();
         assert!(repeated_no_submit.contains("model ended turn without submitting"));
-        assert!(repeated_no_submit.contains("Inspect the saved attempt"));
-        assert!(repeated_no_submit.contains("tm --resume <session>"));
+        assert!(repeated_no_submit.contains("Working-tree edits were retained"));
+        assert!(repeated_no_submit.contains("git status` and `git diff"));
         assert!(!repeated_no_submit.contains("something went wrong"));
+
+        let clean_no_submit = run_outcome(&ticket, 1, false).unwrap_err().to_string();
+        assert!(clean_no_submit.contains("No working-tree edits were retained"));
+        assert!(clean_no_submit.contains("run `tm run T-1` again"));
 
         ticket.failures.push(FailureRecord {
             class: FailureClass::VerificationFailed,
@@ -1878,7 +1903,7 @@ mod tests {
             at: now,
             attempt: 3,
         });
-        let test_failure = run_outcome(&ticket, 2).unwrap_err().to_string();
+        let test_failure = run_outcome(&ticket, 2, false).unwrap_err().to_string();
         assert!(test_failure.contains("Run `tm run T-1` again to retry."));
     }
 
@@ -1931,7 +1956,7 @@ mod tests {
             updated: now,
         };
 
-        let result = run_outcome(&ticket, 0);
+        let result = run_outcome(&ticket, 0, false);
         assert!(result.is_err());
         if let Err(tm_types::TmError::TurnFailed(msg)) = result {
             // Should contain the correct next step for Escalated state
@@ -1996,7 +2021,7 @@ mod tests {
             updated: now,
         };
 
-        let result = run_outcome(&ticket, 0);
+        let result = run_outcome(&ticket, 0, false);
         assert!(result.is_err());
         if let Err(tm_types::TmError::TurnFailed(msg)) = result {
             // Should contain the correct next step for Blocked state (same as Ready)
@@ -2064,7 +2089,7 @@ mod tests {
             updated: now,
         };
 
-        let result = run_outcome(&ticket, 0);
+        let result = run_outcome(&ticket, 0, false);
         assert!(result.is_err());
         if let Err(tm_types::TmError::TurnFailed(msg)) = result {
             assert!(
