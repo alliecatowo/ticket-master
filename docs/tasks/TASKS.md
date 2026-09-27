@@ -1826,7 +1826,7 @@ is based on.
   acceptance: A run where Go is on the invoking process PATH but unavailable in the child execution environment reports that distinction and the executable lookup path, while a genuinely absent Go binary still names Go and provides the install/configure guidance.
   test: `cargo test -p tm-agent missing_toolchain`
   evidence: `/tmp/tm-trials/20260926-1521/spf13-cobra-2257/tm.log:15` — “Required toolchain dependency is unavailable: go. Install or configure it, then retry the task.”
-- [ ] **t20260926-1521-spf13-cobra-2257-bound-retry-context** — Preserve focused investigation context across failed toolchain retries
+- [x] **t20260926-1521-spf13-cobra-2257-bound-retry-context** — Preserve focused investigation context across failed toolchain retries (landed 3ec4e0d)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-runtime · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: On retry after a toolchain-related failure, carry forward the relevant files, identified suspect call site, and attempted verification into the next model turn so the agent resumes instead of repeating broad searches and file reads; keep retries within the configured run budget.
