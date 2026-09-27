@@ -1862,7 +1862,7 @@ is based on.
   acceptance: Prompt tests assert the worker instructions require an evidence artifact for successful work and do not offer an empty-list path; a scripted ticketed run stores a result artifact and submits successfully without an avoidable evidence-rejection retry.
   test: `cargo test -p tm-agent prompt::tests`
   evidence: `/private/tmp/tm-trials/20260926-1702/psf-requests-7432/tm.log:60-63` shows the empty-evidence ticket.submit rejection followed by artifact storage and a successful submission; corresponding worker wording is in `crates/tm-agent/src/prompt.rs:213-216`.
-- [ ] **t20260926-1702-sindresorhus-ky-878-provider-recovery-guidance** — Show a concrete recovery path for an unregistered provider candidate
+- [x] **t20260926-1702-sindresorhus-ky-878-provider-recovery-guidance** — Show a concrete recovery path for an unregistered provider candidate (landed ca15fa8)
   model: sonnet · severity: medium · builds Rust: yes · area: provider UX · deps: none
   files: `crates/tm-provider/src/fabric.rs`
   change: Extend the `preflight_role` unregistered-provider error to identify the missing provider candidate and provide the exact supported next step to either register/configure that provider or replace the candidate with a currently registered one; keep the warning that retrying unchanged configuration cannot work.
