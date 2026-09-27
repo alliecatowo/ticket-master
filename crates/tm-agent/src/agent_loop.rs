@@ -1660,29 +1660,42 @@ impl AgentLoop {
                     input: input.clone(),
                 };
                 let dispatch_started_at = self.clock.now();
-                let resolution = match self.replay_resolution(id, name, input, &root) {
-                    Some(Ok(resolution)) => resolution,
-                    Some(Err(detail)) => {
-                        // Steps completed before this call only — the in-progress step
-                        // (including any calls already dispatched within it) is not committed,
-                        // matching `AgentOutcome::AwaitingApproval`'s own contract just above.
-                        return Ok(AgentOutcome::Failed {
-                            steps,
-                            class: FailureClass::Other,
-                            detail,
-                        });
-                    }
-                    None => {
-                        let ctx = CallContext {
-                            authority: &effective_authority,
-                            ticket: task.ticket.as_ref(),
-                            session: &task.session,
-                            actor: &self.actor,
-                            clock: self.clock.as_ref(),
-                            ids: self.ids.as_ref(),
-                            root: &root,
-                        };
-                        self.tools.dispatch(&call, &ctx).await
+                let cached_read = self
+                    .replay_tool_source
+                    .is_none()
+                    .then(|| cached_inspection_result(&steps, name, input))
+                    .flatten();
+                let resolution = if let Some(cached) = cached_read {
+                    tracing::debug!(
+                        tool = name,
+                        "reused a successful inspection result from this run"
+                    );
+                    cached
+                } else {
+                    match self.replay_resolution(id, name, input, &root) {
+                        Some(Ok(resolution)) => resolution,
+                        Some(Err(detail)) => {
+                            // Steps completed before this call only — the in-progress step
+                            // (including any calls already dispatched within it) is not committed,
+                            // matching `AgentOutcome::AwaitingApproval`'s own contract just above.
+                            return Ok(AgentOutcome::Failed {
+                                steps,
+                                class: FailureClass::Other,
+                                detail,
+                            });
+                        }
+                        None => {
+                            let ctx = CallContext {
+                                authority: &effective_authority,
+                                ticket: task.ticket.as_ref(),
+                                session: &task.session,
+                                actor: &self.actor,
+                                clock: self.clock.as_ref(),
+                                ids: self.ids.as_ref(),
+                                root: &root,
+                            };
+                            self.tools.dispatch(&call, &ctx).await
+                        }
                     }
                 };
                 // Millis since `dispatch_started_at`, clamped to 0: the injected `Clock` need not
@@ -2152,6 +2165,39 @@ fn repeated_exploration_nudge(steps: &[StepRecord]) -> Option<String> {
                 format!("Retained finding: {}", entry.1)
             };
             return Some(format!("You have repeatedly explored the same source or search target without making progress. Already inspected: {key}. {finding} Use this retained result to make the smallest implementation that meets the goal, then run focused verification. Do not reread or repeat this exploration; if you are blocked, state the specific missing information."));
+        }
+    }
+    None
+}
+
+/// Reuse an unchanged, successful exact read/search result from the current run. Search results
+/// and whole-file reads are deterministic for an identical request; edits and verification calls
+/// form a boundary after which the old result is no longer eligible. This prevents repeated
+/// identical exploration from spending a tool call while preserving fresh reads after edits.
+fn cached_inspection_result(
+    steps: &[StepRecord],
+    name: &str,
+    input: &serde_json::Value,
+) -> Option<ToolOutcome> {
+    if !matches!(
+        name,
+        "fs.read" | "search.exact" | "search.regex" | "search.hybrid" | "search.semantic"
+    ) {
+        return None;
+    }
+    for call in steps
+        .iter()
+        .rev()
+        .flat_map(|step| step.tool_calls.iter().rev())
+    {
+        if is_progress_call(call) {
+            return None;
+        }
+        if call.tool_name == name && call.input == *input {
+            return match &call.resolution {
+                ToolOutcome::Completed { .. } => Some(call.resolution.clone()),
+                ToolOutcome::Denied { .. } | ToolOutcome::Errored { .. } => None,
+            };
         }
     }
     None
@@ -5613,5 +5659,21 @@ mod no_progress_tests {
             repeated_exploration_count(&steps),
             REPEATED_EXPLORATION_LIMIT
         );
+    }
+
+    #[test]
+    fn successful_inspection_is_reused_until_a_progress_boundary() {
+        let input = serde_json::json!({"path": "test/stream.ts"});
+        let read = step(1, "fs.read", "test/stream.ts");
+        let cached = cached_inspection_result(std::slice::from_ref(&read), "fs.read", &input);
+        assert!(matches!(cached, Some(ToolOutcome::Completed { .. })));
+
+        let mut steps = vec![read, step(2, "edit.apply_patch", "test/stream.ts")];
+        assert!(cached_inspection_result(&steps, "fs.read", &input).is_none());
+        steps.push(step(3, "fs.read", "test/stream.ts"));
+        assert!(matches!(
+            cached_inspection_result(&steps, "fs.read", &input),
+            Some(ToolOutcome::Completed { .. })
+        ));
     }
 }

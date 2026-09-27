@@ -520,7 +520,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   A ticketed run also stops earlier after six inspections of the same source/history/search target
   without a productive action. That failure reports accumulated tokens, tool calls, and provider
   time, and gives the saved session's directly copyable `tm --resume <session>` command. A successful
-  edit, commit, test run, or stored evidence resets this repeated-target bound.
+  edit, commit, test run, or stored evidence resets this repeated-target bound. During a run, an
+  identical successful file read or search request reuses its recorded result until an edit or
+  verification call makes a fresh result appropriate.
   Before leasing or
   dispatching anything, `tm run <T>` also checks that the ticket's required role actually has a
   registered/credentialed provider candidate (`sched::preflight_provider_or_fail`,
