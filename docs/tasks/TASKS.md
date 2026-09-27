@@ -1654,7 +1654,7 @@ is based on.
   acceptance: A simulated model-ended-turn-without-submission either recovers and completes under the configured retry budget or prints the scheduled retry and exact next action; output never leaves a user unsure whether the failed ticket will resume automatically.
   test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
   evidence: `/tmp/tm-trials/20260926-1044/BurntSushi-ripgrep-3376/tm.log:77` — `agent turn failed: Ticket T-1: no patch or evidence was submitted (this was not a test failure). Failure: something went wrong: model ended turn without submitting. Run tm run T-1 again to retry.`; `/tmp/tm-trials/20260926-1044/BurntSushi-ripgrep-3376/tm.log:245` — `168  ticket.failed T-1`; `/tmp/tm-trials/20260926-1044/BurntSushi-ripgrep-3376/tm.log:251` — `174  ticket.retry_scheduled T-1`
-- [ ] **t20260926-1044-pallets-click-3822-actionable-empty-turn-recovery** — Give actionable recovery guidance when an agent turn submits no patch or evidence
+- [x] **t20260926-1044-pallets-click-3822-actionable-empty-turn-recovery** — Give actionable recovery guidance when an agent turn submits no patch or evidence (landed ddf4195)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: When a model turn ends without a patch or evidence, report the concrete failed-turn state and useful completed work, distinguish transient/provider errors from a model that simply stopped without submitting, and avoid recommending an unconditional rerun when the run made no progress.
