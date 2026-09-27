@@ -1756,7 +1756,7 @@ is based on.
   acceptance: A scripted agent run that repeatedly reads the same file and submits no patch is bounded by the guard, ends with a clear reason and usage/time totals, and offers a directly copyable resume command containing the saved session ID; productive runs remain unaffected.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1342/psf-requests-7432/tm.log` lines 7–29 and 54–106 show repetitive code reads/exploration before ending without a patch at line 107; lines 112–123 record 1107 seconds, 3,114,837 tokens, and 80 tool calls.
-- [ ] **t20260926-1342-sindresorhus-ky-878-recovered-submit-feedback** — Clarify recovered ticket submission errors in run output
+- [x] **t20260926-1342-sindresorhus-ky-878-recovered-submit-feedback** — Clarify recovered ticket submission errors in run output (landed 87330bd)
   model: sonnet · severity: low · builds Rust: yes · area: ux · deps: none
   files: `crates/tm-cli/src/dispatch.rs`, `crates/tm-agent/src/tools.rs`
   change: When an agent's first `ticket.submit` fails for missing evidence but the same run later stores evidence and successfully submits, report the first attempt as a recovered submission error in the user-facing run summary rather than leaving a raw tool error next to a later success without connecting them.
