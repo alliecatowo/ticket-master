@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/gohugoio/hugo/issues/15360",
+  "base_sha": "1d87ee5b7005a38d83cb841471245b9ae7f914bd",
+  "merge_sha": "cb6a7072230920fb47ece28f67501a2c15934ade",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 96,
+      "tokens": 7243,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 4,
+        "plan_quality": 2,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 1
+      },
+      "better": "tm init indexed all 2,270 files in 67 seconds before the actual run, which failed on a provider 429 after reading only decoder.go. Although the failure told me to rerun `tm run T-1`, the event log shows `ticket.retry_scheduled`, so the message leaves it unclear whether the scheduler will retry or whether I should act immediately; the recorded stats also report wall_seconds: 1 despite substantially longer measured command time. Show the scheduled retry state and next action in the terminal summary, report real elapsed time, and make setup/indexing cost visible as a separate phase."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 56,
+      "tokens": 23397,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a concise plan, located UnmarshalToMap and its existing tests directly, implemented a focused BOM trim with TOML/YAML/JSON regressions, and ran the package test successfully. It could improve verification by including the protocol's hidden merged-PR test files in its own verification rather than only its added tests; the mechanically applied protocol test suite passed afterward."
+    }
+  ]
+}

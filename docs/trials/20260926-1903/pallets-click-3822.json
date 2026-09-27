@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 71.651,
+      "tokens": 197839,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 1
+      },
+      "better": "The initial navigation identified the right implementation file and typing tests, but both execution attempts stopped before any fix because the provider returned HTTP 429. The message exposed the rate-limit error and suggested rerunning, yet offered no retry delay or automatic backoff, so the user had to decide whether and when to repeat the command; the large recorded token use also produced no working change. Add bounded provider-aware retries with a clear wait/progress message and preserve the ticket context across retries, then end with a concise summary that distinguishes a provider failure from a code/test result."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 83.534,
+      "tokens": 291688,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "The agent stated a scoped plan, followed the typing path from ParamType to Path.convert, implemented the generic return type, and verified both type narrowing and the full pytest suite. It also disclosed unrelated full-project pyright findings instead of presenting that check as clean. It would be better to avoid repeatedly loading broad source ranges and to run the repository's configured typing checks with all required dependencies installed, while retaining the concise progress updates and final verification summary."
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "test_files": [
+    "test/browser.ts",
+    "test/stream.ts"
+  ],
+  "verification": {
+    "command": "./node_modules/.bin/ava test/stream.ts test/browser.ts",
+    "tm": {
+      "passed": false,
+      "details": "The stream tests fail both hidden empty-body cases (upload and download completion events absent). Chromium tests passed, but Firefox/WebKit executables are unavailable."
+    },
+    "opencode": {
+      "passed": false,
+      "details": "The hidden stream tests passed, including empty response completion; Chromium empty-response browser test passed. Overall command failed because Firefox/WebKit executables are unavailable."
+    }
+  },
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 13.56,
+      "tokens": 7157,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 4,
+        "plan_quality": 1,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 3
+      },
+      "better": "tm indexed the repository quickly and went directly to source/utils/body.ts, but the provider returned a 429 before any plan or code change could be made. The terminal error said to retry, while tm events recorded ticket.retry_scheduled and the final stats reported only 1 second of wall time despite the command taking 13.56 seconds. Make the run summary reconcile observed wall time with event-derived stats, explicitly show the scheduled retry and the exact next command, and provide a direct resume/retry action so a transient provider limit does not leave the user to infer whether work will continue."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 71.31,
+      "tokens": 23206,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode stated a scoped plan, found the flush guard, implemented the completion callback with an empty Uint8Array, added regression coverage, and accurately surfaced that the full npm test command is blocked by a pre-existing lint error while the stream tests pass. It also investigated the unrelated pnpm build-approval files created during install; this consumed some extra context. The hidden stream tests passed. The browser suite could only run Chromium because Firefox/WebKit binaries were unavailable; preinstalling the browser engines would allow complete verification."
+    }
+  ]
+}

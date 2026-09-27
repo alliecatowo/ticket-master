@@ -1,0 +1,45 @@
+{
+  "issue": {
+    "url": "https://github.com/psf/requests/issues/7432",
+    "title": "`prepare_body` stream detection regression"
+  },
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": [
+    "tests/test_requests.py"
+  ],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 34.59,
+      "tokens": 30037,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 2,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 2
+      },
+      "better": "The run stopped twice on the configured provider's HTTP 429 before it could inspect much beyond src/requests/models.py; the second attempt did add a targeted search, but neither attempt reached a patch or tests. The error was honest and offered `tm run T-1` as the recovery command, yet that command immediately hit the same rate limit again, and the user was left to infer how long to wait from the provider's vague ‘brief wait’ text. Better provider-rate-limit recovery would retain the ticket/session context, expose a concrete retry delay when available, and avoid suggesting an immediate blind rerun. The base implementation consequently failed the mechanically applied PR regression test."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 84.58,
+      "tokens": 36700,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "The agent found PreparedRequest.prepare_body quickly, changed the stream-detection condition, and verified its implementation with a focused regression test. Its first handcrafted test attempts failed because the wrapper did not satisfy the stream protocol; it adjusted the test and reported the focused tests passing. It also tried the broader test file and accurately disclosed the recursive httpbin fixture failures. The hidden PR test passed after overwriting tests/test_requests.py from the merge commit. It could improve context efficiency by avoiding repeated test-debug cycles and by checking the package's dependency-group setup earlier; this checkout has a `test` dependency group rather than a pip `.[test]` extra."
+    }
+  ]
+}

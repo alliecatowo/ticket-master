@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 149,
+      "tokens": 108438,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 2,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 2
+      },
+      "better": "The run located the right code quickly, but two provider requests failed with HTTP 429, so it never reached an implementation or test run; the independently applied hidden regression test confirms the bug remains. Make transient rate-limit recovery honor Retry-After or otherwise back off before another model request, and keep the ticket visibly retryable rather than ending the run with a generic failure. The human-facing output said `Run tm run T-1 again to retry` even though `tm events` showed `ticket.retry_scheduled`; tm should make those recovery instructions consistent, explain whether the queued automatic retry will be driven by the scheduler, and offer one concrete command that does not suggest an immediate duplicate provider request."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 55.214,
+      "tokens": 44707,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly traced the append aliasing to `completions.go`, made a minimal defensive-copy change, and reported the full-suite result accurately. It recovered from an unavailable semantic index by continuing with filename and text searches. Add a focused regression test before the run ends, and avoid spending an early search call on an unavailable persistent index when a fresh clone has no index; this would make the context path more direct and the verification more targeted."
+    }
+  ]
+}
