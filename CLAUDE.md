@@ -487,7 +487,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
     still allowed when new evidence requires it. An evidence-free ticket submission tells the worker to store a report
    or other evidence artifact and cite the returned artifact ID when submitting, rather than
    recommending a blind retry. A command reporting a missing common toolchain executable (such as
-  `go`, `cargo`, or `node`) instead ends the attempt with that dependency named.
+   `go`, `cargo`, or `node`) ends the attempt with that dependency named only when it is absent
+   from the command environment's `PATH`; the failure includes the command, its output, and the
+   detected `PATH` so an unrelated build error is not mistaken for an unavailable tool.
   Ticketed runs also stop after 10 consecutive steps without a successful edit, commit, or stored
   evidence artifact. This bounds repeated investigations before the full step limit; the retained
   failure detail summarizes explored targets and the latest finding, says no patch or evidence was

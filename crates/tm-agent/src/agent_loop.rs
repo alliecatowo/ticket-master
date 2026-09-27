@@ -1767,11 +1767,12 @@ impl AgentLoop {
                     ),
                 });
             }
-            if let Some(dependency) = missing_toolchain_dependency(&steps) {
+            if let Some((dependency, command, output, path)) = missing_toolchain_dependency(&steps)
+            {
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: format!("Required toolchain dependency is unavailable: {dependency}. Install or configure it, then retry the task."),
+                    detail: format!("Required toolchain dependency is unavailable: {dependency}. Install or configure it, then retry the task. Failed command: {command}. Output: {output}. PATH: {path}"),
                 });
             }
         }
@@ -2149,7 +2150,14 @@ fn exploration_target(call: &ToolCallRecord) -> Option<String> {
 /// Return the concrete missing executable when toolchain discovery output says the command could
 /// not be found. This is deliberately limited to shell discovery calls, not ordinary source
 /// search results that happen to mention an absent dependency.
-fn missing_toolchain_dependency(steps: &[StepRecord]) -> Option<String> {
+fn missing_toolchain_dependency(steps: &[StepRecord]) -> Option<(String, String, String, String)> {
+    missing_toolchain_dependency_on_path(steps, &std::env::var("PATH").unwrap_or_default())
+}
+
+fn missing_toolchain_dependency_on_path(
+    steps: &[StepRecord],
+    path: &str,
+) -> Option<(String, String, String, String)> {
     for call in steps.iter().flat_map(|step| &step.tool_calls) {
         if !matches!(
             call.tool_name.as_str(),
@@ -2157,39 +2165,58 @@ fn missing_toolchain_dependency(steps: &[StepRecord]) -> Option<String> {
         ) {
             continue;
         }
-        let command = call.input.to_string();
+        let command = call
+            .input
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                call.input
+                    .get("argv")
+                    .and_then(serde_json::Value::as_array)
+                    .map(|argv| {
+                        argv.iter()
+                            .filter_map(serde_json::Value::as_str)
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+            })?;
         let result = match &call.resolution {
             crate::outcome::ToolCallResolution::Completed { result, .. } => result.to_string(),
             crate::outcome::ToolCallResolution::Errored { detail } => detail.clone(),
             crate::outcome::ToolCallResolution::Denied { .. } => continue,
         };
-        let lower = result.to_ascii_lowercase();
-        if !(lower.contains("not found")
-            || lower.contains("no such file or directory")
-            || lower.contains("is not recognized"))
-        {
+        let executable = command
+            .trim_start()
+            .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
+            .next()?;
+        if !matches!(
+            executable,
+            "go" | "rustc"
+                | "cargo"
+                | "node"
+                | "npm"
+                | "pnpm"
+                | "python"
+                | "python3"
+                | "swift"
+                | "make"
+        ) {
             continue;
         }
-        let Some(executable) = command
-            .split(|c: char| c.is_whitespace() || c == '"' || c == '\'')
-            .find(|word| {
-                matches!(
-                    *word,
-                    "go" | "rustc"
-                        | "cargo"
-                        | "node"
-                        | "npm"
-                        | "pnpm"
-                        | "python"
-                        | "python3"
-                        | "swift"
-                        | "make"
-                )
-            })
-        else {
+        let lower = result.to_ascii_lowercase();
+        let says_missing = lower.contains(&format!("{executable}: command not found"))
+            || lower.contains(&format!("{executable}: not found"))
+            || lower.contains(&format!("'{executable}' is not recognized"))
+            || lower.contains(&format!("\"{executable}\" is not recognized"));
+        if !says_missing {
             continue;
-        };
-        return Some(executable.to_string());
+        }
+        let found = std::env::split_paths(path).any(|dir| dir.join(executable).is_file());
+        if found {
+            continue;
+        }
+        return Some((executable.to_string(), command, result, path.to_string()));
     }
     None
 }
@@ -5245,9 +5272,35 @@ mod unproductive_exploration_tests {
             serde_json::json!({"stderr":"go: command not found"}),
         );
         assert_eq!(
-            missing_toolchain_dependency(&[step(vec![command])]).as_deref(),
-            Some("go")
+            missing_toolchain_dependency_on_path(&[step(vec![command])], "")
+                .map(|(dep, _, _, _)| dep),
+            Some("go".to_string())
         );
+    }
+
+    #[test]
+    fn unrelated_cargo_failure_is_not_classified_as_missing_cargo() {
+        let command = call(
+            "shell.run",
+            serde_json::json!({"command":"cargo build"}),
+            serde_json::json!({"exit_code":101,"stderr":"error: package `missing-crate` not found"}),
+        );
+        assert!(missing_toolchain_dependency_on_path(&[step(vec![command])], "/usr/bin").is_none());
+    }
+
+    #[test]
+    fn cargo_not_found_detail_retains_command_output_and_path() {
+        let command = call(
+            "shell.run",
+            serde_json::json!({"command":"cargo build"}),
+            serde_json::json!({"stderr":"sh: cargo: command not found"}),
+        );
+        let (dependency, failed_command, output, path) =
+            missing_toolchain_dependency_on_path(&[step(vec![command])], "").unwrap();
+        assert_eq!(dependency, "cargo");
+        assert_eq!(failed_command, "cargo build");
+        assert!(output.contains("command not found"));
+        assert!(path.is_empty());
     }
 }
 
