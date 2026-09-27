@@ -2510,8 +2510,8 @@ fn plain_tool_action(tool_name: &str, input: &serde_json::Value) -> String {
 /// (`crates/tm-types/src/error.rs`), which is deliberately terse for logs/`Debug`-adjacent
 /// contexts (`"io: {0}"`, `"parse: {0}"`, `"invariant violated: {0}"`, ...) rather than written
 /// for a person — this maps each known prefix to a short plain phrase instead of surfacing that
-/// text verbatim. Parse and invariant errors retain a bounded diagnostic plus a recovery step;
-/// other recognized errors use a generic phrase. An unrecognized shape (no known prefix — a
+/// text verbatim. Correctable parse and argument errors retain a bounded diagnostic and direct
+/// the agent to fix the input; other recognized errors use a generic phrase. An unrecognized shape (no known prefix — a
 /// provider-specific message, say) also falls back to a generic phrase rather than guessing.
 fn plain_tool_error(detail: &str) -> String {
     const MAX_DIAGNOSTIC_CHARS: usize = 120;
@@ -2557,13 +2557,8 @@ fn plain_tool_error(detail: &str) -> String {
         );
     } else if detail.starts_with("parse: ") {
         let diagnostic = concise_diagnostic("parse: ");
-        if diagnostic.contains("unknown variant `verification`") {
-            return format!(
-                "error: couldn't parse the result ({diagnostic}); valid result kinds are command_output, patch, file, report, index, benchmark, transcript, and workspace_snapshot. Use report for verification results, then retry artifact.store with kind `report`"
-            );
-        }
         return format!(
-            "error: couldn't parse the result ({diagnostic}); use one of the supported result kinds: command_output, patch, file, report, verification, index, benchmark, transcript, or workspace_snapshot. Retry with a supported kind, and check the input if it fails again"
+            "error: couldn't parse the input ({diagnostic}); correct the invalid value using the expected values shown, then retry with the corrected input"
         );
     } else if detail.starts_with("invariant violated: ") {
         if detail.contains("Submitting a ticket needs at least one piece of evidence")
@@ -2572,7 +2567,7 @@ fn plain_tool_error(detail: &str) -> String {
             return "error: submission needs evidence; store a report or other evidence artifact, then cite the artifact ID returned by artifact.store in ticket.submit".to_owned();
         }
         return format!(
-            "error: operation state was inconsistent ({}); retry once, then report this failure if it persists",
+            "error: operation state or arguments were inconsistent ({}); inspect and correct the offending input or state before retrying",
             concise_diagnostic("invariant violated: ")
         );
     } else if detail.starts_with("authority denied: ") {
@@ -4219,22 +4214,20 @@ mod tests {
     fn plain_tool_error_keeps_parse_diagnostic_and_recovery_step() {
         let rendered = plain_tool_error("parse: unknown variant `test-output`, expected `patch`");
         assert!(rendered.contains("unknown variant `test-output`, expected `patch`"));
-        assert!(rendered.contains("supported result kinds"));
-        assert!(rendered.contains("command_output"));
-        assert!(rendered.contains("workspace_snapshot"));
-        assert!(rendered.contains("Retry with a supported kind"));
+        assert!(rendered.contains("expected `patch`"));
+        assert!(rendered.contains("correct the invalid value"));
         assert!(!rendered.contains("parse:"));
     }
 
     #[test]
-    fn unsupported_verification_result_kind_maps_to_report() {
+    fn unsupported_verification_result_kind_shows_expected_values_and_corrective_guidance() {
         let rendered = plain_tool_error(
             "parse: unknown variant `verification`, expected one of `command_output`, `patch`, `file`, `report`, `index`, `benchmark`, `transcript`, `workspace_snapshot`",
         );
-        assert!(rendered.contains("valid result kinds are command_output, patch, file, report"));
-        assert!(rendered.contains("Use report for verification results"));
-        assert!(rendered.contains("kind `report`"));
-        assert!(!rendered.contains("retry the operation"));
+        assert!(rendered.contains("unknown variant `verification`"));
+        assert!(rendered.contains("expected one of `command_output`, `patch`, `file`, `report`"));
+        assert!(rendered.contains("correct the invalid value"));
+        assert!(!rendered.contains("retry the same"));
     }
 
     #[test]
@@ -4243,7 +4236,7 @@ mod tests {
             "invariant violated: submission requires at least one evidence artifact",
         );
         assert!(rendered.contains("submission requires at least one evidence artifact"));
-        assert!(rendered.contains("report this failure if it persists"));
+        assert!(rendered.contains("correct the offending input or state"));
         assert!(!rendered.contains("invariant violated:"));
     }
 
@@ -4401,7 +4394,8 @@ mod tests {
         ));
         assert!(bad_result.contains("Tried to save a result"));
         assert!(!bad_result.contains("Saved a result"));
-        assert!(bad_result.contains("Retry with a supported kind"));
+        assert!(bad_result.contains("expected `report`"));
+        assert!(bad_result.contains("correct the invalid value"));
 
         let missing_evidence = format_tool_call(&failed_call(
             "ticket.submit",

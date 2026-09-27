@@ -277,9 +277,10 @@ Env override `TM_EMBEDDER=hash|potion` (whitespace/case-insensitive), download o
 Plain `tm run` progress reports include the attempted tool action; failed result saves and ticket
 submissions are labeled as attempts rather than successes until persistence succeeds. Consecutive
 identical reads of the same file are counted together so repeated context reads are visible without
-hiding different files or ranges. Parse failures also show a short diagnostic and suggest retrying the operation (checking its input if it fails again);
-inconsistent-state failures show their short diagnostic and suggest one retry, then reporting
-the failure if it persists. Detailed errors remain in logs.
+hiding different files or ranges. Parse failures also show a short diagnostic, preserve expected
+enum values, and direct the agent to correct the invalid input before retrying; inconsistent-state
+failures show their short diagnostic and direct the agent to inspect and correct the offending
+input or state before retrying. Detailed errors remain in logs.
 
 Agent attempts compact oversized tool results in provider context while retaining their full
 recorded output. The loop warns as a finite token budget approaches (default 80%; configure with
