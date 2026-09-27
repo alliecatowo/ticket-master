@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 123.177,
+      "tokens": 194694,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run should turn repeated reads and searches of the same files into one focused implementation step instead of restarting investigation. It spent three attempts without editing or submitting evidence, and the messages reported 157,137, 176,829, and 194,694 tokens. The recovery text told the user to continue session S-3 with `tm --resume S-3`, but the final instruction instead said to run `tm ticket retry T-1`; state-aware guidance should select one valid next action and explain it. The independent hidden regression test failed because `os.Args[2]` remained `--`."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 119.299,
+      "tokens": 20950,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly traced the mutation to the append used to add the `--` sentinel, copied the argument slice before appending, and ran `go test ./...`; the independently applied regression test passed. It could be even more surgical by using the three-index capacity-limiting slice idiom rather than allocating and copying all of `finalArgs`, and by adding its own explicit regression test before the hidden test was applied."
+    }
+  ]
+}

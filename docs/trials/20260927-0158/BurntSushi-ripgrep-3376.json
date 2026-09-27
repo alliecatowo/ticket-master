@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 144.511,
+      "tokens": 658678,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm located crates/ignore/src/dir.rs and crates/ignore/src/walk.rs quickly, but each attempt used its 10-step allowance on overlapping reads and searches without changing the repository. Its messages accurately said that no patch or evidence was submitted, but the recovery text told the user to run `tm --resume S-1` while also saying an automatic retry was scheduled; subsequent attempts repeated this with stale session IDs before the final message switched to `tm ticket retry T-1`. A user would not know whether to wait, resume a session, or retry the ticket. The run exhausted retries without a fix and consumed 658,678 reported tokens in 144.511 seconds. A focused next-step nudge that carries established findings into retries, plus recovery wording that reflects the actual retry state, would make this substantially better."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 106.008,
+      "tokens": 64728,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 3,
+        "cost_time": 3
+      },
+      "better": "OpenCode made a clear investigation plan, reached the ignore walker implementation, and narrated its reasoning in understandable terms. Its initial regression test used absolute roots and failed; it then adjusted to relative roots, encountered another failed test, removed the test, and honestly finished with no code changes while reporting that the focused test failed and the full suite was not run. It would be better if it reproduced the exact CLI scenario first and kept the test harness's path conventions in view before drawing conclusions about root normalization."
+    }
+  ]
+}

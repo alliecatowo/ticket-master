@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 78,
+      "tokens": 319195,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm created T-1 and found src/requests/models.py quickly, but each attempt repeated essentially the same reads and search; all three stopped without a code change, and the PR regression test failed afterward. The output was candid about no patch and gave `tm --resume S-3`, but users could be confused by that resume instruction appearing alongside separate scheduled-retry/final retry messages and by the saved-session workflow after the ticket escalated. Stop repeated inspection earlier or use the retained context to direct one focused edit, and make the final recovery command match the ticket's actual state. Across three attempts the run used 319,195 tokens in 78 seconds."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 63,
+      "tokens": 32013,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly located the stream check, stated a scoped plan, made the implementation change, and added a focused regression test; it accurately disclosed that pytest was unavailable in the prepared environment and did not claim test success. It would be better to discover the repository's test dependency group or requirements-dev.txt before declaring verification complete, then run the regression test itself. After installing those project test dependencies, the hidden PR test passed."
+    }
+  ]
+}
