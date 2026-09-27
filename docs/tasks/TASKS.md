@@ -1848,7 +1848,7 @@ is based on.
   acceptance: Replaying the Click #3822 pattern detects repeated investigation of `src/click/types.py` well before 52 tool calls and 1.6M recorded tokens, prompts the agent to edit or state a blocker, and leaves productive focused rereads unaffected.
   test: `cargo test -p tm-agent repeated_exploration_nudge && cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:12-91` (three dispatches repeatedly inspect `src/click/types.py` without a change); `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:94` (run ends without patch or evidence); `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:232-240` (stats record 1,634,307 tokens and 52 tool calls)
-- [ ] **t20260926-1702-pallets-click-3822-honest-escalated-edit-message** — Avoid claiming retained edits when an escalated no-submit run left none
+- [x] **t20260926-1702-pallets-click-3822-honest-escalated-edit-message** — Avoid claiming retained edits when an escalated no-submit run left none (landed babf45f)
   model: sonnet · severity: medium · builds Rust: yes · area: cli/ux · deps: none
   files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
   change: Make the `Escalated if did_not_submit` message branch on `workspace_edits_retained`, as the Ready/Blocked branch already does. When false, explain that no working-tree edits were retained and point to the saved attempt and the appropriate retry command; only tell the user to inspect/resume retained edits when edits actually exist.
