@@ -109,6 +109,9 @@ pub struct PromptEnvironment {
 /// How any tm agent should go about the work, shared by [`chat_fragments`] and
 /// [`worker_fragments`].
 const HOW_TO_WORK: &str = "# How to work
+- Reuse file contents already present in this conversation when the file has not changed. Before \\
+  rereading, identify the specific information you still need. Read again only if the file changed, \\
+  the needed range was omitted, or a tool requires a fresh hash.
 - Understand before you change: read the relevant files and search the codebase (search.hybrid \
 for concepts, search.exact or search.regex for known names) before editing.
 - Make changes with the edit.* tools, keeping edits minimal and in the style of the surrounding \
@@ -567,5 +570,24 @@ mod tests {
             );
             assert!(prompt.contains("Never compute a hash yourself"), "{prompt}");
         }
+    }
+
+    #[test]
+    fn worker_prompt_reuses_unchanged_file_context_and_names_valid_reread_reasons() {
+        let env = PromptEnvironment {
+            root: "/p".to_string(),
+            platform: "macos".to_string(),
+            date: "2026-09-23".to_string(),
+            scope: String::new(),
+            attached_ticket: None,
+        };
+        let prompt = render_system_prompt(&worker_fragments(&env));
+
+        assert!(prompt.contains("Reuse file contents already present in this conversation"));
+        assert!(prompt.contains("when the file has not changed"));
+        assert!(prompt.contains("identify the specific information you still need"));
+        assert!(prompt.contains("the file changed"));
+        assert!(prompt.contains("the needed range was omitted"));
+        assert!(prompt.contains("a tool requires a fresh hash"));
     }
 }
