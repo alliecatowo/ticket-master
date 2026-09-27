@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 101.808,
+      "tokens": 357389,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm correctly surfaced that no patch or evidence was submitted and named a retry command, but spent 19 tool calls and about 357k reported tokens on repeated reads/searches before its 10-step no-progress guard stopped the run; it produced no visible scoped plan, code change, or test attempt. Improve the guard's continuation behavior so a stalled investigation gets one tightly guided implementation turn based on the already-collected findings before the ticket escalates, and make the retry guidance distinguish a useful continuation from blindly repeating the same investigation."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 64.049,
+      "tokens": 256755,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode found the exact append site, changed it to use a separate backing array, added a regression test, and ran the full suite successfully; after the merged PR's test file was checked out over the worktree, `go test ./...` also passed mechanically. It could be more context-efficient by falling back immediately to exact local search after its initial index lookup reported no index, and its added test could exercise the actual os.Args-facing completion path rather than only checking the input slice."
+    }
+  ]
+}

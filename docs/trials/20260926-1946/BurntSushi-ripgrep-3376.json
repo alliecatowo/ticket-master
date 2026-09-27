@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 97.278,
+      "tokens": 88485,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 1
+      },
+      "better": "tm made two relevant searches and read crates/ignore/src/walk.rs, but did not reach or edit the ignore matcher implementation before the provider returned HTTP 429 and the run escalated. The 88,485-token recorded usage is disproportionate to the seven tool calls and no patch or verification was produced. The failure message ended by directing the user to `tm ticket retry T-1`; a bounded foreground backoff with visible wait/retry status would avoid spending another run on the same rate-limited attempt. A concise pre-edit plan and a final message that states no code changed and no tests ran would make this easier to assess. The hidden regression test passed mechanically after its test source was checked out, independent of the agent's implementation."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 41.578,
+      "tokens": 20006,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 2,
+        "plan_quality": 1,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "OpenCode found the CLI's multiple-root path construction and the walker/ignore integration, then accurately stated that it had not changed code. However, after receiving a specific issue report as the task, it asked whether the user wanted a fix or clarification and ended without editing or testing. It also attempted semantic search despite the missing index, then fell back to exact search. Proceeding with the plainly implied bug fix, presenting a scoped plan, and using the exact-search fallback immediately would make the run materially more useful. The hidden regression test passed mechanically after its test source was checked out, independent of the agent's implementation."
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": ["tests/test_requests.py"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 113.48,
+      "tokens": 242490,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm found the right function quickly, but repeatedly read and searched the same models.py region before the provider failed with HTTP 429, consuming 242,490 reported tokens without producing a change or running tests. The terminal message called the failure 'provider unavailable' and suggested retrying, which obscures that this was explicitly a rate-limit response and that waiting briefly may be needed; a bounded transient retry honoring Retry-After, plus an actionable wait/retry message, would make the run more recoverable."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 69.97,
+      "tokens": 34541,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly located prepare_body, changed stream detection back to the dynamic __iter__ check, and iterated on its regression test after seeing test failures; its final targeted run passed. It could be more context-efficient by avoiding an initial full-repository glob, and should verify using the project venv consistently rather than first invoking a globally installed pytest that imported the other arm's checkout."
+    }
+  ],
+  "verification": {
+    "command": "PYTHONPATH=src .venv/bin/pytest -q tests/test_requests.py -k 'iterable or stream'",
+    "tm": "FAIL: 1 failed, 6 passed, 332 deselected; exit 1",
+    "opencode": "PASS: 7 passed, 332 deselected; exit 0"
+  },
+  "notes": [
+    "The requested pip install -e '.[test]' completed but pip warned that requests 2.34.0 does not provide the 'test' extra. Both clones then received the test dependency group from pyproject.toml before agents started.",
+    "The tm run failed on a provider HTTP 429 before making edits or running tests; hidden-test verification therefore failed mechanically.",
+    "OpenCode's trial fixed the behavior; the independently checked-out merged-PR test file passed against that implementation.",
+    "OpenCode output JSON total token count was 34,541; its reported cost was $0.",
+    "Protocol deviation: the OpenCode prompt included the issue title and core report verbatim but the System Information JSON section was shortened during command construction, so the task text was not fully verbatim."
+  ]
+}

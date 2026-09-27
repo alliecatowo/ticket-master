@@ -1,0 +1,42 @@
+{
+  "issue": {
+    "url": "https://github.com/sindresorhus/ky/issues/878",
+    "title": "`onDownloadProgress` never emits `percent: 1` for empty response bodies"
+  },
+  "base_sha": "0bda554d448c1b57c17a5a18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 180.072,
+      "tokens": 608692,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 1
+      },
+      "better": "tm found the right body-stream code and the resulting implementation passes all 19 hidden stream tests, but the run spent 608,692 reported tokens repeatedly revisiting Ky.ts and body.ts. Its output then says the ticket failed because no patch or evidence was submitted and suggests retrying, despite a correct source diff being present; the generic 'something went wrong' event summary makes it unclear whether the work is usable. The full pnpm test command failed in XO on an unrelated test/http-error.ts lint error. A clearer progress plan, bounded investigation context, and a final state that checks and reports existing workspace changes and verification before declaring failure would make this run far more efficient and understandable."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 68.692,
+      "tokens": 27508,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped plan, made the minimal flush change, added a regression check, corrected an initially hanging test fixture after observing a timeout, and completed quickly. The first targeted run failed, and its final summary accurately reported the subsequent 18-test pass; independent hidden stream tests then passed 19/19. The full pnpm test command failed in XO on the same unrelated test/http-error.ts lint error. It could improve by checking the canonical test fixtures and by calling out both the initial failed test and the broader suite's lint failure in the final verification summary."
+    }
+  ]
+}
