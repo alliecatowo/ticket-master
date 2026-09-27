@@ -775,6 +775,11 @@ pub async fn run_ticket(
         retain_progress(&mut progress, &summary);
     }
     if let Some(ticket_state) = terminal_ticket.as_ref() {
+        if let Some(notice) =
+            attempt_failure_notice(ticket_state, failures_before, project.clock.now())
+        {
+            renderer.note(&notice);
+        }
         outcome = Some(run_outcome(
             ticket_state,
             failures_before,
@@ -862,6 +867,32 @@ pub async fn run_ticket(
             None => Ok(()),
         },
     }
+}
+
+/// Report a just-finished failed attempt immediately, including whether the scheduler has
+/// scheduled another attempt. The final `run_outcome` remains the authoritative end-of-run summary.
+fn attempt_failure_notice(
+    ticket: &tm_core::Ticket,
+    failures_before: usize,
+    now: tm_types::Timestamp,
+) -> Option<String> {
+    let failure = ticket.failures.get(failures_before..)?.last()?;
+    let attempt_count = ticket.attempts;
+    let state = state_label(ticket.state);
+    let retry_scheduled = ticket.state == tm_core::TicketState::Ready
+        && matches!(
+            tm_scheduler::retry::decide_retry(ticket, failure.class, now).outcome,
+            tm_scheduler::RetryOutcome::Retry { .. }
+        );
+    let next = if retry_scheduled {
+        "A retry is scheduled."
+    } else {
+        "No retry is scheduled."
+    };
+    Some(format!(
+        "Attempt {attempt_count} failed: {} Ticket state: {state}. {next}",
+        failure.detail
+    ))
 }
 
 /// Turn a lease-race conflict into a useful recovery instruction while preserving other errors.
@@ -1943,6 +1974,11 @@ mod tests {
         };
 
         let result = run_outcome(&ticket, 0, false, &[], None);
+        let notice = attempt_failure_notice(&ticket, 0, now).expect("failure notice");
+        assert!(notice.contains("Attempt 1 failed"));
+        assert!(notice.contains("model ended turn without submitting"));
+        assert!(notice.contains("Ticket state: ready"));
+        assert!(notice.contains("A retry is scheduled"));
         assert!(result.is_err());
         if let Err(tm_types::TmError::TurnFailed(msg)) = result {
             // Should not contain debug-printed enum variant
