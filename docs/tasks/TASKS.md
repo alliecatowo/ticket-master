@@ -1777,7 +1777,7 @@ is based on.
   acceptance: An end-to-end ticket run asserts the JSON `tokens_total` equals the independently summed matching `usage.recorded` events, including multiple model turns.
   test: `cargo test -p tm-cli stats_by_ticket`
   evidence: `/tmp/tm-trials/20260926-1342/spf13-cobra-2257/tm.log` — `tm stats --json --ticket T-1` reported `tokens_total: 2378178`, while the captured `tm events --json` usage records for T-1 showed `tokens: 76192` and `tokens: 76853` (153045 total).
-- [ ] **t20260926-1521-BurntSushi-ripgrep-3376-toolchain-environment-diagnostics** — Make missing-toolchain failures distinguish absent executables from agent command-environment problems
+- [x] **t20260926-1521-BurntSushi-ripgrep-3376-toolchain-environment-diagnostics** — Make missing-toolchain failures distinguish absent executables from agent command-environment problems (landed 40a3036)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: When `missing_toolchain_dependency` identifies “not found” in shell/build/test output, retain the failed command and its output and check executable resolution in the same command environment. Report an absent executable separately from a PATH/environment mismatch, with a recovery step appropriate to the actual condition.
