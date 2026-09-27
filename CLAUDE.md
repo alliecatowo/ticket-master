@@ -507,7 +507,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    available on the agent process `PATH`, the failure explains the environment/PATH mismatch and
    how to correct it instead of recommending installation. Both diagnoses include the failed
    command, its output, and the agent process `PATH`, so an unrelated build error is not mistaken
-   for an unavailable tool.
+   for an unavailable tool. Within that run, a missing-toolchain verification failure gets one
+   bounded continuation: the next model turn receives the retained files, findings, and exact
+   failed command/output, with guidance to avoid broad repeated investigation; the run's existing
+   step and token limits still apply.
   Ticketed runs also stop after 10 consecutive steps without a successful edit, commit, or stored
   evidence artifact. This bounds repeated investigations before the full step limit; the retained
   failure detail summarizes explored targets and the latest finding, says no patch or evidence was

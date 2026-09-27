@@ -1299,6 +1299,7 @@ impl AgentLoop {
         // even across a suspend/resume boundary, without any extra state of its own.
         let mut nudges_sent: u32 = steps.iter().filter(|s| s.tool_calls.is_empty()).count() as u32;
         let mut exploration_nudge_sent = false;
+        let mut toolchain_retry_context_sent = false;
 
         loop {
             if steps.len() as u32 >= self.max_steps {
@@ -1463,6 +1464,9 @@ impl AgentLoop {
             let remaining = self.max_steps.saturating_sub(steps.len() as u32);
             if task.conversation.is_none() && !steps.is_empty() && remaining <= 3 {
                 system.push_str("\n\nThis attempt is close to its step limit. Prioritize finishing verification and calling ticket.submit with the available completion evidence now. Do not repeat completed investigation. If submission fails, use the error to make one focused correction before the limit.");
+            }
+            if toolchain_retry_context_sent {
+                system.push_str("\n\nA verification command failed because its required toolchain executable was unavailable. Resume from the files and findings already present in this conversation; do not repeat broad searches or reread those files without a specific unresolved question. The failed verification and its exact command/output are already recorded above. Make the smallest useful correction or use a verification path available in this environment, then submit with evidence. This is a single bounded continuation; the normal step and token budgets still apply.");
             }
             let request = CompletionRequest {
                 system: Some(system),
@@ -1818,10 +1822,22 @@ impl AgentLoop {
                     ),
                 });
             }
+            let latest_step = steps.last().into_iter().cloned().collect::<Vec<_>>();
             if let Some((dependency, command, output, path, available)) =
-                missing_toolchain_dependency(&steps)
+                missing_toolchain_dependency(&latest_step)
             {
                 let diagnosis = missing_toolchain_diagnosis(&dependency, available);
+                if !toolchain_retry_context_sent
+                    && (steps.len() as u32) < self.max_steps
+                    && first_exhausted_dimension(&effective_budget).is_none()
+                {
+                    // Keep the failed verification and prior file/search results in `steps`, so
+                    // the rebuilt conversation gives the next model turn the exact diagnosis and
+                    // investigation context. Only continue once; ordinary per-run step and token
+                    // accounting remains the hard bound on this recovery turn.
+                    toolchain_retry_context_sent = true;
+                    continue;
+                }
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
