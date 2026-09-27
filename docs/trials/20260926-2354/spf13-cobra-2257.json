@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 152.41,
+      "tokens": 537397,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "Ticket Master repeatedly inspected the same completion files and searched the same anchors without producing a patch; three attempts consumed 537,397 reported tokens and ended escalated. Its stop messages were candid about having no patch, but the suggested `tm --resume S-N` path conflicted with the final `tm ticket retry T-1` instruction and the automatic retries did not change strategy. The benchmark hidden-test checkout happened too early: the retry read the fix test file, so the failing mechanical result is not a clean blind comparison; after the run, restoring the base test and applying the PR test again still failed TestCompletionDoesNotMutateOsArgs (expected `x`, got `--`). A better run would bound context growth, switch from repeated inspection to a focused edit after the first no-progress stop, and provide one consistent recovery command."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 82.81,
+      "tokens": 20860,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode traced the completion argument flow, copied `finalArgs` before appending the temporary separator, added a regression test, ran `go test ./...` successfully, and accurately summarized the result. It initially tried unavailable workspace-index search from inherited environment guidance, then recovered with local searches. More efficient isolated tool configuration or a graceful missing-index fallback would avoid that detour; the implementation was verified against the PR test checkout after the run and passed `go test ./...`."
+    }
+  ]
+}

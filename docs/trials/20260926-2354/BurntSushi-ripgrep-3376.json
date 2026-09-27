@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 162.228,
+      "tokens": 235757,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm repeatedly inspected crates/ignore/src/walk.rs and crates/ignore/src/dir.rs, repeating overlapping shell ranges across three attempts and consuming 235,757 reported tokens without editing, running tests, or submitting evidence; it should detect the repeated investigation earlier and turn the retry into one concrete edit/test action. The end message first advised `tm --resume S-3`, then said the ticket was escalated with no retry scheduled and instructed `tm ticket retry T-1`, leaving the user to decide which recovery path works. The mechanical cargo test passed only after the required checkout of the fix PR's test file; that file is crates/ignore/src/dir.rs, which also contains the production implementation, so this checkout installs the upstream fix and the pass does not demonstrate that tm solved the issue."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 104.14,
+      "tokens": 34140,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode traced the matcher cache, made a focused change, added a two-root-order regression test, recovered from a Rust type error, and ran the targeted test successfully in 104 seconds. It could be more context-efficient by checking the fix PR's matching design and existing test conventions earlier, and should avoid adding its own test in walk.rs when the protocol later checks out dir.rs as the fix's test file. The mechanical cargo test passed after that checkout, but crates/ignore/src/dir.rs contains both the upstream production fix and its test, so the checkout itself supplied the implementation and the pass does not independently verify OpenCode's patch."
+    }
+  ]
+}

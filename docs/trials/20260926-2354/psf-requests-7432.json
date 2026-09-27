@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 111.679,
+      "tokens": 354474,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 2,
+        "cost_time": 1
+      },
+      "better": "tm found the right implementation file, but three attempts repeated nearly the same reads and searches, consumed 354,474 reported tokens, and ended without a patch or verification. The no-progress message says to resume a saved session, while the final run error separately says to run `tm ticket retry T-1`; a user would have to infer which recovery path is current and whether another attempt is already scheduled. A better run would make the first repeated inspection trigger a narrowly guided next action, cap/reduce repeated context, and give one final recovery instruction that agrees with the ticket state."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 100.417,
+      "tokens": 22131,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 3,
+        "plan_quality": 5,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a clear plan and identified a plausible minimal compatibility change with a regression test. Its search unexpectedly included the sibling `tm/` checkout and it applied the change there instead of in its own checkout; it then ran pytest through the system shim, which imported another trial's source tree, and accurately disclosed that the test result did not verify its edit. It would be better to constrain file discovery and patch paths to the current checkout, run tests through the clone's prepared virtual environment, and confirm the edited file and imported package paths before treating verification as complete."
+    }
+  ]
+}
