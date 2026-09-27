@@ -1763,7 +1763,7 @@ is based on.
   acceptance: A scripted run that first submits with an empty evidence list and then stores/cites an artifact ends with a summary explicitly stating the initial submit was recovered and the final ticket state is submitted; a final unsuccessful submit remains clearly reported as failed.
   test: `cargo test -p tm-cli dispatch`
   evidence: `/tmp/tm-trials/20260926-1342/sindresorhus-ky-878/tm.log:28-31` — “Submitted the ticket -> error: submission needs evidence…” followed by “Saved a result” and “Submitted the ticket”.
-- [ ] **t20260926-1342-cobra-reuse-read-context** — Reuse unchanged source reads during ticket runs
+- [~] **t20260926-1342-cobra-reuse-read-context** — Reuse unchanged source reads during ticket runs (needs another pass: the worker made no changes)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/prompt.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: Tell workers to rely on unchanged file contents already in the conversation, and reread only when a specific range was omitted, the file changed, or a tool requires a fresh hash; require identifying that missing detail before repeating a read.
