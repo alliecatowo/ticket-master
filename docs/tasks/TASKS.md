@@ -1661,7 +1661,7 @@ is based on.
   acceptance: A scripted empty-turn run prints an actionable message identifying that no repository change or evidence was submitted and gives a recovery step appropriate to the failure; it does not tell the user only that something went wrong or recommend repeating an unchanged no-progress run.
   test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
   evidence: `/tmp/tm-trials/20260926-1044/pallets-click-3822/tm.log` — `wall_seconds=324`; `tokens_in`: 732981; then `Failure: something went wrong: model ended turn without submitting. Run \`tm run T-1\` again to retry.`
-- [ ] **t20260926-1044-psf-requests-7432-stop-no-progress-runs** — Stop repeated no-progress agent runs with actionable recovery context
+- [x] **t20260926-1044-psf-requests-7432-stop-no-progress-runs** — Stop repeated no-progress agent runs with actionable recovery context (landed 0b49208)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: Detect repeated turns/tool work that make no repository or submitted-artifact progress, and stop before exhausting the full step budget; include a concise summary of the last useful actions and the missing submission in the failure detail.
