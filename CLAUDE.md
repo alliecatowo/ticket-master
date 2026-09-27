@@ -483,8 +483,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    recovery action;
    this is distinct from a test failure.
    Workers receive explicit finalization guidance near the step limit. If a final submission fails,
-   the failure names the submit error and step limit, retains the attempt's work and verification
-   results for review, and makes clear that the ticket was not submitted.
+    the failure names the submit error and step limit, retains the attempt's work and verification
+    results for review, and makes clear that the ticket was not submitted.
+   A step-limit failure without submission also summarizes retained edits and whether verification
+   produced a result, preserves the stop reason, and gives one bounded `tm ticket retry` command
+   with focused guidance instead of an unqualified rerun suggestion.
    Within one attempt, reopening the same source or history target three times (even with changed
     ranges or revisions) triggers one concise nudge to summarize existing findings and take a
     concrete next step; edits and verification reset the count, and a different targeted reread is

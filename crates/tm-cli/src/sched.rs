@@ -1127,10 +1127,13 @@ fn run_outcome(
         });
     }
     let failure = ticket.failures.get(failures_before..).and_then(<[_]>::last);
+    let step_limit = failure.is_some_and(|f| {
+        let detail = f.detail.to_ascii_lowercase();
+        detail.contains("step limit") && detail.contains("without submitting")
+    });
     let did_not_submit = failure.is_some_and(|f| {
-        f.detail
-            .to_ascii_lowercase()
-            .contains("ended turn without submitting")
+        let detail = f.detail.to_ascii_lowercase();
+        detail.contains("ended turn without submitting") || step_limit
     });
     let reason = failure
         .map(|f| {
@@ -1186,14 +1189,39 @@ fn run_outcome(
             };
             let verification = if progress.iter().any(|line| {
                 let line = line.to_ascii_lowercase();
+                (line.contains("cargo test")
+                    || line.contains("pytest")
+                    || line.contains("cargo check"))
+                    && (line.contains("passed")
+                        || line.contains("failed")
+                        || line.contains("exit code"))
+            }) {
+                "Verification ran and a result was retained, but it was not submitted as ticket evidence."
+            } else if progress.iter().any(|line| {
+                let line = line.to_ascii_lowercase();
                 line.contains("cargo test")
                     || line.contains("pytest")
                     || line.contains("cargo check")
             }) {
-                "Verification commands were attempted, but no result evidence was submitted."
+                "Verification was attempted, but no result was retained."
             } else {
-                "No tests were run and no verification evidence was produced."
+                "No verification was run."
             };
+            if step_limit {
+                let retained = if workspace_edits_retained {
+                    "Working-tree edits were retained."
+                } else {
+                    "No working-tree edits were retained; this attempt made no repository change."
+                };
+                let continuation = format!(
+                    "For one bounded continuation attempt, run `tm ticket retry {} --guidance \"Inspect the retained work, make only a focused correction if needed, run the relevant check, and submit evidence.\"`.",
+                    ticket.id
+                );
+                return Err(tm_types::TmError::TurnFailed(format!(
+                    "Ticket {}: work was not submitted. {} {} Stop reason: {} {}",
+                    ticket.id, retained, verification, reason, continuation
+                )));
+            }
             if workspace_edits_retained {
                 format!(
                     "Working-tree edits were retained. Check them with `git status` and `git diff`; {session_resume} Continue with a focused change, run checks, and submit evidence. {findings}"
@@ -1997,6 +2025,34 @@ mod tests {
 
         // A subsequent ordinary test failure keeps its existing retry advice.
         let retained = vec!["* Read src/click/types.py:1-120".to_string()];
+        ticket.failures[1].detail = "step limit (64) reached without submitting".to_string();
+        let step_limit_progress = vec![
+            "* Edited src/click/types.py".to_string(),
+            "* Ran `pytest tests/test_types.py` (passed)".to_string(),
+        ];
+        let step_limit = run_outcome(
+            &ticket,
+            1,
+            true,
+            &step_limit_progress,
+            Some("S-4".to_string()),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(step_limit.contains("work was not submitted"));
+        assert!(step_limit.contains("Working-tree edits were retained"));
+        assert!(step_limit.contains("Verification ran"));
+        assert!(step_limit.contains("step limit (64) reached without submitting"));
+        assert!(step_limit.contains("tm ticket retry T-1 --guidance"));
+        assert!(!step_limit.contains("Run `tm run T-1` again"));
+
+        let no_retained_step_limit = run_outcome(&ticket, 1, false, &[], Some("S-4".to_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(no_retained_step_limit.contains("No working-tree edits were retained"));
+        assert!(no_retained_step_limit.contains("No verification was run"));
+
+        ticket.failures[1].detail = "model ended turn without submitting".to_string();
         let repeated_no_submit = run_outcome(&ticket, 1, true, &retained, Some("S-4".to_string()))
             .unwrap_err()
             .to_string();
@@ -2011,7 +2067,7 @@ mod tests {
         assert!(clean_no_submit.contains("No working-tree edits were retained"));
         assert!(clean_no_submit.contains("no repository change"));
         assert!(clean_no_submit.contains("tm --resume S-4"));
-        assert!(clean_no_submit.contains("No tests were run"));
+        assert!(clean_no_submit.contains("No verification was run"));
         assert!(clean_no_submit.contains("src/click/types.py"));
         assert!(!clean_no_submit.contains("run `tm run T-1` again"));
 
