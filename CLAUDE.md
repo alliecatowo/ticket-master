@@ -276,7 +276,10 @@ Env override `TM_EMBEDDER=hash|potion` (whitespace/case-insensitive), download o
 
 Plain `tm run` progress reports include the attempted tool action; failed result saves and ticket
 submissions are labeled as attempts rather than successes until persistence succeeds. Repeated reads
-of the same file, including whole-file and overlapping range reads, share a repetition count; older
+of the same file, including whole-file and overlapping range reads, share a repetition count; when
+a submission first fails for missing evidence but later succeeds in the same run after evidence is
+stored, the final run summary explicitly says that the initial error was recovered and that the
+ticket is submitted. A final unsuccessful submission remains reported as failed. Older
 superseded read results become short markers in provider context instead of being resent. Parse
 failures also show a short diagnostic, preserve expected
 enum values, and direct the agent to correct the invalid input before retrying; inconsistent-state

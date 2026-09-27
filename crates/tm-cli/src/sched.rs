@@ -1146,7 +1146,7 @@ fn run_outcome(
     session: Option<String>,
 ) -> tm_types::Result<String> {
     if worktree_run_reached_success(ticket.state) {
-        return Ok(if ticket.state == tm_core::TicketState::Submitted {
+        let mut message = if ticket.state == tm_core::TicketState::Submitted {
             format!(
                 "Ticket {id} submitted its work. Review it (tm ticket show {id}), then \
                  `tm ticket accept {id}` or `tm ticket reject {id} --reason \"...\"`.",
@@ -1155,7 +1155,15 @@ fn run_outcome(
         } else {
             let state = state_label(ticket.state);
             format!("Ticket {} submitted its work ({state}).", ticket.id)
-        });
+        };
+        if ticket.state == tm_core::TicketState::Submitted && recovered_submit_error(progress) {
+            message.push_str(
+                " The initial ticket submission failed because evidence was missing, but the \
+                 agent stored evidence and successfully submitted afterward; the submission error \
+                 was recovered and the final ticket state is submitted.",
+            );
+        }
+        return Ok(message);
     }
     let failure = ticket.failures.get(failures_before..).and_then(<[_]>::last);
     let step_limit = failure.is_some_and(|f| {
@@ -1356,6 +1364,30 @@ fn run_outcome(
         message
     };
     Err(tm_types::TmError::TurnFailed(message))
+}
+
+/// Whether live progress records a failed ticket submission followed by a successful retry.
+/// `format_step` preserves tool outcomes as plain-language lines, allowing the final run summary
+/// to connect the earlier failure with the eventual submitted state without hiding either event.
+fn recovered_submit_error(progress: &[String]) -> bool {
+    let mut missing_evidence_submit_failed = false;
+    let mut evidence_stored_after_failure = false;
+    for line in progress {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("tried to submit the ticket")
+            && (lower.contains("evidence") || lower.contains("artifact"))
+            && (lower.contains("error") || lower.contains("needs") || lower.contains("requires"))
+        {
+            missing_evidence_submit_failed = true;
+        } else if missing_evidence_submit_failed
+            && (lower.contains("saved a result") || lower.contains("stored evidence"))
+        {
+            evidence_stored_after_failure = true;
+        } else if evidence_stored_after_failure && lower.contains("submitted the ticket") {
+            return true;
+        }
+    }
+    false
 }
 
 /// Keep a small, deduplicated trail of visible actions for the final no-submit explanation.
@@ -1595,6 +1627,21 @@ mod tests {
         let summary = action_to_summary(&action);
         assert_eq!(summary.kind, "MarkReady");
         assert_eq!(summary.target, "T-1");
+    }
+
+    #[test]
+    fn recovered_submit_error_requires_evidence_storage_and_later_submission() {
+        let recovered = vec![
+            "  * Tried to submit the ticket -> submission needs evidence".to_string(),
+            "  * Saved a result".to_string(),
+            "  * Submitted the ticket".to_string(),
+        ];
+        assert!(recovered_submit_error(&recovered));
+
+        let still_failed = vec![recovered[0].clone()];
+        assert!(!recovered_submit_error(&still_failed));
+        let no_evidence_saved = vec![recovered[0].clone(), recovered[2].clone()];
+        assert!(!recovered_submit_error(&no_evidence_saved));
     }
 
     #[test]
