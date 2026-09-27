@@ -1855,7 +1855,7 @@ is based on.
   acceptance: An escalated no-submit outcome with `workspace_edits_retained = false` never claims edits remain, while an outcome with retained edits still gives the inspect-and-retry guidance; add regression coverage for both.
   test: `cargo test -p tm-cli run_outcome_escalated_state_plain_message && cargo test -p tm-cli run_outcome_`
   evidence: `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:94` (failure without a patch); `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:114` (message says working-tree edits were retained and directs `git status`/`git diff`); `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs:1171-1175` (escalated branch omits the `workspace_edits_retained` check that exists in the Ready/Blocked branch)
-- [ ] **t20260926-1702-psf-requests-7432-align-submit-evidence-prompt** — Align worker instructions with ticket submission evidence requirements
+- [x] **t20260926-1702-psf-requests-7432-align-submit-evidence-prompt** — Align worker instructions with ticket submission evidence requirements (landed 58d4b2e)
   model: sonnet · severity: medium · builds Rust: yes · area: agent/prompt · deps: none
   files: `crates/tm-agent/src/prompt.rs`
   change: Update the ticketed-worker finishing instructions so they do not tell agents an empty evidence list is acceptable when ticket.submit requires evidence. Explain how to store a concise verification/result artifact and cite its returned ID in ticket.submit; keep the guidance accurate for blocked work as well.
