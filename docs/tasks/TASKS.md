@@ -1704,7 +1704,7 @@ is based on.
   acceptance: On a reproduction where the model repeatedly reads `src/click/types.py` then stops without submitting, the run avoids re-sending identical file content, reports actionable Path-focused progress, and ends with a concise saved-session/resume message that clearly states no patch and no tests were produced; ordinary successful runs continue to submit evidence.
   test: `cargo test -p tm-cli run_outcome`
   evidence: `/tmp/tm-trials/20260926-1223/pallets-click-3822/tm.log:19-42` (repeated reads of `src/click/types.py`, followed by “no patch or evidence was submitted” / “something went wrong: model ended turn without submitting”); `/tmp/tm-trials/20260926-1223/pallets-click-3822/tm.log:131-149` (575981 total tokens, 222 recorded seconds, 21 tool calls)
-- [ ] **t20260926-1223-psf-requests-7432-bound-redundant-context-loops** — Stop repetitive context exploration before a ticket burns excessive time and tokens
+- [x] **t20260926-1223-psf-requests-7432-bound-redundant-context-loops** — Stop repetitive context exploration before a ticket burns excessive time and tokens (landed ecb013f)
   model: sonnet · severity: high · builds Rust: yes · area: agent
   deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
