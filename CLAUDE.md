@@ -292,6 +292,11 @@ recorded output. The loop warns as a finite token budget approaches (default 80%
 `TM_AGENT_TOKEN_WARNING_PERCENT`) and hands off before issuing a call whose projected context
 would exceed the token budget.
 
+Ticketed runs also attribute source paths named in search queries and inspection commands to the
+source itself. Repeated reads/searches of that source across different tools or ranges trigger the
+same retained-findings nudge and cumulative exploration bound; edits and verification reset the
+bound, so focused rereads after productive work remain available.
+
 Every build/test/clippy call in these tasks is already capped at `-j 2` — this is an 8GB Mac,
 concurrent full-workspace compiles have caused real disk-space incidents. If you're driving
 several agents/worktrees at once, don't override that cap.

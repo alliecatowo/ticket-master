@@ -2346,6 +2346,17 @@ fn exploration_target(call: &ToolCallRecord) -> Option<String> {
         // ranges (or alternates read tools) without adding a finding.
         return Some(format!("source {path}"));
     }
+    // Search tools commonly return to a file through a different query, and shell inspections
+    // may mention that file in a command. Attribute those calls to the source itself when the
+    // path is explicit, rather than treating every query/command as an unrelated target.
+    let text = call
+        .input
+        .get("query")
+        .or_else(|| call.input.get("command"))
+        .and_then(serde_json::Value::as_str);
+    if let Some(path) = text.and_then(source_path_in_text) {
+        return Some(format!("source {path}"));
+    }
     let target_key = if matches!(name, "history.why" | "git.diff" | "git.log") {
         "path"
     } else {
@@ -2363,6 +2374,23 @@ fn exploration_target(call: &ToolCallRecord) -> Option<String> {
                 .and_then(serde_json::Value::as_str)
         })?;
     Some(format!("{name} {target}"))
+}
+
+/// Find a source-like path embedded in a query or inspection command. This deliberately requires
+/// a path separator and a source extension, avoiding accidental attribution of ordinary words.
+fn source_path_in_text(text: &str) -> Option<&str> {
+    text.split(|c: char| {
+        c.is_whitespace() || matches!(c, '\"' | '\'' | '`' | ',' | ':' | '(' | ')')
+    })
+    .map(|part| part.trim_matches(|c: char| matches!(c, '[' | ']' | '{' | '}')))
+    .find(|part| {
+        part.contains('/')
+            && [
+                ".py", ".rs", ".ts", ".tsx", ".js", ".jsx", ".go", ".java", ".swift", ".c", ".h",
+            ]
+            .iter()
+            .any(|extension| part.ends_with(extension))
+    })
 }
 
 /// Return the concrete missing executable when toolchain discovery output says the command could
@@ -5553,6 +5581,31 @@ mod unproductive_exploration_tests {
         assert!(nudge.contains("Retained finding:"));
         assert!(nudge.contains("existing findings"));
         assert!(nudge.contains("Use this retained result"));
+    }
+
+    #[test]
+    fn search_and_shell_inspections_accumulate_against_the_same_source() {
+        let steps = vec![step(vec![
+            call(
+                "fs.read",
+                serde_json::json!({"path":"src/click/types.py"}),
+                serde_json::json!({"text":"type definitions"}),
+            ),
+            call(
+                "search.exact",
+                serde_json::json!({"query":"src/click/types.py option parsing"}),
+                serde_json::json!({"matches":[]} ),
+            ),
+            call(
+                "shell.run",
+                serde_json::json!({"command":"python -m py_compile src/click/types.py"}),
+                serde_json::json!({"exit_code":0}),
+            ),
+        ])];
+        let nudge = repeated_exploration_nudge(&steps)
+            .expect("cross-tool returns to one source should trigger the nudge");
+        assert!(nudge.contains("src/click/types.py"));
+        assert_eq!(repeated_exploration_count(&steps), 3);
     }
 
     #[test]
