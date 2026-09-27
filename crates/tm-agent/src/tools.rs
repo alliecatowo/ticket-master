@@ -549,13 +549,26 @@ fn get_string_vec_or_empty(input: &Value, field: &str) -> Vec<String> {
 fn resolve_repo_path(root: &Path, path: &str) -> Result<PathBuf> {
     let requested = Path::new(path);
     let rel = if requested.is_absolute() {
-        requested.strip_prefix(root).map_err(|_| {
+        // Shell output commonly reports canonical absolute paths, while the project root may
+        // retain a symlinked or otherwise non-canonical spelling. Compare canonical locations
+        // first so an in-project result can be recovered as a repository-relative path.
+        let canonical = root.canonicalize().ok().and_then(|canonical_root| {
+            requested.canonicalize().ok().and_then(|canonical_path| {
+                canonical_path
+                    .strip_prefix(canonical_root)
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
+        });
+        canonical
+            .or_else(|| requested.strip_prefix(root).ok().map(Path::to_path_buf))
+            .ok_or_else(|| {
             TmError::parse(format!(
                 "path `{path}` is outside the project root; use a repository-relative path such as `src/main.rs`"
             ))
         })?
     } else {
-        requested
+        requested.to_path_buf()
     };
     if rel
         .components()
@@ -4644,6 +4657,21 @@ mod tests {
     fn resolve_repo_path_accepts_absolute_path_inside_project_root() {
         let resolved = resolve_repo_path(Path::new("/root"), "/root/src/main.rs").unwrap();
         assert_eq!(resolved, Path::new("/root/src/main.rs"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_repo_path_recovers_canonical_absolute_path_under_symlinked_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let actual_root = dir.path().join("actual");
+        std::fs::create_dir(&actual_root).unwrap();
+        let file = actual_root.join("result.txt");
+        std::fs::write(&file, "result").unwrap();
+        let linked_root = dir.path().join("project");
+        std::os::unix::fs::symlink(&actual_root, &linked_root).unwrap();
+
+        let resolved = resolve_repo_path(&linked_root, file.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, linked_root.join("result.txt"));
     }
 
     #[test]
