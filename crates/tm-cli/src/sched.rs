@@ -575,6 +575,21 @@ pub async fn run_ticket(
     project: &Project,
     renderer: &Renderer,
 ) -> tm_types::Result<()> {
+    run_ticket_until(
+        args,
+        project,
+        renderer,
+        tm_types::clock::monotonic_deadline_after(RUN_TICKET_MAX_WAIT).into(),
+    )
+    .await
+}
+
+async fn run_ticket_until(
+    args: &RunArgs,
+    project: &Project,
+    renderer: &Renderer,
+    deadline: tokio::time::Instant,
+) -> tm_types::Result<()> {
     if let Some(role) = &args.role {
         return Err(tm_types::TmError::InvalidTransition(format!(
             "--role is not supported yet (requested `{role}`); ticket executor requirements remain authoritative"
@@ -725,26 +740,29 @@ pub async fn run_ticket(
     };
     renderer.note(&format!("Ticket {ticket} dispatched for execution."));
 
-    let deadline = project
-        .clock
-        .now()
-        .plus_seconds(RUN_TICKET_MAX_WAIT.as_secs() as i64);
     let mut detached = false;
     let mut final_state = None;
     let mut outcome = None;
     let mut terminal_ticket = None;
     let mut progress = Vec::new();
     let mut interrupts = InterruptWatcher::new()?;
+    let mut timed_out = false;
     loop {
-        if project.clock.now() >= deadline {
+        if tokio::time::Instant::from(tm_types::clock::monotonic_now()) >= deadline {
             renderer.note(&format!(
-                "Ticket {ticket} is still running after {}s; detaching (the run continues in the background).",
-                RUN_TICKET_MAX_WAIT.as_secs()
+                "Ticket {ticket} is still running at the foreground time limit; detaching (the run continues in the background)."
             ));
             detached = true;
+            timed_out = true;
             break;
         }
         tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                renderer.note(&format!("Ticket {ticket} reached the foreground time limit; detaching (the run continues in the background)."));
+                detached = true;
+                timed_out = true;
+                break;
+            }
             _ = tokio::time::sleep(RUN_TICKET_POLL_INTERVAL) => {}
             _ = interrupts.recv() => {
                 handle_run_interrupt(project, &ticket, renderer, &mut interrupts).await;
@@ -873,19 +891,85 @@ pub async fn run_ticket(
                 renderer.note(&format!(
                     "Provider request failed. Waiting {delay} seconds before retry {retry_count}; the same ticket and saved session will be used."
                 ));
-                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::from(
+                    tm_types::clock::monotonic_now(),
+                ));
+                if remaining.is_zero() || Duration::from_secs(delay) >= remaining {
+                    let (tokens, seconds) = ticket_run_totals(project, &ticket);
+                    let current = project
+                        .store
+                        .view()
+                        .ok()
+                        .and_then(|view| view.tickets.get(&ticket).cloned());
+                    return Err(tm_types::TmError::TurnFailed(format!(
+                        "The foreground run reached its time limit before retry {retry_count} could start. Attempts: {}. Total usage: {tokens} tokens over {seconds} seconds. The retry is still scheduled; run `tm sched run` to keep it moving.",
+                        current
+                            .as_ref()
+                            .map_or(retry_count as u32, |ticket| ticket.attempts)
+                    )));
+                }
+                tokio::time::sleep(Duration::from_secs(delay)).await;
                 // Other retryable failures may recover during this foreground invocation.
                 // No-submit outcomes stop above so we don't repeat an unchanged model failure.
-                Box::pin(run_ticket(args, project, renderer)).await
+                Box::pin(run_ticket_until(args, project, renderer, deadline)).await
             } else {
                 Err(err)
             }
+        }
+        None if timed_out => {
+            let totals = ticket_run_totals(project, &ticket);
+            let current = project
+                .store
+                .view()
+                .ok()
+                .and_then(|view| view.tickets.get(&ticket).cloned());
+            let retry_scheduled = current.as_ref().is_some_and(|current| {
+                current.state == tm_core::TicketState::Ready
+                    && current.failures.last().is_some_and(|failure| {
+                        matches!(
+                            tm_scheduler::retry::decide_retry(
+                                current,
+                                failure.class,
+                                project.clock.now()
+                            )
+                            .outcome,
+                            tm_scheduler::RetryOutcome::Retry { .. }
+                        )
+                    })
+            });
+            let recovery = if retry_scheduled {
+                "Run `tm sched run` to keep the scheduled retry moving.".to_string()
+            } else {
+                format!("Run `tm run {ticket}` when ready to continue.")
+            };
+            Err(tm_types::TmError::TurnFailed(format!(
+                "Foreground run reached its time limit. Attempts: {}. Total usage: {} tokens over {} seconds. {}",
+                current.as_ref().map_or(0, |ticket| ticket.attempts), totals.0, totals.1, recovery
+            )))
         }
         None => match replay_error {
             Some(err) => Err(err),
             None => Ok(()),
         },
     }
+}
+
+fn ticket_run_totals(project: &Project, ticket: &TicketId) -> (u64, u64) {
+    let Ok(events) = project
+        .store
+        .events_for_subject(&tm_types::Id::from(ticket.clone()))
+    else {
+        return (0, 0);
+    };
+    events
+        .iter()
+        .filter_map(|event| event.payload.as_usage_recorded())
+        .fold((0u64, 0u64), |(tokens, seconds), usage| {
+            (
+                tokens.saturating_add(usage.tokens),
+                seconds.saturating_add(usage.wall_seconds),
+            )
+        })
 }
 
 /// Report a just-finished failed attempt immediately, including whether the scheduler has
@@ -2082,6 +2166,15 @@ mod tests {
         let json = serde_json::to_string(&lease).expect("should serialize");
         assert!(json.contains("L-1"));
         assert!(json.contains("T-1"));
+    }
+
+    #[test]
+    fn foreground_retry_delay_is_rejected_when_it_reaches_the_shared_deadline() {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(10);
+        assert!(
+            Duration::from_secs(1)
+                >= deadline.saturating_duration_since(tokio::time::Instant::now())
+        );
     }
 
     /// p1-sched-run-failure-message-copy: run_outcome should produce plain-English failure

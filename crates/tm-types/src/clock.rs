@@ -11,6 +11,19 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::collections::BTreeMap;
 
+/// Return a monotonic deadline for runtime timeouts that must include real waiting time.
+///
+/// Unlike [`Clock`], this is intentionally not replay-controlled: callers use it only to bound
+/// foreground process lifetime, never for persisted decisions or ticket timestamps.
+pub fn monotonic_deadline_after(duration: std::time::Duration) -> std::time::Instant {
+    std::time::Instant::now() + duration
+}
+
+/// Return the current monotonic instant for measuring runtime-only elapsed time.
+pub fn monotonic_now() -> std::time::Instant {
+    std::time::Instant::now()
+}
+
 /// A source of the current time.
 pub trait Clock: Send + Sync {
     /// The current instant.

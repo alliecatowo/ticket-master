@@ -481,7 +481,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   ticket new` also reports a non-draft state after creation and, when a live lease exists, its
   holder and session id. If `tm run <T>` races an existing lease, the conflict includes `tm ticket
   show <T>` and, when known, `tm --resume <S>` recovery commands. `tm run` reports a failed attempt
-  as an error (exit 2), not as "finished". Compatible providers retry transient rate limits
+  as an error (exit 2), not as "finished". Its foreground time limit covers automatic retries and
+  provider backoff together; when that limit prevents another retry, the message says whether a
+  retry remains scheduled and gives one matching recovery action. Repeated no-progress attempts carry
+  findings and cumulative token/time totals forward, reuse equivalent inspection results, and allow
+  only one focused recovery continuation across a repeated chain. Compatible providers retry transient rate limits
   within a bounded request retry budget, honor `Retry-After`, and report each wait; when those
   retries are exhausted, a foreground run follows the ticket's bounded retry policy and keeps the
   saved ticket/session available for recovery. If the model ends without
