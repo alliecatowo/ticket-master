@@ -1162,7 +1162,7 @@ fn run_outcome(
     failures_before: usize,
     workspace_edits_retained: bool,
     progress: &[String],
-    session: Option<String>,
+    _session: Option<String>,
 ) -> tm_types::Result<String> {
     if worktree_run_reached_success(ticket.state) {
         let mut message = if ticket.state == tm_core::TicketState::Submitted {
@@ -1299,16 +1299,16 @@ fn run_outcome(
             if failure.is_some_and(is_rate_limit_failure) =>
         {
             if let Some(wait) = failure.and_then(provider_retry_after_seconds) {
-                format!("The provider rate-limited this request and asked you to wait {wait} seconds. Then retry with `tm run {}`.", ticket.id)
-            } else {
-                let recovery = session.as_deref().map_or_else(
-                || format!("Inspect the saved attempt with `tm ticket show {}` and resume its saved session with `tm --resume <session>`.", ticket.id),
-                |session| format!("Inspect the saved attempt with `tm ticket show {}` and resume it with `tm --resume {session}`.", ticket.id),
-            );
                 if let Some(delay) = scheduled_retry_delay(ticket, failure) {
-                    format!("The provider rate-limited this request. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run` rather than starting an immediate retry. {recovery}")
+                    format!("The provider rate-limited this request and asked you to wait {wait} seconds. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run`.")
                 } else {
-                    format!("The provider rate-limited this request, but no retry delay was supplied, so the wait time is unknown. {recovery}")
+                    format!("The provider rate-limited this request and asked you to wait {wait} seconds. Then run `tm run {}`.", ticket.id)
+                }
+            } else {
+                if let Some(delay) = scheduled_retry_delay(ticket, failure) {
+                    format!("The provider rate-limited this request. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run`.")
+                } else {
+                    format!("The provider rate-limited this request, but no retry delay was supplied, so the wait time is unknown. Run `tm run {}` after the provider is available.", ticket.id)
                 }
             }
         }
@@ -1324,13 +1324,13 @@ fn run_outcome(
         tm_core::TicketState::Escalated if did_not_submit => {
             let recovery = if workspace_edits_retained {
                 format!(
-                    "Working-tree edits were retained; inspect them with `git status` and `git diff`, then retry with `tm ticket retry {}`.",
+                    "Working-tree edits were retained; review them when you retry with `tm ticket retry {}`.",
                     ticket.id
                 )
             } else {
                 format!(
-                    "No working-tree edits were retained, so this run made no repository change. Inspect the saved attempt with `tm ticket show {}` and retry with `tm ticket retry {}`.",
-                    ticket.id, ticket.id
+                    "No working-tree edits were retained, so this run made no repository change. Retry with `tm ticket retry {}`.",
+                    ticket.id
                 )
             };
             let findings = if progress.is_empty() {
@@ -2179,19 +2179,21 @@ mod tests {
             .to_string();
         assert!(scheduled.contains("provider rate-limited the request"));
         assert!(scheduled.contains("wait 20 seconds"));
-        assert!(scheduled.contains("Then retry with `tm run T-1`"));
+        assert!(scheduled.contains("keep the scheduler active with `tm sched run`"));
 
         ticket.retry.max_attempts = 1;
         let unscheduled = run_outcome(&ticket, 0, false, &[], None)
             .unwrap_err()
             .to_string();
         assert!(unscheduled.contains("wait 20 seconds"));
-        assert!(unscheduled.contains("Then retry with `tm run T-1`"));
+        assert!(unscheduled.contains("Then run `tm run T-1`"));
 
         let unscheduled_with_session = run_outcome(&ticket, 0, false, &[], Some("S-7".to_string()))
             .unwrap_err()
             .to_string();
         assert!(unscheduled_with_session.contains("wait 20 seconds"));
+        assert!(unscheduled_with_session.contains("tm run T-1"));
+        assert!(!unscheduled_with_session.contains("tm --resume"));
     }
 
     #[test]
@@ -2302,7 +2304,7 @@ mod tests {
         assert!(escalated_no_submit.contains("The ticket is Escalated"));
         assert!(!escalated_no_submit.contains("tm --resume"));
         assert!(escalated_no_submit.contains("Working-tree edits were retained"));
-        assert!(escalated_no_submit.contains("git status` and `git diff"));
+        assert!(escalated_no_submit.contains("review them when you retry"));
         assert!(escalated_no_submit.contains("tm ticket retry T-1"));
         assert_eq!(
             escalated_no_submit.matches("tm ticket retry T-1").count(),
@@ -2316,7 +2318,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
         assert!(escalated_without_edits.contains("No working-tree edits were retained"));
-        assert!(escalated_without_edits.contains("tm ticket show T-1"));
+        assert!(escalated_without_edits.contains("Current state: escalated"));
         assert!(escalated_without_edits.contains("tm ticket retry T-1"));
         assert!(!escalated_without_edits.contains("tm --resume"));
         assert!(!escalated_without_edits.contains("git status` and `git diff"));
@@ -2328,8 +2330,10 @@ mod tests {
             .to_string();
         assert!(clean_no_submit.contains("No working-tree edits were retained"));
         assert!(clean_no_submit.contains("no repository change"));
+        assert!(clean_no_submit.contains("Current state: ready"));
         assert!(!clean_no_submit.contains("tm --resume"));
         assert!(clean_no_submit.contains("tm sched run"));
+        assert_eq!(clean_no_submit.matches("tm sched run").count(), 1);
         assert!(clean_no_submit.contains("No verification was run"));
         assert!(clean_no_submit.contains("src/click/types.py"));
         assert!(!clean_no_submit.contains("run `tm run T-1` again"));
@@ -2345,6 +2349,18 @@ mod tests {
             .to_string();
         assert!(test_failure.contains("A retry is scheduled"));
         assert!(test_failure.contains("tm sched run"));
+
+        ticket.state = TicketState::Ready;
+        ticket.retry.max_attempts = 1;
+        ticket.failures[2].detail = "model ended turn without submitting".to_string();
+        let unscheduled_no_submit =
+            run_outcome(&ticket, 2, false, &retained, Some("S-4".to_string()))
+                .unwrap_err()
+                .to_string();
+        assert!(unscheduled_no_submit.contains("Current state: ready"));
+        assert!(unscheduled_no_submit.contains("tm run T-1"));
+        assert_eq!(unscheduled_no_submit.matches("tm run T-1").count(), 1);
+        assert!(!unscheduled_no_submit.contains("tm --resume"));
     }
 
     #[test]
