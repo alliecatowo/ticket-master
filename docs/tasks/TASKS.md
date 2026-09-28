@@ -2478,7 +2478,7 @@ is based on.
   acceptance: A simulated no-progress continuation terminates within the configured small retry bound; the final ticket output names the repeated no-progress condition, elapsed time, and one correct recovery action without implying work was completed.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260928-0931/pallets-click-3822/tm.log` lines 29, 44, 59-62 — three "focused continuation made no concrete change" attempts reread the same files, followed by escalation and `TRIAL_EXIT 2 WALL_SECONDS 989.158`.
-- [ ] **t20260928-0931-sindresorhus-ky-878-verification-command-status** — Show the exact verification command and its authoritative result in `tm run` summaries
+- [x] **t20260928-0931-sindresorhus-ky-878-verification-command-status** — Show the exact verification command and its authoritative result in `tm run` summaries (landed bcdd3ff)
   model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: none
   files: `crates/tm-cli/src/agent.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: When rendering verification-related tool progress and the final submitted summary, preserve the exact test command and the shell tool's returned exit code; distinguish a focused/manual check from a project test suite and never label a command as passing based only on a piped/truncated output snippet.
