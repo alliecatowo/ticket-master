@@ -1939,7 +1939,7 @@ is based on.
   acceptance: A no-progress failure with `ticket.retry_scheduled` produces a terminal summary consistent with the event and states one unambiguous next action; tests cover both scheduled and unscheduled retry cases.
   test: `cargo test -p tm-agent && cargo test -p tm-cli`
   evidence: `/private/tmp/tm-trials/20260926-1929/sindresorhus-ky-878/tm.log:18` — “stopped after 10 steps without a repository change or submitted evidence” and “Run `tm run T-1` again to retry”; events 64–65 record `ticket.retry_scheduled`.
-- [ ] **t20260926-1946-BurntSushi-ripgrep-3376-provider-429-foreground-retry** — Recover a foreground `tm run` from transient provider rate limits
+- [x] **t20260926-1946-BurntSushi-ripgrep-3376-provider-429-foreground-retry** — Recover a foreground `tm run` from transient provider rate limits (landed 32b4b98)
   model: sonnet · severity: medium · builds Rust: yes · area: provider · deps: none
   files: `crates/tm-provider/src/providers/compat.rs`, `crates/tm-cli/src/sched.rs`
   change: When a provider returns HTTP 429 during `tm run`, honor any retry-after guidance and apply bounded backoff/retry to the current foreground attempt instead of ending the run after the rate-limited turn; report the delay and each retry clearly, and preserve the ticket/session if the retry bound is exhausted.
