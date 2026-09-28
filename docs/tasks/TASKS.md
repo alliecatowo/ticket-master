@@ -2485,3 +2485,122 @@ is based on.
   acceptance: A scripted `tm run` that executes a passing focused test and then a failing project test prints both exact commands and their exit statuses in its final summary, and does not say verification passed; a command whose output is piped through `tail` still displays the command tool's real exit code.
   test: `mise run test:crate -- tm-cli`
   evidence: `/tmp/tm-trials/20260928-0931/sindresorhus-ky-878/tm.log:24` — `npx tsx verify-fix.mts 2>&1 | tail -10; echo "EXIT:$?"`; progress only says `Ran tests` at line 10, while the submitted claim at line 27 has no command/status transcript.
+- [ ] **t20260928-0931-spf13-cobra-2257-recover-failed-continuations** — Make no-progress continuation recover from failed tool calls
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: When a ticket's focused continuation repeats prior reads/searches or encounters a failed tool call (for example, a shell query returning “couldn't find that”), incorporate the failure into a specific alternate recovery instruction and avoid treating another identical investigation as useful progress. Preserve the observed command error in the recovery context.
+  acceptance: A regression test simulates a ticket run with a failed command/search followed by repeated reads and asserts the recovery turn selects a different actionable path or ends with a concise failure that names the command error; it must not spend multiple continuation turns repeating the same searches without a repo change or verification.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-0931/spf13-cobra-2257/tm.log:73,79,93,102,107-108` — failed command `couldn't find that`, repeated focused-continuation failures, then ticket escalated without changes or tests; source: `crates/tm-agent/src/agent_loop.rs:1804-1823`.
+- [ ] **t20260928-1310-BurntSushi-ripgrep-3376-bound-repeated-no-progress-retries** — Bound repeated inspection retries and carry forward useful findings
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  change: When an attempt and its focused continuation end without a repository change or verification, avoid restarting the same exploration unchanged. Carry the relevant findings into any retry, apply one cumulative token/time budget across attempts, and finish with a single recovery instruction matching the ticket state.
+  acceptance: A deterministic ticket that repeats the same file reads across retries stops within one cumulative no-progress budget or makes a materially new focused attempt; it does not repeat the reads three times, and the final output reports aggregate usage and one valid next action.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-1310/BurntSushi-ripgrep-3376/tm.log:12-52,74-92` — attempts repeated reads across `walk.rs`, `dir.rs`, and `hiargs.rs`, each failed without a patch or verification, then `tm stats --json` reported 628019 total tokens for T-1.
+- [ ] **t20260928-1310-BurntSushi-ripgrep-3376-ticket-new-capturable-id** — Offer a structured ticket ID for scripted runs
+  model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: none
+  files: `crates/tm-cli/src/tickets.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  change: Add a machine-readable output option for `tm ticket new` that emits the created ticket ID in a stable field while retaining the current human-readable default, and document use with `tm run`.
+  acceptance: `tm ticket new ... --json` emits valid JSON with an `id` field that can be passed directly to `tm run`; the default output remains clear to interactive users.
+  test: `cargo test -p tm-cli ticket_new`
+  evidence: `/tmp/tm-trials/20260928-1310/BurntSushi-ripgrep-3376/tm.log:3-5` — `ticket new` printed `Created ticket T-1: ...`, and passing that captured output to `tm run` failed parsing instead of accepting the ID.
+- [ ] **t20260928-1310-pallets-click-3822-provider-retry-progress** — Stop expensive retries when provider failures repeat exploration without progress
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  change: Distinguish provider transport failures from agent no-progress recoveries, avoid automatically replaying unchanged repository inspection after a provider failure, and report cumulative usage plus one actionable recovery choice in the terminal `tm run` message.
+  acceptance: A simulated provider failure followed by inspection-only turns terminates within the configured bounded retry count, does not repeat the same reads across retries, and prints cumulative token/time usage with a single recovery action that matches the ticket state.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-1310/pallets-click-3822/tm.log:50-80` — repeated "Provider request failed. Waiting ...; the same ticket and saved session will be used" and repeated source reads, ending with an escalation reporting `Usage: 187695 tokens, 12 tool calls, 17 seconds` and retry/resume suggestions, without a patch.
+- [ ] **t20260928-1310-psf-requests-7432-focused-recovery** — Carry no-progress findings into a bounded code-or-test recovery
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: When the no-progress guard fires after locating a concrete target, pass the target and prior findings to one recovery turn that must make a minimal code change or run a targeted check; do not replay the same reads/searches over multiple attempts. Surface a stopping point once this focused recovery produces no repository change.
+  acceptance: A regression test simulates repeated inspection-only turns and proves the next turn receives the discovered target and produces an edit/check or terminates with no extra redundant model retry; the user-facing failure reports no patch and no verification.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-1310/psf-requests-7432/tm.log:17-53` — three attempts repeatedly read `src/requests/models.py`, then escalated after no-progress recoveries.
+- [ ] **t20260928-1310-retry-state-copy** — Give one accurate retry or recovery instruction
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/sched.rs`, `crates/tm-agent/src/agent_loop.rs`
+  change: Make provider retry and terminal escalation messages reflect actual ticket/retry state and provide exactly one actionable next step; distinguish an automatic scheduled retry from a required `tm ticket retry` command.
+  acceptance: CLI tests cover a run that retries automatically and later escalates. Output for each state gives one valid action, never advertises a scheduled retry after escalation, and explains retry timing in plain language.
+  test: `cargo test -p tm-cli`
+  evidence: `/tmp/tm-trials/20260928-1310/psf-requests-7432/tm.log:26-53` — `A retry is scheduled` appears in attempts 1 and 2, but the terminal escalation says no retry is scheduled and instructs `tm ticket retry T-1`.
+- [ ] **t20260928-1310-psf-requests-7432-repro-test-fidelity** — Keep generated regression tests faithful to the reported wrapper behavior
+  model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: When deriving a regression test from an issue's delegated file-like wrapper example, preserve the exact behavioral property under test and verify the fake wrapper actually exposes the delegated attribute before using it as proof of the fix.
+  acceptance: An agent regression fixture based on a `__getattr__`-delegating file wrapper cannot be marked as a successful regression test when the wrapped object lacks the delegated `__iter__`; the recovery identifies and corrects the test double before claiming coverage.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-1310/psf-requests-7432/tm.log:23-29` — tm's first delegated-file regression test failed; it then edited the test fixture before the focused run passed.
+- [ ] **t20260928-1310-sindresorhus-ky-878-provider-failure-summary** — Preserve provider failure details across retries and report the final cause
+  model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: none
+  files: `crates/tm-cli/src/sched.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  change: When the provider request retry loop runs, retain a sanitized actionable failure reason and include it in the final `tm run` outcome, distinguishing provider transport failures from the agent's no-progress continuation failures. State whether automatic retry remains scheduled and give one correct next action without exposing credentials or raw secret-bearing headers.
+  acceptance: A scripted provider request failure followed by a stalled continuation shows the provider failure class and retry count in progress and the final summary, identifies the final ticket state and exactly one valid recovery action, and redacts secret-bearing values.
+  test: `cargo test -p tm-cli`
+  evidence: `/private/tmp/tm-trials/20260928-1310/sindresorhus-ky-878/tm.log:32` — “Provider request failed. Waiting 9 seconds before retry 1; the same ticket and saved session will be used.”; lines 47 and 62 show the same generic retry notice and terminal escalation without an underlying provider reason.
+- [ ] **t20260928-1310-spf13-cobra-2257-bound-recovery-reexploration** — Bound recovery turns that repeat inspection without producing a patch
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  change: Detect repeated inspection-only recovery turns and stop retrying once the same source/tool evidence has been revisited without a repository change, targeted check, or submitted evidence; report cumulative usage and one actionable recovery command appropriate to the final ticket state.
+  acceptance: A test with repeated provider failures and identical read/search actions terminates within a bounded retry count, avoids repeating unchanged exploration, and prints the accumulated usage and a single recovery command matching the final ticket state.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-1310/spf13-cobra-2257/tm.log:14-53` — three attempts repeat reads/searches of `completions.go` and `command.go`; the final message reports 203538 tokens and 11 tool calls, says no patch or evidence was submitted, and escalates the ticket.
+- [ ] **t20260928-1518-BurntSushi-ripgrep-3376-bound-no-progress-recovery** — Bound repeated no-progress recovery and report cumulative usage
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: After a focused recovery turn repeats repository inspection without a source change, targeted check, or evidence, stop or require the next turn to take a distinct code/test action using the retained findings; report run-level cumulative tokens and tool calls in the terminal outcome rather than only per-attempt usage.
+  acceptance: An agent-loop test with repeated reads/searches proves that recovery cannot repeat the same investigation-only sequence indefinitely; the terminal outcome reports cumulative usage across all attempts and offers one action consistent with the final ticket state.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-1518/BurntSushi-ripgrep-3376/tm/tm.log:23-57` — three attempts revisit `crates/ignore/src/dir.rs` and `walk.rs`, report no patch or evidence, and end escalated; `tm stats --json` reports 584797 total tokens, while the run output cites 193788 and 189201 for individual attempts.
+- [ ] **t20260928-1518-BurntSushi-ripgrep-3376-align-retry-messages** — Make provider retry and escalation messages agree
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/sched.rs`
+  change: Distinguish provider transport retries from agent no-progress recovery in user-facing output, and ensure scheduled-retry wording is withdrawn or updated when the ticket is escalated and no retry remains.
+  acceptance: CLI tests cover a provider failure followed by a scheduled retry and a subsequent escalation; the final transcript presents one accurate retry state and one valid next command in both cases.
+  test: `cargo test -p tm-cli`
+  evidence: `/tmp/tm-trials/20260928-1518/BurntSushi-ripgrep-3376/tm/tm.log:23-25,37-39,52-57` — the run says “A retry is scheduled,” emits “Provider request failed,” and ultimately says “No retry is scheduled” / “Run `tm ticket retry T-1` to try again.”
+- [ ] **t20260928-1518-pallets-click-3822-bound-no-progress-recovery** — Bound repeated no-progress recovery context
+  model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: Make focused recovery consume the retained investigation summary and require a new concrete action instead of repeating unchanged file reads; stop or escalate promptly when another no-progress continuation adds no new findings, changes, checks, or evidence. Keep provider retry/backoff status distinct from agent no-progress status.
+  acceptance: A simulated no-progress run with repeated reads of the same files does not replay the full investigation for multiple retries, does not spend repeated turns without new work, and reports whether it is waiting on a provider or stopped for no progress with a clear next step.
+  test: `cargo test -p tm-agent`
+  evidence: `/private/tmp/tm-trials/20260928-1518/pallets-click-3822/tm.log:16-55` shows repeated reads and two no-progress continuation messages across attempts; lines 26-27 and 42-43 show user-visible retry/provider-failure status; lines 56-57 report escalation with no patch after 211725 tokens.
+- [ ] **t20260928-1518-psf-requests-7432-bound-repeated-no-progress** — Carry findings forward and cap repeated no-progress recovery spend
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: After a focused continuation fails to change code, run a bounded final recovery using the actual summarized target/findings or stop without replaying the same repository reads/searches in multiple model attempts; report whether usage is per-attempt or cumulative and give one recovery action consistent with the ticket state.
+  acceptance: An agent-loop regression test with repeated reads/searches proves that the next attempt uses prior findings for a distinct code/test action or terminates immediately; terminal output gives one valid retry/resume instruction and explains token totals across attempts.
+  test: `cargo test -p tm-agent`
+  evidence: `/private/tmp/tm-trials/20260928-1518/psf-requests-7432/tm.log:30-60,92-93` — attempts 1–3 revisit `src/requests/models.py` and repeat queries; the terminal output says “No patch or evidence was submitted” although the final worktree diff contains the fix, and advertises a scheduled retry before ending with “No retry is scheduled” and a manual retry command; usage is reported as 159179 tokens for the final 48-second attempt.
+- [ ] **t20260928-1518-psf-requests-7432-provider-retry-diagnostic** — Explain provider failures with a safe actionable summary
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/sched.rs`
+  change: When a provider request fails and tm schedules a retry, include a sanitized concise reason when available and distinguish this transport retry from an agent no-progress retry; retain credential redaction and show whether the same saved session is being reused.
+  acceptance: CLI tests cover a provider failure with an available reason and one without it; each reports a useful but redacted cause, identifies the retry type/session behavior, and preserves the retry delay and count.
+  test: `cargo test -p tm-cli`
+  evidence: `/private/tmp/tm-trials/20260928-1518/psf-requests-7432/tm.log:31-32,42-43` — tm only says “Provider request failed,” waits, then redispatches without any reason or indication how those provider retries relate to the no-progress failures.
+- [ ] **t20260928-1518-sindresorhus-ky-878-null-shell-cwd** — Resolve omitted or null command working directories to the project root
+  model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-agent/src/tools.rs`, `crates/tm-agent/src/prompt.rs`
+  change: Normalize a missing or JSON-null `cwd` for shell.run to `.` before dispatch and ensure the shell executor resolves it against the active project root. The agent prompt already says shell.run runs in the project directory; make that true for null-valued tool arguments too, and return a concise corrected-cwd error if normalization cannot be done.
+  acceptance: A shell.run call with omitted cwd and one with `cwd: null` both execute in the active project root; neither attempts to start a shell in a `<project>/null` directory, and a regression test verifies the exact root used.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-1518/sindresorhus-ky-878/tm.log:44-47` — the first shell command failed to start at `/private/tmp/tm-trials/20260928-1518/sindresorhus-ky-878/tm/null`, then the agent retried the probe.
+- [ ] **t20260928-1518-sindresorhus-ky-878-provider-retry-summary** — Explain provider retries and report aggregate run outcome
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/sched.rs`, `crates/tm-agent/src/agent_loop.rs`
+  change: On transient provider errors, show a concise sanitized cause when available and identify the retry as a provider transport retry, distinct from an agent no-progress continuation. At the end of tm run, summarize whether a source patch exists, whether verification completed and its result, cumulative tokens/time across retries, and the one valid next action for the ticket's final state.
+  acceptance: CLI/agent-loop tests cover a retryable provider error followed by successful submission and a no-progress continuation. The output reports retry type/count and aggregate usage, accurately distinguishes submitted code from verified code, and gives one state-correct recovery instruction without exposing credentials.
+  test: `cargo test -p tm-cli && cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-1518/sindresorhus-ky-878/tm.log:32-35,44-54,58-76` — one focused continuation was declared unproductive, a provider failure was reported only as “Provider request failed,” another dispatch resumed and submitted, while `tm stats --json` reported 462,023 aggregate tokens and the terminal output did not state a verification result.
+- [ ] **t20260928-1518-spf13-cobra-2257-bound-recovery-reexploration** — Bound recovery turns that repeat inspection without producing a patch
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  change: Detect repeated inspection-only recovery turns and stop retrying once the same source/tool evidence has been revisited without a repository change, targeted check, or submitted evidence; report cumulative usage and one actionable recovery command appropriate to the final ticket state.
+  acceptance: A test with repeated provider failures and identical read/search actions terminates within a bounded retry count, avoids repeating unchanged exploration, and prints the accumulated usage and a single recovery command matching the final ticket state.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-1518/spf13-cobra-2257/tm.log:17-47` — three repeated inspections end without a patch or evidence, then report `tm ticket retry T-1` although the ticket is escalated; total reported usage was 379770 tokens.
