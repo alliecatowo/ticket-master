@@ -1890,7 +1890,7 @@ is based on.
   acceptance: A simulated 429 followed by a successful provider response completes the same ticket without manual `tm run`; logs and CLI output show the retry count and delay, while permanent/non-retryable failures remain clearly reported.
   test: `cargo test -p tm-cli`
   evidence: `/tmp/tm-trials/20260926-1903/pallets-click-3822/tm.log` lines 17 and 47: `429 Too Many Requests` and `Run tm run T-1 again to retry.`
-- [ ] **t20260926-1903-psf-requests-7432-rate-limit-recovery** — Make provider 429 recovery delay actionable
+- [x] **t20260926-1903-psf-requests-7432-rate-limit-recovery** — Make provider 429 recovery delay actionable (landed fb83df9)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: When a run fails because a provider rate-limits the request, carry any known Retry-After duration into the user-facing failure guidance and avoid recommending an immediate blind `tm run <ticket>` retry; if no duration is available, clearly say the retry delay is unknown.
