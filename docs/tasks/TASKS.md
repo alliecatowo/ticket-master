@@ -1946,7 +1946,7 @@ is based on.
   acceptance: A deterministic provider test returning 429 once and then success completes the same foreground run with retry progress shown; persistent 429 responses terminate within the configured bound with the ticket/session and a specific recovery step intact.
   test: `cargo test -p tm-provider && cargo test -p tm-cli`
   evidence: `/tmp/tm-trials/20260926-1946/BurntSushi-ripgrep-3376/tm.log:13` — `429 Too Many Requests`; run ended with exit code 2 and escalated ticket T-1 without implementing or verifying a patch.
-- [ ] **t20260926-1946-pallets-click-3822-no-progress-reorientation** — Reorient after repeated investigation before failing a coding ticket
+- [x] **t20260926-1946-pallets-click-3822-no-progress-reorientation** — Reorient after repeated investigation before failing a coding ticket (landed 4d0e082)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
   files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
   change: When the ticket agent reaches the no-progress step limit after investigation-only tool calls, use the retained investigation summary to issue one explicit, focused reorientation turn toward a repository change and relevant check before returning `AgentOutcome::Failed`; if it still cannot progress, report the failed state and the exact `tm ticket retry <id>` recovery command clearly.
