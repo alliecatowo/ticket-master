@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 186.313,
+      "tokens": 728884,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm reached the relevant body stream and tests, but repeated nearly identical reads across three stalled continuations and did not produce a patch or run verification; stats report 728,884 tokens. The user sees ‘Provider request failed’ retry notices, then a generic ‘focused continuation made no concrete change’ failure, without the provider error detail or a concise account of why the scheduled attempts stopped. Report a sanitized underlying provider failure, separate transport retries from agent no-progress attempts, and include aggregate usage plus one accurate next action in the terminal summary."
+    },
+    {
+      "tool": "OpenCode",
+      "passed": false,
+      "wall_seconds": 92.157,
+      "tokens": 19155,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly found the flush guard, applied the minimal production fix, added a focused regression test, and accurately reported that its focused test passed while the full suite was blocked by an unrelated lint error. The post-run hidden tests did not pass: the merged tests also check the callback event shape in browser and stream contexts, and the implementation returned an extra zero-length chunk field; the browser run also had a WebKit network failure. Compare the implementation against the exact callback contract exercised by the checked-out tests and rerun the affected tests before declaring completion."
+    }
+  ]
+}

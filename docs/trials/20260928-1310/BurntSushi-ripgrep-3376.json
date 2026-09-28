@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 148,
+      "tokens": 628019,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm named useful files in its progress output and honestly reported that no patch or evidence was submitted, but all three attempts repeated investigation of walk.rs, dir.rs, and hiargs.rs, failed to make a change, and consumed 628,019 reported tokens in 148 seconds. The messages said the retry was scheduled and eventually that the ticket was escalated, but a user had no implementation or tests to show for the run. A cumulative no-progress/token budget should stop identical retries earlier and carry the prior diagnosis into one genuinely action-oriented continuation. Also, `ticket new` printed `Created ticket T-1: <title>` rather than a directly capturable ID; my scripted capture passed the whole line to `tm run`, which rejected it, so a structured ID output would make this flow safer. The mechanical hidden-test check passed after checking out `crates/ignore/src/dir.rs`, but that PR file contains both production implementation and its new test; the overwrite installed the fix itself, so this pass does not establish that tm solved the issue."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 152,
+      "tokens": 36254,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode quickly traced the path-walking flow, reset the single-threaded walker's ignore matcher between roots, and added a two-order regression test. Its first test assertion failed because the expected list omitted root directory entries; it adjusted the test, then the focused check passed and the final summary reported that check accurately. It would be stronger with a test focused on the exact failure PR scenario as well as the current walker-state diagnosis, and by surfacing the initial failures concisely in the final report. The hidden-test checkout also overwrote `dir.rs`, which contains the production fix alongside the PR test, so the mechanical pass cannot independently validate the agent's implementation."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 132.2,
+      "tokens": 451616,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 1
+      },
+      "better": "tm initialized and indexed the repository, located prepare_body(), made the compatibility change, and the PR's overwritten redirect regression test passed. It did not reach that result efficiently: it repeated overlapping reads over three attempts, showed provider/retry messages without making clear that the same investigation was recurring, and reported 451,616 tokens for a run that took about two minutes. Its own added regression test initially failed because the test wrapper did not actually delegate an __iter__ attribute; it then changed the wrapped object and got its focused tests passing. A user would be more confident with one scoped plan up front, a regression test modeled directly on the issue's `__getattr__` wrapper, and a bounded recovery that carries findings forward instead of replaying searches. The final test claim matched the run output, and the hidden PR test passed mechanically."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 79.192,
+      "tokens": 48058,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode produced a scoped plan and added a delegated-attribute regression test, then recovered from its own initial local-test failure by setting PYTHONPATH to src. It did not change the production `prepare_body()` detector, however, and the mechanically applied PR redirect test failed with the original `AttrProxy` TypeError. The local test passing would not be enough evidence to claim the issue fixed; it should make the fallback in the precise stream-detection condition and run the PR's redirect test before concluding."
+    }
+  ]
+}

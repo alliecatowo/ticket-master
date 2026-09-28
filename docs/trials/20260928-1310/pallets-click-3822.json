@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/pallets/click/issues/3822",
+  "base_sha": "7944461a80b780d060899c8835acab3c273a04a6",
+  "merge_sha": "86949d19b930ef68a45566544cb4b9508d895d0d",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 136.1,
+      "tokens": 187695,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm located the relevant Path and prompt typing code, but never formed a scoped edit/test plan or produced a patch. It reread the same files across three no-progress attempts, reported a provider failure without making clear whether the user should wait, retry, or resume, and then escalated; the displayed 187,695-token usage for roughly two minutes is disproportionate. The user's first visible failure was also `tm run Created` because the trial wrapper parsed the ticket ID incorrectly; the wrapper recovered by running T-1, so this was a harness mistake rather than a tm defect. A better run would stop promptly on repeated inspection, state the transport failure and one recommended next action, and provide a concise scoped plan and budget-aware progress."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 66.81,
+      "tokens": 22913,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode gave an upfront scoped plan, implemented generic Path typing, added a focused pathlib.Path assertion, and checked the full suite plus type checkers. Its implementation still did not satisfy the PR's hidden typing file: both mypy and pyright fail the default-path assertions after the PR test files are overlaid. It would improve by validating the full range of path_type values, especially the omitted/default argument, and running the newly overlaid test files as its final acceptance check before reporting completion."
+    }
+  ]
+}

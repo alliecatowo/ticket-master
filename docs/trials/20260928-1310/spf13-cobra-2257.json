@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 114,
+      "tokens": 203538,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm found the relevant completion code early, but it repeated source reads and shell searches through three recovery attempts without making a change, running a targeted check, or submitting evidence. The run consumed 203,538 reported tokens in 114 seconds, then escalated and asked the user to retry while also mentioning scheduler operation; a clearer bounded recovery policy should stop repeated exploration sooner, summarize the failed attempts and usage once, and give one state-appropriate next command."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 70.4,
+      "tokens": 24965,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode traced the append side effect, copied the completion arguments before appending the temporary delimiter, added a regression test, and reported the passing full Go suite. It could be more context-efficient by treating the first missing-index semantic-search error as an immediate fallback signal rather than trying that unavailable index first; the implementation's copy is also more allocation-heavy than the fix's slice-capacity approach, though the hidden regression test and full suite pass."
+    }
+  ]
+}
