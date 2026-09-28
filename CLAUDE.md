@@ -545,8 +545,13 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   command. A successful write resets this tool-call counter too.
   A ticketed run also stops earlier after six inspections of the same source/history/search target
   without a productive action. That failure reports accumulated tokens, tool calls, and provider
-  time, and gives the saved session's directly copyable `tm --resume <session>` command. A successful
-  edit, commit, test run, or stored evidence resets this repeated-target bound. During a run, an
+   time, and gives the saved session's directly copyable `tm --resume <session>` command. A successful
+   edit, commit, test run, or stored evidence resets this repeated-target bound. Reaching the
+   repeated-inspection, no-progress tool-call, or no-progress step threshold gives one focused
+   continuation in the same saved session: use the discovered target to make a change, run a
+   targeted check and submit evidence, or explain a concrete blocker without more exploration.
+   Ticket usage is debited to its durable budget across attempts, so retries cannot reset the
+   configured cumulative token/context allowance. During a run, an
   identical successful file read or search request reuses its recorded result until an edit or
   verification call makes a fresh result appropriate.
   Before leasing or

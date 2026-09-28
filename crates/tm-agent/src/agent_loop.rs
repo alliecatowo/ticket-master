@@ -1469,10 +1469,9 @@ impl AgentLoop {
             if toolchain_retry_context_sent {
                 system.push_str("\n\nA verification command failed because its required toolchain executable was unavailable. Resume from the files and findings already present in this conversation; do not repeat broad searches or reread those files without a specific unresolved question. The failed verification and its exact command/output are already recorded above. Make the smallest useful correction or use a verification path available in this environment, then submit with evidence. This is a single bounded continuation; the normal step and token budgets still apply.");
             }
-            if no_progress_reorientation_sent && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT
-            {
+            if no_progress_reorientation_sent {
                 let summary = InvestigationSummary::from_steps(&steps).render();
-                system.push_str("\n\nThis is your one focused recovery turn after reaching the no-progress limit. Use the actionable findings already recorded in this conversation to make the smallest useful repository change now, then run the relevant focused check and submit evidence. Do not continue broad investigation. If you are blocked, explain the specific blocker.");
+                system.push_str("\n\nThis is your one focused recovery turn after an inspection or no-progress limit. Use the discovered target and findings already recorded in this conversation to make the smallest useful repository change, run a targeted check, and submit evidence. Do not restart file or history exploration. If neither action is possible, explain the specific blocker in your final reply without further tool calls.");
                 // Keep the findings explicit in the instruction even when prior tool results were
                 // compacted from the rebuilt conversation.
                 system.push_str("\nRetained investigation summary: ");
@@ -1807,32 +1806,61 @@ impl AgentLoop {
                     at: self.clock.now(),
                 },
             );
-            if task.ticket.is_some()
-                && repeated_exploration_count(&steps) >= REPEATED_EXPLORATION_LIMIT
+            if no_progress_reorientation_sent
+                && steps.last().is_some_and(|step| !step_made_progress(step))
+                && !steps.last().is_some_and(|step| {
+                    step.tool_calls.iter().any(|call| {
+                        (call.tool_name.starts_with("test.")
+                            || call.tool_name == "build.run"
+                            || call.tool_name == "shell.run")
+                            && matches!(
+                                call.resolution,
+                                crate::outcome::ToolCallResolution::Completed { .. }
+                            )
+                    })
+                })
             {
                 let summary = InvestigationSummary::from_steps(&steps).render();
-                let totals = run_totals(&steps);
+                let retry = task
+                    .ticket
+                    .as_ref()
+                    .map(|ticket| format!("tm ticket retry {ticket}"))
+                    .unwrap_or_else(|| "tm ticket retry <id>".to_string());
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: format!(
-                        "stopped after {REPEATED_EXPLORATION_LIMIT} repeated inspections without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds. Continue the saved session with `tm --resume {}` and make one focused change, run the relevant checks, then submit with evidence.",
-                        totals.tokens, totals.tool_calls, totals.wall_seconds, task.session
-                    ),
+                    detail: format!("focused continuation made no concrete change, targeted check, or submission. Last useful work: {summary}. Retry with `{retry}` and provide a targeted reproduction or specific blocker."),
                 });
+            }
+            if task.ticket.is_some()
+                && repeated_exploration_count(&steps) >= REPEATED_EXPLORATION_LIMIT
+                && !no_progress_reorientation_sent
+                && (steps.len() as u32) < self.max_steps
+                && first_exhausted_dimension(&effective_budget).is_none()
+            {
+                no_progress_reorientation_sent = true;
+                continue;
             }
             if task.ticket.is_some()
                 && no_progress_tool_calls(&steps) >= NO_PROGRESS_TOOL_CALL_LIMIT
             {
+                if !no_progress_reorientation_sent
+                    && (steps.len() as u32) < self.max_steps
+                    && first_exhausted_dimension(&effective_budget).is_none()
+                {
+                    no_progress_reorientation_sent = true;
+                    continue;
+                }
                 let summary = InvestigationSummary::from_steps(&steps).render();
-                let totals = run_totals(&steps);
+                let retry = task
+                    .ticket
+                    .as_ref()
+                    .map(|ticket| format!("tm ticket retry {ticket}"))
+                    .unwrap_or_else(|| "tm ticket retry <id>".to_string());
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: format!(
-                        "stopped after {NO_PROGRESS_TOOL_CALL_LIMIT} tool calls without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds. Continue the saved session with `tm --resume {}` and make one focused change, run the relevant checks, then submit with evidence.",
-                        totals.tokens, totals.tool_calls, totals.wall_seconds, task.session
-                    ),
+                    detail: format!("focused continuation ended without a change or evidence. Last useful work: {summary}. Retry with `{retry}` and provide one targeted reproduction or diagnosis."),
                 });
             }
             if task.ticket.is_some() && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT {
