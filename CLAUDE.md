@@ -162,6 +162,10 @@ never drift between sessions:
   for that run. A provider at capacity (`RouteDecision::Wait`) makes the agent loop wait, up to
   5 minutes, instead of failing the attempt
   (`docs/decisions/D-023-capacity-wait-is-not-a-failed-attempt.md`).
+  When `tm run` receives a retryable provider failure such as HTTP 429 and the ticket retry policy
+  schedules another attempt, it waits in the foreground, reports the retry number and delay, and
+  retries the same ticket automatically. The scheduler remains authoritative for the bounded retry
+  count; permanent provider failures are reported without retrying.
 - `tm mcp [--no-workers]` — the project as an MCP server over stdio (newline-delimited JSON-RPC),
   negotiates protocol versions `2024-11-05`, `2025-03-26`, and `2025-06-18` with the client, and
   defaults to the latest supported version for an unknown request. A Claude Code session can

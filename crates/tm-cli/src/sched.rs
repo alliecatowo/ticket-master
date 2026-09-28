@@ -854,6 +854,25 @@ pub async fn run_ticket(
                     }
                 });
             if let Some(delay) = retry {
+                let retry_count = project
+                    .store
+                    .view()
+                    .ok()
+                    .and_then(|view| {
+                        view.tickets
+                            .get(&ticket)
+                            .map(|current| current.failures.len())
+                    })
+                    .unwrap_or(1);
+                tracing::warn!(
+                    ticket = %ticket,
+                    retry = retry_count,
+                    delay_seconds = delay,
+                    "provider attempt failed; waiting before retry"
+                );
+                renderer.note(&format!(
+                    "Provider request failed. Waiting {delay} seconds before retry {retry_count}."
+                ));
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 // Other retryable failures may recover during this foreground invocation.
                 // No-submit outcomes stop above so we don't repeat an unchanged model failure.
