@@ -1228,10 +1228,6 @@ fn run_outcome(
                 .to_string()
         }
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked if did_not_submit => {
-            let session_resume = session.as_deref().map_or_else(
-                || format!("Inspect the saved attempt with `tm ticket show {}` and resume its saved session with `tm --resume <session>`.", ticket.id),
-                |session| format!("Inspect the saved attempt with `tm ticket show {}` and resume it with `tm --resume {session}`.", ticket.id),
-            );
             let findings = if progress.is_empty() {
                 "No source findings were retained from this attempt.".to_string()
             } else {
@@ -1284,11 +1280,11 @@ fn run_outcome(
             }
             if workspace_edits_retained {
                 format!(
-                    "Working-tree edits were retained. Check them with `git status` and `git diff`; {session_resume} Continue with a focused change, run checks, and submit evidence. {findings}"
+                    "Working-tree edits were retained. Check them with `git status` and `git diff`; use the retained findings to continue with a focused change, run checks, and submit evidence. {findings}"
                 )
             } else {
                 format!(
-                    "No working-tree edits were retained, so this run made no repository change; no patch was produced. {verification} {session_resume} Give the resumed session a focused next step: use the retained findings to change the relevant path, run its targeted check, and submit evidence. {findings}"
+                    "No working-tree edits were retained, so this run made no repository change; no patch was produced. {verification} Use the retained findings to change the relevant path, run its targeted check, and submit evidence. {findings}"
                 )
             }
         }
@@ -1338,14 +1334,6 @@ fn run_outcome(
                     ticket.id, ticket.id
                 )
             };
-            let resume = if workspace_edits_retained {
-                session.as_deref().map_or_else(
-                    || "Resume its saved session with `tm --resume <session>`.".to_string(),
-                    |session| format!("Resume it with `tm --resume {session}`."),
-                )
-            } else {
-                String::new()
-            };
             let findings = if progress.is_empty() {
                 "No source findings were retained from this attempt.".to_string()
             } else {
@@ -1362,7 +1350,7 @@ fn run_outcome(
                 )
             };
             format!(
-                "No patch or evidence was submitted. {recovery} {resume} Use the retained findings for one focused change, run its targeted check, and submit evidence. {findings}"
+                "No patch or evidence was submitted. The ticket is Escalated. {recovery} Use the retained findings for one focused change, run its targeted check, and submit evidence. {findings}"
             )
         }
         tm_core::TicketState::Escalated => {
@@ -1410,7 +1398,10 @@ fn run_outcome(
     } else {
         format!("Ticket {}: {}. {}", ticket.id, reason, next)
     };
-    let message = if did_not_submit && !retry_status.is_empty() {
+    let message = if did_not_submit
+        && !retry_status.is_empty()
+        && ticket.state != tm_core::TicketState::Escalated
+    {
         format!("{message} {retry_status}")
     } else {
         message
@@ -2141,8 +2132,8 @@ mod tests {
             // Should contain the correct next step for Ready state
             assert!(msg.contains("No working-tree edits were retained"));
             assert!(msg.contains("no repository change"));
-            assert!(msg.contains("tm --resume <session>"));
-            assert!(!msg.contains("Run `tm run T-1` again"));
+            assert!(!msg.contains("tm --resume"));
+            assert!(msg.contains("tm sched run"));
             // Should have plain-English failure reason
             assert!(!msg.contains("something went wrong"));
             assert!(msg.contains("no patch or evidence was submitted"));
@@ -2151,6 +2142,7 @@ mod tests {
             assert!(msg.contains("Attempt 1"));
             assert!(msg.contains("Current state: ready"));
             assert!(msg.contains("An automatic retry is scheduled"));
+            assert!(!msg.contains("tm run T-1` again"));
             // Should contain the ticket ID
             assert!(msg.contains("T-1"));
         } else {
@@ -2276,10 +2268,16 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(escalated_no_submit.contains("No patch or evidence was submitted"));
-        assert!(escalated_no_submit.contains("tm --resume S-4"));
+        assert!(escalated_no_submit.contains("The ticket is Escalated"));
+        assert!(!escalated_no_submit.contains("tm --resume"));
         assert!(escalated_no_submit.contains("Working-tree edits were retained"));
         assert!(escalated_no_submit.contains("git status` and `git diff"));
         assert!(escalated_no_submit.contains("tm ticket retry T-1"));
+        assert_eq!(
+            escalated_no_submit.matches("tm ticket retry T-1").count(),
+            1
+        );
+        assert!(!escalated_no_submit.contains("automatic retry"));
         assert!(escalated_no_submit.contains("src/click/types.py"));
 
         let escalated_without_edits =
@@ -2299,7 +2297,8 @@ mod tests {
             .to_string();
         assert!(clean_no_submit.contains("No working-tree edits were retained"));
         assert!(clean_no_submit.contains("no repository change"));
-        assert!(clean_no_submit.contains("tm --resume S-4"));
+        assert!(!clean_no_submit.contains("tm --resume"));
+        assert!(clean_no_submit.contains("tm sched run"));
         assert!(clean_no_submit.contains("No verification was run"));
         assert!(clean_no_submit.contains("src/click/types.py"));
         assert!(!clean_no_submit.contains("run `tm run T-1` again"));

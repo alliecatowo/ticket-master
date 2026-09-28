@@ -491,18 +491,19 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
      the scheduler action and computed delay instead of suggesting an immediate duplicate `tm run`;
      without a scheduled retry it keeps the manual rerun command. A scheduler retry, when permitted,
      is visible in the ticket state
-   and uses the saved investigation summary. Resume the saved session with a focused next step
-   when useful findings exist. The no-submit summary includes a short trail of retained progress,
-   gives the saved session's exact resume command when available, and states when no edits or tests
-   were produced. Ticket workers receive a focused path-first plan and guidance to avoid repeating
+    and uses the saved investigation summary. The no-submit summary includes a short trail of
+    retained progress, states when no edits or tests were produced, and gives exactly one recovery
+    action valid for the ticket's final state: keep the scheduler active for a scheduled retry,
+    retry an escalated ticket, or rerun a ready ticket. It does not suggest resuming a session
+    alongside a scheduled/manual retry. Ticket workers receive a focused path-first plan and guidance to avoid repeating
    unchanged reads, run a relevant check, and submit evidence. If it cannot recover, the error
    identifies the failed
     attempt, current ticket state, provider-turn failure reason (separate from test failures),
     whether another retry is scheduled, and the exact next command. A no-submit failure retains a concise summary of the
     investigation for the next attempt and tells the user that the findings are unverified; it
-    reports whether the workspace has edits and recommends continuing the saved session when edits
-    remain. With no edits, it says no repository change was made and directs the user to inspect
-    the saved attempt and resume its session with a focused next step rather than blindly rerunning;
+     reports whether the workspace has edits and preserves findings for the next attempt. With no
+     edits, it says no repository change was made and includes the recovery action for the final
+     ticket state rather than a competing saved-session command;
     provider errors should be fixed before retrying. If no
    retry is available, the final summary names the missing patch or evidence and gives the next
    recovery action;
