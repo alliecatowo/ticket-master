@@ -1271,6 +1271,13 @@ fn run_outcome(
                 )
             }
         }
+        tm_core::TicketState::Ready | tm_core::TicketState::Blocked
+            if failure.is_some_and(|f| f.class == tm_core::FailureClass::ProviderUnavailable)
+                && scheduled_retry_delay(ticket, failure).is_some() =>
+        {
+            let delay = scheduled_retry_delay(ticket, failure).unwrap_or_default();
+            format!("A retry is scheduled in about {delay} seconds. Run `tm sched run` to keep the scheduler active until it starts.")
+        }
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked => {
             format!("Run `tm run {}` again to retry.", ticket.id)
         }
@@ -1327,13 +1334,7 @@ fn run_outcome(
     let attempt_count = ticket.attempts;
     let state = state_label(ticket.state);
     let retry_status = if ticket.state == tm_core::TicketState::Ready {
-        let retry_is_scheduled = failure.is_some_and(|f| {
-            matches!(
-                tm_scheduler::retry::decide_retry(ticket, f.class, ticket.updated).outcome,
-                tm_scheduler::RetryOutcome::Retry { .. }
-            )
-        });
-        if retry_is_scheduled {
+        if scheduled_retry_delay(ticket, failure).is_some() {
             "An automatic retry is scheduled; if it does not start, run `tm sched run`.".to_string()
         } else {
             format!(
@@ -1374,6 +1375,19 @@ fn run_outcome(
         message
     };
     Err(tm_types::TmError::TurnFailed(message))
+}
+
+fn scheduled_retry_delay(
+    ticket: &tm_core::Ticket,
+    failure: Option<&tm_core::FailureRecord>,
+) -> Option<u64> {
+    let failure = failure?;
+    match tm_scheduler::retry::decide_retry(ticket, failure.class, ticket.updated).outcome {
+        tm_scheduler::RetryOutcome::Retry { after } => {
+            Some(after.seconds_since(ticket.updated).max(0) as u64)
+        }
+        tm_scheduler::RetryOutcome::Escalate(_) => None,
+    }
 }
 
 /// Whether live progress records a failed ticket submission followed by a successful retry.
@@ -2013,7 +2027,7 @@ mod tests {
         use tm_types::{Authority, Budget, Timestamp, Tolerance};
 
         let now = Timestamp::EPOCH;
-        let ticket = Ticket {
+        let mut ticket = Ticket {
             id: TicketId::new("T-1").unwrap(),
             kind: TicketKind::Work,
             objective: "test objective".to_string(),
@@ -2086,6 +2100,21 @@ mod tests {
         } else {
             panic!("Expected TurnFailed error");
         }
+
+        ticket.failures[0].class = FailureClass::ProviderUnavailable;
+        ticket.failures[0].detail = "provider returned 429 rate limited".to_string();
+        let scheduled = run_outcome(&ticket, 0, false, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert!(scheduled.contains("A retry is scheduled in about 20 seconds"));
+        assert!(scheduled.contains("Run `tm sched run` to keep the scheduler active"));
+        assert!(!scheduled.contains("tm run T-1`"));
+
+        ticket.retry.max_attempts = 1;
+        let unscheduled = run_outcome(&ticket, 0, false, &[], None)
+            .unwrap_err()
+            .to_string();
+        assert!(unscheduled.contains("Run `tm run T-1` again to retry"));
     }
 
     #[test]
@@ -2341,8 +2370,9 @@ mod tests {
         let result = run_outcome(&ticket, 0, false, &[], None);
         assert!(result.is_err());
         if let Err(tm_types::TmError::TurnFailed(msg)) = result {
-            // Should contain the correct next step for Blocked state (same as Ready)
-            assert!(msg.contains("Run `tm run T-3` again to retry."));
+            assert!(msg.contains("A retry is scheduled in about 20 seconds"));
+            assert!(msg.contains("Run `tm sched run` to keep the scheduler active"));
+            assert!(!msg.contains("Run `tm run T-3` again"));
             // Should have plain-English failure reason
             assert!(msg.contains("provider was unavailable"));
         } else {

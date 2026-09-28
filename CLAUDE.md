@@ -476,7 +476,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   as an error (exit 2), not as "finished". If the model ends without
    submitting, `tm run` reports the failure and recovery action without immediately starting an
     identical foreground attempt; it immediately prints the failure reason, attempt count, current
-    ticket state, and whether a retry is scheduled. A scheduler retry, when permitted, is visible in the ticket state
+     ticket state, and whether a retry is scheduled. When one is scheduled, the terminal summary names
+     the scheduler action and computed delay instead of suggesting an immediate duplicate `tm run`;
+     without a scheduled retry it keeps the manual rerun command. A scheduler retry, when permitted,
+     is visible in the ticket state
    and uses the saved investigation summary. Resume the saved session with a focused next step
    when useful findings exist. The no-submit summary includes a short trail of retained progress,
    gives the saved session's exact resume command when available, and states when no edits or tests
