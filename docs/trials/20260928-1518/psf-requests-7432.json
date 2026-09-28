@@ -1,0 +1,49 @@
+{
+  "issue": {
+    "url": "https://github.com/psf/requests/issues/7432",
+    "title": "`prepare_body` stream detection regression",
+    "fix_pr": 7433,
+    "test_files": ["tests/test_requests.py"]
+  },
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 156.07,
+      "tokens": 159179,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the correct production condition and the final worktree contains the needed `isinstance(data, Iterable) or hasattr(data, '__iter__')` fallback. However, three successive attempts largely repeated reads/searches, while its terminal message said `No patch or evidence was submitted` and `No retry is scheduled`; the user cannot tell that the implementation edit is actually present. Earlier `A retry is scheduled` notices and repeated continue/resume guidance also leave the user unsure whether to wait, resume, or manually retry. The displayed 159,179-token usage is attached to the final 48-second attempt, making cumulative versus per-attempt spend hard to understand. Report the actual worktree state and one accurate next action, carry findings into a genuinely distinct recovery turn, stop redundant exploration, and clarify token accounting. The mechanical hidden-test command exited nonzero because pytest reported recursive `httpbin` fixture setup errors (1 passed, 5 errors), so this is recorded as a failure rather than treated as proof of a broken implementation."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 86.13,
+      "tokens": 23716,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly found `prepare_body()`, stated a focused plan, and made a localized production change plus regression coverage. It recovered from two initial targeted-test failures by inspecting the traceback and adjusting its wrapper test double; the final focused run reported 5 passed and the final response accurately named that command. Its context navigation included one harmless incorrect path read. The task text supplied to this run contained duplicated/misordered system-information lines compared with the issue body, so the prompt was not fully verbatim and this comparison has a prompt-fidelity limitation. After applying the hidden PR test file, the prescribed stream-filtered test command also exited nonzero due recursive `httpbin` fixture setup errors (1 passed, 5 errors); therefore the arm is marked mechanically failed, not assumed to pass based on its agent-authored test. A clean compatible test-fixture setup and an exact prompt capture would improve reproducibility."
+    }
+  ],
+  "verification": {
+    "command": "PYTHONPATH=src /opt/homebrew/bin/pytest -q tests/test_requests.py -k 'stream'",
+    "tm": "failed: 1 passed, 5 errors; recursive httpbin fixture dependency",
+    "opencode": "failed: 1 passed, 5 errors; recursive httpbin fixture dependency"
+  }
+}

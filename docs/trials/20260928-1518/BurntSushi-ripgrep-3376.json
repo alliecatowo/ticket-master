@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 150.8,
+      "tokens": 584797,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 3
+      },
+      "better": "tm should stop the focused recovery from repeating nearly the same inspection sequence: it revisited crates/ignore/src/dir.rs and walk.rs across three no-change attempts and accumulated 584,797 tokens without a patch or test. The user-facing sequence is hard to follow: ‘Provider request failed. Waiting …’ is followed by ‘A retry is scheduled,’ but the run ends escalated with ‘No retry is scheduled’ and asks the user to run `tm ticket retry T-1`. Keep provider transport retries distinct from no-progress attempts, surface cumulative usage while retrying, and conclude with one next action that matches the final ticket state."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 97.61,
+      "tokens": 29161,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode found the parent-matcher cache in crates/ignore/src/dir.rs, removed reuse across roots, added a multiple-root regression in walk.rs, and accurately reported its targeted and package test results. It could make the plan and final summary even more useful by naming the root-specific cache invariant up front and including the exact test command and a concise changed-file summary. The independent package check passed after assigning this clone its own Cargo target directory; sharing the ambient target directory during concurrent checks initially produced misleading failures."
+    }
+  ]
+}

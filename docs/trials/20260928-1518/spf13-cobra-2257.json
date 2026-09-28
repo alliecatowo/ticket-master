@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 124.843,
+      "tokens": 379770,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the relevant append call, but did not turn that discovery into a scoped fix or test. It repeated reads and searches across three attempts, reported nearly 380k tokens and then exposed a confusing recovery state: the run ended escalated while its final text said to run `tm ticket retry T-1`, even though it also reported that an agent cannot retry an escalated ticket. The repeated 'no repository change or submitted evidence' messages were clear about failure but gave no new next step; stop the inspection loop earlier, preserve one focused handoff with actionable guidance, and make recovery commands match ticket state."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 44.754,
+      "tokens": 18916,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly traced the shared-backing-array append in `completions.go`, copied the args before appending, ran `go test ./...`, and clearly summarized the change and verification. It could improve context efficiency further by stating a brief user-facing plan before its tool work and running a targeted regression check as well as the full suite; the hidden regression test independently confirmed its implementation."
+    }
+  ]
+}
