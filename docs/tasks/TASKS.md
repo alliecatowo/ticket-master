@@ -2341,7 +2341,7 @@ is based on.
   acceptance: A deterministic fixture with repeated inspections across retries demonstrates that later attempts receive prior findings, take a materially different edit/test action or stop within a configured bound, and report cumulative token/time usage without replaying the same sequence.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260927-0538/spf13-cobra-2257/tm.log:27-61` — three attempts reread `completions.go` and `command.go` and repeat searches; each ends without a repository change, and stats report 535499 total tokens.
-- [ ] **t20260927-0538-spf13-cobra-2257-recovery-state-copy** — Give one recovery instruction that matches ticket retry state
+- [x] **t20260927-0538-spf13-cobra-2257-recovery-state-copy** — Give one recovery instruction that matches ticket retry state (landed c3b3c09)
   model: sonnet · severity: medium · builds Rust: yes · area: scheduler · deps: none
   files: `crates/tm-agent/src/agent_loop.rs, crates/tm-cli/src/sched.rs, /Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: Make no-progress messages distinguish a retry that will run automatically from a failed/escalated ticket requiring user action; emit a single valid next command and avoid recommending `tm --resume <session>` when the actual next action is ticket retry or scheduler execution.
