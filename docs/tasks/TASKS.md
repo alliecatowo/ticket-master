@@ -2292,7 +2292,7 @@ is based on.
   acceptance: For scheduled retry, ready ticket, and escalated ticket fixtures, captured output states retry status accurately and presents exactly the corresponding valid next command; no output pairs `tm --resume` with a conflicting ticket-retry instruction.
   test: `cargo test -p tm-cli`
   evidence: `/tmp/tm-trials/20260927-0335/spf13-cobra-2257/tm.log:14-24,38-40` — stop messages requested `tm --resume S-*`, claimed `A retry is scheduled`, and the final message instead instructed `tm ticket retry T-1`.
-- [ ] **t20260927-0538-BurntSushi-ripgrep-3376-cumulative-no-progress-retry-budget** — Stop retries from repeating repository inspections without progress
+- [x] **t20260927-0538-BurntSushi-ripgrep-3376-cumulative-no-progress-retry-budget** — Stop retries from repeating repository inspections without progress (landed f1403fe)
   model: sonnet · severity: high · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: Carry no-progress usage and completed investigation findings across automatic retries in one `tm run`; stop scheduling another identical inspection-only attempt and report aggregate tokens, tool calls, elapsed time, and one actionable recovery command.
