@@ -302,8 +302,10 @@ would exceed the token budget.
 
 Ticketed runs also attribute source paths named in search queries and inspection commands to the
 source itself. Repeated reads/searches of that source across different tools or ranges trigger the
-same retained-findings nudge and cumulative exploration bound; edits and verification reset the
-bound, so focused rereads after productive work remain available.
+same retained-findings nudge and cumulative exploration bound after three visits, including shell
+inspection commands that name the source; the recovery turn must make a focused change/check or
+state a specific blocker. Edits and verification reset the bound, so focused rereads after
+productive work remain available.
 
 Every build/test/clippy call in these tasks is already capped at `-j 2` — this is an 8GB Mac,
 concurrent full-workspace compiles have caused real disk-space incidents. If you're driving

@@ -64,7 +64,7 @@ const NO_PROGRESS_TOOL_CALL_LIMIT: usize = 24;
 
 /// Repeated inspections of one target with no productive action are stopped before the broader
 /// no-progress step ceiling, which exists for varied-but-unproductive exploration.
-const REPEATED_EXPLORATION_LIMIT: usize = 6;
+const REPEATED_EXPLORATION_LIMIT: usize = 3;
 
 /// The user message appended after a ticketed run's text-only turn, once per nudge budgeted by
 /// [`AgentLoop::max_submit_nudges`] (see [`DEFAULT_MAX_SUBMIT_NUDGES`]).
@@ -2241,8 +2241,8 @@ pub(crate) fn tool_result_text(resolution: &ToolOutcome) -> (String, bool) {
     }
 }
 
-/// Recognize repeated inspection of one target from the durable transcript. The same call
-/// appearing three times is enough to interrupt the cycle; a write or verification resets it.
+/// Recognize repeated inspection of one target from the durable transcript. Three visits across
+/// inspection tools are enough to interrupt the cycle; a write or verification resets it.
 fn repeated_exploration_nudge(steps: &[StepRecord]) -> Option<String> {
     let mut counts = BTreeMap::<String, (usize, String)>::new();
     for call in steps.iter().flat_map(|step| &step.tool_calls) {
@@ -5831,15 +5831,23 @@ mod no_progress_tests {
 
     #[test]
     fn repeated_source_inspections_have_an_early_run_level_bound() {
-        let steps: Vec<_> = (1..=REPEATED_EXPLORATION_LIMIT as u32)
-            .map(|i| step(i, "fs.read", "src/repeated.rs"))
-            .collect();
+        let mut shell_inspection = step(3, "shell.run", "src/repeated.rs");
+        shell_inspection.tool_calls[0].input =
+            serde_json::json!({"command": "python -m inspect src/repeated.rs"});
+        let steps = vec![
+            step(1, "fs.read", "src/repeated.rs"),
+            step(2, "fs.read_range", "src/repeated.rs"),
+            shell_inspection,
+        ];
         assert_eq!(
             repeated_exploration_count(&steps),
             REPEATED_EXPLORATION_LIMIT
         );
         let totals = run_totals(&steps);
         assert_eq!(totals.tool_calls, REPEATED_EXPLORATION_LIMIT);
+        let nudge = repeated_exploration_nudge(&steps).expect("cross-tool repeat is detected");
+        assert!(nudge.contains("concrete reproducer"));
+        assert!(nudge.contains("specific missing information"));
     }
 
     #[test]
