@@ -480,7 +480,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   ticket new` also reports a non-draft state after creation and, when a live lease exists, its
   holder and session id. If `tm run <T>` races an existing lease, the conflict includes `tm ticket
   show <T>` and, when known, `tm --resume <S>` recovery commands. `tm run` reports a failed attempt
-  as an error (exit 2), not as "finished". If the model ends without
+  as an error (exit 2), not as "finished". Compatible providers retry transient rate limits
+  within a bounded request retry budget, honor `Retry-After`, and report each wait; when those
+  retries are exhausted, a foreground run follows the ticket's bounded retry policy and keeps the
+  saved ticket/session available for recovery. If the model ends without
    submitting, `tm run` reports the failure and recovery action without immediately starting an
     identical foreground attempt; it immediately prints the failure reason, attempt count, current
      ticket state, and whether a retry is scheduled. When one is scheduled, the terminal summary names

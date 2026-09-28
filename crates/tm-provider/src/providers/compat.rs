@@ -257,7 +257,15 @@ impl CompatProvider {
                     };
                     if err.is_retryable() && attempt < self.config.max_retries {
                         attempt += 1;
-                        tokio::time::sleep(BACKOFF_FLOOR * attempt).await;
+                        let wait = BACKOFF_FLOOR * attempt;
+                        tracing::info!(
+                            provider = %self.config.id,
+                            retry = attempt,
+                            max_retries = self.config.max_retries,
+                            delay_seconds = wait.as_secs_f64(),
+                            "provider request failed; retrying"
+                        );
+                        tokio::time::sleep(wait).await;
                         continue;
                     }
                     return Err(err);
@@ -289,6 +297,13 @@ impl CompatProvider {
                     if err.is_retryable() && attempt < self.config.max_retries {
                         attempt += 1;
                         let wait = err.retry_after().unwrap_or(BACKOFF_FLOOR * attempt);
+                        tracing::info!(
+                            provider = %self.config.id,
+                            retry = attempt,
+                            max_retries = self.config.max_retries,
+                            delay_seconds = wait.as_secs_f64(),
+                            "provider request failed; retrying"
+                        );
                         tokio::time::sleep(wait).await;
                         continue;
                     }

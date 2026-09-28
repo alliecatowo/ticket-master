@@ -871,7 +871,7 @@ pub async fn run_ticket(
                     "provider attempt failed; waiting before retry"
                 );
                 renderer.note(&format!(
-                    "Provider request failed. Waiting {delay} seconds before retry {retry_count}."
+                    "Provider request failed. Waiting {delay} seconds before retry {retry_count}; the same ticket and saved session will be used."
                 ));
                 tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
                 // Other retryable failures may recover during this foreground invocation.
