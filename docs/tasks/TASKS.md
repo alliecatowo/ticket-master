@@ -1932,7 +1932,7 @@ is based on.
   acceptance: A deterministic agent-loop test with ten investigation-only steps followed by a valid patch proves the bounded continuation can complete and retains prior findings; a failure-path test proves the emitted recovery instruction agrees with whether a retry is scheduled.
   test: `cargo test -p tm-agent no_progress`
   evidence: `/tmp/tm-trials/20260926-1929/spf13-cobra-2257/tm.log` lines 6-16 show repeated reads/searches followed by `stopped after 10 steps without a repository change or submitted evidence` and `Run tm run T-1 again to retry`; `tm.log` lines 32-39 record `ticket.retry_scheduled`. `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs` lines 1760-1767 returns `AgentOutcome::Failed` immediately at the no-progress limit.
-- [ ] **t20260926-1929-sindresorhus-ky-878-no-progress-retry-guidance** — Make no-progress cutoff and retry guidance actionable
+- [x] **t20260926-1929-sindresorhus-ky-878-no-progress-retry-guidance** — Make no-progress cutoff and retry guidance actionable (landed eb545bb)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-cli/src/sched.rs`
   change: When a ticket reaches the no-progress step limit, include whether a retry was scheduled, clarify whether the user should wait or rerun `tm run <ticket>`, and summarize the useful work actually retained (including whether a source patch exists) rather than offering generic recovery text.
