@@ -2320,7 +2320,7 @@ is based on.
   acceptance: A no-progress run that retries and later escalates presents a single final command valid for the final ticket state; the message does not simultaneously imply automatic retry and require manual retry/resume.
   test: `cargo test -p tm-cli run_outcome`
   evidence: `/tmp/tm-trials/20260927-0538/gohugoio-hugo-15360/tm.log:86-108` — stop text advised `tm --resume S-4/S-5/S-6` while retries were scheduled, then the final output said `Run tm ticket retry T-2`; the attempts ended escalated.
-- [ ] **t20260927-0538-pallets-click-3822-no-progress-recovery** — Make repeated-investigation stops carry forward findings and give one accurate recovery action
+- [x] **t20260927-0538-pallets-click-3822-no-progress-recovery** — Make repeated-investigation stops carry forward findings and give one accurate recovery action (landed c551210)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-cli/src/sched.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: When repeated reads/searches hit the no-progress guard, steer the same bounded run toward an edit and focused verification using the findings already gathered; if it cannot proceed, emit only the recovery instruction that matches actual ticket/session/retry state, and explain token totals across attempts. Avoid launching retries that replay the same inspection sequence.
