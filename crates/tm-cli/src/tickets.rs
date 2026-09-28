@@ -481,7 +481,10 @@ fn executor_summary(executor: &ExecutorRequirements) -> Option<String> {
 /// The plain-text body of `tm ticket show`: a person-readable summary, not a struct dump. Pulled
 /// out of [`ticket_show`] so it can be unit-tested against a constructed [`tm_core::ticket::Ticket`]
 /// without a real [`Project`]/[`tm_core::Store`].
-fn format_ticket_text(ticket: &tm_core::ticket::Ticket) -> String {
+fn format_ticket_text(
+    ticket: &tm_core::ticket::Ticket,
+    usage: crate::stats::TicketUsage,
+) -> String {
     let mut text = format!("ID:           {}\n", ticket.id);
     text.push_str(&format!("State:        {}\n", state_label(ticket.state)));
     text.push_str(&format!("Kind:         {}\n", kind_label(ticket.kind)));
@@ -528,6 +531,8 @@ fn format_ticket_text(ticket: &tm_core::ticket::Ticket) -> String {
     };
     text.push_str(&format!("Children:     {children}\n"));
     text.push_str(&format!("Budget:       {}\n", budget_label(&ticket.budget)));
+    text.push_str(&format!("Tokens used:  {}\n", usage.tokens_total));
+    text.push_str(&format!("Wall time:    {} seconds\n", usage.wall_seconds));
     text.push_str(&format!(
         "Authority:    {}\n",
         authority_label(&ticket.authority)
@@ -562,11 +567,20 @@ pub fn ticket_show(
         .tickets
         .get(&ticket_id)
         .ok_or_else(|| TmError::not_found("ticket", &ticket_id))?;
+    let events = crate::stats::read_all_events(project)?;
+    let usage = crate::stats::ticket_usage(&events, &ticket_id);
 
     if renderer.is_json() {
-        renderer.emit(ticket, "")?;
+        let mut json = serde_json::to_value(ticket).map_err(TmError::from)?;
+        json.as_object_mut()
+            .expect("ticket serializes as an object")
+            .insert(
+                "usage".to_string(),
+                serde_json::to_value(usage).map_err(TmError::from)?,
+            );
+        renderer.emit(&json, "")?;
     } else {
-        renderer.emit(ticket, &format_ticket_text(ticket))?;
+        renderer.emit(ticket, &format_ticket_text(ticket, usage))?;
     }
 
     Ok(())
@@ -1879,7 +1893,7 @@ mod tests {
     #[test]
     fn format_ticket_text_has_no_debug_struct_syntax() {
         let ticket = sample_ticket("T-1", "fix the thing");
-        let text = format_ticket_text(&ticket);
+        let text = format_ticket_text(&ticket, crate::stats::TicketUsage::default());
         assert!(!text.contains('{'), "text contained a struct brace: {text}");
         assert!(!text.contains("Some("), "text contained Some(...): {text}");
         assert!(
@@ -1887,9 +1901,64 @@ mod tests {
             "text contained raw u64::MAX: {text}"
         );
         assert!(text.contains("Budget:       unlimited"));
+        assert!(text.contains("Tokens used:  0"));
+        assert!(text.contains("Wall time:    0 seconds"));
         assert!(text.contains("State:        draft"));
         assert!(text.contains("Depends on:   none"));
         assert!(text.contains("Children:     none"));
+    }
+
+    #[test]
+    fn ticket_usage_totals_sum_recorded_usage_and_ignore_other_tickets() {
+        let id = TicketId::new("T-1").unwrap();
+        let other = TicketId::new("T-2").unwrap();
+        let events = vec![
+            tm_events::EventDraft::new(
+                tm_types::ParticipantId::system(),
+                tm_types::Id::none(),
+                tm_events::Payload::from(tm_events::payload::UsageRecordedPayload {
+                    ticket: Some(id.clone()),
+                    session: None,
+                    tokens: 12,
+                    dollars_micros: 0,
+                    wall_seconds: 4,
+                    provider: None,
+                    model: None,
+                }),
+            ),
+            tm_events::EventDraft::new(
+                tm_types::ParticipantId::system(),
+                tm_types::Id::none(),
+                tm_events::Payload::from(tm_events::payload::UsageRecordedPayload {
+                    ticket: Some(other),
+                    session: None,
+                    tokens: 900,
+                    dollars_micros: 0,
+                    wall_seconds: 99,
+                    provider: None,
+                    model: None,
+                }),
+            ),
+        ];
+        let events: Vec<_> = events
+            .into_iter()
+            .enumerate()
+            .map(|(i, draft)| tm_events::Event {
+                seq: i as u64 + 1,
+                ts: tm_types::Timestamp::EPOCH,
+                kind: draft.kind(),
+                subject: draft.subject,
+                actor: draft.actor,
+                session: draft.session,
+                causation: draft.causation,
+                correlation: draft.correlation,
+                payload: draft.payload,
+                hash: "test".into(),
+            })
+            .collect();
+        let usage = crate::stats::ticket_usage(&events, &id);
+        assert_eq!(usage.tokens_total, 12);
+        assert_eq!(usage.wall_seconds, 4);
     }
 
     #[test]

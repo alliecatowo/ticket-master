@@ -24,7 +24,7 @@ use crate::render::{Renderer, Table};
 /// `tm-cli`'s convention is that each command module reads the log through its own thin,
 /// independent handle rather than sharing `project.store`'s internal one -- see
 /// `crate::project::open_event_log`'s doc comment).
-fn read_all_events(project: &Project) -> tm_types::Result<Vec<Event>> {
+pub(crate) fn read_all_events(project: &Project) -> tm_types::Result<Vec<Event>> {
     let db_path = project.state_dir.join("project.db");
     let log = EventLog::open_with_clock(&db_path, project.clock.clone())?;
     const BATCH: usize = 1024;
@@ -39,6 +39,25 @@ fn read_all_events(project: &Project) -> tm_types::Result<Vec<Event>> {
         out.extend(batch);
     }
     Ok(out)
+}
+
+/// Totals from the ticket's durable usage records. Budget limits are intentionally not consulted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub(crate) struct TicketUsage {
+    pub tokens_total: u64,
+    pub wall_seconds: u64,
+}
+
+pub(crate) fn ticket_usage(events: &[Event], ticket: &TicketId) -> TicketUsage {
+    events
+        .iter()
+        .filter_map(|event| event.payload.as_usage_recorded())
+        .filter(|usage| usage.ticket.as_ref() == Some(ticket))
+        .fold(TicketUsage::default(), |mut total, usage| {
+            total.tokens_total = total.tokens_total.saturating_add(usage.tokens);
+            total.wall_seconds = total.wall_seconds.saturating_add(usage.wall_seconds);
+            total
+        })
 }
 
 /// One calendar day's rollup, bucketed by each folded event's UTC date (the first 10 characters
