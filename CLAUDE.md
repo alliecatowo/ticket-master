@@ -532,10 +532,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    bounded continuation: the next model turn receives the retained files, findings, and exact
    failed command/output, with guidance to avoid broad repeated investigation; the run's existing
    step and token limits still apply.
-  Ticketed runs also stop after 10 consecutive steps without a successful edit, commit, or stored
-  evidence artifact. This bounds repeated investigations before the full step limit; the retained
-  failure detail summarizes explored targets and the latest finding, says no patch or evidence was
-  submitted, and directs the worker to make a focused change, verify it, and submit with evidence.
+   Ticketed runs also stop after 10 consecutive steps without a successful edit, commit, or stored
+   evidence artifact. Before failing, the agent gets one focused recovery turn using the retained
+   investigation summary, directed to make a small repository change, run a relevant check, and
+   submit evidence. If that turn also makes no progress, the failure detail summarizes explored
+   targets and names the exact `tm ticket retry <id>` command.
   A successful write resets the consecutive-step counter.
   They also stop after 24 consecutive tool calls without a successful edit, commit, or stored
   evidence artifact, bounding turns that contain many inspections and exploration across many

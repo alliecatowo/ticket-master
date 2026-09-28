@@ -1300,6 +1300,7 @@ impl AgentLoop {
         let mut nudges_sent: u32 = steps.iter().filter(|s| s.tool_calls.is_empty()).count() as u32;
         let mut exploration_nudge_sent = false;
         let mut toolchain_retry_context_sent = false;
+        let mut no_progress_reorientation_sent = false;
 
         loop {
             if steps.len() as u32 >= self.max_steps {
@@ -1468,6 +1469,15 @@ impl AgentLoop {
             if toolchain_retry_context_sent {
                 system.push_str("\n\nA verification command failed because its required toolchain executable was unavailable. Resume from the files and findings already present in this conversation; do not repeat broad searches or reread those files without a specific unresolved question. The failed verification and its exact command/output are already recorded above. Make the smallest useful correction or use a verification path available in this environment, then submit with evidence. This is a single bounded continuation; the normal step and token budgets still apply.");
             }
+            if no_progress_reorientation_sent && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT
+            {
+                let summary = InvestigationSummary::from_steps(&steps).render();
+                system.push_str("\n\nThis is your one focused recovery turn after reaching the no-progress limit. Use the actionable findings already recorded in this conversation to make the smallest useful repository change now, then run the relevant focused check and submit evidence. Do not continue broad investigation. If you are blocked, explain the specific blocker.");
+                // Keep the findings explicit in the instruction even when prior tool results were
+                // compacted from the rebuilt conversation.
+                system.push_str("\nRetained investigation summary: ");
+                system.push_str(&summary);
+            }
             let request = CompletionRequest {
                 system: Some(system),
                 messages,
@@ -1592,6 +1602,21 @@ impl AgentLoop {
                         "nudged a text-only turn to call ticket.submit instead of failing the attempt"
                     );
                     continue;
+                }
+                if no_progress_reorientation_sent {
+                    let summary = InvestigationSummary::from_steps(&steps).render();
+                    let retry = task
+                        .ticket
+                        .as_ref()
+                        .map(|ticket| format!("tm ticket retry {ticket}"))
+                        .unwrap_or_else(|| "tm ticket retry <id>".to_string());
+                    return Ok(AgentOutcome::Failed {
+                        steps,
+                        class: FailureClass::Other,
+                        detail: format!(
+                            "ticket failed after the focused recovery turn ended without a repository change or submitted evidence. Last useful work: {summary}. Retry with `{retry}`."
+                        ),
+                    });
                 }
                 return Ok(AgentOutcome::Failed {
                     steps,
@@ -1813,12 +1838,24 @@ impl AgentLoop {
             if task.ticket.is_some() && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT {
                 let summary = InvestigationSummary::from_steps(&steps).render();
                 let totals = run_totals(&steps);
+                if !no_progress_reorientation_sent
+                    && (steps.len() as u32) < self.max_steps
+                    && first_exhausted_dimension(&effective_budget).is_none()
+                {
+                    no_progress_reorientation_sent = true;
+                    continue;
+                }
+                let retry = task
+                    .ticket
+                    .as_ref()
+                    .map(|ticket| format!("tm ticket retry {ticket}"))
+                    .unwrap_or_else(|| "tm ticket retry <id>".to_string());
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
                     detail: format!(
-                        "stopped after {NO_PROGRESS_STEP_LIMIT} steps without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds. Continue the saved session with `tm --resume {}` and make a focused change, run the relevant checks, then submit with evidence.",
-                        totals.tokens, totals.tool_calls, totals.wall_seconds, task.session
+                        "ticket failed after the focused recovery turn also made no repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds. Retry with `{retry}`.",
+                        totals.tokens, totals.tool_calls, totals.wall_seconds
                     ),
                 });
             }
