@@ -2420,7 +2420,7 @@ is based on.
   acceptance: CLI tests cover a failure with a scheduled retry and an escalated ticket; each output presents one actionable, state-correct recovery instruction and never pairs “A retry is scheduled” with a manual resume/retry instruction.
   test: `cargo test -p tm-cli`
   evidence: `/tmp/tm-trials/20260928-0029/spf13-cobra-2257/tm.log` — attempt messages said “Continue the saved session with `tm --resume S-1`” while “A retry is scheduled”; the final run said “Ticket state: escalated. No retry is scheduled” and “Run `tm ticket retry T-1` to try again.”
-- [ ] **t20260928-0312-BurntSushi-ripgrep-3376-bounded-no-progress-retries** — Stop repeated investigation within one cumulative run budget
+- [x] **t20260928-0312-BurntSushi-ripgrep-3376-bounded-no-progress-retries** — Stop repeated investigation within one cumulative run budget (landed 98e7712)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-cli/src/sched.rs`
   change: Make the no-progress budget and recovery policy cumulative across automatic attempts in one `tm run`; preserve findings and issue at most one focused continuation after repeated source reads. Bound provider backoff/retries by the same run deadline and report aggregate tokens, elapsed time, attempt count, and one recovery command in the final message.
