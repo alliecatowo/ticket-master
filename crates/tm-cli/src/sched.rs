@@ -1297,6 +1297,19 @@ fn run_outcome(
             let delay = scheduled_retry_delay(ticket, failure).unwrap_or_default();
             format!("A retry is scheduled in about {delay} seconds. Run `tm sched run` to keep the scheduler active until it starts.")
         }
+        tm_core::TicketState::Ready | tm_core::TicketState::Blocked
+            if failure.is_some_and(is_rate_limit_failure) =>
+        {
+            let recovery = session.as_deref().map_or_else(
+                || format!("Inspect the saved attempt with `tm ticket show {}` and resume its saved session with `tm --resume <session>`.", ticket.id),
+                |session| format!("Inspect the saved attempt with `tm ticket show {}` and resume it with `tm --resume {session}`.", ticket.id),
+            );
+            if let Some(delay) = scheduled_retry_delay(ticket, failure) {
+                format!("The provider rate-limited this request. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run` rather than starting an immediate retry. {recovery}")
+            } else {
+                format!("The provider rate-limited this request, but no retry delay was supplied, so the wait time is unknown. {recovery}")
+            }
+        }
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked => {
             format!("Run `tm run {}` again to retry.", ticket.id)
         }
@@ -1355,6 +1368,8 @@ fn run_outcome(
     let retry_status = if ticket.state == tm_core::TicketState::Ready {
         if scheduled_retry_delay(ticket, failure).is_some() {
             "An automatic retry is scheduled; if it does not start, run `tm sched run`.".to_string()
+        } else if failure.is_some_and(is_rate_limit_failure) {
+            String::new()
         } else {
             format!(
                 "No automatic retry is scheduled. Run `tm run {}` to try again.",
@@ -1394,6 +1409,14 @@ fn run_outcome(
         message
     };
     Err(tm_types::TmError::TurnFailed(message))
+}
+
+fn is_rate_limit_failure(failure: &tm_core::FailureRecord) -> bool {
+    if failure.class != tm_core::FailureClass::ProviderUnavailable {
+        return false;
+    }
+    let detail = failure.detail.to_ascii_lowercase();
+    detail.contains("429") || detail.contains("rate limit") || detail.contains("rate-limit")
 }
 
 fn scheduled_retry_delay(
@@ -2121,7 +2144,8 @@ mod tests {
         }
 
         ticket.failures[0].class = FailureClass::ProviderUnavailable;
-        ticket.failures[0].detail = "provider returned 429 rate limited".to_string();
+        ticket.failures[0].detail =
+            "provider returned 429 rate limited; retry after 20 seconds".to_string();
         let scheduled = run_outcome(&ticket, 0, false, &[], None)
             .unwrap_err()
             .to_string();
@@ -2133,7 +2157,16 @@ mod tests {
         let unscheduled = run_outcome(&ticket, 0, false, &[], None)
             .unwrap_err()
             .to_string();
-        assert!(unscheduled.contains("Run `tm run T-1` again to retry"));
+        assert!(unscheduled.contains("no retry delay was supplied"));
+        assert!(unscheduled.contains("wait time is unknown"));
+        assert!(unscheduled.contains("tm ticket show T-1"));
+        assert!(unscheduled.contains("tm --resume <session>"));
+        assert!(!unscheduled.contains("Run `tm run T-1` again"));
+
+        let unscheduled_with_session = run_outcome(&ticket, 0, false, &[], Some("S-7".to_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(unscheduled_with_session.contains("tm --resume S-7"));
     }
 
     #[test]

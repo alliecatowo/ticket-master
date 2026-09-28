@@ -165,7 +165,10 @@ never drift between sessions:
   When `tm run` receives a retryable provider failure such as HTTP 429 and the ticket retry policy
   schedules another attempt, it waits in the foreground, reports the retry number and delay, and
   retries the same ticket automatically. The scheduler remains authoritative for the bounded retry
-  count; permanent provider failures are reported without retrying.
+  count; permanent provider failures are reported without retrying. A rate-limit failure that
+  returns control without an automatic retry tells the user whether a delay was supplied; when
+  none was provided, it says the wait time is unknown and points to the saved ticket/session
+  recovery path rather than recommending an immediate blind retry.
 - `tm mcp [--no-workers]` — the project as an MCP server over stdio (newline-delimited JSON-RPC),
   negotiates protocol versions `2024-11-05`, `2025-03-26`, and `2025-06-18` with the client, and
   defaults to the latest supported version for an unknown request. A Claude Code session can
