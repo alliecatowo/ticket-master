@@ -54,6 +54,21 @@ struct PriorInvestigation {
     /// Whether this round's chain was later marked resolved by a real submission
     /// ([`BuiltinExecutor::mark_investigation_cleared`]).
     cleared: bool,
+    cumulative_tokens: u64,
+    cumulative_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CumulativeUsage {
+    tokens: u64,
+    seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct InvestigationRecordState {
+    attempt_count: u32,
+    repeated: bool,
+    cleared: bool,
 }
 
 impl PriorInvestigation {
@@ -414,6 +429,14 @@ impl BuiltinExecutor {
                     attempt_count,
                     repeated,
                     cleared,
+                    cumulative_tokens: meta
+                        .get("cumulative_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
+                    cumulative_seconds: meta
+                        .get("cumulative_seconds")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0),
                 })
             })
             // The most recent record is the one with the highest `attempt_count`; ties can't
@@ -441,14 +464,18 @@ impl BuiltinExecutor {
         summary: &InvestigationSummary,
         attempt_count: u32,
         repeated: bool,
+        usage: CumulativeUsage,
     ) {
         self.persist_investigation_record(
             ticket,
             objective,
             summary,
-            attempt_count,
-            repeated,
-            false,
+            InvestigationRecordState {
+                attempt_count,
+                repeated,
+                cleared: false,
+            },
+            usage,
         );
     }
 
@@ -469,9 +496,12 @@ impl BuiltinExecutor {
             ticket,
             objective,
             &InvestigationSummary::default(),
-            attempt_count,
-            false,
-            true,
+            InvestigationRecordState {
+                attempt_count,
+                repeated: false,
+                cleared: true,
+            },
+            CumulativeUsage::default(),
         );
     }
 
@@ -483,9 +513,8 @@ impl BuiltinExecutor {
         ticket: &tm_types::TicketId,
         objective: &str,
         summary: &InvestigationSummary,
-        attempt_count: u32,
-        repeated: bool,
-        cleared: bool,
+        state: InvestigationRecordState,
+        usage: CumulativeUsage,
     ) {
         let max_attempts = self
             .store
@@ -504,11 +533,13 @@ impl BuiltinExecutor {
             "no_submit_ticket": ticket.as_str(),
             "objective": objective,
             "max_attempts": max_attempts,
-            "attempt_count": attempt_count,
-            "repeated": repeated,
-            "cleared": cleared,
+            "attempt_count": state.attempt_count,
+            "repeated": state.repeated,
+            "cleared": state.cleared,
             "tool_signatures": summary.tool_signatures,
             "conclusion": summary.conclusion,
+            "cumulative_tokens": usage.tokens,
+            "cumulative_seconds": usage.seconds,
         });
         if let Err(e) = self.store.store_artifact(
             ArtifactKind::Report,
@@ -541,12 +572,14 @@ impl BuiltinExecutor {
             format!(
                 "\n\n# Prior attempts made no progress\n{} consecutive attempts on this ticket \
                  have now ended without calling ticket.submit, repeating the same investigation \
-                 each time ({}). Do not repeat those same reads/searches again. Stop \
-                 investigating: either state a specific diagnosis of the root cause in your reply, \
-                 or ask (in your final reply, without any further tool calls) for a targeted \
-                 reproduction case from a human before continuing.",
+                 each time ({}). Cumulative usage so far: {} tokens and {} seconds. Do not repeat \
+                 those reads/searches. Use the retained findings to make one focused code change, \
+                 run a targeted check, and submit evidence. If the findings do not support a safe \
+                 change, stop and explain the specific blocker without repeating exploration.",
                 prior.attempt_count,
-                prior.summary.render()
+                prior.summary.render(),
+                prior.cumulative_tokens,
+                prior.cumulative_seconds
             )
         } else {
             format!(
@@ -835,6 +868,18 @@ impl Executor for BuiltinExecutor {
                     .iter()
                     .fold(tm_types::Spend::default(), |acc, step| acc.plus(step.spend));
                 let summary = InvestigationSummary::from_steps(&steps);
+                let attempt_tokens = usage.tokens;
+                let attempt_seconds = steps.iter().fold(0u64, |total, step| {
+                    total.saturating_add(step.spend.wall_seconds)
+                });
+                let cumulative_tokens = prior
+                    .as_ref()
+                    .map_or(0, |p| p.cumulative_tokens)
+                    .saturating_add(attempt_tokens);
+                let cumulative_seconds = prior
+                    .as_ref()
+                    .map_or(0, |p| p.cumulative_seconds)
+                    .saturating_add(attempt_seconds);
                 // Steering/overlap comparisons only ever look at an *unresolved* chain: a
                 // `cleared` winner (this round already reached a real submission since its
                 // no-submit history was recorded — e.g. a human rejected it and asked for
@@ -878,6 +923,10 @@ impl Executor for BuiltinExecutor {
                     &summary,
                     attempt_count,
                     repeated,
+                    CumulativeUsage {
+                        tokens: cumulative_tokens,
+                        seconds: cumulative_seconds,
+                    },
                 );
                 let detail = if repeated {
                     // Deliberately no attempt number in this message: `attempt_count` only
@@ -887,15 +936,18 @@ impl Executor for BuiltinExecutor {
                     format!(
                         "no forward progress: no patch or evidence was submitted. The investigation retained from \
                          this attempt is: {}. The cause and any proposed fix remain unverified. \
-                         Next: provide a targeted reproduction or manual diagnosis; do not repeat \
-                         the same discovery work automatically.",
+                         Next: use the retained findings for one focused code change and targeted \
+                         check, or stop with the specific blocker. Cumulative usage: {cumulative_tokens} \
+                         tokens and {cumulative_seconds} seconds.",
                         summary.render()
                     )
                 } else {
                     format!(
                         "No patch or evidence was submitted. The investigation retained from \
                          this attempt is: {}. The cause and any proposed fix remain unverified. \
-                         Next: continue from these findings, verify a fix, and submit the evidence. \
+                         Next: continue from these findings with one focused code change, a targeted \
+                         check, and submitted evidence. Cumulative usage: {cumulative_tokens} tokens \
+                         and {cumulative_seconds} seconds. \
                          Original failure: {detail}",
                         summary.render()
                     )
@@ -1501,6 +1553,10 @@ mod tests {
         assert_eq!(prior.attempt_count, 1);
         assert!(!prior.repeated);
         assert!(
+            prior.cumulative_tokens > 0,
+            "attempt usage should be retained"
+        );
+        assert!(
             prior
                 .summary
                 .tool_signatures
@@ -1601,6 +1657,12 @@ mod tests {
             "expected the explanation to name what was actually repeated: {}",
             outcome.detail
         );
+        assert!(outcome.detail.contains("focused code change"));
+        assert!(outcome.detail.contains("Cumulative usage:"));
+        let prior = executor
+            .prior_investigation(&ticket, NO_SUBMIT_TEST_OBJECTIVE)
+            .expect("cumulative usage persists with the latest investigation");
+        assert!(prior.cumulative_tokens > 0);
 
         // Still `FailureClass::Other` and still retryable at the type level: the scheduler's
         // ordinary retry/escalation machinery is untouched by this change, only the message it

@@ -500,7 +500,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    identifies the failed
     attempt, current ticket state, provider-turn failure reason (separate from test failures),
     whether another retry is scheduled, and the exact next command. A no-submit failure retains a concise summary of the
-    investigation for the next attempt and tells the user that the findings are unverified; it
+    investigation for the next attempt and tells the user that the findings are unverified; across
+     repeated automatic attempts, the worker is directed to use those findings for one focused code
+     change and targeted check (or stop with the specific blocker), without repeating discovery.
+     The final no-submit detail includes cumulative tokens and elapsed seconds across the retained
+     retry chain; it
      reports whether the workspace has edits and preserves findings for the next attempt. With no
      edits, it says no repository change was made and includes the recovery action for the final
      ticket state rather than a competing saved-session command;
