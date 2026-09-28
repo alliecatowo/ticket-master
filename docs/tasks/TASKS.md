@@ -2456,7 +2456,7 @@ is based on.
   acceptance: A deterministic test with repeated identical file-read/search actions proves the run does not perform three near-identical investigation attempts, records a focused recovery attempt, and surfaces cumulative usage in the final failure message.
   test: `cargo test -p tm-agent repeated_exploration`
   evidence: `/tmp/tm-trials/20260928-0312/psf-requests-7432/tm.log` lines 6–38: repeated reads/searches of `src/requests/models.py`; attempts failed at lines 14, 25, and 37 without a repository change; line 38 gives a generic retry command; reported usage reached 139430 tokens.
-- [ ] **t20260928-0312-sindresorhus-ky-878-run-cost-summary** — Make run token/time cost visible and help bound redundant verification
+- [x] **t20260928-0312-sindresorhus-ky-878-run-cost-summary** — Make run token/time cost visible and help bound redundant verification (landed 39fd404)
   model: sonnet · severity: medium · builds Rust: yes · area: agent
   deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
