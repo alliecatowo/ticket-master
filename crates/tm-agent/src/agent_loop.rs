@@ -727,8 +727,17 @@ impl AgentLoop {
     /// limit — is represented as an `Ok(AgentOutcome::Failed { .. })` or the matching variant,
     /// never as an `Err`.
     pub async fn run(&mut self, task: AgentTask) -> Result<AgentOutcome> {
+        let started_at = self.clock.now();
         self.store.append(vec![self.session_started_draft(&task)])?;
-        let outcome = self.drive(&task, Vec::new()).await;
+        let mut outcome = self.drive(&task, Vec::new()).await;
+        if let Ok(AgentOutcome::Submitted { evidence, steps }) = &mut outcome {
+            let totals = run_totals(steps);
+            let elapsed_seconds = self.clock.now().millis_since(started_at).max(0) as u64 / 1000;
+            evidence.summary = format!(
+                "{} (Run cost: {elapsed_seconds} seconds, {} tokens from recorded provider usage.)",
+                evidence.summary, totals.tokens
+            );
+        }
         self.finish_session(&task, &outcome)?;
         outcome
     }
@@ -1301,6 +1310,10 @@ impl AgentLoop {
         let mut exploration_nudge_sent = false;
         let mut toolchain_retry_context_sent = false;
         let mut no_progress_reorientation_sent = false;
+        let max_provider_calls = std::env::var("TM_AGENT_MAX_PROVIDER_CALLS")
+            .ok()
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|&value| value > 0);
 
         loop {
             if steps.len() as u32 >= self.max_steps {
@@ -1320,6 +1333,19 @@ impl AgentLoop {
                     class: FailureClass::Other,
                     detail,
                 });
+            }
+            if let Some(limit) = max_provider_calls {
+                if steps.len() >= limit {
+                    let totals = run_totals(&steps);
+                    return Ok(AgentOutcome::Failed {
+                        steps,
+                        class: FailureClass::Other,
+                        detail: format!(
+                            "provider-call limit reached ({limit}); {} recorded tokens used. Work and evidence already recorded are preserved. Raise TM_AGENT_MAX_PROVIDER_CALLS to allow more calls, or avoid repeating checks that have already passed.",
+                            totals.tokens
+                        ),
+                    });
+                }
             }
 
             // Re-orientation (`SPEC.md` §29): re-read the current goal state from the store at

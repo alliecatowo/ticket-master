@@ -594,6 +594,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   admitted and dropped sections with token counts — without spending an attempt.
 - `tm ticket show <ID>` includes actual tokens and wall time summed from that ticket's recorded
   usage events, separately from its budget limits; tickets with no recorded usage show zero.
+- A completed `tm run` submission includes elapsed seconds and aggregate tokens from its recorded
+  provider usage. Set `TM_AGENT_MAX_PROVIDER_CALLS` to a positive integer to stop before an
+  additional provider call; the run reports the limit and preserves work and evidence already
+  recorded. To reduce redundant verification, skip checks that have already passed or raise the
+  limit only when more calls are needed.
 - `tm run <ticket> --worktree` isolates one delegated run in a real `git worktree` (a fresh branch
   off `HEAD`, under `<state_dir>/worktrees/<ticket>-<suffix>/`) instead of the main checkout —
   requires a repo-scoped project backed by a real, non-bare git repository with at least one
