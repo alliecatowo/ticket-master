@@ -2412,7 +2412,7 @@ is based on.
   acceptance: A deterministic repeated-inspection task causes the next action to edit or test a concrete identified code path, or exits with a clear blocker within a configured cumulative budget; it must not replay the same discovery sequence across three attempts.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260928-0029/spf13-cobra-2257/tm.log` — attempts 1–3 each reread `completions.go`/`command.go`, reported “No patch or evidence was submitted,” and used 145595, 181223, and 181852 tokens; no test ran.
-- [ ] **t20260928-0029-spf13-cobra-2257-recovery-copy** — Show one recovery action that matches whether a retry is scheduled
+- [x] **t20260928-0029-spf13-cobra-2257-recovery-copy** — Show one recovery action that matches whether a retry is scheduled (landed 8d6a1ec)
   model: sonnet · severity: medium · builds Rust: yes · area: cli
   deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-cli/src/sched.rs`
