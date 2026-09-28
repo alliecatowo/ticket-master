@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 114,
+      "tokens": 508670,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm initially reached the relevant files (`completions.go` and `command.go`) but spent all three attempts repeating inspections without making a repository change or running tests. The output did honestly say no patch or evidence was submitted, but it told the user to continue with `tm --resume S-N` while automatically scheduling retries, then ended escalated with `tm ticket retry T-1`; that left the user unsure which action was expected. Reported attempt usage summed to 508,670 tokens for a 114-second run. Carry the concrete finding across attempts and require a focused edit or targeted test after the no-progress threshold, bound cumulative context spend, and show one recovery instruction consistent with ticket state. Hidden PR tests mechanically failed on the `os.Args[2]` mutation."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 130.379,
+      "tokens": 26196,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped plan, traced the aliased slice to `append(finalArgs, \"--\")`, copied the slice before appending, and added a focused regression test. Its first test iteration failed because the new test used `cobra.test`, triggering Cobra’s go-test argument workaround; it diagnosed the mismatch, changed the test executable name to `cobra`, then passed the focused test and `go test ./...`. It could have kept the change smaller by avoiding an intermediate self-authored test and by applying the hidden test only after the agent finished, as done for grading; its final report was otherwise accurate."
+    }
+  ]
+}

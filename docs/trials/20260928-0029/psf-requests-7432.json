@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 91.534,
+      "tokens": 352318,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm should stop and surface an actionable diagnosis as soon as repeated reads are detected, rather than scheduling more model attempts with the same unproductive investigation context. In this run it repeated inspections of src/requests/models.py three times, consumed 352,318 tokens across those attempts, and escalated without a patch; the suggested next step was to resume manually. A better experience would give one focused recovery turn with a concrete instruction to inspect the existing tests and change the stream check, then stop and clearly say no fix or verification was completed."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 107.757,
+      "tokens": 36633,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 3,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode reached the stream check quickly, implemented the expected compatibility change, and recovered from its initial failing reproduction before reporting its focused tests. It could improve by adapting the test fixture after its first incorrect wrapper assumption with fewer edit-and-rerun cycles, and by providing clearer progress summaries between actions; the final result was concise and accurate."
+    }
+  ]
+}

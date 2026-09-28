@@ -1,0 +1,49 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "test_files": [
+    "test/browser.ts",
+    "test/stream.ts"
+  ],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 39.54,
+      "tokens": 183478,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 3,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 3,
+        "recoverability": 4,
+        "cost_time": 3
+      },
+      "better": "tm reached source/utils/body.ts quickly, made the focused flush fix, and its run had useful recovery signals (goal.reoriented events) before submission. The ticket command clearly says `Created ticket T-1: …`, but its human-readable confirmation on stdout is not a machine-friendly ID contract; callers trying `id=$(tm ticket new …)` capture the whole sentence and then get a confusing invalid-ticket-ID error. Add an explicit ID-only/JSON output mode and document its shell-safe use. At completion, make the result clearer to a user expecting a finished task: summarize whether implementation verification actually ran, distinguish submission from acceptance, and surface the available test outcome instead of leaving the user to infer it from terse activity lines and event IDs. The run used 183,478 tokens, comparatively high for this narrow edit."
+    },
+    {
+      "tool": "OpenCode",
+      "passed": true,
+      "wall_seconds": 73.53,
+      "tokens": 20225,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 5,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped three-step plan, found the progress transform and stream tests quickly, and implemented the change with a focused regression test. Its first test fixture used `new Response(null)`, which produced no response stream and failed; it recognized that fixture issue, replaced it with a closed ReadableStream, and reran the test successfully. The final response accurately reported the 18 passing stream tests and diff check. It could be more thorough by checking the browser-level behavior too; independent hidden-test verification later passed the four empty-body tests across stream plus Chromium, Firefox, and WebKit."
+    }
+  ],
+  "verification": {
+    "command": "./node_modules/.bin/ava test/stream.ts test/browser.ts --match '*empty response body*'",
+    "tm": "PASS: 4 tests",
+    "opencode": "PASS: 4 tests",
+    "additional_observation": "The full test-file run failed in both clones on the same unrelated WebKit upload test due to a localhost POST NetworkError. `pnpm test` also stopped before tests because pnpm 11 rejected ignored optional dependency build scripts (esbuild and unrs-resolver)."
+  }
+}
