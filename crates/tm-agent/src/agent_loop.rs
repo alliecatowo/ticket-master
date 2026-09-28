@@ -1711,11 +1711,17 @@ impl AgentLoop {
                     input: input.clone(),
                 };
                 let dispatch_started_at = self.clock.now();
-                let cached_read = self
-                    .replay_tool_source
-                    .is_none()
-                    .then(|| cached_inspection_result(&steps, name, input))
-                    .flatten();
+                let cached_read = self.replay_tool_source.is_none().then(|| {
+                    if no_progress_reorientation_sent
+                        && recovery_inspection_blocked(&steps, name, input)
+                    {
+                        Some(ToolOutcome::Errored {
+                            detail: "This source or search target was already inspected during this run. Use the retained findings to make a focused change or check instead of repeating the inspection.".to_string(),
+                        })
+                    } else {
+                        cached_inspection_result(&steps, name, input)
+                    }
+                }).flatten();
                 let resolution = if let Some(cached) = cached_read {
                     tracing::debug!(
                         tool = name,
@@ -1881,10 +1887,14 @@ impl AgentLoop {
                     continue;
                 }
                 let summary = InvestigationSummary::from_steps(&steps).render();
+                let totals = run_totals(&steps);
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: format!("focused continuation ended without a change or evidence. Last useful work: {summary}."),
+                    detail: format!(
+                        "focused continuation ended without a change or evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds.",
+                        totals.tokens, totals.tool_calls, totals.wall_seconds
+                    ),
                 });
             }
             if task.ticket.is_some() && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT {
@@ -2343,6 +2353,39 @@ fn cached_inspection_result(
         }
     }
     None
+}
+
+fn exploration_target_for(name: &str, input: &serde_json::Value) -> Option<String> {
+    let call = ToolCallRecord {
+        tool_use_id: String::new(),
+        tool_name: name.to_string(),
+        input: input.clone(),
+        resolution: crate::outcome::ToolCallResolution::Errored {
+            detail: String::new(),
+        },
+    };
+    exploration_target(&call)
+}
+
+fn repeated_target_count(steps: &[StepRecord], target: &str) -> usize {
+    let mut count = 0;
+    for call in steps.iter().flat_map(|step| &step.tool_calls) {
+        if is_progress_call(call) {
+            count = 0;
+        } else if exploration_target(call).as_deref() == Some(target) {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn recovery_inspection_blocked(
+    steps: &[StepRecord],
+    name: &str,
+    input: &serde_json::Value,
+) -> bool {
+    exploration_target_for(name, input)
+        .is_some_and(|target| repeated_target_count(steps, &target) >= REPEATED_EXPLORATION_LIMIT)
 }
 
 fn concise_finding(text: &str) -> String {
@@ -5958,5 +6001,31 @@ mod no_progress_tests {
             cached_inspection_result(&steps, "fs.read", &input),
             Some(ToolOutcome::Completed { .. })
         ));
+    }
+
+    #[test]
+    fn recovery_suppresses_overlapping_source_reads_and_keeps_run_totals() {
+        let mut first = step(1, "fs.read_range", "src/completions.go");
+        first.tool_calls[0].input =
+            serde_json::json!({"path":"src/completions.go","start":1,"end":40});
+        first.spend.tokens = 100_000;
+        let mut second = step(2, "fs.read_range", "src/completions.go");
+        second.tool_calls[0].input =
+            serde_json::json!({"path":"src/completions.go","start":30,"end":80});
+        second.spend.tokens = 50_000;
+        let mut third = step(3, "fs.read", "src/completions.go");
+        third.spend.tokens = 25_000;
+        let steps = vec![first, second, third];
+
+        assert!(recovery_inspection_blocked(
+            &steps,
+            "fs.read_range",
+            &serde_json::json!({"path":"src/completions.go","start":80,"end":120}),
+        ));
+        assert_eq!(
+            run_totals(&steps).tokens,
+            175_000,
+            "all investigation usage remains part of the run outcome"
+        );
     }
 }

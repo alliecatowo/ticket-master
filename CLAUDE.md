@@ -535,9 +535,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
      and a different targeted reread is still allowed when new evidence requires it. The no-submit
      recovery summary is carried into the next attempt so repeated dispatches do not restart cold.
      Repeated-inspection and other no-progress stops get one focused continuation with the retained
-     findings, directed to one concrete edit/check; if that recovery repeats investigation or still
-     cannot make progress, the agent stops without another automatic continuation and reports its
-     cumulative token, tool-call, and time totals. `tm run` uses the ticket's current state to report
+      findings, directed to one concrete edit/check; if that recovery repeats investigation or still
+      cannot make progress, the agent stops without another automatic continuation and reports its
+      cumulative token, tool-call, and time totals. During that recovery, repeated reads or searches
+      of an already-exhausted source are returned as an error instead of being dispatched again.
+      `tm run` uses the ticket's current state to report
      one valid recovery action and sums persisted per-attempt token totals when available.
      An evidence-free ticket submission tells the worker to store a report
    or other evidence artifact and cite the returned artifact ID when submitting, rather than
