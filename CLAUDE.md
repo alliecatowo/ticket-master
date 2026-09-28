@@ -167,8 +167,9 @@ never drift between sessions:
   retries the same ticket automatically. The scheduler remains authoritative for the bounded retry
   count; permanent provider failures are reported without retrying. An exhausted HTTP 429 keeps
   its rate-limit reason and provider-supplied `Retry-After` duration in the failure detail. When
-  that duration is available, `tm run` tells the user how long to wait and gives the ticket's
-  retry command; without one, it says the wait time is unknown and points to the saved
+  that duration is available, `tm run` tells the user how long to wait before using the ticket's
+  retry command; without one, it explicitly says no delay was supplied and the wait time is unknown,
+  then points to the saved
   ticket/session recovery path rather than recommending an immediate blind retry.
 - `tm mcp [--no-workers]` — the project as an MCP server over stdio (newline-delimited JSON-RPC),
   negotiates protocol versions `2024-11-05`, `2025-03-26`, and `2025-06-18` with the client, and

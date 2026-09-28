@@ -1386,13 +1386,13 @@ fn run_outcome(
                 if let Some(delay) = scheduled_retry_delay(ticket, failure) {
                     format!("The provider rate-limited this request and asked you to wait {wait} seconds. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run`.")
                 } else {
-                    format!("The provider rate-limited this request and asked you to wait {wait} seconds. Then run `tm run {}`.", ticket.id)
+                    format!("The provider rate-limited this request and asked you to wait {wait} seconds before retrying. After waiting, run `tm run {}`.", ticket.id)
                 }
             } else {
                 if let Some(delay) = scheduled_retry_delay(ticket, failure) {
                     format!("The provider rate-limited this request. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run`.")
                 } else {
-                    format!("The provider rate-limited this request, but no retry delay was supplied, so the wait time is unknown. Run `tm run {}` after the provider is available.", ticket.id)
+                    format!("The provider rate-limited this request, but no retry delay was supplied, so the wait time is unknown. Check that the provider is available before retrying with `tm run {}`.", ticket.id)
                 }
             }
         }
@@ -2280,7 +2280,8 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(unscheduled.contains("wait 20 seconds"));
-        assert!(unscheduled.contains("Then run `tm run T-1`"));
+        assert!(unscheduled.contains("After waiting, run `tm run T-1`"));
+        assert!(!unscheduled.contains("Run `tm run T-1` again"));
 
         let unscheduled_with_session = run_outcome(&ticket, 0, false, &[], Some("S-7".to_string()))
             .unwrap_err()
@@ -2288,6 +2289,15 @@ mod tests {
         assert!(unscheduled_with_session.contains("wait 20 seconds"));
         assert!(unscheduled_with_session.contains("tm run T-1"));
         assert!(!unscheduled_with_session.contains("tm --resume"));
+
+        ticket.failures[0].detail = "provider returned 429 rate limited".to_string();
+        let unknown_delay = run_outcome(&ticket, 0, false, &[], Some("S-7".to_string()))
+            .unwrap_err()
+            .to_string();
+        assert!(unknown_delay.contains("no retry delay was supplied"));
+        assert!(unknown_delay.contains("wait time is unknown"));
+        assert!(unknown_delay.contains("tm run T-1"));
+        assert!(!unknown_delay.contains("tm run T-1` again"));
     }
 
     #[test]
