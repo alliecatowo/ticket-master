@@ -2299,7 +2299,7 @@ is based on.
   acceptance: Three consecutive inspection-only attempts consume at most one configured no-progress budget, do not reread the same source files on retry, and produce one final summary with cumulative usage and a valid next command.
   test: `cargo test -p tm-agent`
   evidence: `/private/tmp/tm-trials/20260927-0538/BurntSushi-ripgrep-3376/tm/tm.log:25-49` — attempts 1–3 repeated reads/searches, each stopped after 10 steps without a repository change, and spent 192079, 183316, and 237931 tokens; the final user-visible recovery guidance only appears after all three attempts.
-- [ ] **t20260927-0538-BurntSushi-ripgrep-3376-cargo-target-diagnostics** — Explain Cargo's configured target directory before broad artifact searches
+- [x] **t20260927-0538-BurntSushi-ripgrep-3376-cargo-target-diagnostics** — Explain Cargo's configured target directory before broad artifact searches (landed da60752)
   model: sonnet · severity: medium · builds Rust: yes · area: tools · deps: none
   files: `crates/tm-agent/src/tools.rs`
   change: When shell/build tool output indicates Cargo built successfully but the agent's expected `target/debug` artifact is absent, expose the effective Cargo target directory and relevant environment/configuration in the command result or a focused diagnostic so the agent can locate artifacts without scanning outside the project.
