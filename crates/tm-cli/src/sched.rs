@@ -2142,6 +2142,7 @@ mod tests {
         assert!(notice.contains("model ended turn without submitting"));
         assert!(notice.contains("Ticket state: ready"));
         assert!(notice.contains("A retry is scheduled"));
+        assert!(!notice.contains("tm --resume"));
         assert!(result.is_err());
         if let Err(tm_types::TmError::TurnFailed(msg)) = result {
             // Should not contain debug-printed enum variant
@@ -2297,6 +2298,9 @@ mod tests {
         assert!(!repeated_no_submit.contains("tm run T-1` again"));
 
         ticket.state = TicketState::Escalated;
+        let escalated_notice = attempt_failure_notice(&ticket, 1, now).expect("failure notice");
+        assert!(escalated_notice.contains("No retry is scheduled"));
+        assert!(!escalated_notice.contains("tm --resume"));
         let escalated_no_submit = run_outcome(&ticket, 1, true, &retained, Some("S-4".to_string()))
             .unwrap_err()
             .to_string();

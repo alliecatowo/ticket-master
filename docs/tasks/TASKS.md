@@ -2471,3 +2471,17 @@ is based on.
   acceptance: A deterministic test with repeated reads of the same source ranges demonstrates that the run does not spend multiple full attempts repeating investigation, issues at most one focused recovery attempt, and reports total usage across all attempts in its terminal outcome.
   test: `cargo test -p tm-agent repeated_exploration`
   evidence: `/tmp/tm-trials/20260928-0312/spf13-cobra-2257/tm.log` lines 24–50: three attempts each stopped after 10 steps without a repository change, repeated reads of `completions.go`/`command.go`, then escalated; reported 173755 + 231070 + 187131 tokens, and the final message asked for manual resume/retry despite automatic retries already repeating the same investigation.
+- [ ] **t20260928-0931-pallets-click-3822-stop-stalled-continuations** — Stop retrying agent continuations that repeat exploration without making progress
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: When a continuation has already been reoriented and repeats the same inspection without editing, running a targeted check, or submitting a result, stop that ticket promptly instead of replaying the same file reads across additional attempts. Report the retry count, elapsed time, and the exact recovery command in plain language; keep provider transport retries separately identified from agent no-progress retries.
+  acceptance: A simulated no-progress continuation terminates within the configured small retry bound; the final ticket output names the repeated no-progress condition, elapsed time, and one correct recovery action without implying work was completed.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-0931/pallets-click-3822/tm.log` lines 29, 44, 59-62 — three "focused continuation made no concrete change" attempts reread the same files, followed by escalation and `TRIAL_EXIT 2 WALL_SECONDS 989.158`.
+- [ ] **t20260928-0931-sindresorhus-ky-878-verification-command-status** — Show the exact verification command and its authoritative result in `tm run` summaries
+  model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: none
+  files: `crates/tm-cli/src/agent.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  change: When rendering verification-related tool progress and the final submitted summary, preserve the exact test command and the shell tool's returned exit code; distinguish a focused/manual check from a project test suite and never label a command as passing based only on a piped/truncated output snippet.
+  acceptance: A scripted `tm run` that executes a passing focused test and then a failing project test prints both exact commands and their exit statuses in its final summary, and does not say verification passed; a command whose output is piped through `tail` still displays the command tool's real exit code.
+  test: `mise run test:crate -- tm-cli`
+  evidence: `/tmp/tm-trials/20260928-0931/sindresorhus-ky-878/tm.log:24` — `npx tsx verify-fix.mts 2>&1 | tail -10; echo "EXIT:$?"`; progress only says `Ran tests` at line 10, while the submitted claim at line 27 has no command/status transcript.
