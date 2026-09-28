@@ -1196,7 +1196,9 @@ fn run_outcome(
     let reason = failure
         .map(|f| {
             let class_desc = failure_class_description(f.class);
-            if did_not_submit && f.class == tm_core::FailureClass::ProviderUnavailable {
+            if is_rate_limit_failure(f) {
+                format!("provider rate-limited the request: {}", f.detail)
+            } else if did_not_submit && f.class == tm_core::FailureClass::ProviderUnavailable {
                 format!("provider error: {}", f.detail)
             } else if did_not_submit {
                 f.detail.clone()
@@ -1292,6 +1294,7 @@ fn run_outcome(
         }
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked
             if failure.is_some_and(|f| f.class == tm_core::FailureClass::ProviderUnavailable)
+                && !failure.is_some_and(is_rate_limit_failure)
                 && scheduled_retry_delay(ticket, failure).is_some() =>
         {
             let delay = scheduled_retry_delay(ticket, failure).unwrap_or_default();
@@ -1300,14 +1303,18 @@ fn run_outcome(
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked
             if failure.is_some_and(is_rate_limit_failure) =>
         {
-            let recovery = session.as_deref().map_or_else(
+            if let Some(wait) = failure.and_then(provider_retry_after_seconds) {
+                format!("The provider rate-limited this request and asked you to wait {wait} seconds. Then retry with `tm run {}`.", ticket.id)
+            } else {
+                let recovery = session.as_deref().map_or_else(
                 || format!("Inspect the saved attempt with `tm ticket show {}` and resume its saved session with `tm --resume <session>`.", ticket.id),
                 |session| format!("Inspect the saved attempt with `tm ticket show {}` and resume it with `tm --resume {session}`.", ticket.id),
             );
-            if let Some(delay) = scheduled_retry_delay(ticket, failure) {
-                format!("The provider rate-limited this request. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run` rather than starting an immediate retry. {recovery}")
-            } else {
-                format!("The provider rate-limited this request, but no retry delay was supplied, so the wait time is unknown. {recovery}")
+                if let Some(delay) = scheduled_retry_delay(ticket, failure) {
+                    format!("The provider rate-limited this request. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run` rather than starting an immediate retry. {recovery}")
+                } else {
+                    format!("The provider rate-limited this request, but no retry delay was supplied, so the wait time is unknown. {recovery}")
+                }
             }
         }
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked => {
@@ -1417,6 +1424,13 @@ fn is_rate_limit_failure(failure: &tm_core::FailureRecord) -> bool {
     }
     let detail = failure.detail.to_ascii_lowercase();
     detail.contains("429") || detail.contains("rate limit") || detail.contains("rate-limit")
+}
+
+fn provider_retry_after_seconds(failure: &tm_core::FailureRecord) -> Option<u64> {
+    let detail = failure.detail.to_ascii_lowercase();
+    let marker = "retry after ";
+    let start = detail.find(marker)? + marker.len();
+    detail[start..].split_whitespace().next()?.parse().ok()
 }
 
 fn scheduled_retry_delay(
@@ -2149,24 +2163,21 @@ mod tests {
         let scheduled = run_outcome(&ticket, 0, false, &[], None)
             .unwrap_err()
             .to_string();
-        assert!(scheduled.contains("A retry is scheduled in about 20 seconds"));
-        assert!(scheduled.contains("Run `tm sched run` to keep the scheduler active"));
-        assert!(!scheduled.contains("tm run T-1`"));
+        assert!(scheduled.contains("provider rate-limited the request"));
+        assert!(scheduled.contains("wait 20 seconds"));
+        assert!(scheduled.contains("Then retry with `tm run T-1`"));
 
         ticket.retry.max_attempts = 1;
         let unscheduled = run_outcome(&ticket, 0, false, &[], None)
             .unwrap_err()
             .to_string();
-        assert!(unscheduled.contains("no retry delay was supplied"));
-        assert!(unscheduled.contains("wait time is unknown"));
-        assert!(unscheduled.contains("tm ticket show T-1"));
-        assert!(unscheduled.contains("tm --resume <session>"));
-        assert!(!unscheduled.contains("Run `tm run T-1` again"));
+        assert!(unscheduled.contains("wait 20 seconds"));
+        assert!(unscheduled.contains("Then retry with `tm run T-1`"));
 
         let unscheduled_with_session = run_outcome(&ticket, 0, false, &[], Some("S-7".to_string()))
             .unwrap_err()
             .to_string();
-        assert!(unscheduled_with_session.contains("tm --resume S-7"));
+        assert!(unscheduled_with_session.contains("wait 20 seconds"));
     }
 
     #[test]

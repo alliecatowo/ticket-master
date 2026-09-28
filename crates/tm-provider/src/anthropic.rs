@@ -466,6 +466,13 @@ fn parse_error_message(body: &[u8], fallback: &str) -> String {
         .unwrap_or_else(|_| fallback.to_string())
 }
 
+fn rate_limit_message(message: String, retry_after: Option<Duration>) -> String {
+    match retry_after {
+        Some(wait) => format!("{message} Retry after {} seconds.", wait.as_secs()),
+        None => message,
+    }
+}
+
 /// Classify an HTTP response as success, a retryable failure, or a terminal failure.
 ///
 /// 200 -> `Ok(())`, caller parses body as success. 429 -> [`ProviderError::RateLimited`] with
@@ -483,7 +490,7 @@ pub fn classify_status(
     let retry_after = retry_after_header.and_then(parse_retry_after);
 
     if status.as_u16() == 429 {
-        let message = parse_error_message(body, "rate limited");
+        let message = rate_limit_message(parse_error_message(body, "rate limited"), retry_after);
         return Err(ProviderError::RateLimited {
             message,
             retry_after,
@@ -847,7 +854,7 @@ mod tests {
                 message,
                 retry_after,
             } => {
-                assert_eq!(message, "slow down");
+                assert_eq!(message, "slow down Retry after 30 seconds.");
                 assert_eq!(retry_after, Some(Duration::from_secs(30)));
             }
             other => panic!("expected RateLimited, got {other:?}"),

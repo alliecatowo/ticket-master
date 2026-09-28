@@ -2383,3 +2383,91 @@ is based on.
   acceptance: A repeat-exploration fixture cannot spend multiple full-context attempts rereading the same files; the next attempt receives the prior findings, makes a distinct edit/test/evidence step or exits with actionable guidance, and reported cumulative usage agrees with recorded provider usage.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260927-0742/sindresorhus-ky-878/tm.log` lines 69 and 84 show no-submit attempts reporting 190855 and 225600 tokens respectively before the retry eventually submits; ticket stats reported 615955 total tokens.
+- [ ] **t20260928-0029-pallets-click-3822-stop-repeated-noop-retries** — Stop repeated reconnaissance loops and preserve a valid workdir across tm retries
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-cli/src/sched.rs`, `crates/tm-agent/src/agent_loop.rs`
+  change: Detect consecutive attempts that repeat the same source reads and git-status/diff checks without a repository change or submitted evidence; carry forward a compact investigation summary, require a new concrete action before another retry, and reject or repair an invalid per-ticket shell working directory instead of retrying commands under `/null`.
+  acceptance: A scripted ticket that repeats the same inspection-only tool sequence is stopped or resumed with a distinct actionable prompt before spending another full attempt budget, while legitimate follow-up attempts can still edit and verify; a configured missing workdir yields a clear actionable error and never launches a shell in `/null`.
+  test: `cargo test -p tm-cli sched::tests`
+  evidence: `/tmp/tm-trials/20260928-0029/pallets-click-3822/tm.log:23,38,46,52` — three attempts repeated reads/diff/status with no patch (192,258 + 193,901 + 169,106 tokens); line 46 shows the shell command failing to start under `.../tm/null`.
+- [ ] **t20260928-0029-psf-requests-7432-bound-repeated-exploration-retries** — Stop automatic retries after repeated no-progress inspections
+  model: sonnet · severity: high · builds Rust: yes · area: agent-runtime · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-cli/src/sched.rs`
+  change: When `repeated_exploration_count` reaches its limit and the agent has submitted no patch or evidence, prevent the scheduler from automatically dispatching repeated attempts with the same ineffective investigation context. Give at most one focused recovery attempt, then leave the ticket escalated with a concise explanation and next action; preserve total usage accounting across attempts.
+  acceptance: A test with repeated reads and no repository change demonstrates that the ticket does not loop through multiple automatic attempts, total token usage stays within the configured retry budget, and the user-facing failure clearly states that no patch or verification was completed.
+  test: `cargo test -p tm-agent repeated_exploration`
+  evidence: `/tmp/tm-trials/20260928-0029/psf-requests-7432/tm.log` lines 14–36 — three repeated-inspection failures followed by escalation; ticket stats at lines 59–76 report 352318 tokens and 23 tool calls.
+- [ ] **t20260928-0029-sindresorhus-ky-878-ticket-new-machine-output** — Add machine-readable ticket IDs to `ticket new`
+  model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
+  files: `crates/tm-cli/src/tickets.rs`
+  change: Add a documented `--json` or `--id-only` mode to `tm ticket new` that emits an unambiguous ticket identifier suitable for shell command substitution, while preserving the existing human-readable default output.
+  acceptance: `tm ticket new --id-only "objective"` prints only `T-<n>` on stdout; errors remain nonzero, and the default command retains its current human-readable confirmation.
+  test: `cargo test -p tm-cli`
+  evidence: `/tmp/tm-trials/20260928-0029/sindresorhus-ky-878/tm.log:6-7` — `ticket new` prints `Created ticket T-1: …`; capturing that output as an ID leads to `ticket ID must look like T-<n> …, got "Created ticket T-1: …"`.
+- [ ] **t20260928-0029-spf13-cobra-2257-no-progress-action** — Turn repeated completion-code inspections into a focused edit or stop before repeating discovery
+  model: sonnet · severity: high · builds Rust: yes · area: agent
+  deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: When `repeated_exploration_count` or the no-progress limits fire, use the retained investigation summary to direct one bounded continuation toward the identified implementation and a targeted check, rather than terminating the attempt and dispatching a retry that re-reads the same files. Enforce and report a cumulative token/context budget across retries.
+  acceptance: A deterministic repeated-inspection task causes the next action to edit or test a concrete identified code path, or exits with a clear blocker within a configured cumulative budget; it must not replay the same discovery sequence across three attempts.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-0029/spf13-cobra-2257/tm.log` — attempts 1–3 each reread `completions.go`/`command.go`, reported “No patch or evidence was submitted,” and used 145595, 181223, and 181852 tokens; no test ran.
+- [ ] **t20260928-0029-spf13-cobra-2257-recovery-copy** — Show one recovery action that matches whether a retry is scheduled
+  model: sonnet · severity: medium · builds Rust: yes · area: cli
+  deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-cli/src/sched.rs`
+  change: Coordinate the no-progress failure detail and `tm run` terminal outcome so the output does not recommend `tm --resume S-N` while an automatic retry is scheduled or after the ticket has escalated. Render exactly the applicable next command based on ticket state and whether retry will occur automatically.
+  acceptance: CLI tests cover a failure with a scheduled retry and an escalated ticket; each output presents one actionable, state-correct recovery instruction and never pairs “A retry is scheduled” with a manual resume/retry instruction.
+  test: `cargo test -p tm-cli`
+  evidence: `/tmp/tm-trials/20260928-0029/spf13-cobra-2257/tm.log` — attempt messages said “Continue the saved session with `tm --resume S-1`” while “A retry is scheduled”; the final run said “Ticket state: escalated. No retry is scheduled” and “Run `tm ticket retry T-1` to try again.”
+- [ ] **t20260928-0312-BurntSushi-ripgrep-3376-bounded-no-progress-retries** — Stop repeated investigation within one cumulative run budget
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-cli/src/sched.rs`
+  change: Make the no-progress budget and recovery policy cumulative across automatic attempts in one `tm run`; preserve findings and issue at most one focused continuation after repeated source reads. Bound provider backoff/retries by the same run deadline and report aggregate tokens, elapsed time, attempt count, and one recovery command in the final message.
+  acceptance: A deterministic run that repeats the same inspections across attempts stops within one configured tool/token/time budget, does not replay equivalent reads, and reports total usage and whether a retry is actually scheduled; a retryable provider failure also exits within the foreground deadline.
+  test: `cargo test -p tm-agent no_progress && cargo test -p tm-cli sched`
+  evidence: `/tmp/tm-trials/20260928-0312/BurntSushi-ripgrep-3376/tm.log` lines 29–55: attempts 1–3 each stopped after 10 steps with no patch/evidence; attempts 2 and 3 report 198936 and 203004 tokens, and provider backoffs at lines 30 and 43 led to an 850.494-second `tm run` before escalation. `tm stats --json` reported 608146 total tokens.
+
+- [ ] **t20260928-0312-BurntSushi-ripgrep-3376-confine-shell-side-effects** — Keep shell commands inside the ticket workspace
+  model: sonnet · severity: medium · builds Rust: yes · area: sandbox · deps: none
+  files: `crates/tm-agent/src/tools.rs`, `crates/tm-core/src/executor.rs`
+  change: Apply an OS-enforced per-run filesystem boundary to shell-like tools, not only a validated starting `cwd`, so commands cannot read, create, or delete paths outside the initialized project unless an explicit capability grants that path.
+  acceptance: A tool test proves a normal project-local build succeeds while attempts to write a sentinel under an absolute path outside the project and to delete an outside directory are denied and leave those paths unchanged.
+  test: `cargo test -p tm-agent shell_run`
+  evidence: `/tmp/tm-trials/20260928-0312/BurntSushi-ripgrep-3376/tm.log` line 22 records the agent running `rm -rf /tmp/reproduce && mkdir -p /tmp/reproduce/...` despite the trial workspace being `.../tm`; `crates/tm-agent/src/tools.rs` lines 896–930 validates only shell `cwd`, not filesystem side effects performed by the command.
+- [ ] **t20260928-0312-gohugoio-hugo-15360-bound-no-progress-retries** — Prevent repeated no-progress attempts from replaying exploration and obscuring retry state
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: When a ticket repeatedly hits the no-progress exploration threshold, carry the inspected paths and concrete findings into one bounded continuation that directs the model to make the smallest relevant change, run its focused test, and submit evidence. Stop launching equivalent investigation-only retries after that continuation; report one accurate state describing whether retry is actually scheduled or the user must issue `tm ticket retry <id>`, and aggregate token/time usage across attempts.
+  acceptance: In a deterministic agent-loop scenario where three attempts repeatedly read/search the same decoder files without editing, the continuation uses the prior findings to target the edit/test, total reported tokens and elapsed time include every attempt, and the terminal message cannot simultaneously imply an automatic retry and request a manual retry; normal progressing runs retain existing behavior.
+  test: `cargo test -p tm-agent repeated_exploration`
+  evidence: `/tmp/tm-trials/20260928-0312/gohugoio-hugo-15360/tm.log` lines 10–19, 23–32, and 36–46 show repeated reads/searches and three 10-step no-progress failures (169493, 192011, 205213 tokens); lines 46–47 end in escalation, while the output at lines 21, 34, and 47 announces scheduled retries and suggests resume/manual retry. The no-progress failure paths are implemented in `crates/tm-agent/src/agent_loop.rs` around lines 1810–1859.
+- [ ] **t20260928-0312-pallets-click-3822-inspection-loop-recovery** — Stop unproductive inspection retries and preserve a focused recovery path
+  model: sonnet · severity: high · builds Rust: yes · area: agent · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  change: When a ticket repeatedly reads the same implementation through file-read and shell-inspection tools without recording new findings, reuse prior inspection evidence across tool aliases and make the recovery prompt require a specific next action or a clear blocker. Avoid silently re-dispatching the same inspection loop after provider failures; surface one concise status with an actionable resume/retry command and stop within a small bounded token/time budget.
+  acceptance: A replay of a typing-fix task that revisits `src/click/types.py` and `src/click/termui.py` without edits produces a focused recovery or explicit blocker within one attempt, rather than three read-only attempts; the user sees the final failed/escalated state and next command clearly, and aggregate token use is bounded and reported accurately.
+  test: `cargo test -p tm-agent repeated_source_inspections_have_an_early_run_level_bound`
+  evidence: `/tmp/tm-trials/20260928-0312/pallets-click-3822/tm.log` lines 80–104 and 117–139: repeated source inspections, three attempts without a patch, provider retry messages, and escalation with resume/retry instructions.
+- [ ] **t20260928-0312-psf-requests-7432-repeated-inspection-stop** — Prevent repeated-inspection retries from exhausting the ticket without action
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: When the repeated-inspection guard fires, make recovery materially different from repeating the same reads: stop automatic retries after the bounded focused recovery attempt, reuse the retained findings to direct one concrete edit/check, and report the actual cumulative token/tool/time spend in the final ticket outcome.
+  acceptance: A deterministic test with repeated identical file-read/search actions proves the run does not perform three near-identical investigation attempts, records a focused recovery attempt, and surfaces cumulative usage in the final failure message.
+  test: `cargo test -p tm-agent repeated_exploration`
+  evidence: `/tmp/tm-trials/20260928-0312/psf-requests-7432/tm.log` lines 6–38: repeated reads/searches of `src/requests/models.py`; attempts failed at lines 14, 25, and 37 without a repository change; line 38 gives a generic retry command; reported usage reached 139430 tokens.
+- [ ] **t20260928-0312-sindresorhus-ky-878-run-cost-summary** — Make run token/time cost visible and help bound redundant verification
+  model: sonnet · severity: medium · builds Rust: yes · area: agent
+  deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: At the end of a completed `tm run`, report measured elapsed time and aggregate token usage in the user-facing result, and include an actionable way to cap further provider calls or avoid rerunning already-passing checks. Keep this summary grounded in the run's recorded usage rather than an estimate.
+  acceptance: A completed run with multiple provider calls prints total elapsed seconds and total tokens; configuring a token/call budget stops further calls at the limit with a clear explanation and preserves submitted work/evidence.
+  test: `cargo test -p tm-agent`
+  evidence: `/tmp/tm-trials/20260928-0312/sindresorhus-ky-878/tm.log` — `tm stats --json` reports `tokens_total: 471917`, `wall_seconds: 647`, `tool_calls: 22`; the run log also records exploratory repeated test runs and a temporary test file created then deleted (lines 25–44).
+- [ ] **t20260928-0312-spf13-cobra-2257-repeated-inspection-recovery** — Make repeated-inspection recovery change the next attempt
+  model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
+  files: `crates/tm-agent/src/agent_loop.rs`
+  change: When repeated inspections hit the no-progress guard, carry the useful findings into a bounded, materially different recovery attempt; suppress automatic retries that repeat the same reads/searches, and surface cumulative token/tool/time usage in the final failure outcome.
+  acceptance: A deterministic test with repeated reads of the same source ranges demonstrates that the run does not spend multiple full attempts repeating investigation, issues at most one focused recovery attempt, and reports total usage across all attempts in its terminal outcome.
+  test: `cargo test -p tm-agent repeated_exploration`
+  evidence: `/tmp/tm-trials/20260928-0312/spf13-cobra-2257/tm.log` lines 24–50: three attempts each stopped after 10 steps without a repository change, repeated reads of `completions.go`/`command.go`, then escalated; reported 173755 + 231070 + 187131 tokens, and the final message asked for manual resume/retry despite automatic retries already repeating the same investigation.
