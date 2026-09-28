@@ -2313,7 +2313,7 @@ is based on.
   acceptance: On this Hugo BOM task, the saved attempts do not repeatedly inspect decoder.go and git history without change; the run either submits a focused patch with relevant test evidence or exits with a concise, actionable blocker before exceeding the configured cumulative budget.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260927-0538/gohugoio-hugo-15360/tm.log:74-108` — the corrected verbatim-text ticket made three repeated-inspection/no-progress attempts with no patch or evidence; `tm stats --json` reported 466386 tokens for T-2 (996809 across both tickets).
-- [ ] **t20260927-0538-gohugoio-hugo-15360-recovery-guidance** — Make no-progress recovery instructions match ticket state
+- [x] **t20260927-0538-gohugoio-hugo-15360-recovery-guidance** — Make no-progress recovery instructions match ticket state (landed 258dd1e)
   model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: Emit exactly one state-aware recovery action in the terminal failure summary. Do not tell users to resume a session while retries are being scheduled or end with a different retry command; explain whether the ticket is Ready or Escalated and give the valid next command.
