@@ -1,0 +1,50 @@
+{
+  "issue": {
+    "url": "https://github.com/spf13/cobra/issues/2257",
+    "title": "Completions modify os.Args",
+    "body": "I'm trying to workaround https://github.com/spf13/cobra/issues/1877 by inspecting `os.Args` by hand. In some cases cobra accidentally inserts `--` into `os.Args`.\n\nMinimal example:\n```go\npackage main\n\nimport (\n\t\"os\"\n\t\"strings\"\n\n\t\"github.com/spf13/cobra\"\n)\n\nfunc main() {\n\tcmd := &cobra.Command{\n\t\tTraverseChildren: true,\n\t\tValidArgsFunction: func(cmd *cobra.Command, args []string, toComplete string) ([]cobra.Completion, cobra.ShellCompDirective) {\n\t\t\tcobra.CompErrorln(strings.Join(os.Args[1:], \", \"))\n\t\t\treturn nil, cobra.ShellCompDirectiveDefault\n\t\t},\n\t}\n\tif err := cmd.Execute(); err != nil {\n\t\tpanic(err)\n\t}\n}\n\n```\n\nExpected behaviour:\n```console\n$ go run . __complete x\n[Debug] [Error] __complete, x\n:0\nCompletion ended with directive: ShellCompDirectiveDefault\n```\n\nActual behaviour:\n```console\n$ go run . __complete x\n[Debug] [Error] __complete, --\n:0\nCompletion ended with directive: ShellCompDirectiveDefault\n```"
+  },
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 622.45,
+      "tokens": 591956,
+      "scores": {
+        "navigation_quality": 1,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "The run found completions.go and the append site quickly, but it repeatedly read the same completions and command ranges, then exhausted three 10-step attempts without changing files or submitting evidence; the log reports 173,755, 231,070, and 187,131 tokens across those attempts. Improve the agent-loop repeated-inspection recovery so retained findings drive one distinct edit-and-verify attempt and repeated identical reads do not trigger expensive restart cycles. The human-facing failure says to resume or retry, but the automatic retries already repeated essentially the same investigation, and the initial ticket was left escalated with no patch."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 94.9,
+      "tokens": 19150,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "The agent identified the append aliasing bug, made an isolated fix, added regression coverage, and reported the full suite accurately. Its initial semantic-search tool was unavailable because the fresh clone had no index, but it recovered immediately using filename discovery and exact search. It could improve by avoiding the unavailable index call for a small, keyword-local bug and by relying on the repository's existing regression test conventions rather than adding a separate bespoke test before considering the upstream test shape."
+    }
+  ],
+  "verification": {
+    "command": "go test ./...",
+    "tm": "fail: TestCompletionDoesNotMutateOsArgs reports os.Args[2] expected x, got --",
+    "opencode": "pass"
+  },
+  "setup_note": "go mod download returned 'no modules specified' in both clones; go mod download all completed successfully before either agent started."
+}

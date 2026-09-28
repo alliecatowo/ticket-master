@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 577.31,
+      "tokens": 139430,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm needs to stop repeated inspections sooner and turn its own recovery prompt into a focused action rather than rescheduling nearly identical investigations. Here it read src/requests/models.py repeatedly, consumed 139,430 reported tokens over three attempts, and ended with no patch; the messages asked the operator to continue saved sessions with tm --resume S-1/S-2/S-3 but did not recover automatically or summarize a concrete next change. A clear budget/progress message with a single useful finding and one bounded recovery attempt would have made the run easier to understand and less costly."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 81.0,
+      "tokens": 33049,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 2,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode could have avoided unnecessary test-writing and test-debugging context by using the issue's exact delegated-attribute wrapper and running the project's provided hidden regression test after completing the fix. Its first locally added test incorrectly passed BytesIO, which is already directly iterable; it then spent several turns chasing pytest importing Requests from another checkout. Despite this, it noticed and disclosed the wrong-source test run, and the protocol's authoritative hidden test passed after the arm's implementation was kept and the merged test file was checked out."
+    }
+  ]
+}

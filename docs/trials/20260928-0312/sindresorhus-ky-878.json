@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 647,
+      "tokens": 471917,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 3,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 3,
+        "recoverability": 3,
+        "cost_time": 2
+      },
+      "better": "tm found the relevant progress implementation and produced a passing fix against the merged hidden tests, but its recorded 471,917 tokens and 647-second run are high for this narrow defect; the log shows multiple exploratory test passes and creating then deleting a temporary test file. The CLI's staged flow is understandable, and the final `tm run` message correctly tells the user to review and accept the submitted work, though a one-shot user may expect `tm run` itself to finish the ticket rather than stop at a review handoff. Better guided narrowing after the first relevant hit, targeted verification before broad test runs, and a more compact user-visible run summary with elapsed time and token usage would reduce effort and make the handoff more obvious."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 193,
+      "tokens": 20425,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 5,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly located the flush guard, stated a scoped implementation and test plan, and reported the failure when its first browser test exposed that Fetch may provide a null response body. It then extended the fix to cover that path and reran the focused progress tests successfully. It could improve by recognizing the null-body response path before its first test attempt and preserving the focused verification result clearly alongside the unrelated full-suite XO/WebKit failures found during independent verification."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719213c2e6a869bca1151",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 850.494,
+      "tokens": 608146,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 1,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm should turn the first ten inspection-only steps into a focused edit/test continuation instead of replaying essentially the same reads through three attempts. The user sees useful but repetitive `Ticket T-1 dispatched for execution.` and `Provider request failed. Waiting ...` messages, followed by failure text advising `tm --resume S-3` even though the run also schedules retry; that leaves it unclear whether to wait, resume, or run `tm ticket retry T-1`. Report aggregate tokens and elapsed time as attempts progress, and enforce a workspace filesystem boundary: this run executed `rm -rf /tmp/reproduce` outside the project. tm never produced a patch or ran task verification, so the passing result here is only the required mechanical post-run hidden-test check."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 80.667,
+      "tokens": 42967,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 5,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 4
+      },
+      "better": "OpenCode could improve by avoiding the failed zvec lookup when this fresh clone has no index, and by checking its final test-count statement against the actual command output (it reported 152 tests while the crate's unit, integration, and doc-test totals sum to 153). A terse completion summary should also distinguish its own pre-overwrite regression test from the protocol's independent post-run verification."
+    }
+  ]
+}
