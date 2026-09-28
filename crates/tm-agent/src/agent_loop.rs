@@ -1850,10 +1850,22 @@ impl AgentLoop {
                 })
             {
                 let summary = InvestigationSummary::from_steps(&steps).render();
+                let totals = run_totals(&steps);
+                let recovery = task.ticket.as_ref().map_or_else(
+                    || {
+                        "review the saved session and make a focused change before retrying"
+                            .to_string()
+                    },
+                    |ticket| {
+                        format!(
+                            "run `tm ticket retry {ticket}` after reviewing the retained findings"
+                        )
+                    },
+                );
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: format!("focused continuation made no concrete change, targeted check, or submission. Last useful work: {summary}."),
+                    detail: format!("The focused continuation repeated exploration without a change, targeted check, or submission. No agent continuation retry remains (1 focused continuation used); provider transport retries are separate and are not counted here. Elapsed time: {} seconds. No work was submitted. Last useful work: {summary}. Recovery: {recovery}.", totals.wall_seconds),
                 });
             }
             if task.ticket.is_some()
@@ -1864,12 +1876,16 @@ impl AgentLoop {
                 if no_progress_reorientation_sent {
                     let summary = InvestigationSummary::from_steps(&steps).render();
                     let totals = run_totals(&steps);
+                    let recovery = task.ticket.as_ref().map_or_else(
+                        || "review the saved session and make a focused change before retrying".to_string(),
+                        |ticket| format!("run `tm ticket retry {ticket}` after reviewing the retained findings"),
+                    );
                     return Ok(AgentOutcome::Failed {
                         steps,
                         class: FailureClass::Other,
                         detail: format!(
-                            "ticket failed after its focused recovery repeated investigation without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds.",
-                            totals.tokens, totals.tool_calls, totals.wall_seconds
+                            "The focused continuation repeated exploration without a repository change, targeted check, or submitted evidence. No agent continuation retry remains (1 focused continuation used); provider transport retries are separate and are not counted here. Elapsed time: {} seconds. No work was submitted. Last useful work: {summary}. Recovery: {recovery}.",
+                            totals.wall_seconds
                         ),
                     });
                 }
