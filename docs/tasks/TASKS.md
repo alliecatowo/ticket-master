@@ -2334,7 +2334,7 @@ is based on.
   acceptance: A repeated-inspection trial cannot silently repeat the same searches on automatic retries; its retained diagnosis is presented to the next attempt as a focused action, or the ticket is left stopped with one command that actually resumes/retries it. Add a regression test asserting the displayed recovery instruction matches the resulting ticket/session state.
   test: `cargo test -p tm-agent repeated_exploration`
   evidence: `/tmp/tm-trials/20260927-0538/psf-requests-7432/tm.log:15-40` — three attempts stop without a patch; retry messages name `tm --resume S-1`/`S-2`/`S-3` while runs restart automatically. `tm stats --json` reports `tokens_total: 456874`.
-- [ ] **t20260927-0538-spf13-cobra-2257-no-progress-steering** — Turn repeated investigation into a bounded concrete next action
+- [x] **t20260927-0538-spf13-cobra-2257-no-progress-steering** — Turn repeated investigation into a bounded concrete next action (landed 17e064c)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/agent_loop.rs, /Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: When a run repeatedly reads the same source files and searches the same terms across automatic attempts without editing or submitting evidence, carry its findings forward and steer the next attempt to one focused code change plus a targeted check; stop redundant attempts before they repeat the same exploration and report cumulative usage.
