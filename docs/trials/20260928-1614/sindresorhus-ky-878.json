@@ -1,0 +1,52 @@
+{
+  "issue": "https://github.com/sindresorhus/ky/issues/878",
+  "base_sha": "0bda554d448c1b57c17a5c18114432c02465d467",
+  "merge_sha": "99644d0169138eb0c42718f06862061288f05a96",
+  "test_files": [
+    "test/browser.ts",
+    "test/stream.ts"
+  ],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 80,
+      "tokens": 339572,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 3,
+        "cost_time": 2
+      },
+      "better": "tm quickly found and edited source/utils/body.ts, but after an initial plausible patch it spent a continuation rereading the same file and rerunning probes, including a nonexistent test/progress.ts check whose pipeline masked failure; the later retry did finish and its focused stream suite passed. The user-facing sequence at tm.log lines 59–93 says no continuation retry remains and recommends a manual ticket retry, then says a retry is scheduled and dispatches again after a generic provider-failure message; even though agent continuations and provider transport retries are distinct internally, the next action is not clear to a user. tm should carry concrete findings into a focused edit/test attempt, cap and surface cumulative context use, and conclude with a state-accurate verification summary and one clearly labeled recovery action. The reported 339,572 tokens for a 37-second stats wall time is also alarming without explanation."
+    },
+    {
+      "tool": "opencode",
+      "passed": false,
+      "wall_seconds": 56.543,
+      "tokens": 49636,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode located the stream transform quickly, made the minimal source change, added a meaningful regression test, and reported its focused test and diff check clearly. It completed in under a minute with 49,636 reported tokens. It would be better to run the full hidden browser and stream test files before stopping, and distinguish the passing empty-body regression case from the unrelated WebKit upload test failure surfaced by the independent post-run suite."
+    }
+  ],
+  "verification": {
+    "command": "./node_modules/.bin/ava test/browser.ts test/stream.ts",
+    "tm_exit": 1,
+    "opencode_exit": 1,
+    "tm_failure": "browser › webkit - onUploadProgress is silently ignored when request streams are unsupported: Playwright NetworkError, POST to localhost failed",
+    "opencode_failure": "browser › webkit - onUploadProgress is silently ignored when request streams are unsupported: Playwright NetworkError, POST to localhost failed",
+    "focused_empty_response_test": "passed in both arms"
+  },
+  "setup_note": "pnpm install ran in both clones and built distribution, but pnpm 11 returned ERR_PNPM_IGNORED_BUILDS for esbuild and unrs-resolver. Subsequent ava invocations used the installed local binary to avoid pnpm's lifecycle reinstall."
+}

@@ -1,0 +1,42 @@
+{
+  "issue": "https://github.com/BurntSushi/ripgrep/issues/3376",
+  "base_sha": "48a6ad93f152dc848f1883ceb3bf2c7baab6738c",
+  "merge_sha": "43e2f08edef8c00e5d7719212c3e6a869bca1151",
+  "fix_pr": 3420,
+  "test_files": ["crates/ignore/src/dir.rs"],
+  "verification_note": "PR #3420 mixes production implementation and its inline regression test in crates/ignore/src/dir.rs. Per protocol, checking out this test file also overwrote the implementation in each arm; both focused post-checkout commands passed mechanically, but those passes do not independently verify either arm's implementation.",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": true,
+      "wall_seconds": 108.537,
+      "tokens": 365884,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm identified the right ignore/walk subsystem, but repeated almost the same reads and shell searches over three attempts, never turned those findings into a code change or targeted test, and accumulated 365,884 reported tokens. The recovery messages were inconsistent from the user's point of view: each no-progress notice said to run `tm ticket retry T-1` and that a retry was scheduled, then the run ultimately ended Escalated with ‘No retry is scheduled’ and again suggested that command. Make the repeated-exploration continuation consume its retained findings to attempt one concrete edit and focused check; if it cannot, end promptly with a single state-accurate next action, and include cumulative usage while retries are happening. Evidence: `tm.log` lines 12-39."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 104.808,
+      "tokens": 536165,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode traced the bug to cached parent ignore matchers, implemented the base-path-aware change in `crates/ignore/src/dir.rs`, added a regression test, and recovered after its first test expectation incorrectly omitted walked directory entries. It ran the focused test and full ignore suite and accurately noted that the full suite had run before its new test was added. It could improve context efficiency by avoiding a broad full-suite run before finishing the focused regression test, then running the full suite once at the end. The required post-run checkout overwrote its implementation because the PR's test and implementation share `dir.rs`; the post-checkout pass is mechanical, not independent evidence for the agent's patch."
+    }
+  ]
+}

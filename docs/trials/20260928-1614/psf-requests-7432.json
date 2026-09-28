@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 62.56,
+      "tokens": 198517,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 1
+      },
+      "better": "tm found the right implementation file quickly, but then repeated the same reads and prepare_body searches over three attempts, used 198,517 tokens, and submitted no patch or test evidence. The user-facing status said both ‘A retry is scheduled’ and later ‘No retry is scheduled,’ while suggesting `tm ticket retry T-1`; the provider retries were described without a useful cause. A stronger run would carry the already-found target and findings into one distinct edit or test attempt, stop spending context on repeated inspection, and finish with a single accurate ticket-state/recovery message including cumulative usage."
+    },
+    {
+      "tool": "OpenCode",
+      "passed": true,
+      "wall_seconds": 67.70,
+      "tokens": 212802,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 3,
+        "plan_quality": 5,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode stated a scoped plan, identified `PreparedRequest.prepare_body()`, changed stream detection to delegated `hasattr`, and added focused regression coverage. It recovered from an initially ineffective test double and a fixture setup issue, then reported the passing focused tests accurately. It could be more context-efficient: the run consumed 212,802 tokens for this localized fix, and its added test covered rewind position rather than reproducing the issue's full 307 redirect scenario; applying the hidden PR test passed."
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "test_files": ["completions_test.go"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 92.6,
+      "tokens": null,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 2,
+        "plan_quality": 1,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "tm inspected the likely completion code quickly, but repeated the same reads and searches, then failed three times without modifying the repository or running a focused test. The user-facing failure says there is no retry left and no work was submitted, yet also says a retry is scheduled and advises `tm ticket retry T-1`; this leaves the user unsure whether to wait or retry. The follow-up should make the final retry state and recovery command consistent, and stop/report clearly when the retry budget is exhausted. No implementation tokens were exposed in the trial output, so token use could not be graded or recorded."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 70.3,
+      "tokens": 27036,
+      "scores": {
+        "navigation_quality": 5,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 5,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly located the append side effect in `getCompletions`, copied the input slice before appending the sentinel, and ran `go test ./...` successfully. It told the user it would add a regression test but did not add one; it should follow through on that stated plan and test the shared-backing-array mutation explicitly."
+    }
+  ]
+}
