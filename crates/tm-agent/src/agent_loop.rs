@@ -1604,16 +1604,11 @@ impl AgentLoop {
                 }
                 if no_progress_reorientation_sent {
                     let summary = InvestigationSummary::from_steps(&steps).render();
-                    let retry = task
-                        .ticket
-                        .as_ref()
-                        .map(|ticket| format!("tm ticket retry {ticket}"))
-                        .unwrap_or_else(|| "tm ticket retry <id>".to_string());
                     return Ok(AgentOutcome::Failed {
                         steps,
                         class: FailureClass::Other,
                         detail: format!(
-                            "ticket failed after the focused recovery turn ended without a repository change or submitted evidence. Last useful work: {summary}. Retry with `{retry}`."
+                            "ticket failed after the focused recovery turn ended without a repository change or submitted evidence. Last useful work: {summary}."
                         ),
                     });
                 }
@@ -1821,15 +1816,10 @@ impl AgentLoop {
                 })
             {
                 let summary = InvestigationSummary::from_steps(&steps).render();
-                let retry = task
-                    .ticket
-                    .as_ref()
-                    .map(|ticket| format!("tm ticket retry {ticket}"))
-                    .unwrap_or_else(|| "tm ticket retry <id>".to_string());
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: format!("focused continuation made no concrete change, targeted check, or submission. Last useful work: {summary}. Retry with `{retry}` and provide a targeted reproduction or specific blocker."),
+                    detail: format!("focused continuation made no concrete change, targeted check, or submission. Last useful work: {summary}."),
                 });
             }
             if task.ticket.is_some()
@@ -1852,15 +1842,10 @@ impl AgentLoop {
                     continue;
                 }
                 let summary = InvestigationSummary::from_steps(&steps).render();
-                let retry = task
-                    .ticket
-                    .as_ref()
-                    .map(|ticket| format!("tm ticket retry {ticket}"))
-                    .unwrap_or_else(|| "tm ticket retry <id>".to_string());
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: format!("focused continuation ended without a change or evidence. Last useful work: {summary}. Retry with `{retry}` and provide one targeted reproduction or diagnosis."),
+                    detail: format!("focused continuation ended without a change or evidence. Last useful work: {summary}."),
                 });
             }
             if task.ticket.is_some() && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT {
@@ -1873,16 +1858,11 @@ impl AgentLoop {
                     no_progress_reorientation_sent = true;
                     continue;
                 }
-                let retry = task
-                    .ticket
-                    .as_ref()
-                    .map(|ticket| format!("tm ticket retry {ticket}"))
-                    .unwrap_or_else(|| "tm ticket retry <id>".to_string());
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
                     detail: format!(
-                        "ticket failed after the focused recovery turn also made no repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds. Retry with `{retry}`.",
+                        "ticket failed after the focused recovery turn also made no repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds.",
                         totals.tokens, totals.tool_calls, totals.wall_seconds
                     ),
                 });

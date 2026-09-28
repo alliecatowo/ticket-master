@@ -1289,8 +1289,7 @@ fn run_outcome(
             }
         }
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked
-            if failure.is_some_and(|f| f.class == tm_core::FailureClass::ProviderUnavailable)
-                && !failure.is_some_and(is_rate_limit_failure)
+            if !failure.is_some_and(is_rate_limit_failure)
                 && scheduled_retry_delay(ticket, failure).is_some() =>
         {
             let delay = scheduled_retry_delay(ticket, failure).unwrap_or_default();
@@ -1360,6 +1359,32 @@ fn run_outcome(
     };
     let attempt_count = ticket.attempts;
     let state = state_label(ticket.state);
+    let message = if did_not_submit {
+        let resume = if next.is_empty() {
+            String::new()
+        } else {
+            format!(" {next}")
+        };
+        let cumulative_tokens = cumulative_failure_tokens(ticket);
+        let usage = if cumulative_tokens > 0 {
+            format!(" Recorded usage across attempts: {cumulative_tokens} tokens.")
+        } else {
+            String::new()
+        };
+        format!(
+            "Ticket {}: no patch or evidence was submitted (this was not a test failure). Attempt {} ended because: {}. Current state: {}.{}{}",
+            ticket.id,
+            attempt_count,
+            reason,
+            state,
+            resume,
+            usage
+        )
+    } else if next.is_empty() {
+        format!("Ticket {}: {}.", ticket.id, reason)
+    } else {
+        format!("Ticket {}: {}. {}", ticket.id, reason, next)
+    };
     let retry_status = if ticket.state == tm_core::TicketState::Ready {
         if scheduled_retry_delay(ticket, failure).is_some() {
             "An automatic retry is scheduled; if it does not start, run `tm sched run`.".to_string()
@@ -1379,34 +1404,31 @@ fn run_outcome(
     } else {
         String::new()
     };
-    let message = if did_not_submit {
-        let resume = if next.is_empty() {
-            String::new()
-        } else {
-            format!(" {next}")
-        };
-        format!(
-            "Ticket {}: no patch or evidence was submitted (this was not a test failure). Attempt {} ended because: {}. Current state: {}.{}",
-            ticket.id,
-            attempt_count,
-            reason,
-            state,
-            resume
-        )
-    } else if next.is_empty() {
-        format!("Ticket {}: {}.", ticket.id, reason)
-    } else {
-        format!("Ticket {}: {}. {}", ticket.id, reason, next)
-    };
     let message = if did_not_submit
         && !retry_status.is_empty()
         && ticket.state != tm_core::TicketState::Escalated
+        && !message.contains("tm sched run")
+        && !message.contains("tm run ")
     {
         format!("{message} {retry_status}")
     } else {
         message
     };
     Err(tm_types::TmError::TurnFailed(message))
+}
+
+/// Sum the per-attempt totals included in no-progress failure details. This is deliberately
+/// based on persisted failure records, so the displayed aggregate survives scheduler retries.
+fn cumulative_failure_tokens(ticket: &tm_core::Ticket) -> u64 {
+    ticket.failures.iter().fold(0u64, |total, failure| {
+        let Some(usage) = failure.detail.split("Usage: ").nth(1) else {
+            return total;
+        };
+        let Some(value) = usage.split_whitespace().next() else {
+            return total;
+        };
+        total.saturating_add(value.parse::<u64>().unwrap_or(0))
+    })
 }
 
 fn is_rate_limit_failure(failure: &tm_core::FailureRecord) -> bool {
@@ -2255,6 +2277,12 @@ mod tests {
         assert!(no_retained_step_limit.contains("No verification was run"));
 
         ticket.failures[1].detail = "model ended turn without submitting".to_string();
+        ticket.failures[0].detail =
+            "focused continuation failed. Usage: 168474 tokens, 8 tool calls, 21 seconds."
+                .to_string();
+        ticket.failures[1].detail =
+            "model ended turn without submitting. Usage: 209939 tokens, 9 tool calls, 25 seconds."
+                .to_string();
         let repeated_no_submit = run_outcome(&ticket, 1, true, &retained, Some("S-4".to_string()))
             .unwrap_err()
             .to_string();
@@ -2262,6 +2290,9 @@ mod tests {
         assert!(repeated_no_submit.contains("Working-tree edits were retained"));
         assert!(repeated_no_submit.contains("git status` and `git diff"));
         assert!(!repeated_no_submit.contains("something went wrong"));
+        assert!(repeated_no_submit.contains("Recorded usage across attempts: 378413 tokens"));
+        assert_eq!(repeated_no_submit.matches("tm sched run").count(), 1);
+        assert!(!repeated_no_submit.contains("tm run T-1` again"));
 
         ticket.state = TicketState::Escalated;
         let escalated_no_submit = run_outcome(&ticket, 1, true, &retained, Some("S-4".to_string()))
@@ -2312,7 +2343,8 @@ mod tests {
         let test_failure = run_outcome(&ticket, 2, false, &[], None)
             .unwrap_err()
             .to_string();
-        assert!(test_failure.contains("Run `tm run T-1` again to retry."));
+        assert!(test_failure.contains("A retry is scheduled"));
+        assert!(test_failure.contains("tm sched run"));
     }
 
     #[test]
