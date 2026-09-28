@@ -2464,7 +2464,7 @@ is based on.
   acceptance: A completed run with multiple provider calls prints total elapsed seconds and total tokens; configuring a token/call budget stops further calls at the limit with a clear explanation and preserves submitted work/evidence.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260928-0312/sindresorhus-ky-878/tm.log` — `tm stats --json` reports `tokens_total: 471917`, `wall_seconds: 647`, `tool_calls: 22`; the run log also records exploratory repeated test runs and a temporary test file created then deleted (lines 25–44).
-- [ ] **t20260928-0312-spf13-cobra-2257-repeated-inspection-recovery** — Make repeated-inspection recovery change the next attempt
+- [x] **t20260928-0312-spf13-cobra-2257-repeated-inspection-recovery** — Make repeated-inspection recovery change the next attempt (landed 1b7747b)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: When repeated inspections hit the no-progress guard, carry the useful findings into a bounded, materially different recovery attempt; suppress automatic retries that repeat the same reads/searches, and surface cumulative token/tool/time usage in the final failure outcome.
