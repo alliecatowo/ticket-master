@@ -2306,7 +2306,7 @@ is based on.
   acceptance: With `CARGO_TARGET_DIR` configured outside the repository and a successful cargo build, the agent receives the effective target path and can locate the binary without issuing a filesystem-wide search.
   test: `cargo test -p tm-agent`
   evidence: `/private/tmp/tm-trials/20260927-0538/BurntSushi-ripgrep-3376/tm/tm.log:25` — the first attempt ran `cargo build`, repeated `cargo build --bin rg`, then issued `find / -maxdepth 6 -name "rg"` after looking only in `target/debug`.
-- [ ] **t20260927-0538-gohugoio-hugo-15360-no-progress-loop** — Turn repeated inspection stops into a focused continuation
+- [x] **t20260927-0538-gohugoio-hugo-15360-no-progress-loop** — Turn repeated inspection stops into a focused continuation (landed 6d9594c)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: When repeated inspections/no-progress thresholds are reached, preserve the discovered target and require the next attempt to take a concrete action (edit, targeted test, or explain a blocker) rather than restarting the same file/history exploration. Enforce a cumulative token/context budget across attempts and stop or ask for user input when it is exhausted.
