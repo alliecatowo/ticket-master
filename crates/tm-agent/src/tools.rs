@@ -939,7 +939,11 @@ const INLINE_STDOUT_TAIL: usize = 12 * 1024;
 /// A command's result as the model sees it: exit code, the output itself (truncated in the middle
 /// when long), and artifact ids for the full streams (`shell.query_output` can query those).
 /// Output that can't be read back degrades to an empty string rather than failing the call.
-fn command_result_json(result: &command::CommandResult, cache: &dyn CommandCache) -> Value {
+fn command_result_json(
+    result: &command::CommandResult,
+    cache: &dyn CommandCache,
+    cwd: Option<&str>,
+) -> Value {
     let read = |id: &ArtifactId| cache.read_artifact(id).unwrap_or_default();
     let (stdout, stdout_truncated) = inline_output(
         &read(&result.stdout_artifact),
@@ -965,7 +969,52 @@ fn command_result_json(result: &command::CommandResult, cache: &dyn CommandCache
     if result.from_cache {
         value["from_cache"] = json!(true);
     }
+    if result.exit_code == 0 && is_cargo_build(&result.argv) {
+        if let Some(cwd) = cwd {
+            if let Some(target_dir) = cargo_target_directory(cwd) {
+                value["cargo_target_directory"] = json!(target_dir);
+                value["artifact_hint"] = json!(format!(
+                    "Cargo build artifacts are under '{}'; look there for the built binary.",
+                    target_dir
+                ));
+            }
+        }
+    }
     value
+}
+
+fn is_cargo_build(argv: &[String]) -> bool {
+    let args = if argv.get(1).is_some_and(|arg| arg == "-c") {
+        argv.get(2).map(String::as_str).unwrap_or_default()
+    } else {
+        if argv
+            .first()
+            .and_then(|arg| Path::new(arg).file_name())
+            .and_then(|name| name.to_str())
+            != Some("cargo")
+        {
+            return false;
+        }
+        return argv.iter().skip(1).any(|arg| arg == "build");
+    };
+    args.split(|c: char| c.is_whitespace() || matches!(c, ';' | '&' | '|'))
+        .any(|arg| arg == "build")
+}
+
+fn cargo_target_directory(cwd: &str) -> Option<String> {
+    let output = std::process::Command::new("cargo")
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    serde_json::from_slice::<Value>(&output.stdout)
+        .ok()?
+        .get("target_directory")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// `bytes` as text, keeping the first `head` and last `tail` bytes (on char boundaries) with a
@@ -1124,7 +1173,7 @@ impl BuiltinCapability {
         let key = command_key(ctx, &argv, &cwd, cacheable);
         let spec = CommandSpec {
             argv,
-            cwd,
+            cwd: cwd.clone(),
             env_allowlist: Vec::new(),
             declared_inputs: Vec::new(),
             cacheable,
@@ -1149,7 +1198,11 @@ impl BuiltinCapability {
         if !drafts.is_empty() {
             self.store.append(drafts)?;
         }
-        Ok(command_result_json(&result, self.command_cache.as_ref()))
+        Ok(command_result_json(
+            &result,
+            self.command_cache.as_ref(),
+            Some(&cwd),
+        ))
     }
 
     fn run_fixed_git(
@@ -1182,7 +1235,11 @@ impl BuiltinCapability {
         if !drafts.is_empty() {
             self.store.append(drafts)?;
         }
-        Ok(command_result_json(&result, self.command_cache.as_ref()))
+        Ok(command_result_json(
+            &result,
+            self.command_cache.as_ref(),
+            None,
+        ))
     }
 
     /// As [`BuiltinCapability::run_fixed_git`], but for the one `git.*` tool that is a genuine
@@ -3001,6 +3058,23 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
     use tm_types::{FixedClock, PatternSet, SessionId, TestIds, Timestamp};
+
+    #[test]
+    fn cargo_build_detection_handles_direct_and_shell_commands() {
+        assert!(is_cargo_build(&[
+            "cargo".into(),
+            "build".into(),
+            "--bin".into(),
+            "rg".into()
+        ]));
+        assert!(is_cargo_build(&[
+            "/bin/sh".into(),
+            "-c".into(),
+            "cargo build --bin rg".into()
+        ]));
+        assert!(!is_cargo_build(&["cargo".into(), "test".into()]));
+        assert!(!is_cargo_build(&["make".into(), "build".into()]));
+    }
 
     struct FakeCache {
         results: Mutex<BTreeMap<String, command::CommandResult>>,
