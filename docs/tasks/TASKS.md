@@ -2471,7 +2471,7 @@ is based on.
   acceptance: A deterministic test with repeated reads of the same source ranges demonstrates that the run does not spend multiple full attempts repeating investigation, issues at most one focused recovery attempt, and reports total usage across all attempts in its terminal outcome.
   test: `cargo test -p tm-agent repeated_exploration`
   evidence: `/tmp/tm-trials/20260928-0312/spf13-cobra-2257/tm.log` lines 24–50: three attempts each stopped after 10 steps without a repository change, repeated reads of `completions.go`/`command.go`, then escalated; reported 173755 + 231070 + 187131 tokens, and the final message asked for manual resume/retry despite automatic retries already repeating the same investigation.
-- [ ] **t20260928-0931-pallets-click-3822-stop-stalled-continuations** — Stop retrying agent continuations that repeat exploration without making progress
+- [x] **t20260928-0931-pallets-click-3822-stop-stalled-continuations** — Stop retrying agent continuations that repeat exploration without making progress (landed 1197c69)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: When a continuation has already been reoriented and repeats the same inspection without editing, running a targeted check, or submitting a result, stop that ticket promptly instead of replaying the same file reads across additional attempts. Report the retry count, elapsed time, and the exact recovery command in plain language; keep provider transport retries separately identified from agent no-progress retries.
