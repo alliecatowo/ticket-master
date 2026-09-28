@@ -1604,11 +1604,13 @@ impl AgentLoop {
                 }
                 if no_progress_reorientation_sent {
                     let summary = InvestigationSummary::from_steps(&steps).render();
+                    let totals = run_totals(&steps);
                     return Ok(AgentOutcome::Failed {
                         steps,
                         class: FailureClass::Other,
                         detail: format!(
-                            "ticket failed after the focused recovery turn ended without a repository change or submitted evidence. Last useful work: {summary}."
+                            "ticket failed after the focused recovery turn ended without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds.",
+                            totals.tokens, totals.tool_calls, totals.wall_seconds
                         ),
                     });
                 }
@@ -1824,10 +1826,21 @@ impl AgentLoop {
             }
             if task.ticket.is_some()
                 && repeated_exploration_count(&steps) >= REPEATED_EXPLORATION_LIMIT
-                && !no_progress_reorientation_sent
                 && (steps.len() as u32) < self.max_steps
                 && first_exhausted_dimension(&effective_budget).is_none()
             {
+                if no_progress_reorientation_sent {
+                    let summary = InvestigationSummary::from_steps(&steps).render();
+                    let totals = run_totals(&steps);
+                    return Ok(AgentOutcome::Failed {
+                        steps,
+                        class: FailureClass::Other,
+                        detail: format!(
+                            "ticket failed after its focused recovery repeated investigation without a repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds.",
+                            totals.tokens, totals.tool_calls, totals.wall_seconds
+                        ),
+                    });
+                }
                 no_progress_reorientation_sent = true;
                 continue;
             }
@@ -5651,6 +5664,47 @@ mod unproductive_exploration_tests {
             .expect("cross-tool returns to one source should trigger the nudge");
         assert!(nudge.contains("src/click/types.py"));
         assert_eq!(repeated_exploration_count(&steps), 3);
+    }
+
+    #[test]
+    fn repeated_exploration_recovery_is_bounded_and_reports_cumulative_usage() {
+        let repeated = || {
+            call(
+                "fs.read",
+                serde_json::json!({"path":"src/requests/models.py"}),
+                serde_json::json!({"text":"prepare_body checks stream types"}),
+            )
+        };
+        let mut investigation = step(vec![repeated(), repeated(), repeated()]);
+        investigation.spend = Spend {
+            tokens: 42_000,
+            dollars_micros: 0,
+            wall_seconds: 12,
+        };
+        let mut recovery = step(vec![repeated()]);
+        recovery.index = 2;
+        recovery.spend = Spend {
+            tokens: 8_000,
+            dollars_micros: 0,
+            wall_seconds: 3,
+        };
+        let steps = vec![investigation, recovery];
+
+        assert!(repeated_exploration_count(&steps) >= REPEATED_EXPLORATION_LIMIT);
+        let nudge = repeated_exploration_nudge(&steps).expect("repeated target remains identified");
+        assert!(nudge.contains("src/requests/models.py"));
+        assert!(nudge.contains("smallest implementation"));
+        assert!(nudge.contains("focused verification"));
+
+        let totals = run_totals(&steps);
+        assert_eq!(totals.tokens, 50_000);
+        assert_eq!(totals.tool_calls, 4);
+        assert_eq!(totals.wall_seconds, 15);
+        let detail = format!(
+            "ticket failed after its focused recovery repeated investigation without a repository change or submitted evidence. Usage: {} tokens, {} tool calls, {} seconds.",
+            totals.tokens, totals.tool_calls, totals.wall_seconds
+        );
+        assert!(detail.contains("50000 tokens, 4 tool calls, 15 seconds"));
     }
 
     #[test]
