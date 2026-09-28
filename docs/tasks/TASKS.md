@@ -1869,7 +1869,7 @@ is based on.
   acceptance: A preflight failure for `coder.fast` configured with `devpass` tells the user how to inspect available providers and what configuration action to take, while continuing to fail before an agent turn; tests assert the message includes both the missing provider and actionable repair guidance.
   test: `cargo test -p tm-provider preflight_role`
   evidence: `/private/tmp/tm-trials/20260926-1702/sindresorhus-ky-878/tm.log:4` reports `provider not registered: devpass` and points to `tm provider list`, but does not explain how to register that provider or replace the candidate.
-- [ ] **t20260926-1702-spf13-cobra-2257-ticket-usage-summary** — Make ticket usage totals easy to retrieve
+- [x] **t20260926-1702-spf13-cobra-2257-ticket-usage-summary** — Make ticket usage totals easy to retrieve (landed 5c1e444)
   model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
   files: `crates/tm-cli/src/tickets.rs`, `crates/tm-cli/src/stats.rs`
   change: Add actual recorded usage totals (at least total tokens and wall time) to `tm ticket show` text and JSON, aggregating the ticket's `usage.recorded` events without confusing ticket budget limits with consumed usage.
