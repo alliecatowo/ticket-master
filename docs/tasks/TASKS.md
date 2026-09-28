@@ -1883,7 +1883,7 @@ is based on.
   acceptance: A CLI test with a provider 429 and scheduled retry reports the scheduled state and a single correct next action, not a contradictory blind manual rerun; a failure without a scheduled retry still offers a valid manual recovery command.
   test: `cargo test -p tm-cli sched`
   evidence: `/tmp/tm-trials/20260926-1903/gohugoio-hugo-15360/tm.log:11` says `Run tm run T-1 again to retry`; line 33 records `ticket.retry_scheduled`.
-- [ ] **t20260926-1903-pallets-click-3822-provider-backoff** — Retry transient provider rate limits with clear progress
+- [x] **t20260926-1903-pallets-click-3822-provider-backoff** — Retry transient provider rate limits with clear progress (landed 5fc1802)
   model: sonnet · severity: high · builds Rust: yes · area: provider · deps: none
   files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
   change: When a run fails with a transient provider rate-limit response (HTTP 429), apply a bounded retry/backoff policy where safe; tell the user it is waiting and show the retry timing, rather than immediately ending with a generic provider-unavailable failure and a manual rerun suggestion.
