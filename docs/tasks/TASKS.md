@@ -1876,7 +1876,7 @@ is based on.
   acceptance: After a run, `tm ticket show <id> --json` and human-readable output display the same actual total token count as `tm stats --ticket <id> --json`; before any usage is recorded, show a clear zero/no-usage value and do not print the unlimited budget sentinel as spent tokens.
   test: `cargo test -p tm-cli tickets`
   evidence: `/tmp/tm-trials/20260926-1702/spf13-cobra-2257/tm.log` lines 173-203 show `tm ticket show --json` budget `tokens: 18446744073709551615` and spent `tokens: 0`; lines 256-274 show `tm stats --ticket T-1 --json` with the actual `tokens_total: 3661949`. Source: `crates/tm-cli/src/tickets.rs` lines 481-572 serializes the ticket directly without event usage; `crates/tm-cli/src/stats.rs` lines 1-9 documents aggregation of durable usage events.
-- [ ] **t20260926-1903-gohugoio-hugo-15360-retry-scheduled-run-guidance** — Align provider failure guidance with scheduled retry state
+- [x] **t20260926-1903-gohugoio-hugo-15360-retry-scheduled-run-guidance** — Align provider failure guidance with scheduled retry state (landed a3eb434)
   model: sonnet · severity: medium · builds Rust: yes · area: provider · deps: none
   files: `crates/tm-cli/src/sched.rs`
   change: When a provider-unavailable failure has already scheduled `ticket.retry_scheduled`, do not end with an unconditional instruction to immediately run `tm run <ticket>` again. Report that a retry is scheduled, explain what will trigger it (or provide the exact resume command if it will not run automatically), and include any known rate-limit delay. Preserve the manual rerun instruction for failures without a scheduled retry.
