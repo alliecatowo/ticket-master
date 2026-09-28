@@ -2449,7 +2449,7 @@ is based on.
   acceptance: A replay of a typing-fix task that revisits `src/click/types.py` and `src/click/termui.py` without edits produces a focused recovery or explicit blocker within one attempt, rather than three read-only attempts; the user sees the final failed/escalated state and next command clearly, and aggregate token use is bounded and reported accurately.
   test: `cargo test -p tm-agent repeated_source_inspections_have_an_early_run_level_bound`
   evidence: `/tmp/tm-trials/20260928-0312/pallets-click-3822/tm.log` lines 80–104 and 117–139: repeated source inspections, three attempts without a patch, provider retry messages, and escalation with resume/retry instructions.
-- [ ] **t20260928-0312-psf-requests-7432-repeated-inspection-stop** — Prevent repeated-inspection retries from exhausting the ticket without action
+- [x] **t20260928-0312-psf-requests-7432-repeated-inspection-stop** — Prevent repeated-inspection retries from exhausting the ticket without action (landed d8ba74f)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: When the repeated-inspection guard fires, make recovery materially different from repeating the same reads: stop automatic retries after the bounded focused recovery attempt, reuse the retained findings to direct one concrete edit/check, and report the actual cumulative token/tool/time spend in the final ticket outcome.
