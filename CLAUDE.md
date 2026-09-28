@@ -479,7 +479,7 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   fresh `mktemp` project root, never this checkout.
 - Ticket lifecycle from the CLI: `tm ticket new "<objective>"` (starts a global-scope project if
   none exists; new tickets get `Authority::worker()`), `tm ticket activate <T>` (draft -> ready),
-  then `tm run <T>` (activates a draft itself, and prints each step live) or `tm sched run`. `tm
+  then `tm run <T>` (activates a draft itself, and prints each step live, including exact verification commands and their returned exit statuses in progress and submitted summaries) or `tm sched run`. `tm
   ticket new` also reports a non-draft state after creation and, when a live lease exists, its
   holder and session id. If `tm run <T>` races an existing lease, the conflict includes `tm ticket
   show <T>` and, when known, `tm --resume <S>` recovery commands. `tm run` reports a failed attempt

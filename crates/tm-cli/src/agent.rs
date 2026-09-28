@@ -2379,6 +2379,9 @@ fn recovered_submission_line(calls: &[ToolCallRecord], start: usize) -> Option<(
 /// Render one resolved tool call as a single summary line.
 pub(crate) fn format_tool_call(call: &ToolCallRecord) -> String {
     let action = plain_tool_action(&call.tool_name, &call.input);
+    if let Some((label, command, status)) = verification_result(call) {
+        return format!("  * {label}: `{command}` -> {status}");
+    }
     match &call.resolution {
         ToolCallResolution::Completed { .. } => format!("  * {action}"),
         ToolCallResolution::Denied { reason } => {
@@ -2395,6 +2398,55 @@ pub(crate) fn format_tool_call(call: &ToolCallRecord) -> String {
             format!("  * {attempted_action} -> {}", plain_tool_error(detail))
         }
     }
+}
+
+/// Verification tools return structured status data. Use that result rather than inferring success
+/// from output text, which may be truncated or piped through a command that hides an upstream error.
+fn verification_result(call: &ToolCallRecord) -> Option<(&'static str, String, String)> {
+    let label = match call.tool_name.as_str() {
+        "shell.run" | "shell.query_output" => {
+            let command = call
+                .input
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if command.contains("cargo test --workspace") || command.contains("mise run test") {
+                "Project test suite"
+            } else if command.contains("test") {
+                "Focused check"
+            } else {
+                "Command"
+            }
+        }
+        "test.run" => "Focused check",
+        "build.run" => "Project check",
+        _ => return None,
+    };
+    let command = call
+        .input
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            call.input
+                .get("argv")
+                .and_then(serde_json::Value::as_array)
+                .map(|argv| {
+                    argv.iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+        })?;
+    let status = match &call.resolution {
+        ToolCallResolution::Completed { result, .. } => result
+            .get("exit_code")
+            .and_then(serde_json::Value::as_i64)
+            .map(|code| format!("exit {code}"))?,
+        ToolCallResolution::Errored { detail } => format!("failed: {}", plain_tool_error(detail)),
+        ToolCallResolution::Denied { reason } => format!("not run: {reason}"),
+    };
+    Some((label, command, status))
 }
 
 /// Cap on a salient argument's length in a live `tm run` progress line, so a long shell command,
@@ -2646,6 +2698,21 @@ pub(crate) fn format_outcome_summary(outcome: &AgentOutcome) -> String {
             format_pending_approval(pending_call)
         }
     };
+    let mut summary = summary;
+    let verification = outcome
+        .steps()
+        .iter()
+        .flat_map(|step| &step.tool_calls)
+        .filter_map(verification_result)
+        .map(|(label, command, status)| format!("{label}: `{command}` -> {status}"))
+        .collect::<Vec<_>>();
+    if !verification.is_empty() {
+        summary.push_str("; verification: ");
+        summary.push_str(&verification.join("; "));
+        if verification.iter().any(|line| !line.ends_with("exit 0")) {
+            summary.push_str(" (verification did not pass)");
+        }
+    }
     if summary.is_empty() {
         summary
     } else {
@@ -4480,5 +4547,22 @@ mod tests {
         assert!(rendered.contains("first attempt needed evidence"));
         assert_eq!(rendered.matches("Submitted the ticket").count(), 1);
         assert!(rendered.contains("Tried to submit the ticket"));
+    }
+
+    #[test]
+    fn shell_verification_reports_exact_command_and_returned_status() {
+        let call = ToolCallRecord {
+            tool_use_id: "call-1".to_string(),
+            tool_name: "shell.run".to_string(),
+            input: serde_json::json!({ "command": "npx tsx verify-fix.mts 2>&1 | tail -10" }),
+            resolution: ToolCallResolution::Completed {
+                result: serde_json::json!({ "exit_code": 1, "stdout": "tail output" }),
+                artifact: None,
+            },
+        };
+        let rendered = format_tool_call(&call);
+        assert!(rendered.contains("`npx tsx verify-fix.mts 2>&1 | tail -10`"));
+        assert!(rendered.contains("exit 1"));
+        assert!(!rendered.contains("passing"));
     }
 }
