@@ -1967,7 +1967,7 @@ is based on.
   acceptance: A run that edits a source file and later reaches the no-progress threshold reports that a patch remains in the workspace, clearly states that verification/submission did not complete, and gives a precise retry or verification recovery command; an actually unchanged run continues to report no patch.
   test: `cargo test -p tm-agent no_progress_tests`
   evidence: `/private/tmp/tm-trials/20260926-1946/sindresorhus-ky-878/tm.log` lines 46-46 and 118-127 — tm reported “No patch or evidence was submitted” and “Run `tm ticket retry T-1` to try again,” while the same run left a diff in `source/utils/body.ts` implementing the fix.
-- [ ] **t20260926-1946-spf13-cobra-2257-guided-no-progress-continuation** — Guide implementation after an investigation stalls
+- [x] **t20260926-1946-spf13-cobra-2257-guided-no-progress-continuation** — Guide implementation after an investigation stalls (landed e758414)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
   files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
   change: When the no-progress step limit is reached after useful file/search investigation but no edit or submitted evidence, start one bounded continuation turn with a concise actionable instruction grounded in the findings (identify the likely edit target, make the change, run its focused check, and submit evidence) before failing/escalating. Preserve the current terminal failure behavior if that continuation also makes no progress.
