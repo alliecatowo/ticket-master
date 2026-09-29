@@ -1981,7 +1981,7 @@ is based on.
   acceptance: A scripted run that repeats a file read and receives a 429 produces one concise failure summary stating no patch/tests occurred, retains useful findings, and presents a bounded retry action consistent with retry state; it does not dispatch duplicate immediate provider requests.
   test: `cargo test -p tm-agent && cargo test -p tm-cli`
   evidence: `/tmp/tm-trials/20260926-2011/gohugoio-hugo-15360/tm.log:13-36` — repeated reads/searches and dispatch notices, then “provider was unavailable” with `429 Too Many Requests`; event log lines 39-58 record follow-on events and failure.
-- [ ] **t20260926-2011-pallets-click-3822-bound-repeated-investigation** — Stop repeated source inspection before the no-progress limit
+- [~] **t20260926-2011-pallets-click-3822-bound-repeated-investigation** — Stop repeated source inspection before the no-progress limit (needs another pass: the worker made no changes)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: When consecutive overlapping reads/searches have already identified the target implementation and typing test, nudge the agent to act on the retained findings and run one focused check before spending more steps on the same files; keep the nudge bounded and retain the existing hard stop if it still makes no progress.
