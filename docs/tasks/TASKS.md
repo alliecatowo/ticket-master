@@ -1925,7 +1925,7 @@ is based on.
   acceptance: An agent fixture that repeats reads of one source file reaches a focused edit or a clearly reported bounded stop before the hard no-progress failure; its trace shows the repeated-read warning and does not silently consume the full no-progress allowance repeating identical exploration.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1929/psf-requests-7432/tm.log:13-23` — the run repeatedly read `src/requests/models.py` (including four consecutive read events) and repeated a search, then reported “stopped after 10 steps without a repository change or submitted evidence.”
-- [ ] **t20260926-1929-spf13-cobra-2257-no-progress-continuation** — Continue bounded investigations after the no-progress stop
+- [x] **t20260926-1929-spf13-cobra-2257-no-progress-continuation** — Continue bounded investigations after the no-progress stop (landed f06a94d)
   model: sonnet · severity: medium · builds Rust: yes · area: agent
   files: `crates/tm-agent/src/agent_loop.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
   change: When the no-progress guard fires after ten steps, preserve the accumulated investigation and provide a clear, usable recovery path that actually resumes those findings within an explicit bound, rather than ending the only `tm run` attempt after repetitive reads/searches. Make the human-facing message agree with the ticket's retry state and whether another command is required.
