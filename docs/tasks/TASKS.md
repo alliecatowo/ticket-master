@@ -1911,7 +1911,7 @@ is based on.
   acceptance: A deterministic 429-with-Retry-After test proves no request is retried before the indicated delay; a CLI-level test proves a retry-scheduled ticket does not display an immediate manual-retry instruction and instead explains the scheduler action, while unscheduled failures still provide a valid manual recovery command.
   test: `cargo test -p tm-provider providers::compat && cargo test -p tm-cli sched`
   evidence: `/tmp/tm-trials/20260926-1903/spf13-cobra-2257/tm.log` contains `429 Too Many Requests` twice and `ticket.retry_scheduled` (event 30 and event 73); the emitted failure message says `Run tm run T-1 again to retry`. Source: `crates/tm-provider/src/providers/compat.rs` (429 retry behavior) and `crates/tm-cli/src/sched.rs` lines 1164-1198 produce the manual and scheduler recovery text.
-- [ ] **t20260926-1929-pallets-click-3822-provider-429-retry** — Retry transient provider rate limits in foreground ticket runs
+- [x] **t20260926-1929-pallets-click-3822-provider-429-retry** — Retry transient provider rate limits in foreground ticket runs (landed 8ff3877)
   model: sonnet · severity: medium · builds Rust: yes · area: scheduler · deps: none
   files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
   change: When a provider returns HTTP 429 during `tm run`, honor any retry-after delay and retry the current ticket attempt within the bounded foreground run instead of returning immediately with a failed ticket and only scheduling a later retry. Emit concise progress that makes the wait and retry visible.
