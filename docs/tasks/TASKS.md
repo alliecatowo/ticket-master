@@ -1918,7 +1918,7 @@ is based on.
   acceptance: A deterministic provider test returning 429 once and then success completes the same foreground run successfully, records the retry, and emits an understandable retry message; persistent 429s still terminate clearly after the configured bound.
   test: `cargo test -p tm-cli`
   evidence: `/tmp/tm-trials/20260926-1929/pallets-click-3822/tm.log` line 7 — `provider was unavailable ... 429 Too Many Requests ... Run tm run T-1 again to retry.`
-- [ ] **t20260926-1929-psf-requests-7432-no-progress-read-loop** — Steer repeated source rereads toward implementation before the no-progress cutoff
+- [x] **t20260926-1929-psf-requests-7432-no-progress-read-loop** — Steer repeated source rereads toward implementation before the no-progress cutoff (landed 7856444)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: Track repeated reads/searches of the same relevant source range within an agent turn and, before `NO_PROGRESS_STEP_LIMIT` fails the ticket, send a concise steering message containing the already-read location and require a concrete next action (edit, focused test, or submitted evidence); avoid returning the same broad search result as fresh context.
