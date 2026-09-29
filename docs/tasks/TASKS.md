@@ -1960,7 +1960,7 @@ is based on.
   acceptance: An integration test simulating 429 with Retry-After shows the actual rate-limit reason, does not immediately exhaust the ticket attempt, and either retries after the specified delay within a configured bound or tells the user exactly when/how to retry; non-rate-limit 5xx failures retain their existing behavior.
   test: `cargo test -p tm-provider && cargo test -p tm-cli`
   evidence: `/tmp/tm-trials/20260926-1946/psf-requests-7432/tm.log:25` — “provider was unavailable” despite the embedded “429 Too Many Requests” / “Rate limit exceeded. Please retry after a brief wait.”; the run exits 2 and the following event records ticket failure.
-- [ ] **t20260926-1946-sindresorhus-ky-878-report-existing-work-on-stall** — Report existing patch state before declaring a ticket made no change
+- [x] **t20260926-1946-sindresorhus-ky-878-report-existing-work-on-stall** — Report existing patch state before declaring a ticket made no change (landed 4715913)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
   files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
   change: Before returning the no-progress failure in `agent_loop.rs`, distinguish the current no-progress streak from the whole run's workspace state; when a prior turn has left a source diff, avoid saying “No patch ... was submitted” without checking it, and tell the user whether that patch remains unverified and how to resume verification. Preserve the bounded stop rather than silently claiming success.
