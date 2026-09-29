@@ -520,8 +520,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
       for a focused change, check, and evidence submission. If that continuation still makes no
       progress, the run fails with a specific recovery action rather than continuing indefinitely.
       If that focused continuation repeats exploration without a change, targeted check, or
-      submission, the agent stops immediately with its continuation retry count, elapsed time, and
-      one `tm ticket retry <T>` recovery command; provider transport retries are reported separately.
+      submission, the agent stops immediately with its continuation retry count and elapsed time;
+      the human-facing `tm run` summary selects the next command from the ticket's actual state, so
+      a scheduled retry is not mistaken for a manual retry; provider transport retries are separate.
       The final no-submit detail includes cumulative tokens and elapsed seconds across the retained
      retry chain; it
      reports whether the workspace has edits and preserves findings for the next attempt. With no
@@ -531,7 +532,7 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
       alongside those ticket-state recovery commands;
      the agent-loop no-progress stop checks the full workspace state, not only the trailing
      no-progress streak: if a patch remains, it says verification and submission did not complete
-     and directs the user to retry the ticket so the patch can be checked and submitted.
+     and lets `tm run` direct the user according to whether the ticket has a retry scheduled.
      provider errors should be fixed before retrying. If no
    retry is available, the final summary names the missing patch or evidence and gives the next
    recovery action;
@@ -573,11 +574,11 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    failed command/output, with guidance to avoid broad repeated investigation; the run's existing
    step and token limits still apply.
    Ticketed runs also stop after 10 consecutive steps without a successful edit, commit, or stored
-   evidence artifact. Before failing, the agent gets one focused recovery turn using the retained
+   evidence artifact. Before failing, the agent gets one focused continuation in the same run using the retained
    investigation summary, directed to edit an already-identified implementation target, run its
    relevant check, and submit evidence without repeating investigation. If that turn also makes no
-   progress, the failure detail summarizes explored targets, reports run usage, and names the saved
-   session with a directly copyable resume command.
+   progress, the failure detail summarizes explored targets and reports run usage; `tm run` supplies
+   the recovery command that matches the ticket's actual state.
   A successful write resets the consecutive-step counter.
   They also stop after 24 consecutive tool calls without a successful edit, commit, or stored
   evidence artifact, bounding turns that contain many inspections and exploration across many
@@ -589,7 +590,9 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    edit, commit, test run, or stored evidence resets this repeated-target bound. Reaching the
    repeated-inspection, no-progress tool-call, or no-progress step threshold gives one focused
    continuation in the same saved session: use the discovered target to make a change, run a
-   targeted check and submit evidence, or explain a concrete blocker without more exploration.
+   targeted check and submit evidence, or explain a concrete blocker without more exploration. If
+   this continuation fails, the agent-loop detail does not assume that a retry is available;
+   `tm run` reports whether to keep the scheduler active or take a manual action.
    Ticket usage is debited to its durable budget across attempts, so retries cannot reset the
    configured cumulative token/context allowance. During a run, an
   identical successful file read or search request reuses its recorded result until an edit or

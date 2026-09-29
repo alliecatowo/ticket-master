@@ -1849,7 +1849,7 @@ impl AgentLoop {
                 return Ok(AgentOutcome::Failed {
                     steps,
                     class: FailureClass::Other,
-                    detail: format!("The focused continuation repeated exploration without a change, targeted check, or submission. No agent continuation retry remains (1 focused continuation used); provider transport retries are separate and are not counted here. Elapsed time: {} seconds. No work was submitted. Last useful work: {summary}. Saved session: {}. Continue with `tm --resume {}`.", totals.wall_seconds, task.session, task.session),
+                    detail: format!("The focused continuation repeated exploration without a change, targeted check, or submission. No agent continuation retry remains (1 focused continuation used); provider transport retries are separate and are not counted here. Elapsed time: {} seconds. No work was submitted. Last useful work: {summary}. The ticket's current state determines whether another attempt is scheduled; check `tm ticket show {}` for its state and next step.", totals.wall_seconds, task.ticket.as_ref().map_or_else(|| task.session.to_string(), ToString::to_string)),
                 });
             }
             if task.ticket.is_some()
@@ -1862,14 +1862,14 @@ impl AgentLoop {
                     let totals = run_totals(&steps);
                     let recovery = task.ticket.as_ref().map_or_else(
                         || "review the saved session and make a focused change before retrying".to_string(),
-                        |ticket| format!("run `tm ticket retry {ticket}` after reviewing the retained findings"),
+                        |ticket| format!("check `tm ticket show {ticket}` for the current state and next step"),
                     );
                     return Ok(AgentOutcome::Failed {
                         steps,
                         class: FailureClass::Other,
                         detail: format!(
-                            "The focused continuation repeated exploration without a repository change, targeted check, or submitted evidence. No agent continuation retry remains (1 focused continuation used); provider transport retries are separate and are not counted here. Elapsed time: {} seconds. No work was submitted. Last useful work: {summary}. Saved session: {}. Continue with `tm --resume {}` or retry with {recovery}.",
-                            totals.wall_seconds, task.session, task.session
+                            "The focused continuation repeated exploration without a repository change, targeted check, or submitted evidence. No agent continuation retry remains (1 focused continuation used); provider transport retries are separate and are not counted here. Elapsed time: {} seconds. No work was submitted. Last useful work: {summary}. Saved session: {}. {recovery}.",
+                            totals.wall_seconds, task.session
                         ),
                     });
                 }
@@ -1902,8 +1902,17 @@ impl AgentLoop {
                 let totals = run_totals(&steps);
                 let patch_remains = workspace_has_patch(&root);
                 let ticket_recovery = task.ticket.as_ref().map_or_else(
-                    || format!("Continue the saved session with `tm --resume {}`.", task.session),
-                    |ticket| format!("Run `tm ticket retry {ticket}` to continue verification and submit evidence."),
+                    || {
+                        format!(
+                            "Continue the saved session with `tm --resume {}`.",
+                            task.session
+                        )
+                    },
+                    |ticket| {
+                        format!(
+                            "Check `tm ticket show {ticket}` for its current state and next step."
+                        )
+                    },
                 );
                 let patch_status = no_progress_patch_status(patch_remains);
                 if !no_progress_reorientation_sent
