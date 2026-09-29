@@ -537,9 +537,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
      directs the worker to reuse returned evidence and move to a reproducer, code change, or focused
      test; edits and verification reset the count,
      and a different targeted reread is still allowed when new evidence requires it. The no-submit
-     recovery summary is carried into the next attempt so repeated dispatches do not restart cold.
+      recovery summary is carried into the next attempt so repeated dispatches do not restart cold.
      Repeated-inspection and other no-progress stops get one focused continuation with the retained
-      findings, directed to one concrete edit/check; if that recovery repeats investigation or still
+      findings, directed to edit an already-identified implementation target and run its relevant
+      check without rereading that source or repeating searches; if that recovery repeats investigation or still
       cannot make progress, the agent stops without another automatic continuation and reports its
       cumulative token, tool-call, and time totals. During that recovery, repeated reads or searches
       of an already-exhausted source are returned as an error instead of being dispatched again.
@@ -559,9 +560,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    step and token limits still apply.
    Ticketed runs also stop after 10 consecutive steps without a successful edit, commit, or stored
    evidence artifact. Before failing, the agent gets one focused recovery turn using the retained
-   investigation summary, directed to make a small repository change, run a relevant check, and
-   submit evidence. If that turn also makes no progress, the failure detail summarizes explored
-   targets and names the exact `tm ticket retry <id>` command.
+   investigation summary, directed to edit an already-identified implementation target, run its
+   relevant check, and submit evidence without repeating investigation. If that turn also makes no
+   progress, the failure detail summarizes explored targets, reports run usage, and names the saved
+   session with a directly copyable resume command.
   A successful write resets the consecutive-step counter.
   They also stop after 24 consecutive tool calls without a successful edit, commit, or stored
   evidence artifact, bounding turns that contain many inspections and exploration across many
