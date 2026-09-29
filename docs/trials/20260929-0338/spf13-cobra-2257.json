@@ -1,0 +1,39 @@
+{
+  "issue": "https://github.com/spf13/cobra/issues/2257",
+  "base_sha": "61968e893eee2f27696c2fbc8e34fa5c4afaf7c4",
+  "merge_sha": "746ef07158728502482cea9f880a6f4b21ef29a9",
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 95,
+      "tokens": 429435,
+      "scores": {
+        "navigation_quality": 3,
+        "context_efficiency": 1,
+        "plan_quality": 2,
+        "verification_honesty": 2,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 2
+      },
+      "better": "The run identified the right files, but repeatedly explored after its first useful discovery and ended without attempting the small slice-copy fix. The user-facing failure said the focused continuation repeated exploration and suggested resuming, while reporting that no work was submitted; a recovery mode that immediately acts on the established append-side-effect diagnosis (or gives a direct targeted next step) would have avoided three failed dispatches and made the outcome more useful. The reported telemetry was inconsistent: tm run took about 95 seconds wall-clock while tm stats reported 46 seconds and zero input/output tokens despite 429,435 total tokens, making the effort and cost difficult to interpret."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 62,
+      "tokens": 38959,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 5,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode quickly traced the append side effect, copied the arguments before adding the sentinel, wrote a regression test, ran gofmt and go test ./..., and accurately reported the passing result. It first attempted semantic workspace search where no index existed, then recovered with exact searches. A more efficient first route to exact source search and a test aligned exactly with the reported os.Args behavior (the submitted regression test used a direct Execute setup) would improve the run further."
+    }
+  ]
+}

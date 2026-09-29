@@ -1,0 +1,1 @@
+{"skipped":"Issue is marked fixed by merged PR #3420 (base 48a6ad93f152dc848f1883ceb3bf2c7baab6738c, merge 43e2f08edef8c00e5d7719212c3e6a869bca1151), but that PR changed only crates/ignore/src/dir.rs and contains no test-file changes; no merged fix with tests exists."}

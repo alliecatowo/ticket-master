@@ -1,0 +1,40 @@
+{
+  "issue": "https://github.com/psf/requests/issues/7432",
+  "base_sha": "0b401c76b6e80a4eecf3c690085b2553f6e261ca",
+  "merge_sha": "6404f345e562d962abe6700a1c357ec1e7e18232",
+  "test_files": ["tests/test_requests.py"],
+  "arms": [
+    {
+      "tool": "tm",
+      "passed": false,
+      "wall_seconds": 67.7,
+      "tokens": 198654,
+      "scores": {
+        "navigation_quality": 2,
+        "context_efficiency": 1,
+        "plan_quality": 1,
+        "verification_honesty": 3,
+        "ux_copy_clarity": 2,
+        "recoverability": 1,
+        "cost_time": 3
+      },
+      "better": "tm located PreparedRequest.prepare_body and the relevant source, but repeatedly reread the same file and its file-reading tool returned errors; the run exhausted its focused continuation and submitted no patch or test evidence. It would be better if the agent converted the first exploration into a concrete diagnosis and edit, and if a continuation failure clearly separated transient provider/tool errors from repeated unproductive work while offering an effective recovery path. The CLI's ticket-create confirmation was clear; the generic file-read error and repeated 'focused continuation' messages would leave a user unsure what actually failed or what to try next."
+    },
+    {
+      "tool": "opencode",
+      "passed": true,
+      "wall_seconds": 72.3,
+      "tokens": 192547,
+      "scores": {
+        "navigation_quality": 4,
+        "context_efficiency": 4,
+        "plan_quality": 4,
+        "verification_honesty": 4,
+        "ux_copy_clarity": 4,
+        "recoverability": 4,
+        "cost_time": 5
+      },
+      "better": "OpenCode followed the stream-detection path, changed the predicate to hasattr(data, '__iter__'), added a regression test, and corrected its test double after an initial failing check. The hidden PR regression test passed after the prescribed test-file checkout. It would be stronger if the first regression double modeled Python's special-method lookup correctly and if it ran the actual merged PR test before declaring verification complete; the required post-run hidden test did pass."
+    }
+  ]
+}
