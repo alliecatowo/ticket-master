@@ -512,6 +512,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
     investigation for the next attempt and tells the user that the findings are unverified; across
       repeated automatic attempts, the worker is directed to use those findings for one focused code
       change and targeted check (or stop with the specific blocker), without repeating discovery.
+      Reaching the no-progress step limit after investigation gives one bounded continuation whose
+      instruction names the likely inspected source and retained finding when available, then asks
+      for a focused change, check, and evidence submission. If that continuation still makes no
+      progress, the run fails with a specific recovery action rather than continuing indefinitely.
       If that focused continuation repeats exploration without a change, targeted check, or
       submission, the agent stops immediately with its continuation retry count, elapsed time, and
       one `tm ticket retry <T>` recovery command; provider transport retries are reported separately.

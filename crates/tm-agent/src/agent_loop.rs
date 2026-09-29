@@ -1496,12 +1496,7 @@ impl AgentLoop {
                 system.push_str("\n\nA verification command failed because its required toolchain executable was unavailable. Resume from the files and findings already present in this conversation; do not repeat broad searches or reread those files without a specific unresolved question. The failed verification and its exact command/output are already recorded above. Make the smallest useful correction or use a verification path available in this environment, then submit with evidence. This is a single bounded continuation; the normal step and token budgets still apply.");
             }
             if no_progress_reorientation_sent {
-                let summary = InvestigationSummary::from_steps(&steps).render();
-                system.push_str("\n\nThis is your one focused recovery turn after an inspection or no-progress limit. Treat the investigation already recorded in this conversation as sufficient: if it identifies a relevant implementation file or target function, edit it now with the smallest useful fix, then run the most relevant targeted test and submit evidence. Do not reread that source, repeat searches, or inspect history. If neither action is possible, explain the specific blocker in your final reply without further tool calls.");
-                // Keep the findings explicit in the instruction even when prior tool results were
-                // compacted from the rebuilt conversation.
-                system.push_str("\nRetained investigation summary: ");
-                system.push_str(&summary);
+                system.push_str(&no_progress_recovery_guidance(&steps));
             }
             let request = CompletionRequest {
                 system: Some(system),
@@ -1989,6 +1984,53 @@ fn no_progress_steps(steps: &[StepRecord]) -> usize {
         .rev()
         .take_while(|step| !step_made_progress(step))
         .count()
+}
+
+/// Give the single bounded continuation a concrete target and the latest useful result from
+/// investigation, even when older tool results have been pruned from the conversation.
+fn no_progress_recovery_guidance(steps: &[StepRecord]) -> String {
+    let likely_target = steps
+        .iter()
+        .flat_map(|step| &step.tool_calls)
+        .rev()
+        .find_map(|call| {
+            if matches!(call.tool_name.as_str(), "fs.read" | "fs.read_range") {
+                call.input
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            } else {
+                exploration_target(call)
+                    .filter(|target| target.starts_with("source "))
+                    .map(|target| target.trim_start_matches("source ").to_string())
+            }
+        });
+    let finding = steps
+        .iter()
+        .rev()
+        .flat_map(|step| step.tool_calls.iter().rev())
+        .find_map(|call| match &call.resolution {
+            crate::outcome::ToolCallResolution::Completed { result, .. }
+                if !is_progress_call(call) =>
+            {
+                let text = result.to_string();
+                (!text.trim().is_empty()).then(|| concise_finding(&text))
+            }
+            _ => None,
+        });
+    let mut guidance = String::from(
+        "\n\nThis is your one focused recovery turn after the investigation reached its no-progress limit. Use the recorded findings to make the smallest useful change, run its focused check, and submit evidence. Do not repeat broad searches or reread already inspected files. If blocked, state the specific blocker without further investigation.",
+    );
+    if let Some(target) = likely_target {
+        guidance.push_str(" Likely edit target: ");
+        guidance.push_str(&target);
+        guidance.push('.');
+    }
+    if let Some(finding) = finding {
+        guidance.push_str(" Retained finding: ");
+        guidance.push_str(&finding);
+    }
+    guidance
 }
 
 /// Check the complete workspace state at a no-progress stop, rather than inferring it from the
@@ -6070,5 +6112,27 @@ mod no_progress_tests {
             175_000,
             "all investigation usage remains part of the run outcome"
         );
+    }
+
+    #[test]
+    fn no_progress_continuation_names_the_investigated_target_and_finding() {
+        let mut inspected = step(1, "fs.read", "src/completions.go");
+        inspected.tool_calls[0].resolution = ToolCallResolution::Completed {
+            result: serde_json::json!({"text":"Completion registration skips command aliases"}),
+            artifact: None,
+        };
+        let guidance = no_progress_recovery_guidance(&[inspected]);
+        assert!(guidance.contains("Likely edit target: src/completions.go"));
+        assert!(guidance.contains("Completion registration skips command aliases"));
+        assert!(guidance.contains("focused check"));
+        assert!(guidance.contains("submit evidence"));
+    }
+
+    #[test]
+    fn no_progress_continuation_without_findings_still_has_a_bounded_action() {
+        let guidance = no_progress_recovery_guidance(&[]);
+        assert!(guidance.contains("one focused recovery turn"));
+        assert!(guidance.contains("make the smallest useful change"));
+        assert!(guidance.contains("specific blocker"));
     }
 }
