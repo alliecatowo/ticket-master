@@ -890,9 +890,19 @@ async fn run_ticket_until(
                     delay_seconds = delay,
                     "provider attempt failed; waiting before retry"
                 );
-                renderer.note(&format!(
-                    "Provider request failed. Waiting {delay} seconds before retry {retry_count}; the same ticket and saved session will be used."
-                ));
+                let is_rate_limited = project
+                    .store
+                    .view()
+                    .ok()
+                    .and_then(|view| view.tickets.get(&ticket).cloned())
+                    .and_then(|current| current.failures.last().cloned())
+                    .is_some_and(|failure| is_rate_limit_failure(&failure));
+                let retry_message = if is_rate_limited {
+                    format!("The provider rate limit was reached. Waiting {delay} seconds, then retry {retry_count} for ticket {ticket}.")
+                } else {
+                    format!("Provider request failed. Waiting {delay} seconds before retry {retry_count}; the same ticket and saved session will be used.")
+                };
+                renderer.note(&retry_message);
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::from(
                     tm_types::clock::monotonic_now(),
                 ));
@@ -1527,9 +1537,19 @@ fn is_rate_limit_failure(failure: &tm_core::FailureRecord) -> bool {
 
 fn provider_retry_after_seconds(failure: &tm_core::FailureRecord) -> Option<u64> {
     let detail = failure.detail.to_ascii_lowercase();
-    let marker = "retry after ";
-    let start = detail.find(marker)? + marker.len();
-    detail[start..].split_whitespace().next()?.parse().ok()
+    for marker in ["retry after ", "retry-after: ", "retry-after "] {
+        let Some(start) = detail.find(marker).map(|index| index + marker.len()) else {
+            continue;
+        };
+        let value = detail[start..]
+            .split_whitespace()
+            .next()?
+            .trim_end_matches(|character: char| !character.is_ascii_digit());
+        if let Ok(seconds) = value.parse() {
+            return Some(seconds);
+        }
+    }
+    None
 }
 
 fn retry_delay_seconds(failure: &tm_core::FailureRecord, policy_delay: u64) -> u64 {
@@ -2279,6 +2299,10 @@ mod tests {
         ticket.failures[0].detail =
             "provider returned 429 rate limited; retry after 20 seconds".to_string();
         assert_eq!(retry_delay_seconds(&ticket.failures[0], 5), 20);
+        ticket.failures[0].detail = "HTTP 429 Too Many Requests; Retry-After: 20s".to_string();
+        assert_eq!(retry_delay_seconds(&ticket.failures[0], 5), 20);
+        ticket.failures[0].detail =
+            "provider returned 429 rate limited; retry after 20 seconds".to_string();
         let scheduled = run_outcome(&ticket, 0, false, &[], None)
             .unwrap_err()
             .to_string();

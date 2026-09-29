@@ -488,7 +488,10 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
   show <T>` and, when known, `tm --resume <S>` recovery commands. `tm run` reports a failed attempt
   as an error (exit 2), not as "finished". Its foreground time limit covers automatic retries and
   provider backoff together; when that limit prevents another retry, the message says whether a
-  retry remains scheduled and gives one matching recovery action. Repeated no-progress attempts carry
+   retry remains scheduled and gives one matching recovery action. Transient HTTP 429 failures are
+   retried in the same foreground invocation within the ticket's configured attempt bound; the wait
+   honors the provider's `Retry-After` value and progress states that the provider rate limit was
+   reached before retrying. Repeated no-progress attempts carry
   findings and cumulative token/time totals forward, reuse equivalent inspection results, and allow
   only one focused recovery continuation across a repeated chain. Compatible providers retry transient rate limits
   within a bounded request retry budget, honor `Retry-After`, and report each wait; when those
