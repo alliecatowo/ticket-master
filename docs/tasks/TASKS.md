@@ -2383,7 +2383,7 @@ is based on.
   acceptance: A repeat-exploration fixture cannot spend multiple full-context attempts rereading the same files; the next attempt receives the prior findings, makes a distinct edit/test/evidence step or exits with actionable guidance, and reported cumulative usage agrees with recorded provider usage.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260927-0742/sindresorhus-ky-878/tm.log` lines 69 and 84 show no-submit attempts reporting 190855 and 225600 tokens respectively before the retry eventually submits; ticket stats reported 615955 total tokens.
-- [ ] **t20260928-0029-pallets-click-3822-stop-repeated-noop-retries** — Stop repeated reconnaissance loops and preserve a valid workdir across tm retries
+- [~] **t20260928-0029-pallets-click-3822-stop-repeated-noop-retries** — Stop repeated reconnaissance loops and preserve a valid workdir across tm retries (needs another pass: the worker made no changes)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-cli/src/sched.rs`, `crates/tm-agent/src/agent_loop.rs`
   change: Detect consecutive attempts that repeat the same source reads and git-status/diff checks without a repository change or submitted evidence; carry forward a compact investigation summary, require a new concrete action before another retry, and reject or repair an invalid per-ticket shell working directory instead of retrying commands under `/null`.
