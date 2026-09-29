@@ -2033,7 +2033,7 @@ is based on.
   acceptance: A run with multiple dispatch attempts presents one unambiguous initial dispatch and labels each subsequent attempt/retry so a user can distinguish continued recovery from accidental duplicate work.
   test: `cargo test -p tm-cli sched::tests`
   evidence: `/tmp/tm-trials/20260926-2037/BurntSushi-ripgrep-3376/tm.log:72-91` — identical dispatch messages at lines 72, 83, and 88 before the provider rate-limit failure at line 91
-- [ ] **t20260926-2037-gohugoio-hugo-15360-no-progress-run-does-not-finish-scoped-fix** — Prevent repeated investigation from ending a focused ticket before a minimal implementation can be attempted
+- [x] **t20260926-2037-gohugoio-hugo-15360-no-progress-run-does-not-finish-scoped-fix** — Prevent repeated investigation from ending a focused ticket before a minimal implementation can be attempted (landed 01a572f)
   model: sonnet · severity: high · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: When the repeated-inspection/no-progress guard fires on a ticket, preserve the useful stop signal but route the run through actionable recovery that asks for one focused edit and relevant check before returning terminal failure; avoid re-reading the same source and history when a relevant implementation file has already been located.
