@@ -2124,7 +2124,7 @@ is based on.
   acceptance: An escalated no-change run prints exactly one executable recovery command that matches the ticket/session state and succeeds in making the work runnable without requiring the user to choose between resume and retry.
   test: `cargo test -p tm-cli run_outcome_escalated_state_plain_message`
   evidence: `/tmp/tm-trials/20260926-2354/BurntSushi-ripgrep-3376/tm.log:69` — “Continue the saved session with `tm --resume S-3` and make a focused change”; line 78 ends “Ticket state: escalated. No retry is scheduled. Run `tm ticket retry T-1` to try again.”
-- [ ] **t20260926-2354-pallets-click-3822-repeat-cycle-token-budget** — Redirect repeated investigation before it burns a large token budget
+- [~] **t20260926-2354-pallets-click-3822-repeat-cycle-token-budget** — Redirect repeated investigation before it burns a large token budget (needs another pass: the worker made no changes)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: When repeated reads/searches revisit the same files and symbols without an edit or evidence, stop the loop earlier or change the next-step prompt to a concrete implementation action; avoid replaying the same broad exploratory commands across retries.
