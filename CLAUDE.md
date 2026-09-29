@@ -520,9 +520,12 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
      reports whether the workspace has edits and preserves findings for the next attempt. With no
      edits, it says no repository change was made and includes the recovery action for the final
      ticket state: keep the scheduler active for an automatic retry, run a ready ticket when no
-     retry is scheduled, or retry an escalated ticket. It never recommends `tm --resume <session>`
-     alongside those ticket-state recovery commands;
-    provider errors should be fixed before retrying. If no
+      retry is scheduled, or retry an escalated ticket. It never recommends `tm --resume <session>`
+      alongside those ticket-state recovery commands;
+     the agent-loop no-progress stop checks the full workspace state, not only the trailing
+     no-progress streak: if a patch remains, it says verification and submission did not complete
+     and directs the user to retry the ticket so the patch can be checked and submitted.
+     provider errors should be fixed before retrying. If no
    retry is available, the final summary names the missing patch or evidence and gives the next
    recovery action;
    this is distinct from a test failure.

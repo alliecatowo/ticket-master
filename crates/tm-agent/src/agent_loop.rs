@@ -1905,6 +1905,12 @@ impl AgentLoop {
             if task.ticket.is_some() && no_progress_steps(&steps) >= NO_PROGRESS_STEP_LIMIT {
                 let summary = InvestigationSummary::from_steps(&steps).render();
                 let totals = run_totals(&steps);
+                let patch_remains = workspace_has_patch(&root);
+                let ticket_recovery = task.ticket.as_ref().map_or_else(
+                    || format!("Continue the saved session with `tm --resume {}`.", task.session),
+                    |ticket| format!("Run `tm ticket retry {ticket}` to continue verification and submit evidence."),
+                );
+                let patch_status = no_progress_patch_status(patch_remains);
                 if !no_progress_reorientation_sent
                     && (steps.len() as u32) < self.max_steps
                     && first_exhausted_dimension(&effective_budget).is_none()
@@ -1916,8 +1922,8 @@ impl AgentLoop {
                     steps,
                     class: FailureClass::Other,
                     detail: format!(
-                        "ticket failed after the focused recovery turn also made no repository change or submitted evidence. Last useful work: {summary}. No patch or evidence was submitted. Usage: {} tokens, {} tool calls, {} seconds. Continue the saved session with `tm --resume {}` or retry the ticket.",
-                        totals.tokens, totals.tool_calls, totals.wall_seconds, task.session
+                        "ticket failed after the focused recovery turn also made no repository change or submitted evidence. Last useful work: {summary}. {patch_status} Usage: {} tokens, {} tool calls, {} seconds. {ticket_recovery}",
+                        totals.tokens, totals.tool_calls, totals.wall_seconds
                     ),
                 });
             }
@@ -1983,6 +1989,25 @@ fn no_progress_steps(steps: &[StepRecord]) -> usize {
         .rev()
         .take_while(|step| !step_made_progress(step))
         .count()
+}
+
+/// Check the complete workspace state at a no-progress stop, rather than inferring it from the
+/// trailing streak of tool calls. Comparing against HEAD includes staged and unstaged changes;
+/// untracked files are included because they may be the patch the worker left behind.
+fn workspace_has_patch(root: &std::path::Path) -> bool {
+    std::process::Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=normal"])
+        .current_dir(root)
+        .output()
+        .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+}
+
+fn no_progress_patch_status(patch_remains: bool) -> &'static str {
+    if patch_remains {
+        "A workspace patch remains, but verification and submission did not complete."
+    } else {
+        "No patch or evidence was submitted."
+    }
 }
 
 /// Count tool calls in the current trailing streak of steps that made no successful repository
@@ -5955,6 +5980,19 @@ mod no_progress_tests {
             artifact: None,
         };
         assert_eq!(no_progress_steps(&[edit]), 1);
+    }
+
+    #[test]
+    fn remaining_patch_is_reported_as_unverified_with_ticket_recovery() {
+        let status = no_progress_patch_status(true);
+        assert!(status.contains("A workspace patch remains"));
+        assert!(status.contains("verification and submission did not complete"));
+        assert!(!status.contains("No patch or evidence was submitted"));
+    }
+
+    #[test]
+    fn unchanged_workspace_reports_no_patch() {
+        assert!(no_progress_patch_status(false).contains("No patch or evidence was submitted"));
     }
 
     #[test]
