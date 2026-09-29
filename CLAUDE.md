@@ -164,7 +164,9 @@ never drift between sessions:
   (`docs/decisions/D-023-capacity-wait-is-not-a-failed-attempt.md`).
   When `tm run` receives a retryable provider failure such as HTTP 429 and the ticket retry policy
   schedules another attempt, it waits in the foreground, reports the retry number and delay, and
-  retries the same ticket automatically. The scheduler remains authoritative for the bounded retry
+  retries the same ticket automatically. For HTTP 429, the foreground wait is at least the
+  provider-supplied `Retry-After` duration, even when the ticket retry policy asks for a shorter
+  delay. The scheduler remains authoritative for the bounded retry
   count; permanent provider failures are reported without retrying. An exhausted HTTP 429 keeps
   its rate-limit reason and provider-supplied `Retry-After` duration in the failure detail. When
   that duration is available, `tm run` tells the user how long to wait before using the ticket's

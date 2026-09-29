@@ -866,7 +866,9 @@ async fn run_ticket_until(
                     );
                     match decision.outcome {
                         tm_scheduler::RetryOutcome::Retry { after } => {
-                            Some(after.seconds_since(project.clock.now()).max(0) as u64)
+                            let policy_delay =
+                                after.seconds_since(project.clock.now()).max(0) as u64;
+                            Some(retry_delay_seconds(current.failures.last()?, policy_delay))
                         }
                         tm_scheduler::RetryOutcome::Escalate(_) => None,
                     }
@@ -1528,6 +1530,14 @@ fn provider_retry_after_seconds(failure: &tm_core::FailureRecord) -> Option<u64>
     let marker = "retry after ";
     let start = detail.find(marker)? + marker.len();
     detail[start..].split_whitespace().next()?.parse().ok()
+}
+
+fn retry_delay_seconds(failure: &tm_core::FailureRecord, policy_delay: u64) -> u64 {
+    if is_rate_limit_failure(failure) {
+        policy_delay.max(provider_retry_after_seconds(failure).unwrap_or_default())
+    } else {
+        policy_delay
+    }
 }
 
 fn scheduled_retry_delay(
@@ -2268,12 +2278,18 @@ mod tests {
         ticket.failures[0].class = FailureClass::ProviderUnavailable;
         ticket.failures[0].detail =
             "provider returned 429 rate limited; retry after 20 seconds".to_string();
+        assert_eq!(retry_delay_seconds(&ticket.failures[0], 5), 20);
         let scheduled = run_outcome(&ticket, 0, false, &[], None)
             .unwrap_err()
             .to_string();
         assert!(scheduled.contains("provider rate-limited the request"));
         assert!(scheduled.contains("wait 20 seconds"));
         assert!(scheduled.contains("keep the scheduler active with `tm sched run`"));
+
+        ticket.failures[0].detail = "provider unavailable: server error".to_string();
+        assert_eq!(retry_delay_seconds(&ticket.failures[0], 5), 5);
+        ticket.failures[0].detail =
+            "provider returned 429 rate limited; retry after 20 seconds".to_string();
 
         ticket.retry.max_attempts = 1;
         let unscheduled = run_outcome(&ticket, 0, false, &[], None)
