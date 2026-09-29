@@ -2236,7 +2236,7 @@ is based on.
   acceptance: An escalated no-change run displays one valid recovery command, its effect is stated, and executing it transitions the saved work into a runnable state.
   test: `cargo test -p tm-cli run_outcome_escalated_state_plain_message`
   evidence: `/tmp/tm-trials/20260927-0158/spf13-cobra-2257/tm.log:23` — “Continue the saved session with `tm --resume S-1`”; line 48 then says “Run `tm ticket retry T-1` to try again.”
-- [ ] **t20260927-0335-BurntSushi-ripgrep-3376-cumulative-no-progress-budget** — Prevent repeated tm retries from exhausting context without progress
+- [~] **t20260927-0335-BurntSushi-ripgrep-3376-cumulative-no-progress-budget** — Prevent repeated tm retries from exhausting context without progress (needs another pass: the worker made no changes)
   model: sonnet · severity: high · builds Rust: yes · area: agent · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`
   change: Make repeated-exploration/no-progress limits cumulative across automatic retries in a single `tm run`, and avoid retrying identical inspection-only sessions unless the saved-session prompt directs a concrete next action; report aggregate spend and a concise recovery command.
