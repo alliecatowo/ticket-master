@@ -1953,7 +1953,7 @@ is based on.
   acceptance: A ticket that performs 10 investigation-only steps but has actionable findings is given a focused patch attempt instead of immediately ending with the current generic continuation text; if the retry attempt also stalls, output explicitly says the ticket failed and names the command to retry it.
   test: `cargo test -p tm-agent repeated_investigation_hits_bounded_threshold_and_keeps_actionable_summary`
   evidence: `/tmp/tm-trials/20260926-1946/pallets-click-3822/tm.log` lines 38-41 — “stopped after 10 steps without a repository change or submitted evidence” followed by “Run `tm ticket retry T-1` to try again.”
-- [ ] **t20260926-1946-psf-requests-7432-rate-limit-recovery** — Preserve rate-limit classification and recover from transient 429s
+- [x] **t20260926-1946-psf-requests-7432-rate-limit-recovery** — Preserve rate-limit classification and recover from transient 429s (landed f0523ec)
   model: sonnet · severity: medium · builds Rust: yes · area: provider · deps: none
   files: `crates/tm-provider/src/anthropic.rs`, `crates/tm-cli/src/sched.rs`
   change: Preserve a provider's HTTP 429/RateLimited classification through the agent-run failure path instead of presenting it as generic “provider unavailable”; when the provider supplies Retry-After, surface the wait duration and perform a bounded retry or give one clear timed retry action rather than an untimed generic retry instruction.
