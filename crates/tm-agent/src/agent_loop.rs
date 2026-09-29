@@ -2388,7 +2388,7 @@ fn repeated_exploration_nudge(steps: &[StepRecord]) -> Option<String> {
             } else {
                 format!("Retained finding: {}", entry.1)
             };
-            return Some(format!("You have repeatedly explored the same source or search target without making progress. Already inspected: {key}. {finding} Use this retained result and reuse the returned evidence instead of repeating these reads or nearby ranges. Move now to a concrete reproducer, the smallest implementation that meets the goal, or a focused test, then run focused verification. If blocked, state the specific missing information."));
+            return Some(format!("Repeated-read warning: you have inspected the same source or search target several times without making progress. Already inspected: {key}. {finding} This result is retained; do not repeat this broad read/search or treat it as new context. Take one concrete next action now: edit the implementation, run a focused test, or submit evidence. If none is possible, stop and state the specific blocker."));
         }
     }
     None
@@ -5700,10 +5700,11 @@ mod unproductive_exploration_tests {
         let nudge = repeated_exploration_nudge(&[step(vec![repeated(), repeated(), repeated()])])
             .expect("third repeat should be recognized");
         assert!(nudge.contains("src/main.rs"));
+        assert!(nudge.contains("Repeated-read warning"));
         assert!(nudge.contains("Retained finding:"));
         assert!(nudge.contains("found target"));
-        assert!(nudge.contains("smallest implementation"));
-        assert!(nudge.contains("focused verification"));
+        assert!(nudge.contains("do not repeat this broad read/search"));
+        assert!(nudge.contains("edit the implementation, run a focused test, or submit evidence"));
     }
 
     #[test]
@@ -5750,8 +5751,8 @@ mod unproductive_exploration_tests {
             read(40),
         ])])
         .expect("same source target should be bounded despite changed ranges/revisions");
-        assert!(nudge.contains("smallest implementation"));
-        assert!(nudge.contains("focused verification"));
+        assert!(nudge.contains("edit the implementation"));
+        assert!(nudge.contains("run a focused test"));
         assert!(nudge.contains("src/requests.py"));
     }
 
@@ -5779,7 +5780,7 @@ mod unproductive_exploration_tests {
         assert!(nudge.contains("src/click/types.py"));
         assert!(nudge.contains("Retained finding:"));
         assert!(nudge.contains("existing findings"));
-        assert!(nudge.contains("Use this retained result"));
+        assert!(nudge.contains("This result is retained"));
     }
 
     #[test]
@@ -5834,8 +5835,8 @@ mod unproductive_exploration_tests {
         assert!(repeated_exploration_count(&steps) >= REPEATED_EXPLORATION_LIMIT);
         let nudge = repeated_exploration_nudge(&steps).expect("repeated target remains identified");
         assert!(nudge.contains("src/requests/models.py"));
-        assert!(nudge.contains("smallest implementation"));
-        assert!(nudge.contains("focused verification"));
+        assert!(nudge.contains("edit the implementation"));
+        assert!(nudge.contains("run a focused test"));
 
         let totals = run_totals(&steps);
         assert_eq!(totals.tokens, 50_000);
@@ -6054,8 +6055,8 @@ mod no_progress_tests {
         let totals = run_totals(&steps);
         assert_eq!(totals.tool_calls, REPEATED_EXPLORATION_LIMIT);
         let nudge = repeated_exploration_nudge(&steps).expect("cross-tool repeat is detected");
-        assert!(nudge.contains("concrete reproducer"));
-        assert!(nudge.contains("specific missing information"));
+        assert!(nudge.contains("Take one concrete next action now"));
+        assert!(nudge.contains("state the specific blocker"));
     }
 
     #[test]

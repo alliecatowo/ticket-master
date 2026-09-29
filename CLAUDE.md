@@ -544,10 +544,12 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
    with focused guidance instead of an unqualified rerun suggestion.
    Agent step-limit details also carry a compact checkpoint of inspected source paths, the latest
    stated hypothesis or retained finding, and one focused next action for that retry.
-   Within one attempt, reopening the same source or history target three times (even with changed
-     ranges or revisions) triggers one concise nudge that includes the latest retained result and
-     directs the worker to reuse returned evidence and move to a reproducer, code change, or focused
-     test; edits and verification reset the count,
+    Within one attempt, reopening the same source or history target three times (even with changed
+      ranges or revisions) triggers a repeated-read warning with the retained location and finding.
+      The worker must move to an implementation edit, focused test, or evidence submission; another
+      inspection during the bounded continuation stops the attempt before the full no-progress
+      allowance is consumed. Exact repeated successful reads/searches reuse their recorded result
+      instead of supplying fresh context. Edits and verification reset the count,
      and a different targeted reread is still allowed when new evidence requires it. The no-submit
       recovery summary is carried into the next attempt so repeated dispatches do not restart cold.
      Repeated-inspection and other no-progress stops get one focused continuation with the retained
