@@ -1394,17 +1394,22 @@ fn run_outcome(
         tm_core::TicketState::Ready | tm_core::TicketState::Blocked
             if failure.is_some_and(is_rate_limit_failure) =>
         {
+            let retained = failure
+                .map(|f| f.detail.as_str())
+                .filter(|detail| detail.contains("Investigation retained before the provider failure:"))
+                .map(|_| " The repeated investigation is retained; no patch or verification was produced.")
+                .unwrap_or("");
             if let Some(wait) = failure.and_then(provider_retry_after_seconds) {
                 if let Some(delay) = scheduled_retry_delay(ticket, failure) {
-                    format!("The provider rate-limited this request and asked you to wait {wait} seconds. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run`.")
+                    format!("The provider rate-limited this request and asked you to wait {wait} seconds. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run`.{retained}")
                 } else {
-                    format!("The provider rate-limited this request and asked you to wait {wait} seconds before retrying. After waiting, run `tm run {}`.", ticket.id)
+                    format!("The provider rate-limited this request and asked you to wait {wait} seconds before retrying. No retry is scheduled. After waiting, run `tm run {}`.{retained}", ticket.id)
                 }
             } else {
                 if let Some(delay) = scheduled_retry_delay(ticket, failure) {
-                    format!("The provider rate-limited this request. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run`.")
+                    format!("The provider rate-limited this request. A retry is scheduled in about {delay} seconds; keep the scheduler active with `tm sched run`.{retained}")
                 } else {
-                    format!("The provider rate-limited this request, but no retry delay was supplied, so the wait time is unknown. Check that the provider is available before retrying with `tm run {}`.", ticket.id)
+                    format!("The provider rate-limited this request, but no retry delay was supplied, so the wait time is unknown. No retry is scheduled. Check that the provider is available before retrying with `tm run {}`.{retained}", ticket.id)
                 }
             }
         }
@@ -2301,14 +2306,17 @@ mod tests {
         assert_eq!(retry_delay_seconds(&ticket.failures[0], 5), 20);
         ticket.failures[0].detail = "HTTP 429 Too Many Requests; Retry-After: 20s".to_string();
         assert_eq!(retry_delay_seconds(&ticket.failures[0], 5), 20);
-        ticket.failures[0].detail =
-            "provider returned 429 rate limited; retry after 20 seconds".to_string();
+        ticket.failures[0].detail = "provider returned 429 rate limited; retry after 20 seconds. \
+            Investigation retained before the provider failure: already investigated: fs.read(src/main.rs). \
+            This attempt made no patch or verification.".to_string();
         let scheduled = run_outcome(&ticket, 0, false, &[], None)
             .unwrap_err()
             .to_string();
         assert!(scheduled.contains("provider rate-limited the request"));
         assert!(scheduled.contains("wait 20 seconds"));
         assert!(scheduled.contains("keep the scheduler active with `tm sched run`"));
+        assert!(scheduled.contains("repeated investigation is retained"));
+        assert!(scheduled.contains("no patch or verification was produced"));
 
         ticket.failures[0].detail = "provider unavailable: server error".to_string();
         assert_eq!(retry_delay_seconds(&ticket.failures[0], 5), 5);

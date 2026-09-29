@@ -601,7 +601,11 @@ impl Fabric {
                     },
                     finished_at,
                 );
-                Err(TmError::Provider(err.to_string()))
+                let detail = match err.retry_after() {
+                    Some(wait) => format!("{err}; retry after {} seconds", wait.as_secs()),
+                    None => err.to_string(),
+                };
+                Err(TmError::Provider(detail))
             }
         }
     }
@@ -1027,13 +1031,18 @@ mod tests {
             &request,
             crate::mock::ScriptedFailure {
                 times: None,
-                error: ProviderError::Unavailable("boom".into()),
+                error: ProviderError::RateLimited {
+                    message: "Too Many Requests".into(),
+                    retry_after: Some(std::time::Duration::from_secs(23)),
+                },
             },
         );
         fabric.register_provider(provider);
 
         let err = fabric.execute(Role::CoderFast, req()).await.unwrap_err();
-        assert!(matches!(err, TmError::Provider(msg) if msg.contains("boom")));
+        assert!(
+            matches!(err, TmError::Provider(msg) if msg.contains("Too Many Requests") && msg.contains("retry after 23 seconds"))
+        );
     }
 
     #[tokio::test]

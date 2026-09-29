@@ -1522,10 +1522,40 @@ impl AgentLoop {
                 Ok(result) => result,
                 Err(e) => {
                     self.record_provider_events(task)?;
+                    let investigation = InvestigationSummary::from_steps(&steps);
+                    let retained = if !investigation.made_changes
+                        && !investigation.tool_signatures.is_empty()
+                    {
+                        let findings = steps
+                            .iter()
+                            .flat_map(|step| &step.tool_calls)
+                            .filter_map(|call| match &call.resolution {
+                                crate::outcome::ToolCallResolution::Completed {
+                                    result, ..
+                                } if exploration_target(call).is_some() => {
+                                    let finding = concise_finding(&result.to_string());
+                                    (!finding.is_empty()).then_some(finding)
+                                }
+                                _ => None,
+                            })
+                            .take(2)
+                            .collect::<Vec<_>>();
+                        let findings = if findings.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" Findings: {}.", findings.join("; "))
+                        };
+                        format!(
+                            " Investigation retained before the provider failure: {}.{findings}",
+                            investigation.render(),
+                        )
+                    } else {
+                        String::new()
+                    };
                     return Ok(AgentOutcome::Failed {
                         steps,
                         class: FailureClass::ProviderUnavailable,
-                        detail: e.to_string(),
+                        detail: format!("{}{retained}", e),
                     });
                 }
             };

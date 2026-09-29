@@ -550,10 +550,14 @@ All three can be memory-heavy on a large workspace; if one causes trouble on thi
       The worker must move to an implementation edit, focused test, or evidence submission; another
       inspection during the bounded continuation stops the attempt before the full no-progress
       allowance is consumed. Exact repeated successful reads/searches reuse their recorded result
-      instead of supplying fresh context. Edits and verification reset the count,
-     and a different targeted reread is still allowed when new evidence requires it. The no-submit
-      recovery summary is carried into the next attempt so repeated dispatches do not restart cold.
-     Repeated-inspection and other no-progress stops get one focused continuation with the retained
+       instead of supplying fresh context. Edits and verification reset the count,
+      and a different targeted reread is still allowed when new evidence requires it. The no-submit
+       recovery summary is carried into the next attempt so repeated dispatches do not restart cold.
+      If a provider rate limit ends a run after inspection-only work, the failure retains the useful
+       investigation summary and states that no patch or verification was produced. A supplied
+       provider retry delay is included in the failure detail; the final guidance says whether a
+       bounded scheduler retry is actually scheduled and gives one matching next action.
+      Repeated-inspection and other no-progress stops get one focused continuation with the retained
       findings, directed to edit an already-identified implementation target and run its relevant
       check without rereading that source or repeating searches; if that recovery repeats investigation or still
       cannot make progress, the agent stops without another automatic continuation and reports its
