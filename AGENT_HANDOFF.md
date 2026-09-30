@@ -41,7 +41,7 @@ empirically, not assumed:
   subagents" section now documents the one-off symlink command for the rare case a subagent
   genuinely needs live-provider access inside its worktree.
 - **This repo now has a real `origin`**: a public GitHub repo, `alliecatowo/ticket-master`,
-  created and pushed this same pass (`gh repo create ... --source=. --remote=origin`;
+  created and pushed this same pass (`gh repo create ... --public --source=. --remote=origin`;
   `.env` verified never in git history before pushing, and the pushed tree checked for `target/`/
   `.zvec-grep/`/`.tm/` — none present). This turned the earlier "`fresh`/`head` is currently a
   no-op" finding into a real, live behavior difference, so `.claude/settings.json` now pins
