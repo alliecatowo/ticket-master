@@ -1,8 +1,7 @@
 # Installing tm
 
 `tm` is a single Rust binary (`crates/tm-cli`, binary name `tm`) plus an optional built web
-client. The GitHub repo (`alliecatowo/ticket-master`) is private, so a couple of steps below go
-through the `gh` CLI or SSH instead of a plain public download.
+client. The GitHub repo (`alliecatowo/ticket-master`) and its release assets are public.
 
 ## Requirements
 
@@ -11,14 +10,14 @@ through the `gh` CLI or SSH instead of a plain public download.
   `mise run release` (`scripts/release.sh`) builds the same tarball layout locally, for a
   platform that matrix doesn't cover yet or to test a release before tagging. Anything outside
   those two targets needs the source install below. As of `v0.1.0` only `tm-aarch64-apple-darwin`
-  is actually published — the Linux asset is blocked on a pre-existing break (`tm-computer` does
-  not compile on Linux; CI is red on `main` for the same reason) — so on Linux, build from source
-  (see README's install section) until that's fixed; it attaches automatically once it compiles.
-- [`gh`](https://cli.github.com/), authenticated (`gh auth login`), for the release-asset install
-  path — the repo is private, so a plain `curl` of a public URL won't work.
+  (macOS arm64) is actually published, so on Linux, build from source (see below). `tm-computer`
+  has compiled on Linux since `b01efda` (after `v0.1.0` was tagged), so the Linux asset attaches
+  automatically from the next tag.
+- [`gh`](https://cli.github.com/), authenticated (`gh auth login`), for `scripts/install.sh`, which
+  downloads through `gh release download`. Release assets are public, so you can also fetch a
+  tarball with a plain `curl` and pass its path to the script (see below).
 - For the source install: Rust (see `rust-toolchain.toml`, currently 1.85+), a C compiler
-  (`rusqlite` builds SQLite from source via its `bundled` feature), and SSH access to the repo (an
-  SSH key on your GitHub account, since the clone URL is `ssh://git@github.com/...`).
+  (`rusqlite` builds SQLite from source via its `bundled` feature).
 - At least one configured model provider to actually run a turn — see "Provider setup" below.
 
 ## Install
@@ -26,7 +25,7 @@ through the `gh` CLI or SSH instead of a plain public download.
 ### 1. Release tarball + install script (recommended)
 
 ```sh
-gh auth login                 # once, if you haven't already -- the repo is private
+gh auth login                 # once, if you haven't already (the script uses gh)
 scripts/install.sh
 ```
 
@@ -47,14 +46,11 @@ profile.
 ### 2. From source with cargo
 
 ```sh
-cargo install --git ssh://git@github.com/alliecatowo/ticket-master.git tm-cli --locked
+cargo install --git https://github.com/alliecatowo/ticket-master.git tm-cli --locked
 ```
 
 `tm-cli` is the package name; it builds one binary, `tm`. This clones the whole workspace (its
-path-dependency sibling crates need to be present to resolve) and builds just this package. If
-your SSH setup authenticates through an agent that cargo's own libssh2-based git client doesn't
-handle, set `CARGO_NET_GIT_FETCH_WITH_CLI=true` (env var or `~/.cargo/config.toml`) so cargo shells
-out to your system `git`/`ssh` instead.
+path-dependency sibling crates need to be present to resolve) and builds just this package.
 
 This path has **no bundled web client** — `tm serve` falls back to nothing to serve at `/app/`
 unless you point it at a build with `--web-dir`/`TM_WEB_DIR` (see `clients/web/`).
@@ -62,7 +58,7 @@ unless you point it at a build with `--web-dir`/`TM_WEB_DIR` (see `clients/web/`
 ### 3. Dev checkout with mise (for working on tm itself)
 
 ```sh
-git clone git@github.com:alliecatowo/ticket-master.git
+git clone https://github.com/alliecatowo/ticket-master.git
 cd ticket-master
 mise install
 mise run build        # just the tm binary, or `mise run build:all` for the whole workspace
@@ -122,7 +118,7 @@ claude mcp add --transport stdio tm -- tm mcp
 
 Re-run `scripts/install.sh` (against a newer release, or a newer local tarball) — it replaces
 `$PREFIX/bin/tm` and `$PREFIX/share/tm/web` in place. From a cargo install:
-`cargo install --git ssh://git@github.com/alliecatowo/ticket-master.git tm-cli --locked --force`.
+`cargo install --git https://github.com/alliecatowo/ticket-master.git tm-cli --locked --force`.
 
 ## Uninstall
 

@@ -1,6 +1,6 @@
 # Benchmarking `tm` vs Claude Code / OpenCode / Codex CLI — plan
 
-Research only; nothing here has been run. Owner: allisonemilycoleman@gmail.com. Repo: `/Users/allie/Develop/ticket-master`.
+Research only; nothing here has been run.
 
 ## 0. What tm already has (reuse, don't rebuild)
 
