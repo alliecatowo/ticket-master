@@ -53,18 +53,22 @@ full session [`tui-live.cast`](docs/showcase/tui-live.cast) (`asciinema play` it
 <summary><b>Option A — download a release (recommended)</b></summary>
 <br/>
 
-Prebuilt `tm` binaries ship with every [GitHub release](https://github.com/alliecatowo/ticket-master/releases),
-each one already bundling the built web client (`tm serve` finds it next to the binary — no
-separate `pnpm build` step needed after installing this way).
+Prebuilt `tm` binaries ship with every [GitHub release](https://github.com/alliecatowo/ticket-master/releases).
+Releases after `v0.1.0` also bundle the built web client (`tm serve` finds it next to the binary,
+so no separate `pnpm build` step is needed after installing that way).
 Release assets are public, so a plain `curl` works (or use `gh release download`):
 
 ```sh
-curl -fLO https://github.com/alliecatowo/ticket-master/releases/latest/download/tm-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/alliecatowo/ticket-master/releases/download/v0.1.0/tm-aarch64-apple-darwin.tar.gz
 tar -xzf tm-aarch64-apple-darwin.tar.gz
-./tm-aarch64-apple-darwin/bin/tm --version && ./tm-aarch64-apple-darwin/bin/tm init
+./tm-aarch64-apple-darwin/tm --version && ./tm-aarch64-apple-darwin/tm init
 ```
 
-Or let `scripts/install.sh` do the download, checksum verification and layout for you, into
+That is the `v0.1.0` layout (binary at `tm-aarch64-apple-darwin/tm`). Releases after `v0.1.0`
+move it to `tm-<target-triple>/bin/tm` next to a bundled `share/tm/web/`.
+
+Or let `scripts/install.sh` do the download, checksum verification (when the release carries a `.sha256`; `v0.1.0`
+doesn't) and layout for you, into
 `${PREFIX:-$HOME/.local}`:
 
 ```sh
@@ -81,9 +85,8 @@ full guide: upgrading, uninstalling, and installing from a local tarball.
 > `b01efda` (after `v0.1.0` was tagged); the release matrix already builds both targets, so the
 > `x86_64-unknown-linux-gnu` asset attaches automatically from the next tag.
 >
-> **Asset layout:** the `bin/tm` + `share/tm/web/` (bundled web client) layout above starts with
-> the next tag after this change. `v0.1.0`'s asset predates it and has the binary directly at
-> `tm-aarch64-apple-darwin/tm` (no web client bundled) — `scripts/install.sh` handles both layouts.
+> **Asset layout:** `v0.1.0`'s asset has the binary directly at `tm-aarch64-apple-darwin/tm` and
+> bundles no web client. The `bin/tm` + `share/tm/web/` layout starts with the next tag. `scripts/install.sh` handles both layouts.
 
 </details>
 

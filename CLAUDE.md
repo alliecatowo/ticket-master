@@ -673,8 +673,8 @@ Full playbook: `.claude/skills/dispatch-background-agent/SKILL.md`. The rules be
 load-bearing subset, stated plainly because getting them wrong has already cost real time in this
 repo.
 
-**This repo has a real `origin` now** — a private GitHub repo, `git@github.com:alliecatowo/
-ticket-master.git`, created 2026-09-22 (`gh repo create alliecatowo/ticket-master --private
+**This repo has a real `origin` now** — a public GitHub repo, `git@github.com:alliecatowo/
+ticket-master.git`, created 2026-09-22 (`gh repo create alliecatowo/ticket-master --public
 --source=. --remote=origin`), with `main` pushed and tracked. Before this, `EnterWorktree`'s
 default `worktree.baseRef` (`fresh`, which branches new worktrees from `origin/<default-branch>`)
 was a checked no-op with no `origin` to resolve against. That's no longer true, and `fresh`'s real

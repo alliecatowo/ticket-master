@@ -40,8 +40,8 @@ empirically, not assumed:
   of it across every worktree would make that worse. `CLAUDE.md`'s "Background and parallel
   subagents" section now documents the one-off symlink command for the rare case a subagent
   genuinely needs live-provider access inside its worktree.
-- **This repo now has a real `origin`**: a private GitHub repo, `alliecatowo/ticket-master`,
-  created and pushed this same pass (`gh repo create ... --private --source=. --remote=origin`;
+- **This repo now has a real `origin`**: a public GitHub repo, `alliecatowo/ticket-master`,
+  created and pushed this same pass (`gh repo create ... --public --source=. --remote=origin`;
   `.env` verified never in git history before pushing, and the pushed tree checked for `target/`/
   `.zvec-grep/`/`.tm/` — none present). This turned the earlier "`fresh`/`head` is currently a
   no-op" finding into a real, live behavior difference, so `.claude/settings.json` now pins
