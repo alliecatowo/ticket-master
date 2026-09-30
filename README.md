@@ -7,7 +7,7 @@
 [![CI](https://github.com/alliecatowo/ticket-master/actions/workflows/ci.yml/badge.svg)](https://github.com/alliecatowo/ticket-master/actions/workflows/ci.yml)
 ![version](https://img.shields.io/badge/version-0.1.0-blue)
 ![rust](https://img.shields.io/badge/rust-1.85%2B-orange)
-![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)
+[![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#-license)
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
 
 Chat with an agent live in your terminal — then hand follow-up work to background
@@ -56,11 +56,10 @@ full session [`tui-live.cast`](docs/showcase/tui-live.cast) (`asciinema play` it
 Prebuilt `tm` binaries ship with every [GitHub release](https://github.com/alliecatowo/ticket-master/releases),
 each one already bundling the built web client (`tm serve` finds it next to the binary — no
 separate `pnpm build` step needed after installing this way).
-This repo is private, so download authenticated (the `gh` CLI handles it):
+Release assets are public, so a plain `curl` works (or use `gh release download`):
 
 ```sh
-gh release download --repo alliecatowo/ticket-master \
-  --pattern 'tm-aarch64-apple-darwin.tar.gz'
+curl -fLO https://github.com/alliecatowo/ticket-master/releases/latest/download/tm-aarch64-apple-darwin.tar.gz
 tar -xzf tm-aarch64-apple-darwin.tar.gz
 ./tm-aarch64-apple-darwin/bin/tm --version && ./tm-aarch64-apple-darwin/bin/tm init
 ```
@@ -69,7 +68,7 @@ Or let `scripts/install.sh` do the download, checksum verification and layout fo
 `${PREFIX:-$HOME/.local}`:
 
 ```sh
-gh auth login   # once -- this repo is private
+gh auth login   # once -- the script downloads via the gh CLI
 scripts/install.sh
 ```
 
@@ -77,11 +76,10 @@ scripts/install.sh
 or a target the matrix below doesn't cover yet). See [`docs/install.md`](docs/install.md) for the
 full guide: upgrading, uninstalling, and installing from a local tarball.
 
-> **Platform status:** `v0.1.0` ships `tm-aarch64-apple-darwin`. The Linux asset is
-> blocked on a pre-existing break — `tm-computer` does not compile on Linux (CI is red
-> on `main` for the same reason) — so on Linux build from source (Option B) until that
-> is fixed. The release matrix already builds both targets; Linux attaches automatically
-> once it compiles.
+> **Platform status:** `v0.1.0` ships only a macOS arm64 binary (`tm-aarch64-apple-darwin`).
+> On Linux, build from source (Option B). `tm-computer` has compiled on Linux since
+> `b01efda` (after `v0.1.0` was tagged); the release matrix already builds both targets, so the
+> `x86_64-unknown-linux-gnu` asset attaches automatically from the next tag.
 >
 > **Asset layout:** the `bin/tm` + `share/tm/web/` (bundled web client) layout above starts with
 > the next tag after this change. `v0.1.0`'s asset predates it and has the binary directly at
@@ -95,7 +93,7 @@ full guide: upgrading, uninstalling, and installing from a local tarball.
 Requires Rust 1.85+ ([`mise`](https://mise.jdx.dev/) provides it: `mise install`):
 
 ```sh
-git clone git@github.com:alliecatowo/ticket-master.git && cd ticket-master
+git clone https://github.com/alliecatowo/ticket-master.git && cd ticket-master
 mise install
 mise run build            # debug build of just the `tm` binary
 ./target/debug/tm init
@@ -220,9 +218,9 @@ Full matrix and configuration details: [`docs/providers.md`](docs/providers.md).
 
 </details>
 
-## 🧮 Calc helpers
+## 📄 License
 
-`calc.div(a, b)` returns `a / b` and raises `ValueError("division by zero")` when `b` is zero — check the divisor or catch `ValueError` before dividing.
+Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
 
 ---
 

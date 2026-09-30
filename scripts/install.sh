@@ -1,9 +1,9 @@
 #!/bin/sh
 # scripts/install.sh -- install `tm` from a GitHub release, or from a local release tarball.
 #
-# The ticket-master repo (alliecatowo/ticket-master) is private, so downloading a release asset
-# goes through the `gh` CLI, not a plain `curl` of a public URL. Run `gh auth login` first if
-# `gh auth status` fails below.
+# Downloading a release asset goes through the `gh` CLI (`gh release download`), which needs a
+# login even for public repos. Run `gh auth login` first if `gh auth status` fails below. Release
+# assets are public, so you can also `curl` a tarball yourself and pass its path instead.
 #
 # Usage:
 #   scripts/install.sh                    Download the release asset matching this OS/arch from
@@ -161,7 +161,7 @@ download_latest() {
   need_cmd gh
   need_cmd tar
   if ! gh auth status >/dev/null 2>&1; then
-    die "gh is not authenticated; run 'gh auth login' first (this repo is private)"
+    die "gh is not authenticated; run 'gh auth login' first, or download the tarball yourself and pass its path"
   fi
 
   triple="$(detect_triple)"
