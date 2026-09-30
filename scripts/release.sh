@@ -15,7 +15,7 @@
 # workspace version in Cargo.toml's [workspace.package]). The tarball is refused if it ever
 # contains a path matching `.env` or `.tm/` -- see the check below.
 #
-# --publish additionally runs `gh release create` against this repo's private `origin`
+# --publish additionally runs `gh release create` against this repo's GitHub `origin`
 # (alliecatowo/ticket-master). Per this repo's convention, do not run --publish as part of local
 # verification: only the orchestrator publishes, from main, after a release-task change like this
 # one has been merged. See docs/install.md.
