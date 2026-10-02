@@ -127,7 +127,7 @@ per-ticket event-count budget cap (`store.event_count_for`), and bakes the ticke
 rendered prompt. Making `AgentTask.ticket` `Option<TicketId>` would ripple a real "what does this
 mean with no ticket" question through every one of those call sites, in the one part of this
 system meant to be boring and correct. This is a real, multi-step fix, not a quick decoupling —
-see `AGENT_HANDOFF.md`'s top section for the concrete next-session starting point (stop the eager
+see `docs/archive/AGENT_HANDOFF.md`'s top section for the concrete next-session starting point (stop the eager
 create; decide what a ticketless turn's `AgentTask.ticket` should be, given those real reads;
 build the promotion path, since `ticket.create_child` requires a parent a ticketless session
 doesn't have).
@@ -159,7 +159,7 @@ question is narrower than recorded — what should goal-tracking and budget-hand
 ticketless turn (most likely: skip goal-tracking entirely, since there's no ticket `objective` to
 seed one from; on budget exhaustion, produce `AgentOutcome::BudgetExhausted` directly without a
 `budget_handoff` call, since there's no lease to release). Still not attempted in this pass — see
-`AGENT_HANDOFF.md`'s architectural-gap section for the pointer.
+`docs/archive/AGENT_HANDOFF.md`'s architectural-gap section for the pointer.
 
 ## Implemented, 2026-09-22
 

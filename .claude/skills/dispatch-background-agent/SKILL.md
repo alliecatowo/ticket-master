@@ -26,7 +26,7 @@ moment it was run in a directory with no project yet -- see
 `docs/decisions/D-003-project-scope.md` for the fix (global scope by default; bare `tm` no longer
 writes into the workspace un-asked). That fix landed, but the *process* failure that triggered it
 is still live: a subagent doing its own manual verification of a `tm`-touching change ran the
-compiled binary directly against `/Users/allie/Develop/ticket-master` -- the orchestrator's own
+compiled binary directly against `<repo>` -- the orchestrator's own
 primary checkout -- instead of an isolated tempdir. It happened three times in one session, once
 leaving a 37MB real index behind, and broke the test suite for whoever ran `mise run verify` next
 without knowing why.

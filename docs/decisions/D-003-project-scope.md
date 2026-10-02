@@ -48,7 +48,7 @@ the same convention `tm-browser`'s `managed.rs` already used for `~/.tm/browsers
 project's directory is `$TM_HOME/projects/<key>/`, where `key = sanitize(root) + '-' +
 <first 8 hex chars of blake3(canonical root path bytes)>`; `sanitize` strips a leading `/`, maps
 `/` and every character outside `[A-Za-z0-9._-]` to `-`, collapses runs of `-`, and truncates to
-100 characters — e.g. `/Users/allie/Develop/foo` → `Users-allie-Develop-foo-3f9a1c2b`. The
+100 characters — e.g. `/Users/me/Develop/foo` → `Users-me-Develop-foo-3f9a1c2b`. The
 directory holds `project.db`, `index.db`, `artifacts/`, and a `workspace.json` marker
 (`{"workspace": "<canonical root>", "created_at": <ts>, "schema": 1}`) recording which real
 workspace it belongs to, since the sanitized name alone is lossy.
