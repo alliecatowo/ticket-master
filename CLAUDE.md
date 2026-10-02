@@ -703,7 +703,7 @@ constraint on this machine: a worktree's `target/` grows to ~8GB. `mise run disk
 contain tracked files (plus your own uncommitted changes on that branch) — a gitignored file like
 `.env` is invisible to `git worktree add` by design, confirmed empirically (a probe worktree had
 no `.env` at all). This is left deliberately manual, not automated: `.env` currently holds a real
-credential already flagged for rotation (see the top of `AGENT_HANDOFF.md`), and auto-copying it
+credential already flagged for rotation (see the top of `docs/archive/AGENT_HANDOFF.md`), and auto-copying it
 into every worktree would scatter more live copies of a secret that's already known-exposed rather
 than fewer. If a specific subagent genuinely needs a real provider credential inside its worktree
 (rare — most work doesn't touch a live provider at all), symlink it in deliberately for that one

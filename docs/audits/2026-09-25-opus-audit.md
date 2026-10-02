@@ -21,7 +21,7 @@ are cheap to fix: an uncapped `search.exact`, an all-or-nothing context pack, an
 
 ## 1. Can tm work on ticket-master itself (dogfooding)? — **No, not yet.**
 
-Setup: `git clone /Users/allie/Develop/ticket-master /tmp/tm-audit/self`, then `tm init` (0s, builds no index),
+Setup: `git clone <repo> /tmp/tm-audit/self`, then `tm init` (0s, builds no index),
 then `tm doctor` (57s; this is where the first index is built: "634 added, 3146 chunks, 502 commits"; the
 index is 80MB).
 

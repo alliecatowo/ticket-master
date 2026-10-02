@@ -12,7 +12,7 @@ The project owner, after seeing D-018's "sessions & tickets" home screen live:
 > TICKET WE DIDNT MAKE IT FAMILIAR TO CC USERS TO WIN THEM OVER WE DIDNT DO THE "EVEN WITHOUT THE
 > CORE TICKETS OF TICKET MASTER THIS SHOULD BE BETTER THEN ANY TERMINAL BASED CODING HARNESS" STUFF
 
-That restates what they had already asked for (quoted in D-017 and `AGENT_HANDOFF.md`): "tm=claude",
+That restates what they had already asked for (quoted in D-017 and `docs/archive/AGENT_HANDOFF.md`): "tm=claude",
 "same interface basically", "you do <- in a claude convo and it goes to the cross session 'agents'
 view, the same thing `claude agents` goes to", and a chat screen "more beautiful and functional
 than claude code / codex / opencode". D-018 built a chat screen but invented its own home screen

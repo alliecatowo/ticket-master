@@ -356,7 +356,7 @@ Trial agents drive each surface for real (ticket request → implementation → 
   files: `crates/tm-codeintel/src/lib.rs`
   change: `tm symbol refs <name>` and `tm symbol callers <name>` take 48-56 seconds on this repo's own codebase — an order of magnitude too slow for interactive use, and separate from the correctness bugs `nav-fix-cli-symbol-output-bugs` already fixes (including the redundant double-parse it removes, which this task should build on rather than duplicate). Profile the reference/caller analysis path (tree-sitter parse + resolution) to find the actual hot loop — likely re-parsing every file per candidate reference rather than once per file with a cached index — and fix it so it scales with files-containing-matches, not files-in-repo times candidates.
   acceptance: `tm symbol refs transition` and `tm symbol callers transition` (or an equally common symbol) complete in under 5 seconds on a fresh clone of this repo with a built index.
-  test_command: `cd /tmp/test && rm -rf repo .tm && git clone --depth 1 file:///Users/allie/Develop/ticket-master repo && cd repo && tm init && tm doctor > /dev/null && time tm symbol refs transition --plain | head -1`
+  test_command: `cd /tmp/test && rm -rf repo .tm && git clone --depth 1 file://<repo> repo && cd repo && tm init && tm doctor > /dev/null && time tm symbol refs transition --plain | head -1`
   evidence: `symbol refs transition`: 48.4s user; `symbol callers transition`: 56.5s user (fresh clone, mock provider).
 
 - [x] **p1-search-index-not-built-message** — `tm search --mode semantic` can't distinguish "index not built yet" from "no matches" (landed 0614d69)
@@ -1412,7 +1412,7 @@ is based on.
   evidence: `/tmp/tm-trials/20260925-1314/BurntSushi-ripgrep-3376/tm.log` lines 5-37 and 58-82 show repeated reads of `walk.rs`/`dir.rs` followed by the identical no-submit failure; `tm events tail --from 0` shows two sessions and retry scheduling (events 164-176, 287-294). Also: pass-2/3 trials show the same pattern repeatedly: pallets-click-3822 (both passes, up to 1.39M input tokens on a retry that repeated the same reads) and psf-requests-7432 (41 tool calls, 3.29M input tokens, repeated reads of models.py/test_requests.py/utils.py) — see docs/trials/20260925-1650 and 20260925-1847. Also: recurred again in pass 4/5 as pallets-click-3822 ending without submission after repeated Path-source reads (docs/trials/20260925-2015: 1,416,202 input tokens; docs/trials/20260925-2206: 916,284 input tokens for a second ticket) — same no-submit-then-restart-investigation shape.
 - [x] **t20260925-1314-gohugoio-hugo-15360-actionable-tool-errors** (landed 12c4ec6) — Note: passes 20260925-2357 and 20260926-0129 (run against pre-fix binaries) show the same generic-phrase cluster plus a distinct `unknown variant \`verification\`` schema mismatch on artifact-store payloads; the schema-mismatch angle is tracked separately below as `t20260926-agent-submit-schema-verification-variant` since it's a real payload/schema bug, not just message wording — worth a quick post-landing check that the wording fix actually covers `sindresorhus-ky-878`/`spf13-cobra-2257`'s repeat of "couldn't find that"/"operation state was inconsistent" in a fresh trial pass.
   model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
-  files: `crates/tm-cli/src/agent.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-cli/src/agent.rs` (<worktree>)
   change: Extend `plain_tool_error` and its progress rendering to preserve a concise safe diagnostic and identify an actionable recovery step, especially for invariant and parse failures, instead of reducing them to generic phrases.
   acceptance: When a tool call fails with an invariant or parse error, `tm run` output names the failed operation and suggests a concrete next action, while detailed diagnostics remain available in logs; add focused tests for both cases.
   test: `cargo test -p tm-cli plain_tool_error`
@@ -1440,7 +1440,7 @@ is based on.
   evidence: `/tmp/tm-trials/20260925-1314/sindresorhus-ky-878/tm.log:7` — `provider was unavailable: provider: no candidate can serve role coder.fast: provider not registered: devpass. Run tm run T-1 again to retry.`; source: `crates/tm-cli/src/sched.rs:818-830` currently recommends the same retry for every `Ready`/`Blocked` failure. Also: confirmed again in pass 2 (docs/trials/20260925-1650/sindresorhus-ky-878.json): `no worker attached; lease lapsed` then the same unregistered-devpass error with the same unhelpful retry suggestion. Also: recurred a 3rd time in spf13-cobra-2257 pass 6 (docs/trials/20260925-2357: `provider was unavailable: ... provider not registered: devpass. Run tm run T-1 again to retry.`), confirming this is a persistent, not one-off, gap in `run_outcome`'s Ready/Blocked message construction (`crates/tm-cli/src/sched.rs:818-830`).
 - [x] **t20260925-1314-spf13-cobra-2257-step-limit-submit-recovery** (landed e84b8fb)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>`
   change: When the worker approaches `max_steps`, surface an explicit finalization/recovery path and preserve completion evidence if `ticket.submit` fails at the limit; replace generic retry guidance with the actual failure reason and safe next action.
   acceptance: A test simulates a worker that completes and verifies its task but reaches the final allowed step with a failed submit; the run either submits successfully through the recovery path or returns a user-facing failure that identifies the step-limit/submit cause, preserves the diff and test evidence, and does not claim the ticket was submitted.
   test: `cargo test -p tm-agent`
@@ -1570,35 +1570,35 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-0637/psf-requests-7432/tm.log:45` — “no patch or evidence was submitted … model ended turn without submitting. Run `tm run T-1` again to retry.”
 - [x] **t20260926-0637-sindresorhus-ky-878-repo-path-argument-guidance** — Make repository-path errors actionable when tools receive absolute paths (landed d882bec)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-tools · deps: none
-  files: `crates/tm-agent/src/tools.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-agent/src/tools.rs`, `<worktree>`
   change: When a tool receives an absolute path inside the configured project root, either safely normalize it to the corresponding repository-relative path or return an error that explains the accepted relative-path format and gives the correct example; keep rejecting paths outside the project root.
   acceptance: A tool request using an absolute path inside the project succeeds or returns a concise correction pointing to its relative form, while an outside-root path remains rejected.
   test: `cargo test -p tm-agent resolve_repo_path`
   evidence: `/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm.log:12` — “Built the project -> error: couldn't parse the result (path `/private/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm` must be repository-relative)”
 - [x] **t20260926-0637-result-schema-recovery** — Explain unsupported result kinds and recover without repeated invalid tool calls (landed e84fdba)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-tools · deps: none
-  files: `crates/tm-cli/src/agent.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-cli/src/agent.rs`, `<worktree>`
   change: Include the supported result-kind names in parse-error feedback and provide an explicit mapping/recovery hint when a provider emits an unsupported result kind such as `verification`; ensure retries switch to a supported kind rather than resubmitting the same invalid shape.
   acceptance: A scripted unsupported `verification` result produces one clear error naming valid result kinds and a succeeding retry uses a supported kind, with no repeated schema failure.
   test: `cargo test -p tm-cli plain_tool_error_keeps_parse_diagnostic_and_recovery_step`
   evidence: `/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm.log:18` — “Saved a result -> error: couldn't parse the result (unknown variant `verification`, expected one of `command_output`, `patch`, `file`, `report`, `index`, `benchmark`, `tran…); retry the operation, and check its input if it fails again”
 - [x] **t20260926-0637-evidence-submission-guidance** — Surface evidence requirements before ticket submission fails (landed cfa02f3)
   model: sonnet · severity: low · builds Rust: yes · area: ticket-lifecycle · deps: none
-  files: `crates/tm-cli/src/agent.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-cli/src/agent.rs`, `<worktree>`
   change: When an agent attempts ticket submission without evidence, explain that it must store a report or other evidence artifact first and then cite that artifact when submitting; direct the next action rather than suggesting a blind retry.
   acceptance: An evidence-free submission produces a user-facing instruction to create and attach evidence, and the agent run completes submission with that evidence without an unhelpful retry loop.
   test: `cargo test -p tm-cli plain_tool_error_keeps_invariant_diagnostic_and_recovery_step`
   evidence: `/tmp/tm-trials/20260926-0637/sindresorhus-ky-878/tm.log:17` — “Submitted the ticket -> error: operation state was inconsistent (Submitting a ticket needs at least one piece of evidence); retry once, then report this failure if it persists”
 - [x] **t20260926-0821-BurntSushi-ripgrep-3376-recover-empty-agent-turn** — Recover automatically when a model ends a turn without submitting work (landed eb1b126)
   model: sonnet · severity: high · builds Rust: yes · area: run/recovery · deps: none
-  files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-cli/src/sched.rs`, `<worktree>`
   change: When a transient agent-turn failure leaves a ready ticket with no patch or evidence, continue using the ticket's retry policy within the current `tm run` invocation when budget permits; otherwise report the scheduled retry time, current attempt count, and exact next command instead of ending after a generic model-turn failure.
   acceptance: A simulated model-ended-turn-without-submission failure either recovers and completes within the configured retry budget or prints the retry schedule and an unambiguous next step; it never implies work was completed or tests passed.
   test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
   evidence: `/tmp/tm-trials/20260926-0821/BurntSushi-ripgrep-3376/tm.log:54` — `agent turn failed: Ticket T-1: no patch or evidence was submitted ... model ended turn without submitting. Run tm run T-1 again to retry.`; `/tmp/tm-trials/20260926-0821/BurntSushi-ripgrep-3376/tm.log:193` — retry was only scheduled after this run failed.
 - [x] **t20260926-0821-pallets-click-3822-events-snapshot-default** — Make `tm events` useful for a one-shot event inspection (landed 5f3e2fb)
   model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
-  files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs` (<worktree>)
   change: When `tm events` is invoked without a subcommand, render the current event log snapshot and exit instead of printing command usage; retain `tm events tail` for live-follow behavior and expose an explicit follow option only when requested.
   acceptance: A CLI test runs bare `tm events` with recorded events and asserts it prints the snapshot and exits successfully without hanging; existing `tm events tail` follow and `--no-follow` behavior remains covered.
   test: `cargo test -p tm-cli events_tail`
@@ -1606,7 +1606,7 @@ is based on.
 - [x] **t20260926-0821-psf-requests-7432-resume-no-submit-investigation** — Recover a no-submit run using the investigation already performed (landed d6be9df)
   model: sonnet · severity: high · builds Rust: yes · area: agent
   deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>`
   change: When a run has substantial relevant tool activity but ends without `ticket.submit`, carry a concise actionable investigation summary into the recovery attempt and tell the user what was retained and what remains unverified instead of only returning “model ended turn without submitting.”
   acceptance: A regression test simulates a relevant investigation followed by a no-submit ending and proves the retry receives the findings without repeating the same discovery calls; the final CLI error names the missing deliverable and the next recovery action.
   test: `cargo test -p tm-agent`
@@ -1614,7 +1614,7 @@ is based on.
 - [x] **t20260926-0821-psf-requests-7432-bound-repeated-source-exploration** — Bound repeated source and history exploration during ticket runs (landed e087aa7)
   model: sonnet · severity: medium · builds Rust: yes · area: agent
   deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>`
   change: Track repeated file reads and historical diff probes in an investigation, then have the agent summarize existing evidence and move to a concrete edit or an explicit blocker instead of reopening the same files and comparisons.
   acceptance: An agent-loop test fixture with duplicate read/history calls demonstrates that the run reuses its first findings, bounds redundant exploration, and still permits a targeted reread when new evidence requires it.
   test: `cargo test -p tm-agent`
@@ -1628,28 +1628,28 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-0821/sindresorhus-ky-878/tm.log` lines 44–47 — “Submitting a ticket needs at least one piece of evidence”; “couldn't parse the result”; then “Saved a result” and “Ticket T-2 submitted its work.”
 - [x] **t20260926-0821-spf13-cobra-2257-events-snapshot-default** — Make `tm events` useful for one-shot event inspection (landed 00b8a7c)
   model: sonnet · severity: low · builds Rust: yes · area: cli · deps: none
-  files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-cli/src/args.rs`, `crates/tm-cli/src/ops.rs` (<worktree>)
   change: When `tm events` is invoked without a subcommand, render the current event log snapshot and exit instead of printing command usage; retain `tm events tail` for live-follow behavior and `--no-follow` for snapshots from a chosen sequence.
   acceptance: A CLI test runs bare `tm events` with recorded events and asserts it prints the snapshot and exits successfully without hanging; existing `tm events tail` follow and `--no-follow` behavior remains covered.
   test: `cargo test -p tm-cli events_tail`
   evidence: `/tmp/tm-trials/20260926-0821/spf13-cobra-2257/tm.log:71-86` — protocol's bare `tm events` invocation printed “The durable event log: tail, inspect, replay, and verify the hash chain” followed by usage, so I had to discover `events tail --from 1 --no-follow` to capture the event log.
 - [x] **t20260926-0821-spf13-cobra-2257-no-submit-recovery** — Make no-submit retry guidance explain what is retained (landed 604db60)
   model: sonnet · severity: medium · builds Rust: yes · area: cli · deps: none
-  files: `crates/tm-cli/src/sched.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-cli/src/sched.rs` (<worktree>)
   change: For a failed run with no patch or evidence, supplement the generic `tm run <ticket> again` recommendation with whether the working-tree edits were retained and what retrying will do, so a user can choose a recovery action without guessing.
   acceptance: CLI tests cover a no-submit failure with retained edits and one without edits; each message states the accurate workspace state and a concrete next action, while preserving the distinction from test failures.
   test: `cargo test -p tm-cli run_outcome`
   evidence: `/tmp/tm-trials/20260926-0821/spf13-cobra-2257/tm.log:69` — after 1160.07 seconds the run ended “no patch or evidence was submitted ... Run `tm run T-1` again to retry,” without indicating whether the workspace contained recoverable edits.
 - [x] **t20260926-0821-spf13-cobra-2257-reuse-read-context** — Avoid repeating unchanged file reads during ticket runs (landed 956f48b)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
-  files: `crates/tm-agent/src/prompt.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-agent/src/prompt.rs` (<worktree>)
   change: Add worker guidance to reuse file contents already present in the conversation and repeat a read only when the file changed, a needed range was omitted, or a tool requires a fresh hash; before rereading, identify the specific missing information.
   acceptance: Prompt tests assert the worker instructions explicitly direct reuse of unchanged file context and give concrete reasons that justify rereading; a replay test with repeated read calls shows the worker proceeds to the next relevant action instead of issuing redundant identical reads.
   test: `cargo test -p tm-agent prompt`
   evidence: `/tmp/tm-trials/20260926-0821/spf13-cobra-2257/tm.log:7-21` — before changing any files, the run repeatedly emitted “Read command.go” and “Read completions.go” across 17 tool actions, after it had already found and inspected the completion append path.
 - [x] **t20260926-1044-BurntSushi-ripgrep-3376-recover-empty-agent-turn** — Make empty agent turns recoverable and actionable (landed 56acca3)
   model: sonnet · severity: high · builds Rust: yes · area: run/recovery · deps: none
-  files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-cli/src/sched.rs`, `<worktree>`
   change: When a model ends a turn without submitting a patch or evidence, use the remaining retry budget within the same `tm run` invocation when possible. If the run cannot recover, report the attempt count, current ticket state, why the turn failed, whether/when an automatic retry is scheduled, and a precise next command; distinguish provider-turn failure from test failure.
   acceptance: A simulated model-ended-turn-without-submission either recovers and completes under the configured retry budget or prints the scheduled retry and exact next action; output never leaves a user unsure whether the failed ticket will resume automatically.
   test: `cargo test -p tm-cli run_outcome_ready_state_plain_message`
@@ -1736,14 +1736,14 @@ is based on.
 - [x] **t20260926-1342-gohugoio-hugo-15360-surface-attempt-retries** — Surface attempt failures and retries during `tm run` (landed 1530b98)
   model: sonnet · severity: medium · builds Rust: yes · area: cli
   deps: none
-  files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-cli/src/sched.rs`, `<worktree>`
   change: When a foreground `tm run <ticket>` attempt ends without submitting and the scheduler retries or recovers, print a concise user-facing notice with the failure reason, attempt count, ticket state, and next action instead of requiring a later `tm events`/ticket metadata inspection to discover why the run stalled.
   acceptance: A simulated first attempt that ends with `model ended turn without submitting` prints that reason and whether a retry is scheduled; the final run summary reports the resulting state and resume command. The event log remains authoritative and unchanged.
   test: `cargo test -p tm-cli sched::tests`
   evidence: `/tmp/tm-trials/20260926-1342/gohugoio-hugo-15360/tm.log` — `attempt 1 model ended turn without submitting`; user-facing output proceeded through extensive command listings and ended only when bounded execution was interrupted; retry/failure details were recovered from `tm events`.
 - [x] **t20260926-1342-pallets-click-3822-repeated-source-read-progress-guard** — Bound repeated source reads and show actionable progress when a run stalls (landed e0e76e1)
   model: sonnet · severity: high · builds Rust: yes · area: agent/context · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>/crates/tm-cli/src/sched.rs`
   change: Detect repeated overlapping reads and searches of the same source during a ticket run, avoid re-sending already available content when there is no new finding, and surface a concise retained-findings summary with a scoped next step. When a model ends without submitting, provide a direct saved-session resume command alongside the honest no-patch/no-evidence status.
   acceptance: Replaying the Click #3822 investigation pattern stops the repeated `src/click/types.py` reads/searches from consuming another full context window, tells the user what was established and what remains, and includes a usable resume command after no-submit; normal runs still submit patches and evidence.
   test: `cargo test -p tm-agent repeated_exploration_nudge && cargo test -p tm-cli repeated_no_submit_failure_gets_focused_recovery_guidance`
@@ -1765,14 +1765,14 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-1342/sindresorhus-ky-878/tm.log:28-31` — “Submitted the ticket -> error: submission needs evidence…” followed by “Saved a result” and “Submitted the ticket”.
 - [~] **t20260926-1342-cobra-reuse-read-context** — Reuse unchanged source reads during ticket runs (needs another pass: the worker made no changes)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
-  files: `crates/tm-agent/src/prompt.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-agent/src/prompt.rs` (<worktree>)
   change: Tell workers to rely on unchanged file contents already in the conversation, and reread only when a specific range was omitted, the file changed, or a tool requires a fresh hash; require identifying that missing detail before repeating a read.
   acceptance: Prompt tests cover the guidance, and a replay of this Cobra task's repeated `completions.go`/`command.go` reads shows the agent reuses prior findings and reaches the edit without redundant reads.
   test: `cargo test -p tm-agent prompt`
   evidence: `/tmp/tm-trials/20260926-1342/spf13-cobra-2257/tm.log:6-27` — the run reread `completions.go` repeatedly, including consecutive reads of the same source, and revisited overlapping `command.go` ranges before editing.
 - [x] **t20260926-1342-cobra-stats-token-reconciliation** — Reconcile per-ticket token totals with recorded usage events (landed ed62c14)
   model: sonnet · severity: high · builds Rust: yes · area: telemetry · deps: none
-  files: `crates/tm-cli/src/stats.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-cli/src/stats.rs` (<worktree>)
   change: Ensure `tm stats --json --ticket <id>` reports the sum of that ticket's `usage.recorded` token counts; add a diagnostic or test-backed correction path if the rollup can diverge from its source events.
   acceptance: An end-to-end ticket run asserts the JSON `tokens_total` equals the independently summed matching `usage.recorded` events, including multiple model turns.
   test: `cargo test -p tm-cli stats_by_ticket`
@@ -1786,7 +1786,7 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-1521/BurntSushi-ripgrep-3376/tm.log:79-80` — the agent ran `cargo build --bin rg ...` and then terminated with “Required toolchain dependency is unavailable: cargo. Install or configure it, then retry the task.”
 - [x] **t20260926-1521-pallets-click-3822-repeated-exploration-stall-feedback** — Surface a focused progress nudge before repeated source exploration consumes another run (landed 64e0bdc)
   model: sonnet · severity: high · builds Rust: yes · area: agent/context · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/executor.rs`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>/crates/tm-agent/src/executor.rs`
   change: Strengthen repeated-exploration detection to trigger an actionable, user-visible nudge as soon as a turn repeatedly rereads the same source file or overlapping ranges without a new finding. Include a short retained-findings summary and a concrete next step, and carry that context into a resumed attempt instead of allowing another long reread loop.
   acceptance: Replaying the Click #3822 investigation pattern surfaces a nudge after repeated `src/click/types.py` reads, avoids another full cycle of overlapping reads with no new finding, and preserves a concise investigation summary for recovery; productive read-then-edit runs are not interrupted.
   test: `cargo test -p tm-agent repeated_exploration_nudge && cargo test -p tm-agent`
@@ -1807,14 +1807,14 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-1521/psf-requests-7432/tm.log:71-74` records the evidence-free submit error, `Saved a result`, and success; formatter paths are in `crates/tm-cli/src/agent.rs:2346-2364` and `:2496-2502`.
 - [x] **t20260926-1521-sindresorhus-ky-878-avoid-redundant-source-rereads** — Stop repeated test-file exploration after the relevant case is found (landed 41b8136)
   model: sonnet · severity: high · builds Rust: yes · area: agent/context · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
+  files: `<worktree>/crates/tm-agent/src/agent_loop.rs`
   change: Track recent successful reads and searches within a ticket run, and when the agent requests overlapping content again without an intervening edit or a clear new hypothesis, reuse the prior result or prompt it to state what new question the reread answers. Preserve deliberate rereads after edits and when verification requires fresh content.
   acceptance: Replaying this investigation finds `source/utils/body.ts` and `test/stream.ts` once, then does not issue repeated identical `onDownloadProgress` searches or five consecutive full reads of `test/stream.ts`; a reread after editing still returns the current file contents.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1521/sindresorhus-ky-878/tm.log:7-18` (duplicate searches and browser reads); `/tmp/tm-trials/20260926-1521/sindresorhus-ky-878/tm.log:27-40` (repeated stream-file reads after the target was located)
 - [x] **t20260926-1521-sindresorhus-ky-878-suggest-extension-near-match** — Recover from guessed source extensions without a directory-listing detour (landed 02044f7)
   model: sonnet · severity: medium · builds Rust: yes · area: agent/tools · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/tools.rs`
+  files: `<worktree>/crates/tm-agent/src/tools.rs`
   change: Extend the not-found path hinting used by `fs_io_error` to consider a unique same-stem candidate with a different source extension (for example `.js` to `.ts`) and include it as a safe correction; retain the existing project-root guidance when candidates are ambiguous.
   acceptance: A read request for `test/helpers/create-http-test-server.js` in a project containing only `test/helpers/create-http-test-server.ts` returns the precise `.ts` suggestion and the agent can continue without listing the project root; ambiguous matches do not auto-select a path.
   test: `cargo test -p tm-agent fs_io_error`
@@ -1836,25 +1836,25 @@ is based on.
 - [x] **t20260926-1702-BurntSushi-ripgrep-3376-repeat-exploration-checkpoint** — Stop repeated source reads before exhausting the agent step budget (landed 67874ca)
   model: sonnet · severity: high · builds Rust: yes · area: agent
   deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>`
   change: Strengthen the repeated-exploration guard so repeated or overlapping reads of the same source path/range trigger a useful reminder to reuse already-returned evidence and move to a reproducer, code change, or focused test; when an attempt reaches its step limit, attach a compact checkpoint naming inspected paths, current hypothesis, and next action to the retry guidance.
   acceptance: In a deterministic scripted run that repeats reads of the same two files until near the configured step limit, the agent is nudged before the final three steps, does not repeat the same ranges, and on a forced limit error the CLI reports the retained checkpoint and one actionable resume step; existing normal investigation flows remain unchanged.
   test: `cargo test -p tm-agent repeated_exploration && cargo test -p tm-cli step_limit`
   evidence: `/tmp/tm-trials/20260926-1702/BurntSushi-ripgrep-3376/tm.log` lines 18-35 show repeated/overlapping reads of `crates/ignore/src/dir.rs` and `walk.rs`; line 150 shows `step limit (64) reached without submitting` and generic retry advice. Source: `crates/tm-agent/src/agent_loop.rs` lines 1444-1454 contains the current repeated-exploration nudge and only adds a step-limit reminder within the last three steps; lines 1822-1826 formats the generic step-limit guidance.
 - [x] **t20260926-1702-pallets-click-3822-cumulative-exploration-budget** — Interrupt cumulative source thrashing when exact-call streak detection misses it (landed 817c0fa)
   model: sonnet · severity: high · builds Rust: yes · area: agent/context · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>/crates/tm-agent/src/agent_loop.rs`
   change: Extend repeated-exploration detection to account for a cumulative sequence of reads and searches that repeatedly returns to the same source file through different tools, ranges, or intervening low-value inspection calls. Before further exploration, show a concise retained-findings summary and a concrete next action; reset the budget on a meaningful edit, test, or new evidence.
   acceptance: Replaying the Click #3822 pattern detects repeated investigation of `src/click/types.py` well before 52 tool calls and 1.6M recorded tokens, prompts the agent to edit or state a blocker, and leaves productive focused rereads unaffected.
   test: `cargo test -p tm-agent repeated_exploration_nudge && cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:12-91` (three dispatches repeatedly inspect `src/click/types.py` without a change); `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:94` (run ends without patch or evidence); `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:232-240` (stats record 1,634,307 tokens and 52 tool calls)
 - [x] **t20260926-1702-pallets-click-3822-honest-escalated-edit-message** — Avoid claiming retained edits when an escalated no-submit run left none (landed babf45f)
   model: sonnet · severity: medium · builds Rust: yes · area: cli/ux · deps: none
-  files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  files: `crates/tm-cli/src/sched.rs`, `<worktree>/crates/tm-cli/src/sched.rs`
   change: Make the `Escalated if did_not_submit` message branch on `workspace_edits_retained`, as the Ready/Blocked branch already does. When false, explain that no working-tree edits were retained and point to the saved attempt and the appropriate retry command; only tell the user to inspect/resume retained edits when edits actually exist.
   acceptance: An escalated no-submit outcome with `workspace_edits_retained = false` never claims edits remain, while an outcome with retained edits still gives the inspect-and-retry guidance; add regression coverage for both.
   test: `cargo test -p tm-cli run_outcome_escalated_state_plain_message && cargo test -p tm-cli run_outcome_`
-  evidence: `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:94` (failure without a patch); `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:114` (message says working-tree edits were retained and directs `git status`/`git diff`); `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs:1171-1175` (escalated branch omits the `workspace_edits_retained` check that exists in the Ready/Blocked branch)
+  evidence: `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:94` (failure without a patch); `/tmp/tm-trials/20260926-1702/pallets-click-3822/tm.log:114` (message says working-tree edits were retained and directs `git status`/`git diff`); `<worktree>/crates/tm-cli/src/sched.rs:1171-1175` (escalated branch omits the `workspace_edits_retained` check that exists in the Ready/Blocked branch)
 - [x] **t20260926-1702-psf-requests-7432-align-submit-evidence-prompt** — Align worker instructions with ticket submission evidence requirements (landed 58d4b2e)
   model: sonnet · severity: medium · builds Rust: yes · area: agent/prompt · deps: none
   files: `crates/tm-agent/src/prompt.rs`
@@ -1885,7 +1885,7 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-1903/gohugoio-hugo-15360/tm.log:11` says `Run tm run T-1 again to retry`; line 33 records `ticket.retry_scheduled`.
 - [x] **t20260926-1903-pallets-click-3822-provider-backoff** — Retry transient provider rate limits with clear progress (landed 5fc1802)
   model: sonnet · severity: high · builds Rust: yes · area: provider · deps: none
-  files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  files: `crates/tm-cli/src/sched.rs`, `<worktree>/crates/tm-cli/src/sched.rs`
   change: When a run fails with a transient provider rate-limit response (HTTP 429), apply a bounded retry/backoff policy where safe; tell the user it is waiting and show the retry timing, rather than immediately ending with a generic provider-unavailable failure and a manual rerun suggestion.
   acceptance: A simulated 429 followed by a successful provider response completes the same ticket without manual `tm run`; logs and CLI output show the retry count and delay, while permanent/non-retryable failures remain clearly reported.
   test: `cargo test -p tm-cli`
@@ -1913,7 +1913,7 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-1903/spf13-cobra-2257/tm.log` contains `429 Too Many Requests` twice and `ticket.retry_scheduled` (event 30 and event 73); the emitted failure message says `Run tm run T-1 again to retry`. Source: `crates/tm-provider/src/providers/compat.rs` (429 retry behavior) and `crates/tm-cli/src/sched.rs` lines 1164-1198 produce the manual and scheduler recovery text.
 - [x] **t20260926-1929-pallets-click-3822-provider-429-retry** — Retry transient provider rate limits in foreground ticket runs (landed 8ff3877)
   model: sonnet · severity: medium · builds Rust: yes · area: scheduler · deps: none
-  files: `crates/tm-cli/src/sched.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-cli/src/sched.rs`, `<worktree>`
   change: When a provider returns HTTP 429 during `tm run`, honor any retry-after delay and retry the current ticket attempt within the bounded foreground run instead of returning immediately with a failed ticket and only scheduling a later retry. Emit concise progress that makes the wait and retry visible.
   acceptance: A deterministic provider test returning 429 once and then success completes the same foreground run successfully, records the retry, and emits an understandable retry message; persistent 429s still terminate clearly after the configured bound.
   test: `cargo test -p tm-cli`
@@ -1927,11 +1927,11 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-1929/psf-requests-7432/tm.log:13-23` — the run repeatedly read `src/requests/models.py` (including four consecutive read events) and repeated a search, then reported “stopped after 10 steps without a repository change or submitted evidence.”
 - [x] **t20260926-1929-spf13-cobra-2257-no-progress-continuation** — Continue bounded investigations after the no-progress stop (landed f06a94d)
   model: sonnet · severity: medium · builds Rust: yes · area: agent
-  files: `crates/tm-agent/src/agent_loop.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-agent/src/agent_loop.rs` (<worktree>)
   change: When the no-progress guard fires after ten steps, preserve the accumulated investigation and provide a clear, usable recovery path that actually resumes those findings within an explicit bound, rather than ending the only `tm run` attempt after repetitive reads/searches. Make the human-facing message agree with the ticket's retry state and whether another command is required.
   acceptance: A deterministic agent-loop test with ten investigation-only steps followed by a valid patch proves the bounded continuation can complete and retains prior findings; a failure-path test proves the emitted recovery instruction agrees with whether a retry is scheduled.
   test: `cargo test -p tm-agent no_progress`
-  evidence: `/tmp/tm-trials/20260926-1929/spf13-cobra-2257/tm.log` lines 6-16 show repeated reads/searches followed by `stopped after 10 steps without a repository change or submitted evidence` and `Run tm run T-1 again to retry`; `tm.log` lines 32-39 record `ticket.retry_scheduled`. `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs` lines 1760-1767 returns `AgentOutcome::Failed` immediately at the no-progress limit.
+  evidence: `/tmp/tm-trials/20260926-1929/spf13-cobra-2257/tm.log` lines 6-16 show repeated reads/searches followed by `stopped after 10 steps without a repository change or submitted evidence` and `Run tm run T-1 again to retry`; `tm.log` lines 32-39 record `ticket.retry_scheduled`. `<worktree>/crates/tm-agent/src/agent_loop.rs` lines 1760-1767 returns `AgentOutcome::Failed` immediately at the no-progress limit.
 - [x] **t20260926-1929-sindresorhus-ky-878-no-progress-retry-guidance** — Make no-progress cutoff and retry guidance actionable (landed eb545bb)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
   files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-cli/src/sched.rs`
@@ -1948,7 +1948,7 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-1946/BurntSushi-ripgrep-3376/tm.log:13` — `429 Too Many Requests`; run ended with exit code 2 and escalated ticket T-1 without implementing or verifying a patch.
 - [x] **t20260926-1946-pallets-click-3822-no-progress-reorientation** — Reorient after repeated investigation before failing a coding ticket (landed 4d0e082)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
+  files: `<worktree>/crates/tm-agent/src/agent_loop.rs`
   change: When the ticket agent reaches the no-progress step limit after investigation-only tool calls, use the retained investigation summary to issue one explicit, focused reorientation turn toward a repository change and relevant check before returning `AgentOutcome::Failed`; if it still cannot progress, report the failed state and the exact `tm ticket retry <id>` recovery command clearly.
   acceptance: A ticket that performs 10 investigation-only steps but has actionable findings is given a focused patch attempt instead of immediately ending with the current generic continuation text; if the retry attempt also stalls, output explicitly says the ticket failed and names the command to retry it.
   test: `cargo test -p tm-agent repeated_investigation_hits_bounded_threshold_and_keeps_actionable_summary`
@@ -1962,14 +1962,14 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-1946/psf-requests-7432/tm.log:25` — “provider was unavailable” despite the embedded “429 Too Many Requests” / “Rate limit exceeded. Please retry after a brief wait.”; the run exits 2 and the following event records ticket failure.
 - [x] **t20260926-1946-sindresorhus-ky-878-report-existing-work-on-stall** — Report existing patch state before declaring a ticket made no change (landed 4715913)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
+  files: `<worktree>/crates/tm-agent/src/agent_loop.rs`
   change: Before returning the no-progress failure in `agent_loop.rs`, distinguish the current no-progress streak from the whole run's workspace state; when a prior turn has left a source diff, avoid saying “No patch ... was submitted” without checking it, and tell the user whether that patch remains unverified and how to resume verification. Preserve the bounded stop rather than silently claiming success.
   acceptance: A run that edits a source file and later reaches the no-progress threshold reports that a patch remains in the workspace, clearly states that verification/submission did not complete, and gives a precise retry or verification recovery command; an actually unchanged run continues to report no patch.
   test: `cargo test -p tm-agent no_progress_tests`
   evidence: `/private/tmp/tm-trials/20260926-1946/sindresorhus-ky-878/tm.log` lines 46-46 and 118-127 — tm reported “No patch or evidence was submitted” and “Run `tm ticket retry T-1` to try again,” while the same run left a diff in `source/utils/body.ts` implementing the fix.
 - [x] **t20260926-1946-spf13-cobra-2257-guided-no-progress-continuation** — Guide implementation after an investigation stalls (landed e758414)
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
+  files: `<worktree>/crates/tm-agent/src/agent_loop.rs`
   change: When the no-progress step limit is reached after useful file/search investigation but no edit or submitted evidence, start one bounded continuation turn with a concise actionable instruction grounded in the findings (identify the likely edit target, make the change, run its focused check, and submit evidence) before failing/escalating. Preserve the current terminal failure behavior if that continuation also makes no progress.
   acceptance: A scripted task whose first investigation reaches the current no-progress limit but has identified the relevant code can make an edit and submit evidence in the guided continuation without restarting the ticket; a continuation that still makes no progress fails with an actionable message and does not loop indefinitely.
   test: `cargo test -p tm-agent`
@@ -1983,35 +1983,35 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-2011/gohugoio-hugo-15360/tm.log:13-36` — repeated reads/searches and dispatch notices, then “provider was unavailable” with `429 Too Many Requests`; event log lines 39-58 record follow-on events and failure.
 - [~] **t20260926-2011-pallets-click-3822-bound-repeated-investigation** — Stop repeated source inspection before the no-progress limit (needs another pass: the worker made no changes)
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>`
   change: When consecutive overlapping reads/searches have already identified the target implementation and typing test, nudge the agent to act on the retained findings and run one focused check before spending more steps on the same files; keep the nudge bounded and retain the existing hard stop if it still makes no progress.
   acceptance: A deterministic run with repeated reads of one source file and a relevant typing test receives a single actionable nudge before the no-progress limit, then can edit and submit evidence; a scripted run that ignores the nudge still terminates without an unbounded loop.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260926-2011/pallets-click-3822/tm.log:6-31` — repeated `Read src/click/types.py` and overlapping `sed` calls, followed by repeated `Ticket T-1 dispatched for execution` notices; ticket T-1 attempt 1 ended after 10 steps without a repository change.
 - [ ] **t20260926-2011-pallets-click-3822-provider-429-visible-recovery** — Make repeated provider rate-limit retries visible and actionable
   model: sonnet · severity: high · builds Rust: yes · area: provider · deps: none
-  files: `crates/tm-cli/src/sched.rs`, `crates/tm-provider/src/providers/compat.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-cli/src/sched.rs`, `crates/tm-provider/src/providers/compat.rs`, `<worktree>`
   change: Preserve HTTP 429/rate-limit classification through foreground `tm run`, surface any retry timing and whether a retry is automatic, and avoid making multiple opaque attempts before reporting a provider failure; after retry exhaustion, give one precise recovery action that reflects the ticket's actual state.
   acceptance: A deterministic provider returning 429 twice and then success shows bounded retry progress and completes the same run; a persistent 429 exits within the bound with the rate-limit reason, ticket/session state, and a valid non-contradictory next action.
   test: `cargo test -p tm-provider -p tm-cli`
   evidence: `/tmp/tm-trials/20260926-2011/pallets-click-3822/tm.log:32,58` — attempt ended with `provider was unavailable ... 429 Too Many Requests`; event log recorded `ticket.escalated` and advised rerunning, while `tm ticket show T-1 --json` showed the same 429 on attempts 2 and 3.
 - [ ] **t20260926-2011-psf-requests-7432-actionable-retry** — Show the direct retry command after a no-progress ticket run
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
+  files: `<worktree>/crates/tm-agent/src/agent_loop.rs`
   change: In both no-progress failure details, retain the investigation summary and session-resume option but also print the exact ticket recovery commands (`tm ticket retry <ticket-id>` followed by `tm run <ticket-id>`), clearly distinguishing retrying the failed ticket from resuming a provider session.
   acceptance: When a ticket stops at the no-progress bound, the returned failure text gives the user a copyable retry-and-run command using the actual ticket ID and separately labels the optional session-resume path; the regression test asserts those details.
   test: `cargo test -p tm-agent repeated_investigation_hits_bounded_threshold_and_keeps_actionable_summary`
   evidence: `/tmp/tm-trials/20260926-2011/psf-requests-7432/tm.log:33` — "Continue the saved session with `tm --resume S-3`"; run report says "Run `tm ticket retry T-1` to try again."
 - [ ] **t20260926-2011-sindresorhus-ky-878-provider-429-bounded-recovery** — Recover cleanly from provider rate limits during `tm run`
   model: sonnet · severity: high · builds Rust: yes · area: provider · deps: none
-  files: `crates/tm-cli/src/sched.rs`, `crates/tm-provider/src/providers/compat.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-cli/src/sched.rs`, `crates/tm-provider/src/providers/compat.rs`, `<worktree>`
   change: Preserve explicit HTTP 429/rate-limit classification through foreground `tm run`; honor retry timing with a small bounded backoff when a retry is useful, and report clearly when throttling prevents completion instead of leaving an immediate manual retry as the only recovery.
   acceptance: A deterministic provider returning 429 and then success completes the same run after bounded, visible retry; a persistent 429 exits within the run bound and reports the rate-limit reason, retry status, and one valid next action without claiming tests or changes were completed.
   test: `cargo test -p tm-provider -p tm-cli`
   evidence: `/private/tmp/tm-trials/20260926-2011/sindresorhus-ky-878/tm.log:34` — `provider was unavailable ... 429 Too Many Requests`; run exited 2 after 67 seconds and recommended `tm ticket retry T-1`, but no completion or verification followed.
 - [ ] **t20260926-2011-spf13-cobra-2257-carry-context-across-transient-retries** — Preserve investigation context when a provider rate limit interrupts a run
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
+  files: `<worktree>/crates/tm-agent/src/agent_loop.rs`
   change: When a retryable provider-unavailable response interrupts a ticket attempt, retain a concise carry-forward note of the relevant files/symbols already located and the next planned action, and inject it into the next attempt instead of restarting repository discovery from the original ticket alone. Keep retries bounded and report when a provider rate limit caused the retry.
   acceptance: A simulated transient 429 after the agent has located a target function leads the next attempt to continue from that location without repeating the same broad searches; the user-facing run result identifies the rate-limit retry and whether it recovered.
   test: `cargo test -p tm-agent`
@@ -2042,14 +2042,14 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-2037/gohugoio-hugo-15360/tm.log` — `stopped after 10 steps without a repository change or submitted evidence` followed by `Usage: 182057 tokens, 10 tool calls, 13 seconds. Continue the saved session with tm --resume S-3`; same log's stats output reports `"tokens_total": 376235`.
 - [ ] **t20260926-2037-pallets-click-3822-rate-limit-recovery-guidance** — Make exhausted provider rate limits actionable in foreground runs
   model: sonnet · severity: high · builds Rust: yes · area: provider · deps: none
-  files: `crates/tm-cli/src/sched.rs`, `crates/tm-provider/src/types.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-cli/src/sched.rs`, `crates/tm-provider/src/types.rs`, `<worktree>`
   change: Preserve and present provider rate-limit classification and any retry timing in the final `tm run` failure summary; when the bounded provider retries are exhausted, state whether retrying is safe, show the ticket's resulting state, and offer a precise next action rather than only raw 429 text and a generic retry instruction.
   acceptance: A deterministic provider that returns 429 until retry exhaustion makes `tm run` exit with a concise message that identifies rate limiting, includes available retry timing, accurately names the ticket state, and gives a valid recovery action; a subsequent successful retry completes without confusing duplicate dispatch output.
   test: `cargo test -p tm-provider -p tm-cli`
   evidence: `/tmp/tm-trials/20260926-2037/pallets-click-3822/tm.log:16-30,46-52` — `tm run` emitted repeated dispatch notices, ended with `provider was unavailable ... 429 Too Many Requests`, and the event stream recorded `ticket.escalated` without usage/retry timing.
 - [ ] **t20260926-2037-psf-requests-7432-clear-recovery-path** — Make bounded-stop recovery instructions unambiguous
   model: sonnet · severity: medium · builds Rust: yes · area: agent-loop · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
+  files: `<worktree>/crates/tm-agent/src/agent_loop.rs`
   change: When a repeated-inspection stop occurs, distinguish resuming the provider session from retrying the failed ticket and give one explicit, ordered recovery sequence that matches the ticket's current state; do not present `tm --resume <session>` and `tm ticket retry <ticket>` as unexplained competing commands.
   acceptance: A regression test asserts the repeated-inspection failure message identifies the required recovery path for the current ticket/session state and provides copyable commands in the right order, with session resume clearly labeled as an alternative only when valid.
   test: `cargo test -p tm-agent repeated_source_inspections_have_an_early_run_level_bound`
@@ -2063,14 +2063,14 @@ is based on.
   evidence: `/tmp/tm-trials/20260926-2037/sindresorhus-ky-878/tm.log:3` — `ticket ID must look like T-<n> ... got "Created ticket T-1: ..."`
 - [ ] **t20260926-2037-spf13-cobra-2257-clear-dispatch-and-rate-limit-recovery** — Clarify dispatch progress and recover cleanly from provider rate limits
   model: sonnet · severity: medium · builds Rust: yes · area: scheduler · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  files: `<worktree>/crates/tm-cli/src/sched.rs`
   change: When a ticket run encounters a provider rate-limit response, apply a bounded backoff/retry policy before failing. Ensure repeated scheduler/dispatch progress notices identify whether a new attempt has started, and on exhaustion report the rate limit and one actionable recovery sequence rather than an opaque provider error.
   acceptance: A test simulating a 429 verifies bounded retry/backoff and eventual success or a final actionable failure; output tests prove repeated dispatch notices distinguish new attempts from repeated ticks and that exhausted retries name the provider issue and next step.
   test: `cargo test -p tm-cli rate_limit && cargo test -p tm-cli dispatch`
   evidence: `/tmp/tm-trials/20260926-2037/spf13-cobra-2257/tm.log:7-18` — three “Ticket T-1 dispatched for execution.” notices preceded “provider was unavailable: ... 429 Too Many Requests”; final failure advised `tm ticket retry T-1`.
 - [ ] **t20260926-2225-ripgrep-no-progress-retry-loop** — Stop or redirect repeated no-progress retries
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`
+  files: `<worktree>/crates/tm-agent/src/agent_loop.rs`
   change: When a ticket repeatedly hits the no-progress/repeated-inspection guard, do not schedule another identical discovery attempt. Surface one clear next action to the user, or pass the retained investigation into a genuinely focused continuation; make the displayed `tm --resume <session>` instruction consistent with whether `tm run` is scheduling another attempt.
   acceptance: A deterministic test drives successive no-submit attempts that repeat the same file reads and searches; it proves the loop does not perform three identical 10-step attempts and that the terminal message accurately describes whether automatic retry or manual resume is required.
   test: `cargo test -p tm-agent`
@@ -2245,7 +2245,7 @@ is based on.
   evidence: `/tmp/tm-trials/20260927-0335/BurntSushi-ripgrep-3376/tm.log:88-143` — three attempts repeated reads/searches without a patch, consuming 185380, 183596, and 236211 tokens respectively; the final recovery message directs resuming but `tm run` automatically retried the first two inspection-only failures.
 - [ ] **t20260927-0335-pallets-click-3822-resume-repeated-investigation** — Avoid restarting the same no-progress investigation on automatic retries
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>`
   change: When a no-submit attempt fails and a retry is scheduled, carry the retained investigation into the next attempt and require a materially new action instead of repeating the same source reads/searches; make the user-facing recovery message consistent about whether tm will retry automatically or requires `tm --resume`.
   acceptance: A scripted ticket that returns the same source inspections without a patch does not repeat the inspections across three attempts, does not spend hundreds of thousands of tokens on the loop, and ends with one unambiguous recovery instruction.
   test: `cargo test -p tm-agent`
@@ -2322,42 +2322,42 @@ is based on.
   evidence: `/tmp/tm-trials/20260927-0538/gohugoio-hugo-15360/tm.log:86-108` — stop text advised `tm --resume S-4/S-5/S-6` while retries were scheduled, then the final output said `Run tm ticket retry T-2`; the attempts ended escalated.
 - [x] **t20260927-0538-pallets-click-3822-no-progress-recovery** — Make repeated-investigation stops carry forward findings and give one accurate recovery action (landed c551210)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-cli/src/sched.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-agent/src/agent_loop.rs`, `crates/tm-cli/src/sched.rs` (<worktree>)
   change: When repeated reads/searches hit the no-progress guard, steer the same bounded run toward an edit and focused verification using the findings already gathered; if it cannot proceed, emit only the recovery instruction that matches actual ticket/session/retry state, and explain token totals across attempts. Avoid launching retries that replay the same inspection sequence.
   acceptance: A deterministic agent-loop test with repeated reads followed by a valid patch completes using retained investigation, and a stop-path test asserts the displayed recovery action matches retry state and reports coherent cumulative usage; a trial-like repeated-inspection fixture does not replay the same discovery on every retry.
   test: `cargo test -p tm-agent no_progress`
   evidence: `/private/tmp/tm-trials/20260927-0538/pallets-click-3822/tm.log:31-56` — three attempts repeatedly inspect `src/click/types.py` and `tests/typing/typing_prompt.py`, end with “No patch or evidence was submitted”, suggest `tm --resume S-1/S-2/S-3`, then say “A retry is scheduled” / “Run `tm ticket retry T-1`”; reported attempt usage is 168474, 209939, and 216616 tokens despite each attempt lasting 21–41 seconds.
 - [ ] **t20260927-0538-psf-requests-7432-stop-repeating-investigation** — Make repeated-inspection recovery actionable and consistent
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
-  files: `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  files: `<worktree>/crates/tm-agent/src/agent_loop.rs`, `<worktree>/crates/tm-cli/src/sched.rs`
   change: When a run hits the repeated-inspection limit, do not automatically relaunch the same investigation unchanged. Either stop and provide one accurate next action, or create a guided retry that makes a focused code change using the retained findings. Align the agent-loop failure text with the scheduler's actual behavior: this run told the user to `tm --resume S-1`, then automatically retried two more times, and finally told the user to run `tm ticket retry T-1`.
   acceptance: A repeated-inspection trial cannot silently repeat the same searches on automatic retries; its retained diagnosis is presented to the next attempt as a focused action, or the ticket is left stopped with one command that actually resumes/retries it. Add a regression test asserting the displayed recovery instruction matches the resulting ticket/session state.
   test: `cargo test -p tm-agent repeated_exploration`
   evidence: `/tmp/tm-trials/20260927-0538/psf-requests-7432/tm.log:15-40` — three attempts stop without a patch; retry messages name `tm --resume S-1`/`S-2`/`S-3` while runs restart automatically. `tm stats --json` reports `tokens_total: 456874`.
 - [x] **t20260927-0538-spf13-cobra-2257-no-progress-steering** — Turn repeated investigation into a bounded concrete next action (landed 17e064c)
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs, /Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-agent/src/agent_loop.rs, <worktree>`
   change: When a run repeatedly reads the same source files and searches the same terms across automatic attempts without editing or submitting evidence, carry its findings forward and steer the next attempt to one focused code change plus a targeted check; stop redundant attempts before they repeat the same exploration and report cumulative usage.
   acceptance: A deterministic fixture with repeated inspections across retries demonstrates that later attempts receive prior findings, take a materially different edit/test action or stop within a configured bound, and report cumulative token/time usage without replaying the same sequence.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260927-0538/spf13-cobra-2257/tm.log:27-61` — three attempts reread `completions.go` and `command.go` and repeat searches; each ends without a repository change, and stats report 535499 total tokens.
 - [x] **t20260927-0538-spf13-cobra-2257-recovery-state-copy** — Give one recovery instruction that matches ticket retry state (landed c3b3c09)
   model: sonnet · severity: medium · builds Rust: yes · area: scheduler · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs, crates/tm-cli/src/sched.rs, /Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-agent/src/agent_loop.rs, crates/tm-cli/src/sched.rs, <worktree>`
   change: Make no-progress messages distinguish a retry that will run automatically from a failed/escalated ticket requiring user action; emit a single valid next command and avoid recommending `tm --resume <session>` when the actual next action is ticket retry or scheduler execution.
   acceptance: CLI tests cover scheduled retry, unscheduled failure, and escalation; each output states the actual ticket state and exactly one actionable recovery command that can proceed from that state.
   test: `cargo test -p tm-cli sched && cargo test -p tm-agent no_progress`
   evidence: `/tmp/tm-trials/20260927-0538/spf13-cobra-2257/tm.log:37-62` — each attempt recommends `tm --resume S-n` while stating a retry is scheduled; after escalation the run says `Run tm ticket retry T-1 to try again`.
 - [ ] **t20260927-0742-BurntSushi-ripgrep-3376-resume-no-progress-attempts** — Resume from retained findings after repeated no-progress attempts
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs` (`/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-agent/src/agent_loop.rs`)
+  files: `crates/tm-agent/src/agent_loop.rs` (`<worktree>/crates/tm-agent/src/agent_loop.rs`)
   change: When a ticket attempt hits the repeated-inspection/no-progress limit, carry its investigation summary into the next automatic attempt and instruct the agent to make a focused change or run a targeted check instead of re-reading the same files and re-running the same irrelevant environment probes. Ensure the user-facing retry/resume instruction matches whether tm will automatically schedule a retry or requires an explicit resume.
   acceptance: A simulated ticket with repeated reads and no edits does not repeat those reads in its next attempt; the next-attempt prompt includes the prior useful findings, and the emitted next-step command accurately describes the actual automatic/manual retry behavior.
   test: `cargo test -p tm-agent repeated_exploration`
   evidence: `/tmp/tm-trials/20260927-0742/BurntSushi-ripgrep-3376/tm.log` lines 25, 42, 54 — three 10-step attempts re-read `crates/ignore/src/dir.rs` and `walk.rs`, used 205553/188817/219857 tokens, and reported “Continue the saved session” while scheduling retries; source: `crates/tm-agent/src/agent_loop.rs` lines 1781-1817.
 - [ ] **t20260927-0742-pallets-click-3822-shell-cwd-validation** — Prevent shell launches from using invalid generated working directories
   model: sonnet · severity: medium · builds Rust: yes · area: agent · deps: none
-  files: `crates/tm-agent/src/tools.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-agent/src/tools.rs` (<worktree>)
   change: Before dispatching shell.run, resolve and validate its effective cwd against the project root; on an invalid or missing cwd, fall back only when protocol semantics permit, otherwise return a concise error that names the bad path and gives a valid project-relative correction. Ensure `/bin/sh` is never spawned with a synthetic `/null` path.
   acceptance: A regression test passes an absent/null cwd through the shell.run dispatch path and proves either safe project-root execution per documented defaults or a structured actionable error; no process-start error refers to a synthesized `<project>/null` directory.
   test: `cargo test -p tm-agent shell_run`
@@ -2444,7 +2444,7 @@ is based on.
   evidence: `/tmp/tm-trials/20260928-0312/gohugoio-hugo-15360/tm.log` lines 10–19, 23–32, and 36–46 show repeated reads/searches and three 10-step no-progress failures (169493, 192011, 205213 tokens); lines 46–47 end in escalation, while the output at lines 21, 34, and 47 announces scheduled retries and suggests resume/manual retry. The no-progress failure paths are implemented in `crates/tm-agent/src/agent_loop.rs` around lines 1810–1859.
 - [x] **t20260928-0312-pallets-click-3822-inspection-loop-recovery** — Stop unproductive inspection retries and preserve a focused recovery path (landed 2aa4323)
   model: sonnet · severity: high · builds Rust: yes · area: agent · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>`
   change: When a ticket repeatedly reads the same implementation through file-read and shell-inspection tools without recording new findings, reuse prior inspection evidence across tool aliases and make the recovery prompt require a specific next action or a clear blocker. Avoid silently re-dispatching the same inspection loop after provider failures; surface one concise status with an actionable resume/retry command and stop within a small bounded token/time budget.
   acceptance: A replay of a typing-fix task that revisits `src/click/types.py` and `src/click/termui.py` without edits produces a focused recovery or explicit blocker within one attempt, rather than three read-only attempts; the user sees the final failed/escalated state and next command clearly, and aggregate token use is bounded and reported accurately.
   test: `cargo test -p tm-agent repeated_source_inspections_have_an_early_run_level_bound`
@@ -2480,7 +2480,7 @@ is based on.
   evidence: `/tmp/tm-trials/20260928-0931/pallets-click-3822/tm.log` lines 29, 44, 59-62 — three "focused continuation made no concrete change" attempts reread the same files, followed by escalation and `TRIAL_EXIT 2 WALL_SECONDS 989.158`.
 - [x] **t20260928-0931-sindresorhus-ky-878-verification-command-status** — Show the exact verification command and its authoritative result in `tm run` summaries (landed bcdd3ff)
   model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: none
-  files: `crates/tm-cli/src/agent.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-cli/src/agent.rs` (<worktree>)
   change: When rendering verification-related tool progress and the final submitted summary, preserve the exact test command and the shell tool's returned exit code; distinguish a focused/manual check from a project test suite and never label a command as passing based only on a piped/truncated output snippet.
   acceptance: A scripted `tm run` that executes a passing focused test and then a failing project test prints both exact commands and their exit statuses in its final summary, and does not say verification passed; a command whose output is piped through `tail` still displays the command tool's real exit code.
   test: `mise run test:crate -- tm-cli`
@@ -2494,21 +2494,21 @@ is based on.
   evidence: `/tmp/tm-trials/20260928-0931/spf13-cobra-2257/tm.log:73,79,93,102,107-108` — failed command `couldn't find that`, repeated focused-continuation failures, then ticket escalated without changes or tests; source: `crates/tm-agent/src/agent_loop.rs:1804-1823`.
 - [ ] **t20260928-1310-BurntSushi-ripgrep-3376-bound-repeated-no-progress-retries** — Bound repeated inspection retries and carry forward useful findings
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>/crates/tm-cli/src/sched.rs`
   change: When an attempt and its focused continuation end without a repository change or verification, avoid restarting the same exploration unchanged. Carry the relevant findings into any retry, apply one cumulative token/time budget across attempts, and finish with a single recovery instruction matching the ticket state.
   acceptance: A deterministic ticket that repeats the same file reads across retries stops within one cumulative no-progress budget or makes a materially new focused attempt; it does not repeat the reads three times, and the final output reports aggregate usage and one valid next action.
   test: `cargo test -p tm-agent`
   evidence: `/tmp/tm-trials/20260928-1310/BurntSushi-ripgrep-3376/tm.log:12-52,74-92` — attempts repeated reads across `walk.rs`, `dir.rs`, and `hiargs.rs`, each failed without a patch or verification, then `tm stats --json` reported 628019 total tokens for T-1.
 - [ ] **t20260928-1310-BurntSushi-ripgrep-3376-ticket-new-capturable-id** — Offer a structured ticket ID for scripted runs
   model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: none
-  files: `crates/tm-cli/src/tickets.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate`
+  files: `crates/tm-cli/src/tickets.rs`, `<worktree>`
   change: Add a machine-readable output option for `tm ticket new` that emits the created ticket ID in a stable field while retaining the current human-readable default, and document use with `tm run`.
   acceptance: `tm ticket new ... --json` emits valid JSON with an `id` field that can be passed directly to `tm run`; the default output remains clear to interactive users.
   test: `cargo test -p tm-cli ticket_new`
   evidence: `/tmp/tm-trials/20260928-1310/BurntSushi-ripgrep-3376/tm.log:3-5` — `ticket new` printed `Created ticket T-1: ...`, and passing that captured output to `tm run` failed parsing instead of accepting the ID.
 - [ ] **t20260928-1310-pallets-click-3822-provider-retry-progress** — Stop expensive retries when provider failures repeat exploration without progress
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>/crates/tm-cli/src/sched.rs`
   change: Distinguish provider transport failures from agent no-progress recoveries, avoid automatically replaying unchanged repository inspection after a provider failure, and report cumulative usage plus one actionable recovery choice in the terminal `tm run` message.
   acceptance: A simulated provider failure followed by inspection-only turns terminates within the configured bounded retry count, does not repeat the same reads across retries, and prints cumulative token/time usage with a single recovery action that matches the ticket state.
   test: `cargo test -p tm-agent`
@@ -2536,14 +2536,14 @@ is based on.
   evidence: `/tmp/tm-trials/20260928-1310/psf-requests-7432/tm.log:23-29` — tm's first delegated-file regression test failed; it then edited the test fixture before the focused run passed.
 - [ ] **t20260928-1310-sindresorhus-ky-878-provider-failure-summary** — Preserve provider failure details across retries and report the final cause
   model: sonnet · severity: medium · builds Rust: yes · area: cli-ux · deps: none
-  files: `crates/tm-cli/src/sched.rs` (/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate)
+  files: `crates/tm-cli/src/sched.rs` (<worktree>)
   change: When the provider request retry loop runs, retain a sanitized actionable failure reason and include it in the final `tm run` outcome, distinguishing provider transport failures from the agent's no-progress continuation failures. State whether automatic retry remains scheduled and give one correct next action without exposing credentials or raw secret-bearing headers.
   acceptance: A scripted provider request failure followed by a stalled continuation shows the provider failure class and retry count in progress and the final summary, identifies the final ticket state and exactly one valid recovery action, and redacts secret-bearing values.
   test: `cargo test -p tm-cli`
   evidence: `/private/tmp/tm-trials/20260928-1310/sindresorhus-ky-878/tm.log:32` — “Provider request failed. Waiting 9 seconds before retry 1; the same ticket and saved session will be used.”; lines 47 and 62 show the same generic retry notice and terminal escalation without an underlying provider reason.
 - [ ] **t20260928-1310-spf13-cobra-2257-bound-recovery-reexploration** — Bound recovery turns that repeat inspection without producing a patch
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>/crates/tm-cli/src/sched.rs`
   change: Detect repeated inspection-only recovery turns and stop retrying once the same source/tool evidence has been revisited without a repository change, targeted check, or submitted evidence; report cumulative usage and one actionable recovery command appropriate to the final ticket state.
   acceptance: A test with repeated provider failures and identical read/search actions terminates within a bounded retry count, avoids repeating unchanged exploration, and prints the accumulated usage and a single recovery command matching the final ticket state.
   test: `cargo test -p tm-agent`
@@ -2599,7 +2599,7 @@ is based on.
   evidence: `/tmp/tm-trials/20260928-1518/sindresorhus-ky-878/tm.log:32-35,44-54,58-76` — one focused continuation was declared unproductive, a provider failure was reported only as “Provider request failed,” another dispatch resumed and submitted, while `tm stats --json` reported 462,023 aggregate tokens and the terminal output did not state a verification result.
 - [ ] **t20260928-1518-spf13-cobra-2257-bound-recovery-reexploration** — Bound recovery turns that repeat inspection without producing a patch
   model: sonnet · severity: high · builds Rust: yes · area: agent-loop · deps: none
-  files: `crates/tm-agent/src/agent_loop.rs`, `/Users/allie/Develop/ticket-master/.claude/worktrees/tm-integrate/crates/tm-cli/src/sched.rs`
+  files: `crates/tm-agent/src/agent_loop.rs`, `<worktree>/crates/tm-cli/src/sched.rs`
   change: Detect repeated inspection-only recovery turns and stop retrying once the same source/tool evidence has been revisited without a repository change, targeted check, or submitted evidence; report cumulative usage and one actionable recovery command appropriate to the final ticket state.
   acceptance: A test with repeated provider failures and identical read/search actions terminates within a bounded retry count, avoids repeating unchanged exploration, and prints the accumulated usage and a single recovery command matching the final ticket state.
   test: `cargo test -p tm-agent`

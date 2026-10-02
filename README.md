@@ -8,7 +8,7 @@
 ![version](https://img.shields.io/badge/version-0.1.0-blue)
 ![rust](https://img.shields.io/badge/rust-1.85%2B-orange)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#-license)
-![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey)
+![platform](https://img.shields.io/badge/platform-macOS%20prebuilt%20%7C%20Linux%20from%20source-lightgrey)
 
 Chat with an agent live in your terminal — then hand follow-up work to background
 workers as **tickets**, review their submissions, and keep shipping.
@@ -72,7 +72,7 @@ doesn't) and layout for you, into
 `${PREFIX:-$HOME/.local}`:
 
 ```sh
-gh auth login   # once -- the script downloads via the gh CLI
+gh auth login   # once -- the script currently downloads via the gh CLI (the plain curl route above needs no login)
 scripts/install.sh
 ```
 
