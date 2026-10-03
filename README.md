@@ -13,7 +13,7 @@
 Chat with an agent live in your terminal — then hand follow-up work to background
 workers as **tickets**, review their submissions, and keep shipping.
 
-**[📸 Showcase](#-showcase)** · **[⚡ Quickstart](#-quickstart)** · **[🎛️ Slash commands](#%EF%B8%8F-slash-commands)**
+**[🌐 Website](https://alliecatowo.github.io/ticket-master/)** · **[▶ Live demo](https://alliecatowo.github.io/ticket-master/demo/)** · **[📸 Showcase](#-showcase)** · **[⚡ Quickstart](#-quickstart)** · **[🎛️ Slash commands](#%EF%B8%8F-slash-commands)**
 · **[🤖 Providers](#-providers)** · **[🗺️ Docs map](#%EF%B8%8F-docs-map)**
 
 </div>

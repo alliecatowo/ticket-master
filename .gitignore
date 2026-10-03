@@ -23,3 +23,6 @@
 *.log
 .DS_Store
 docs/public/
+
+site/public/
+clients/web/dist-demo/

@@ -1,0 +1,28 @@
+# Zola configuration for the Ticketmaster (tm) project site.
+# Deployed to GitHub Pages under /ticket-master/. The web demo is built separately
+# (clients/web, VITE_TM_DEMO=1) and published at /ticket-master/demo/ by the pages workflow.
+
+base_url = "https://alliecatowo.github.io/ticket-master"
+title = "Ticketmaster"
+description = "tm is an interactive coding agent for your terminal with a ticket-powered background crew: chat live, hand work to background workers, review what they submit."
+default_language = "en"
+compile_sass = true
+build_search_index = false
+generate_feeds = false
+
+taxonomies = []
+
+[markdown]
+highlight_code = true
+highlight_theme = "css"
+highlight_themes_css = [
+  { theme = "ayu-dark", filename = "syntax-dark.css" },
+  { theme = "ayu-light", filename = "syntax-light.css" },
+]
+external_links_target_blank = true
+external_links_no_referrer = true
+smart_punctuation = true
+
+[extra]
+github_repo = "https://github.com/alliecatowo/ticket-master"
+year = 2026
