@@ -1,0 +1,14 @@
+base_url = "https://alliecatowo.github.io/ticket-master"
+title = "Ticketmaster (tm)"
+description = "The interactive coding agent with a ticket-powered background crew"
+theme = "book"
+compile_sass = true
+build_search_index = true
+# Raw markdown notes elsewhere in this directory (audits, decisions, ...) are internal and not published.
+
+[markdown.highlighting]
+theme = "catppuccin-latte"
+
+[extra]
+book_number_chapters = true
+book_only_current_section_pages = false
