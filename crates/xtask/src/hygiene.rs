@@ -402,6 +402,9 @@ const DOT_TM_LITERAL_ALLOWLIST: &[&str] = &[
     // initialized as a `Project` (so it has no `Project::state_dir` to take): see that
     // function's own doc comment in dispatch.rs (`critic-worktree-exec-root-indexing`).
     "crates/tm-cli/src/dispatch.rs",
+    // `$TM_HOME` (default `$HOME/.tm`) is the user-level home, not a project state dir: the
+    // trust list lives there, same convention as `project::tm_home`.
+    "crates/tm-types/src/trust.rs",
     "crates/tm-core/src/store.rs",
     "crates/tm-codeintel/src/api.rs",
     "crates/tm-codeintel/src/store.rs",
