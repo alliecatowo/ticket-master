@@ -1,0 +1,10 @@
+# cargo-audit policy, enforced by the `audit` job in .github/workflows/ci.yml.
+[advisories]
+ignore = [
+    # `paste` (proc-macro) and `number_prefix` are unmaintained and reached only through
+    # model2vec-rs 0.3.0 (tokenizers -> paste, hf-hub -> indicatif -> number_prefix), the latest
+    # release. Both are compile-time / display-only, with no known vulnerability. Drop these
+    # entries when model2vec-rs moves off them.
+    "RUSTSEC-2024-0436",
+    "RUSTSEC-2025-0119",
+]

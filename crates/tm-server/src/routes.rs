@@ -49,9 +49,10 @@ use crate::wiki::{get_wiki_page, list_wiki_pages};
 
 /// Build the full axum router: every handler in `SPEC.md` §14, bound to `state`.
 ///
-/// Auth ([`crate::auth::authenticate`]) is applied by the caller (typically wrapped around this
-/// router via `axum::middleware::from_fn_with_state`), not inside this module, so tests here can
-/// call handlers directly without a bearer token.
+/// Two guards wrap every route: [`crate::auth::authenticate`] (bearer token on a non-loopback
+/// bind) and [`crate::auth::guard_local_origin`] (foreign `Host`/`Origin` refused on a loopback
+/// bind, against DNS rebinding and cross-site requests). Neither affects a plain loopback client
+/// such as `curl`, the `tm` CLI or a test's `reqwest`.
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -87,6 +88,14 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(get_metrics))
         .route("/wiki", get(list_wiki_pages))
         .route("/wiki/{*path}", get(get_wiki_page))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::authenticate,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::guard_local_origin,
+        ))
         .with_state(state)
 }
 

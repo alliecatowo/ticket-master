@@ -5,10 +5,8 @@
 ### The interactive coding agent with a ticket-powered background crew
 
 [![CI](https://github.com/alliecatowo/ticket-master/actions/workflows/ci.yml/badge.svg)](https://github.com/alliecatowo/ticket-master/actions/workflows/ci.yml)
-![version](https://img.shields.io/badge/version-0.1.0-blue)
-![rust](https://img.shields.io/badge/rust-1.85%2B-orange)
+[![release](https://img.shields.io/github/v/release/alliecatowo/ticket-master)](https://github.com/alliecatowo/ticket-master/releases/latest)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-green)](#-license)
-![platform](https://img.shields.io/badge/platform-macOS%20prebuilt%20%7C%20Linux%20from%20source-lightgrey)
 
 Chat with an agent live in your terminal — then hand follow-up work to background
 workers as **tickets**, review their submissions, and keep shipping.
@@ -22,7 +20,7 @@ workers as **tickets**, review their submissions, and keep shipping.
 
 ## 📸 Showcase
 
-> Every clip below is the **real `tm` binary** (`v0.1.0`) driven against a disposable
+> Every clip below is the **real `tm` binary** (`v0.1.1`) driven against a disposable
 > project with a **live provider** — no mocks, no scripted turns.
 > Full session + reproduction notes: [`docs/showcase/`](docs/showcase/).
 
@@ -56,43 +54,30 @@ brew install alliecatowo/tap/ticket-master   # installs the `tm` CLI
 ```
 
 <details open>
-<summary><b>Option A — download a release (recommended)</b></summary>
+<summary><b>Option A: download a release</b></summary>
 <br/>
 
-Prebuilt `tm` binaries ship with every [GitHub release](https://github.com/alliecatowo/ticket-master/releases).
-Releases after `v0.1.0` also bundle the built web client (`tm serve` finds it next to the binary,
-so no separate `pnpm build` step is needed after installing that way).
-Release assets are public, so a plain `curl` works (or use `gh release download`):
+Every [GitHub release](https://github.com/alliecatowo/ticket-master/releases) ships a tarball per
+platform (`tm-aarch64-apple-darwin`, `tm-x86_64-apple-darwin`, `tm-aarch64-unknown-linux-gnu`,
+`tm-x86_64-unknown-linux-gnu`) with a `.sha256` beside each. The tarball holds `bin/tm` and the
+built web client in `share/tm/web/`, which `tm serve` finds on its own:
 
 ```sh
-curl -fLO https://github.com/alliecatowo/ticket-master/releases/download/v0.1.0/tm-aarch64-apple-darwin.tar.gz
+curl -fLO https://github.com/alliecatowo/ticket-master/releases/latest/download/tm-aarch64-apple-darwin.tar.gz
 tar -xzf tm-aarch64-apple-darwin.tar.gz
-./tm-aarch64-apple-darwin/tm --version && ./tm-aarch64-apple-darwin/tm init
+./tm-aarch64-apple-darwin/bin/tm --version && ./tm-aarch64-apple-darwin/bin/tm init
 ```
 
-That is the `v0.1.0` layout (binary at `tm-aarch64-apple-darwin/tm`). Releases after `v0.1.0`
-move it to `tm-<target-triple>/bin/tm` next to a bundled `share/tm/web/`.
-
-Or let `scripts/install.sh` do the download, checksum verification (when the release carries a `.sha256`; `v0.1.0`
-doesn't) and layout for you, into
+Or let `scripts/install.sh` do the download, checksum verification and layout for you, into
 `${PREFIX:-$HOME/.local}`:
 
 ```sh
-gh auth login   # once -- the script currently downloads via the gh CLI (the plain curl route above needs no login)
+gh auth login   # once: the script downloads via the gh CLI
 scripts/install.sh
 ```
 
-`mise run release` builds the same tarball layout locally (for testing a release before tagging,
-or a target the matrix below doesn't cover yet). See [`docs/install.md`](docs/install.md) for the
-full guide: upgrading, uninstalling, and installing from a local tarball.
-
-> **Platform status:** `v0.1.0` ships only a macOS arm64 binary (`tm-aarch64-apple-darwin`).
-> On Linux, build from source (Option B). `tm-computer` has compiled on Linux since
-> `b01efda` (after `v0.1.0` was tagged); the release matrix already builds both targets, so the
-> `x86_64-unknown-linux-gnu` asset attaches automatically from the next tag.
->
-> **Asset layout:** `v0.1.0`'s asset has the binary directly at `tm-aarch64-apple-darwin/tm` and
-> bundles no web client. The `bin/tm` + `share/tm/web/` layout starts with the next tag. `scripts/install.sh` handles both layouts.
+`mise run release` builds the same tarball layout locally. See [`docs/install.md`](docs/install.md)
+for the full guide: upgrading, uninstalling, and installing from a local tarball.
 
 </details>
 

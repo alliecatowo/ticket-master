@@ -240,3 +240,45 @@ async fn malformed_create_ticket_body_returns_json_400_naming_every_missing_fiel
         );
     }
 }
+
+/// `tm serve` on loopback has no bearer token, so it must refuse a request addressed to (or
+/// issued by) a foreign host: the DNS-rebinding and cross-site-request cases.
+#[tokio::test]
+async fn loopback_server_rejects_foreign_host_and_origin() {
+    let (_dir, base) = spawn_server().await;
+    let client = http_client();
+
+    let ok = client
+        .get(format!("{base}/health"))
+        .send()
+        .await
+        .expect("health");
+    assert_eq!(ok.status(), reqwest::StatusCode::OK);
+
+    let rebound = client
+        .get(format!("{base}/state"))
+        .header("Host", "attacker.example:4477")
+        .send()
+        .await
+        .expect("rebound host");
+    assert_eq!(rebound.status(), reqwest::StatusCode::FORBIDDEN);
+    let body: Value = rebound.json().await.expect("error json");
+    assert_eq!(body["error"], "forbidden_origin");
+
+    let cross_site = client
+        .post(format!("{base}/tickets"))
+        .header("Origin", "https://attacker.example")
+        .json(&create_ticket_body())
+        .send()
+        .await
+        .expect("cross-site post");
+    assert_eq!(cross_site.status(), reqwest::StatusCode::FORBIDDEN);
+
+    let same_origin = client
+        .get(format!("{base}/health"))
+        .header("Origin", "http://localhost:5173")
+        .send()
+        .await
+        .expect("local dev origin");
+    assert_eq!(same_origin.status(), reqwest::StatusCode::OK);
+}
