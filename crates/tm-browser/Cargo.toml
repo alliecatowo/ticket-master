@@ -17,10 +17,10 @@ futures = { workspace = true }
 tracing = { workspace = true }
 blake3 = { workspace = true }
 async-trait = { workspace = true }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = "0.30"
 # `browser.toml` parsing (`config.rs`).
-toml = "0.9"
+toml = "1"
 # Chrome for Testing publishes SHA256 digests; `blake3` (above) is used for in-process content
 # addressing elsewhere in this crate and does not match the vendor-published digest format.
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"

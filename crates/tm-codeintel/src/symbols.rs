@@ -391,7 +391,7 @@ impl SymbolIndex {
             while let Some(m) = matches.next() {
                 let mut def_node = None;
                 let mut name_node = None;
-                for cap in m.captures {
+                for cap in m.captures() {
                     if Some(cap.index) == def_idx {
                         def_node = Some(cap.node);
                     }
@@ -498,7 +498,7 @@ impl SymbolIndex {
         let mut cursor = tree_sitter::QueryCursor::new();
         let mut matches = cursor.matches(&reference_query, tree.root_node(), source);
         while let Some(m) = matches.next() {
-            for cap in m.captures {
+            for cap in m.captures() {
                 if Some(cap.index) != ref_idx {
                     continue;
                 }

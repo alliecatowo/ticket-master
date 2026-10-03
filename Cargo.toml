@@ -36,27 +36,27 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-toml = "0.9"
+toml = "1"
 libc = "0.2"
-rusqlite = { version = "0.37", features = ["bundled", "blob", "functions", "backup"] }
+rusqlite = { version = "0.40", features = ["bundled", "blob", "functions", "backup"] }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros"] }
-tower-http = { version = "0.6", features = ["trace", "cors"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+tower-http = { version = "0.7", features = ["trace", "cors"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "form", "query"] }
 tokio-stream = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 regex = "1"
 globset = "0.4"
 ignore = "0.4"
-git2 = { version = "0.20", default-features = false }
+git2 = { version = "0.21", default-features = false }
 blake3 = "1"
 time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
-rand = "0.9"
+rand = "0.10"
 parking_lot = "0.12"
-similar = "2"
-dirs = "6"
+similar = "3"
+dirs = "7"
 dotenvy = "0.15"
 futures = "0.3"
 async-trait = "0.1"
@@ -65,7 +65,7 @@ proptest = "1"
 insta = { version = "1", features = ["json", "redactions"] }
 assert_cmd = "2"
 predicates = "3"
-serial_test = "3"
+serial_test = "4"
 # tm-tui: ratatui/ratatui-core own the cell buffer, diffing and the crossterm backend (D-002);
 # everything above the buffer (components, focus, widgets, theming) is ours. ratatui-core is
 # preferred directly wherever a file needs only Buffer/Rect/Style and not the widget set or a
@@ -79,7 +79,7 @@ portable-pty = "0.9"
 # tm-tui test harness only: portable-pty hands back raw bytes, and PtyHarness::screen() needs a
 # rendered grid. A hand-rolled subset parser would make the SIGTERM/SIGHUP/SIGTSTP tests it gates
 # flaky in exactly the cases they exist to catch, so parse properly (D-002).
-vt100 = "0.15"
+vt100 = "0.16"
 # tm-server: renders wiki pages (SPEC.md §26.4, `GET /wiki/*`) from markdown to HTML. No markdown
 # crate existed anywhere in the workspace; pulldown-cmark is the de facto minimal, pure-Rust,
 # well-maintained CommonMark parser (no unsafe, no unbounded recursion by default), chosen over

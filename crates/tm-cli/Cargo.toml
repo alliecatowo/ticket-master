@@ -86,14 +86,14 @@ ratatui-core = { workspace = true }
 # two incompatible major lines. `default-features = false` on all four to keep the opt-in build
 # itself lean: skips otel's metrics/logs support and tracing-opentelemetry's log-bridge, since
 # `install_tracing` only ever asks for traces.
-opentelemetry = { version = "0.32", default-features = false, features = ["trace"], optional = true }
-opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"], optional = true }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = [
+opentelemetry = { version = "0.33", default-features = false, features = ["trace"], optional = true }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace"], optional = true }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = [
   "trace",
   "http-proto",
   "reqwest-blocking-client",
 ], optional = true }
-tracing-opentelemetry = { version = "0.33", default-features = false, optional = true }
+tracing-opentelemetry = { version = "0.34", default-features = false, optional = true }
 
 [features]
 default = []
