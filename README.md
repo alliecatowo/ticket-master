@@ -49,6 +49,12 @@ full session [`tui-live.cast`](docs/showcase/tui-live.cast) (`asciinema play` it
 
 ## 📦 Install
 
+**Homebrew (macOS and Linux):**
+
+```sh
+brew install alliecatowo/tap/ticket-master   # installs the `tm` CLI
+```
+
 <details open>
 <summary><b>Option A — download a release (recommended)</b></summary>
 <br/>
