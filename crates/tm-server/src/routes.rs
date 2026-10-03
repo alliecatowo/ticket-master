@@ -88,6 +88,8 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(get_metrics))
         .route("/wiki", get(list_wiki_pages))
         .route("/wiki/{*path}", get(get_wiki_page))
+        .route("/agent-tokens", post(mint_agent_token))
+        .layer(axum::middleware::from_fn(crate::auth::bind_identity))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::auth::authenticate,
@@ -1194,6 +1196,13 @@ async fn decide_approval(
     Path(id): Path<String>,
     ApiJson(body): ApiJson<DecideApprovalRequest>,
 ) -> Result<Json<Value>, ServerError> {
+    // `decided_by` is the authenticated principal (see `auth::bind_identity`), so this is a
+    // check on the credential: an agent token can never approve or deny.
+    if !body.decided_by.is_human() {
+        return Err(ServerError::Domain(TmError::AuthorityDenied(
+            "only a human may decide an approval".to_string(),
+        )));
+    }
     let decided_at = state.clock.now();
     let pending_request = state
         .approvals
@@ -1234,6 +1243,41 @@ async fn decide_approval(
 
 /// `tm-server` doesn't hold session/transcript state itself (`SPEC.md` §14: sessions are views);
 /// this just mints a fresh id for the caller to tag its own events/presence with.
+#[derive(Debug, Deserialize)]
+struct MintAgentTokenRequest {
+    name: String,
+}
+
+/// `POST /agent-tokens {"name": "worker-1"}`: a human operator mints a bearer token that
+/// authenticates as `agent:api/worker-1` (and can never act as a human). The token is returned once.
+async fn mint_agent_token(
+    State(state): State<AppState>,
+    axum::Extension(principal): axum::Extension<crate::auth::Principal>,
+    ApiJson(body): ApiJson<MintAgentTokenRequest>,
+) -> Result<(StatusCode, Json<Value>), ServerError> {
+    if !principal.is_human() {
+        return Err(ServerError::Domain(TmError::AuthorityDenied(
+            "only a human operator may mint agent tokens".to_string(),
+        )));
+    }
+    let name = body.name.trim();
+    if name.is_empty()
+        || name.len() > 64
+        || name.chars().any(|c| c.is_control() || c.is_whitespace())
+    {
+        return Err(ServerError::BadRequest(
+            "name must be 1-64 characters with no whitespace".to_string(),
+        ));
+    }
+    let participant = ParticipantId::new(format!("agent:api/{name}"))
+        .map_err(|e| ServerError::BadRequest(e.to_string()))?;
+    let token = state.credentials.mint_agent(participant.clone());
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({"participant": participant, "token": token})),
+    ))
+}
+
 async fn create_session(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<CreateSessionRequest>,
@@ -1613,9 +1657,11 @@ mod tests {
     #[tokio::test]
     async fn a_malformed_ticket_id_in_the_url_renders_as_json() {
         let (_dir, state) = test_state();
+        let token = state.credentials.operator_token().to_string();
         let addr = spawn_router(state).await;
         let resp = reqwest::Client::new()
             .get(format!("http://{addr}/tickets/NOTFOUND"))
+            .bearer_auth(&token)
             .send()
             .await
             .expect("request");
@@ -1636,9 +1682,11 @@ mod tests {
     #[tokio::test]
     async fn create_ticket_with_no_fields_names_every_missing_one() {
         let (_dir, state) = test_state();
+        let token = state.credentials.operator_token().to_string();
         let addr = spawn_router(state).await;
         let resp = reqwest::Client::new()
             .post(format!("http://{addr}/tickets"))
+            .bearer_auth(&token)
             .json(&json!({}))
             .send()
             .await
@@ -2111,7 +2159,7 @@ mod tests {
                 decision: ApprovalDecisionBody::Approve {
                     note: Some("looks safe".to_string()),
                 },
-                decided_by: actor(),
+                decided_by: ParticipantId::new("human:tester").expect("participant"),
             }),
         )
         .await

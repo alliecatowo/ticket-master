@@ -20,11 +20,20 @@ use tempfile::TempDir;
 use tm_server::state::{AppState, ServerConfig};
 use tm_types::{Clock, CounterIds, FixedClock, IdSource};
 
+/// The operator token the test server is configured with (loopback requires one too).
+const OPERATOR_TOKEN: &str = "test-operator-token";
+
 /// A `reqwest::Client` that never consults `HTTP_PROXY`/`HTTPS_PROXY`. A sandboxed or CI shell
 /// commonly sets one of those, and without this a loopback request can get silently routed
 /// through it and fail or hang instead of hitting the server this test just bound.
 fn http_client() -> reqwest::Client {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {OPERATOR_TOKEN}").parse().expect("header"),
+    );
     reqwest::Client::builder()
+        .default_headers(headers)
         .no_proxy()
         .build()
         .expect("build a proxy-free reqwest client")
@@ -35,6 +44,11 @@ fn http_client() -> reqwest::Client {
 /// the project's state directory stays alive for the caller's duration, same as `routes.rs`'s own
 /// `test_state` helper.
 async fn spawn_server() -> (TempDir, String) {
+    let (dir, base, _state) = spawn_server_with_state().await;
+    (dir, base)
+}
+
+async fn spawn_server_with_state() -> (TempDir, String, AppState) {
     let dir = TempDir::new().expect("tempdir");
     let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
     let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
@@ -44,7 +58,7 @@ async fn spawn_server() -> (TempDir, String) {
         bind_addr: "127.0.0.1:0"
             .parse::<SocketAddr>()
             .expect("valid loopback addr"),
-        token: None,
+        token: Some(OPERATOR_TOKEN.to_string()),
         presence_ttl_seconds: 60,
         broadcast_poll_interval: Duration::from_millis(10),
         sse_replay_page_size: 100,
@@ -52,7 +66,7 @@ async fn spawn_server() -> (TempDir, String) {
         workers: false,
     };
     let state = AppState::open(config, clock, ids).expect("open app state");
-    let router = tm_server::routes::router(state);
+    let router = tm_server::routes::router(state.clone());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -62,7 +76,7 @@ async fn spawn_server() -> (TempDir, String) {
         axum::serve(listener, router).await.expect("serve");
     });
 
-    (dir, format!("http://{addr}"))
+    (dir, format!("http://{addr}"), state)
 }
 
 fn create_ticket_body() -> Value {
@@ -281,4 +295,193 @@ async fn loopback_server_rejects_foreign_host_and_origin() {
         .await
         .expect("local dev origin");
     assert_eq!(same_origin.status(), reqwest::StatusCode::OK);
+}
+
+fn bare_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("client")
+}
+
+/// Mint an agent token through the API as the operator.
+async fn mint_agent(base: &str, name: &str) -> String {
+    let resp = http_client()
+        .post(format!("{base}/agent-tokens"))
+        .json(&json!({"name": name}))
+        .send()
+        .await
+        .expect("mint");
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    let body: Value = resp.json().await.expect("json");
+    body["token"].as_str().expect("token").to_string()
+}
+
+#[tokio::test]
+async fn loopback_requires_a_bearer_token() {
+    let (_dir, base) = spawn_server().await;
+    let none = bare_client()
+        .get(format!("{base}/state"))
+        .send()
+        .await
+        .expect("req");
+    assert_eq!(none.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let wrong = bare_client()
+        .get(format!("{base}/state"))
+        .bearer_auth("nope")
+        .send()
+        .await
+        .expect("req");
+    assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let empty = bare_client()
+        .get(format!("{base}/state"))
+        .header("authorization", "Bearer ")
+        .send()
+        .await
+        .expect("req");
+    assert_eq!(empty.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn unconfigured_loopback_server_generates_a_random_operator_token() {
+    let dir = TempDir::new().expect("tempdir");
+    let mut config = ServerConfig {
+        project_root: dir.path().to_path_buf(),
+        state_dir: dir.path().join(".tm"),
+        bind_addr: "127.0.0.1:0".parse::<SocketAddr>().expect("addr"),
+        token: None,
+        presence_ttl_seconds: 60,
+        broadcast_poll_interval: Duration::from_millis(10),
+        sse_replay_page_size: 100,
+        sse_keep_alive: Duration::from_secs(15),
+        workers: false,
+    };
+    let a = AppState::open(
+        config.clone(),
+        Arc::new(FixedClock::epoch()),
+        Arc::new(CounterIds::new()),
+    )
+    .expect("open");
+    config.state_dir = dir.path().join(".tm2");
+    let b = AppState::open(
+        config,
+        Arc::new(FixedClock::epoch()),
+        Arc::new(CounterIds::new()),
+    )
+    .expect("open");
+    let (ta, tb) = (
+        a.credentials.operator_token(),
+        b.credentials.operator_token(),
+    );
+    assert!(
+        ta.len() >= 32 && ta != tb,
+        "tokens must be long and unpredictable"
+    );
+}
+
+#[tokio::test]
+async fn body_cannot_claim_a_different_actor() {
+    let (_dir, base) = spawn_server().await;
+    let client = http_client();
+    let resp = client
+        .post(format!("{base}/tickets"))
+        .json(&json!({"kind": "work", "objective": "x", "actor": "human:allie"}))
+        .send()
+        .await
+        .expect("create");
+    assert_eq!(resp.status(), reqwest::StatusCode::CREATED);
+    let body: Value = resp.json().await.expect("json");
+    let id = body["ticket"]["id"].as_str().expect("id").to_string();
+    let events: Value = client
+        .get(format!("{base}/tickets/{id}/events"))
+        .send()
+        .await
+        .expect("events")
+        .json()
+        .await
+        .expect("json");
+    let text = events.to_string();
+    assert!(
+        text.contains("human:operator"),
+        "actor bound to the credential: {text}"
+    );
+    assert!(
+        !text.contains("human:allie"),
+        "body claim must be ignored: {text}"
+    );
+}
+
+#[tokio::test]
+async fn agent_token_cannot_impersonate_a_human_or_decide_approvals() {
+    let (_dir, base) = spawn_server().await;
+    let agent = mint_agent(&base, "bot").await;
+    let agent_client = || bare_client();
+
+    // Agent decides an approval claiming to be a human: refused before the lookup.
+    let decide = agent_client()
+        .post(format!("{base}/approvals/AP-x/decide"))
+        .bearer_auth(&agent)
+        .json(&json!({"decision": {"approve": {}}, "decided_by": "human:allie"}))
+        .send()
+        .await
+        .expect("decide");
+    assert_eq!(decide.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Agent cannot mint further tokens.
+    let mint = agent_client()
+        .post(format!("{base}/agent-tokens"))
+        .bearer_auth(&agent)
+        .json(&json!({"name": "sub"}))
+        .send()
+        .await
+        .expect("mint");
+    assert_eq!(mint.status(), reqwest::StatusCode::FORBIDDEN);
+
+    // Agent creates a ticket "as" a human with a huge authority grant: actor is the agent and
+    // the authority is clamped to the worker default.
+    let resp = agent_client()
+        .post(format!("{base}/tickets"))
+        .bearer_auth(&agent)
+        .json(&json!({
+            "kind": "work", "objective": "x", "actor": "human:allie",
+            "authority": tm_types::Authority::root(),
+        }))
+        .send()
+        .await
+        .expect("create");
+    let status = resp.status();
+    let text = resp.text().await.expect("text");
+    assert_eq!(status, reqwest::StatusCode::CREATED, "{text}");
+    let body: Value = serde_json::from_str(&text).expect("json");
+    let id = body["ticket"]["id"].as_str().expect("id").to_string();
+    let worker =
+        serde_json::to_value(tm_types::Authority::root().intersect(&tm_types::Authority::worker()))
+            .expect("authority json");
+    assert_eq!(body["ticket"]["authority"], worker);
+    let events = http_client()
+        .get(format!("{base}/tickets/{id}/events"))
+        .send()
+        .await
+        .expect("events")
+        .text()
+        .await
+        .expect("text");
+    assert!(
+        events.contains("agent:api/bot") && !events.contains("human:allie"),
+        "{events}"
+    );
+
+    // Accept (human-only) with a human claim in the body is still the agent, so it is refused.
+    let accept = agent_client()
+        .post(format!("{base}/tickets/{id}/transition"))
+        .bearer_auth(&agent)
+        .json(&json!({"accept": {"actor": "human:allie"}}))
+        .send()
+        .await
+        .expect("accept");
+    assert!(
+        accept.status().is_client_error(),
+        "an agent must not accept work, got {}",
+        accept.status()
+    );
 }

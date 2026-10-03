@@ -64,6 +64,12 @@ pub async fn serve(
 
     let _poller = state.spawn_broadcast_poller();
 
+    // Every request needs the operator bearer token, loopback included. It lives in a 0600 file
+    // under the state dir (never printed) so the `tm` tooling and the user can read it, and the
+    // browser gets it in a URL fragment, which is never sent over the wire.
+    let token_path = project.state_dir.join(TOKEN_FILE);
+    write_token_file(&token_path, state.credentials.operator_token())?;
+
     let mut router = tm_server::routes::router((*state).clone());
 
     let web_dir = find_web_client_dir(args.web_dir.as_deref());
@@ -83,6 +89,10 @@ pub async fn serve(
 
     if !renderer.is_quiet() {
         renderer.note(&format!("Serving the API at {base}"));
+        renderer.note(&format!(
+            "Every request needs `Authorization: Bearer <token>`; the token is in {}.",
+            token_path.display()
+        ));
         match &web_dir {
             Some(_) => renderer.note(&format!("Web client: {base}{WEB_PREFIX}/")),
             None => renderer.note(
@@ -95,12 +105,17 @@ pub async fn serve(
         }
     }
     if args.open {
+        let fragment = format!("#token={}", state.credentials.operator_token());
         let url = match &web_dir {
-            Some(_) => format!("{base}{WEB_PREFIX}/"),
+            Some(_) => format!("{base}{WEB_PREFIX}/{fragment}"),
             None => base.clone(),
         };
         if let Err(e) = open_in_browser(&url) {
-            renderer.note(&format!("Couldn't open a browser ({e}); visit {url}"));
+            renderer.note(&format!(
+                "Couldn't open a browser ({e}); visit {} and paste the token from {}",
+                url.split('#').next().unwrap_or(&url),
+                token_path.display()
+            ));
         }
     }
 
@@ -112,6 +127,24 @@ pub async fn serve(
     }
     served?;
     Ok(())
+}
+
+/// File (under the project state dir) holding the operator bearer token of the running server.
+const TOKEN_FILE: &str = "serve.token";
+
+/// Write `token` to `path` readable only by the current user, replacing any stale file.
+pub(crate) fn write_token_file(path: &Path, token: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let _ = std::fs::remove_file(path);
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    file.write_all(token.as_bytes())
 }
 
 /// Open `url` with the platform's opener.
@@ -202,6 +235,19 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn token_file_is_owner_only_and_replaced() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("serve.token");
+        std::fs::write(&path, "stale").expect("seed");
+        super::write_token_file(&path, "fresh-token").expect("write");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "fresh-token");
+        let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
     use super::*;
 
     #[test]

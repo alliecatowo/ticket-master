@@ -95,6 +95,8 @@ pub struct AppState {
     pub approvals: Arc<ApprovalRegistry>,
     /// Resolved server configuration.
     pub config: ServerConfig,
+    /// Bearer credentials and the identity each carries (see [`crate::auth::Credentials`]).
+    pub credentials: Arc<crate::auth::Credentials>,
     /// Injected clock; never read wall-clock time directly (`SPEC.md` determinism rule).
     pub clock: Arc<dyn Clock>,
     /// Injected id source, for anything this crate allocates ids for (approval ids, etc).
@@ -133,6 +135,7 @@ impl AppState {
             broadcaster: Arc::new(EventHub::new()),
             presence: Arc::new(PresenceTable::new()),
             approvals: Arc::new(ApprovalRegistry::new()),
+            credentials: Arc::new(crate::auth::Credentials::new(config.token.as_deref())),
             config,
             clock,
             ids,
