@@ -108,6 +108,7 @@ otel = [
 ]
 
 [dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }

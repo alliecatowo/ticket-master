@@ -1233,6 +1233,10 @@ pub struct ServeArgs {
     /// in the checkout `tm` was built from).
     #[arg(long, value_name = "DIR")]
     pub web_dir: Option<std::path::PathBuf>,
+    /// Read the bearer token from this file (one line, at least 16 characters) instead of
+    /// generating a random one. `TM_SERVER_TOKEN` does the same; a file keeps it out of `ps`.
+    #[arg(long, value_name = "FILE")]
+    pub token_file: Option<std::path::PathBuf>,
 }
 
 /// `tm mcp [--no-workers]`

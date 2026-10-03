@@ -4544,6 +4544,7 @@ dependencies = [
  "tm-workflow",
  "tokio",
  "toml",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
  "tracing-opentelemetry",
