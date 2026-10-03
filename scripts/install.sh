@@ -9,12 +9,15 @@
 #   scripts/install.sh                    Download the release asset matching this OS/arch from
 #                                          the latest GitHub release via `gh release download`.
 #   scripts/install.sh <path/to/tarball>  Install from an already-downloaded (or locally built,
-#                                          e.g. by `mise run release`) tarball instead. If a
-#                                          sibling <tarball>.sha256 exists, it's verified.
+#                                          e.g. by `mise run release`) tarball instead. A
+#                                          sibling <tarball>.sha256 is required and verified;
+#                                          the install fails closed without one.
 #
 # Env vars:
 #   PREFIX   Install prefix (default: $HOME/.local). Installs $PREFIX/bin/tm and
 #            $PREFIX/share/tm/web.
+#   TM_INSTALL_ALLOW_UNVERIFIED=1
+#            Install a tarball that has no .sha256 next to it (you vouch for its provenance).
 #
 # See docs/install.md for the full walkthrough (provider setup, first run, upgrading,
 # uninstalling) and for the `cargo install --git ...` source-install alternative.
@@ -30,7 +33,7 @@ prefix="${PREFIX:-$HOME/.local}"
 cleanup_dirs=""
 cleanup() {
   # shellcheck disable=SC2086 # word-splitting is exactly what we want here: a list of dirs.
-  [ -n "$cleanup_dirs" ] && rm -rf $cleanup_dirs
+  if [ -n "$cleanup_dirs" ]; then rm -rf $cleanup_dirs; fi
 }
 trap cleanup EXIT
 
@@ -42,10 +45,11 @@ die() {
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
 }
+# Sets $new_dir (not command substitution: that would run in a subshell and lose the
+# cleanup_dirs update, leaking the directory).
 new_tmp_dir() {
-  dir="$(mktemp -d)"
-  cleanup_dirs="$cleanup_dirs $dir"
-  printf '%s\n' "$dir"
+  new_dir="$(mktemp -d)"
+  cleanup_dirs="$cleanup_dirs $new_dir"
 }
 
 usage() {
@@ -99,12 +103,14 @@ verify_checksum() {
   tarball="$1"
   sha_file="$2"
   expected="$(awk '{print $1}' "$sha_file")"
+  [ -n "$expected" ] || die "$sha_file is empty; refusing to install an unverified tarball"
   actual="$(sha256_of "$tarball")"
   [ "$expected" = "$actual" ] || die "checksum mismatch for $tarball: expected $expected, got $actual"
   log "checksum OK ($actual)"
 }
 
-# Installs from an on-disk tarball, verifying its checksum first if a sibling .sha256 exists.
+# Installs from an on-disk tarball, verifying its checksum first. A missing .sha256 is an error
+# (fail closed), not a warning.
 install_from_tarball() {
   tarball="$1"
   [ -f "$tarball" ] || die "no such file: $tarball"
@@ -112,11 +118,14 @@ install_from_tarball() {
   sha_file="${tarball}.sha256"
   if [ -f "$sha_file" ]; then
     verify_checksum "$tarball" "$sha_file"
+  elif [ "${TM_INSTALL_ALLOW_UNVERIFIED:-}" = "1" ]; then
+    log "warning: no $sha_file next to $tarball; installing UNVERIFIED because TM_INSTALL_ALLOW_UNVERIFIED=1"
   else
-    log "warning: no $sha_file next to $tarball; skipping checksum verification"
+    die "no $sha_file next to $tarball; refusing to install an unverified tarball (set TM_INSTALL_ALLOW_UNVERIFIED=1 to override)"
   fi
 
-  extract_dir="$(new_tmp_dir)"
+  new_tmp_dir
+  extract_dir="$new_dir"
   tar xzf "$tarball" -C "$extract_dir"
 
   # The tarball's own top-level dir (tm-<target-triple>), discovered rather than re-derived from the
@@ -165,7 +174,8 @@ download_latest() {
   fi
 
   triple="$(detect_triple)"
-  work="$(new_tmp_dir)"
+  new_tmp_dir
+  work="$new_dir"
 
   log "Looking for the latest ${repo} release asset for ${triple}..."
   if ! gh release download --repo "$repo" --pattern "tm-${triple}.tar.gz*" --dir "$work"; then
