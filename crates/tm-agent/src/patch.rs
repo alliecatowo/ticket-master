@@ -516,7 +516,7 @@ fn check_expectation(
 }
 
 /// Tally a `similar` diff's changes into a [`DiffSummary`].
-fn diff_summary<'a>(diff: &TextDiff<'a, 'a, 'a, str>, created: bool, deleted: bool) -> DiffSummary {
+fn diff_summary<'a>(diff: &TextDiff<'a, 'a, str>, created: bool, deleted: bool) -> DiffSummary {
     let mut lines_added = 0;
     let mut lines_removed = 0;
     for change in diff.iter_all_changes() {
@@ -535,7 +535,7 @@ fn diff_summary<'a>(diff: &TextDiff<'a, 'a, 'a, str>, created: bool, deleted: bo
 }
 
 /// Render a `similar` diff as unified-diff text headed with `a/<path>` / `b/<path>`.
-fn unified_diff_text<'a>(diff: &'a TextDiff<'a, 'a, 'a, str>, path: &str) -> String {
+fn unified_diff_text<'a>(diff: &'a TextDiff<'a, 'a, str>, path: &str) -> String {
     diff.unified_diff()
         .header(&format!("a/{path}"), &format!("b/{path}"))
         .to_string()

@@ -12,7 +12,8 @@
     "moduleResolution": "bundler",
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "types": ["node", "vscode"]
   },
   "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "out", "src/**/*.test.ts"]

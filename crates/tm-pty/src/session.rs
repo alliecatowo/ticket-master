@@ -374,7 +374,7 @@ impl PtySession {
                 pixel_height: 0,
             })
             .map_err(|e| io::Error::other(format!("resizing the pty: {e}")))?;
-        self.parser.set_size(rows, cols);
+        self.parser.screen_mut().set_size(rows, cols);
         self.cols = cols;
         self.rows = rows;
         Ok(())

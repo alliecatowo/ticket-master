@@ -214,7 +214,7 @@ impl CdpClient {
                     outgoing = outgoing_rx.recv() => {
                         match outgoing {
                             Some(text) => {
-                                if sink.send(Message::Text(text)).await.is_err() {
+                                if sink.send(Message::Text(text.into())).await.is_err() {
                                     break;
                                 }
                             }

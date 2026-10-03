@@ -437,7 +437,7 @@ CREATE TABLE IF NOT EXISTS doc_meta (
                     id: row.get(0)?,
                     path: row.get(1)?,
                     blake3: row.get(2)?,
-                    size: row.get::<_, u64>(3)?,
+                    size: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
                     lang: str_to_language(row.get::<_, Option<String>>(4)?),
                     mtime: row.get(5)?,
                 })
@@ -466,7 +466,7 @@ CREATE TABLE IF NOT EXISTS doc_meta (
                     id: row.get(0)?,
                     path: row.get(1)?,
                     blake3: row.get(2)?,
-                    size: row.get::<_, u64>(3)?,
+                    size: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
                     lang: str_to_language(row.get::<_, Option<String>>(4)?),
                     mtime: row.get(5)?,
                 })

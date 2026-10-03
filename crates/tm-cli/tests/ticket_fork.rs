@@ -49,7 +49,7 @@ fn first_seq_for(dir: &Path, kind: &str, subject: &str) -> u64 {
     conn.query_row(
         "SELECT MIN(seq) FROM events WHERE kind = ?1 AND subject = ?2",
         rusqlite::params![kind, subject],
-        |row| row.get(0),
+        |row| row.get::<_, i64>(0).map(|n| n as u64),
     )
     .unwrap_or_else(|e| panic!("query seq for {kind} {subject}: {e}"))
 }

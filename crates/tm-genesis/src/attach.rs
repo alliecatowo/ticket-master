@@ -251,7 +251,7 @@ fn detect_external_trackers(root: &Path) -> Vec<ExternalTracker> {
     }
     if let Ok(repo) = git2::Repository::open(root) {
         if let Ok(remote) = repo.find_remote("origin") {
-            if let Some(url) = remote.url() {
+            if let Ok(url) = remote.url() {
                 let tracker = if url.contains("github.com") {
                     Some("GitHub Issues")
                 } else if url.contains("gitlab.com") {

@@ -59,7 +59,7 @@ fn bump_counter(tx: &Tx<'_>, counter: &str, number: u64) -> tm_types::Result<()>
         .execute(
             "INSERT INTO counters (counter_name, value) VALUES (?1, ?2)
              ON CONFLICT(counter_name) DO UPDATE SET value = MAX(value, excluded.value)",
-            params![counter, number],
+            params![counter, i64::try_from(number).unwrap_or(i64::MAX)],
         )
         .map_err(storage_err)?;
     Ok(())
@@ -1256,7 +1256,7 @@ mod tests {
             assert_eq!(objective, "Fix bug");
             assert_eq!(state, "\"draft\"");
 
-            let counter: u64 = tx
+            let counter: i64 = tx
                 .raw()
                 .query_row(
                     "SELECT value FROM counters WHERE counter_name = ?1",

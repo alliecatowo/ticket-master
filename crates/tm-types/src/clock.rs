@@ -8,7 +8,7 @@ use crate::id::{Id, IdKind};
 use crate::time_::Timestamp;
 use parking_lot::Mutex;
 use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
 use std::collections::BTreeMap;
 
 /// Return a monotonic deadline for runtime timeouts that must include real waiting time.
