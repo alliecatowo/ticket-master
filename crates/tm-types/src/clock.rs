@@ -163,6 +163,17 @@ impl CounterIds {
     }
 }
 
+/// `n` bytes of OS-entropy randomness rendered as `2n` lowercase hex characters, for credentials
+/// (bearer tokens) that must be unguessable, unlike [`IdSource::random_hex`], which is seedable
+/// and deterministic under test. Lives here because this file is the one place allowed to touch
+/// randomness (see the hygiene scan).
+pub fn secure_token_hex(n: usize) -> String {
+    let mut rng = rand::rng();
+    (0..n * 2)
+        .map(|_| std::char::from_digit(rng.random_range(0..16), 16).unwrap_or('0'))
+        .collect()
+}
+
 impl Default for CounterIds {
     fn default() -> Self {
         CounterIds::new()
