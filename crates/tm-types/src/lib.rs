@@ -32,7 +32,7 @@ pub use budget::{Budget, BudgetError, Spend};
 pub use capability::{
     AuthorityRequirement, CallContext, CapabilityProvider, CostClass, ToolSchema,
 };
-pub use clock::{Clock, CounterIds, FixedClock, IdSource, SystemClock, TestIds};
+pub use clock::{secure_token_hex, Clock, CounterIds, FixedClock, IdSource, SystemClock, TestIds};
 pub use error::{Result, TmError};
 pub use id::{
     ArtifactId, DecisionId, Id, IdKind, LeaseId, MilestoneId, ParticipantId, SessionId, TicketId,

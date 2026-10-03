@@ -260,6 +260,7 @@ mod tests {
             broadcaster: Arc::new(EventHub::new()),
             presence: Arc::new(crate::presence::PresenceTable::new()),
             approvals: Arc::new(crate::approvals::ApprovalRegistry::new()),
+            credentials: Arc::new(crate::auth::Credentials::new(None)),
             config: ServerConfig {
                 project_root: root.to_path_buf(),
                 state_dir: root.join(".tm"),

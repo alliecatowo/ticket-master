@@ -52,6 +52,26 @@ interface TicketmasterContextValue {
   retryNow: () => void;
 }
 
+const TOKEN_STORAGE_KEY = "tm.web.token";
+
+/**
+ * The server's bearer token. `tm serve --open` passes it in the URL fragment (`#token=...`, which
+ * browsers never send to a server); it is moved into sessionStorage and the fragment is removed
+ * from the address bar so it isn't left in history or copied into a screenshot.
+ */
+export function loadServerToken(): string | undefined {
+  try {
+    const match = /(?:^|[#&])token=([^&]+)/.exec(window.location.hash);
+    if (match) {
+      window.sessionStorage.setItem(TOKEN_STORAGE_KEY, decodeURIComponent(match[1]));
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    }
+    return window.sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const TicketmasterContext = createContext<TicketmasterContextValue | null>(null);
 
 const EMPTY_PRESENCE: PresenceSnapshot = { participants: [], path_leases: [] };
@@ -69,7 +89,7 @@ export function TicketmasterProvider({
   client?: TicketmasterClient;
 }) {
   const client = useMemo(
-    () => injected ?? new TicketmasterClient({ handle: loadHandle() }),
+    () => injected ?? new TicketmasterClient({ handle: loadHandle(), token: loadServerToken() }),
     [injected],
   );
   const live = useMemo(() => new LiveProject(client), [client]);

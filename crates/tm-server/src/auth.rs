@@ -16,6 +16,8 @@ use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
+use tm_types::ParticipantId;
+
 use crate::state::{AppState, ServerConfig, ServerError};
 
 /// Server authentication configuration (bind address and optional bearer token).
@@ -64,7 +66,8 @@ impl From<AuthError> for ServerError {
 }
 
 /// Resolve the effective bearer token: `configured` (from [`crate::state::ServerConfig::token`])
-/// if set, otherwise the `TM_SERVER_TOKEN` environment variable.
+/// if set, otherwise the `TM_SERVER_TOKEN` environment variable. An empty token is never valid
+/// (it would match an empty `Bearer ` header), so it counts as unset.
 ///
 /// Impure (reads the environment) by necessity — kept as the one small I/O seam so
 /// [`token_matches`] and [`BindAddress::requires_token`] stay pure and unit-testable.
@@ -72,6 +75,83 @@ pub fn resolve_token(configured: Option<&str>) -> Option<String> {
     configured
         .map(str::to_owned)
         .or_else(|| std::env::var("TM_SERVER_TOKEN").ok())
+        .filter(|t| !t.is_empty())
+}
+
+/// Who a request is, as established by the credential it presented. Never taken from the body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Principal {
+    /// The participant every `actor`/`decided_by`/`holder` in the request is bound to.
+    pub id: ParticipantId,
+}
+
+impl Principal {
+    /// True for a human operator credential (may set authority, decide approvals, mint agent
+    /// tokens, and act as a `human:` participant).
+    pub fn is_human(&self) -> bool {
+        self.id.is_human()
+    }
+}
+
+/// The participant a human operator's token acts as.
+pub const OPERATOR_PARTICIPANT: &str = "human:operator";
+
+/// Every bearer credential this server accepts, and the identity each one carries.
+///
+/// There is always an operator token (configured, or random per process) — even on loopback,
+/// where any local process (including the agents this server supervises) can otherwise reach the
+/// port. Agent tokens are minted by the operator for a named `agent:` participant and can never
+/// act as a human.
+pub struct Credentials {
+    operator: String,
+    agents: parking_lot::RwLock<std::collections::HashMap<String, ParticipantId>>,
+}
+
+impl std::fmt::Debug for Credentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Credentials(..)")
+    }
+}
+
+impl Credentials {
+    /// Use `configured`/`TM_SERVER_TOKEN` as the operator token when set, else generate a random
+    /// 256-bit one.
+    pub fn new(configured: Option<&str>) -> Self {
+        let operator = resolve_token(configured).unwrap_or_else(|| tm_types::secure_token_hex(32));
+        Credentials {
+            operator,
+            agents: parking_lot::RwLock::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// The operator token (for the 0600 token file and the `--open` URL fragment only).
+    pub fn operator_token(&self) -> &str {
+        &self.operator
+    }
+
+    /// Mint a fresh token that authenticates as `participant` (must be an `agent:` id).
+    pub fn mint_agent(&self, participant: ParticipantId) -> String {
+        let token = tm_types::secure_token_hex(32);
+        self.agents.write().insert(token.clone(), participant);
+        token
+    }
+
+    /// The principal a presented bearer token belongs to, if any. Compares in constant time
+    /// against every credential so timing doesn't reveal a prefix match.
+    pub fn identify(&self, provided: &str) -> Option<Principal> {
+        let mut found = None;
+        if token_matches(&self.operator, provided) {
+            found = Some(Principal {
+                id: ParticipantId::new(OPERATOR_PARTICIPANT).ok()?,
+            });
+        }
+        for (token, id) in self.agents.read().iter() {
+            if token_matches(token, provided) {
+                found = Some(Principal { id: id.clone() });
+            }
+        }
+        found
+    }
 }
 
 /// Constant-time comparison of `provided` against `expected`, so token comparison time does not
@@ -107,31 +187,113 @@ pub fn bearer_token(req: &Request) -> Option<&str> {
         .and_then(|s| s.strip_prefix("Bearer "))
 }
 
-/// Axum middleware: when `state.config.requires_auth()`, reject the request unless
-/// [`bearer_token`] is present and [`token_matches`] the resolved token; otherwise (loopback
-/// bind) pass every request through unchanged.
+/// Axum middleware: every request, loopback or not, must carry `Authorization: Bearer <token>`
+/// matching a credential in [`Credentials`]; the matching [`Principal`] is attached to the
+/// request for [`bind_identity`] and handlers.
 ///
 /// # Errors
-/// [`ServerError::Unauthorized`] (via [`AuthError`]) on a missing, invalid, or (misconfigured)
-/// absent-but-required token.
+/// [`ServerError::Unauthorized`] on a missing or unknown token.
 pub async fn authenticate(
     State(state): State<AppState>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Result<Response, ServerError> {
-    if !state.config.requires_auth() {
+    let provided = bearer_token(&req).ok_or(AuthError::MissingToken)?;
+    let principal = state
+        .credentials
+        .identify(provided)
+        .ok_or(AuthError::InvalidToken)?;
+    req.extensions_mut().insert(principal);
+    Ok(next.run(req).await)
+}
+
+/// Body keys that name *who* is acting. Overwritten with the authenticated principal.
+const IDENTITY_KEYS: &[&str] = &[
+    "actor",
+    "decided_by",
+    "requested_by",
+    "holder",
+    "participant",
+];
+
+/// Largest body [`bind_identity`] will buffer (matches axum's default `Json` limit).
+const MAX_BODY: usize = 2 * 1024 * 1024;
+
+/// Overwrite every identity claim in `value` (top level, and one level down for the tagged
+/// `transition` bodies) with `principal`, and attenuate a requested `authority` so a non-human
+/// credential can never grant more than [`tm_types::Authority::worker`].
+fn bind_value(
+    value: &mut serde_json::Value,
+    principal: &Principal,
+    depth: usize,
+) -> Result<(), ServerError> {
+    let serde_json::Value::Object(map) = value else {
+        return Ok(());
+    };
+    for key in IDENTITY_KEYS {
+        if map.contains_key(*key) {
+            map.insert(
+                (*key).to_string(),
+                serde_json::Value::String(principal.id.as_str().to_string()),
+            );
+        }
+    }
+    if !principal.is_human() {
+        if let Some(requested) = map.get("authority").cloned() {
+            let requested: tm_types::Authority = serde_json::from_value(requested)
+                .map_err(|e| ServerError::BadRequest(format!("invalid authority: {e}")))?;
+            let clamped = requested.intersect(&tm_types::Authority::worker());
+            map.insert(
+                "authority".to_string(),
+                serde_json::to_value(clamped)
+                    .map_err(|e| ServerError::BadRequest(e.to_string()))?,
+            );
+        }
+    }
+    if depth == 0 {
+        for nested in map.values_mut() {
+            if nested.is_object() {
+                bind_value(nested, principal, 1)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Axum middleware (runs after [`authenticate`]): rewrite the JSON request body so `actor`,
+/// `decided_by`, `requested_by`, `holder` and `participant` are the authenticated principal, no
+/// matter what the client sent, and clamp `authority` for non-human credentials. A client can
+/// therefore never claim `human:allie` (or anything else) in a body.
+pub async fn bind_identity(req: Request, next: Next) -> Result<Response, ServerError> {
+    let Some(principal) = req.extensions().get::<Principal>().cloned() else {
+        return Err(AuthError::MissingToken.into());
+    };
+    let is_json = req
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("application/json"));
+    if !is_json {
         return Ok(next.run(req).await);
     }
-
-    let token = resolve_token(state.config.token.as_deref()).ok_or(AuthError::NotConfigured)?;
-
-    let provided = bearer_token(&req).ok_or(AuthError::MissingToken)?;
-
-    if !token_matches(&token, provided) {
-        return Err(AuthError::InvalidToken.into());
-    }
-
-    Ok(next.run(req).await)
+    let (mut parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, MAX_BODY)
+        .await
+        .map_err(|e| ServerError::BadRequest(format!("unreadable request body: {e}")))?;
+    let out = match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(mut value) => {
+            bind_value(&mut value, &principal, 0)?;
+            axum::body::Bytes::from(
+                serde_json::to_vec(&value).map_err(|e| ServerError::BadRequest(e.to_string()))?,
+            )
+        }
+        // Not valid JSON: let the handler's extractor produce its usual error.
+        Err(_) => bytes,
+    };
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Ok(next
+        .run(Request::from_parts(parts, axum::body::Body::from(out)))
+        .await)
 }
 
 /// True when `authority` (a `Host` header value or the authority part of an `Origin` URL, with
@@ -291,9 +453,11 @@ mod tests {
     }
 
     #[test]
-    fn resolve_token_empty_string_is_valid() {
-        let result = resolve_token(Some(""));
-        assert_eq!(result, Some(String::new()));
+    fn resolve_token_empty_string_is_never_valid() {
+        let _guard = ENV_LOCK.lock().expect("lock poisoned");
+        std::env::remove_var("TM_SERVER_TOKEN");
+        assert_eq!(resolve_token(Some("")), None);
+        assert!(Credentials::new(Some("")).operator_token().len() >= 32);
     }
 
     #[test]
