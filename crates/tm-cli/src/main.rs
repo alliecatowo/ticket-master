@@ -365,6 +365,10 @@ async fn dispatch(cli: Cli, renderer: &Renderer) -> tm_types::Result<()> {
         Some(Command::Project(cmd)) => {
             project::dispatch_project(&cmd, cli.global.project.as_deref(), renderer)
         }
+        Some(Command::Trust(args)) => {
+            let opened = project::open_for_command(cli.global.project.as_deref())?;
+            tm_cli::trust::dispatch_trust(&args, &opened, renderer)
+        }
         Some(Command::Wiki(cmd)) => {
             let opened = project::open_for_command(cli.global.project.as_deref())?;
             wiki::dispatch_wiki(&cmd, &opened, renderer)
