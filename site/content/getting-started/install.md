@@ -4,7 +4,7 @@ weight = 1
 +++
 
 `tm` is a single Rust binary (package `tm-cli`, binary name `tm`) plus an optional built web client.
-It is **not** published to crates.io or Homebrew; install from a GitHub release or from source.
+It is **not** published to crates.io. Install it with Homebrew (`brew install alliecatowo/tap/ticket-master`), from a GitHub release, or from source.
 
 ## Requirements
 
