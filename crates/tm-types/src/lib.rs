@@ -23,6 +23,7 @@ pub mod predicate;
 pub mod role;
 pub mod sanitize;
 pub mod time_;
+pub mod trust;
 
 pub use action::{Action, Decision, GitOp, Oversight, ProjectOp, TicketOp};
 pub use authority::{
@@ -42,3 +43,4 @@ pub use pattern::{PathPattern, PatternSet};
 pub use predicate::{Predicate, PredicateOutcome};
 pub use role::{Role, Tolerance};
 pub use time_::Timestamp;
+pub use trust::{TrustPolicy, TrustStatus, GATED_FILES};

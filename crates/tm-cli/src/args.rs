@@ -138,7 +138,8 @@ const AFTER_HELP: &str = "More commands (still work, just not in the list above)
     browser    Drive a headless browser\n  \
     computer   Drive the real desktop\n  \
     project    Inspect where a project's state lives\n  \
-    wiki       Regenerate the project wiki\n";
+    wiki       Regenerate the project wiki\n  \
+    trust      Allow this repo's hooks.toml, acp.toml and oversight.toml to take effect\n";
 
 /// Every `tm` subcommand.
 #[derive(Debug, Subcommand)]
@@ -279,6 +280,23 @@ pub enum Command {
     /// written under `docs/wiki/` at the workspace root.
     #[command(subcommand, hide = true)]
     Wiki(WikiCommand),
+
+    /// Allow this project's hooks.toml, acp.toml and oversight.toml to take effect. They can run
+    /// commands or relax approvals, so a freshly cloned repo's copies are ignored until you
+    /// review them here. Editing them asks again.
+    #[command(hide = true)]
+    Trust(TrustArgs),
+}
+
+/// `tm trust` arguments.
+#[derive(Debug, clap::Args)]
+pub struct TrustArgs {
+    /// Stop trusting this project.
+    #[arg(long, conflicts_with = "status")]
+    pub revoke: bool,
+    /// Show whether this project is trusted without changing anything.
+    #[arg(long)]
+    pub status: bool,
 }
 
 /// `tm wiki ...` generates project documentation from current state.

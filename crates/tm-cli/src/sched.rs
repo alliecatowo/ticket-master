@@ -2829,6 +2829,8 @@ mod tests {
     /// matches -- `crate::dispatch::acp_override_role` is how it knows.
     #[test]
     fn acp_override_role_names_the_role_acp_toml_overrides() {
+        // These tests are about parsing, not trust (see `tm_types::trust`).
+        std::env::set_var("TM_TRUST_ALL", "1");
         let dir = tempfile::tempdir().expect("tempdir");
         let project = test_project(dir.path());
         assert_eq!(

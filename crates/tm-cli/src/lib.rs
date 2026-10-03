@@ -60,6 +60,7 @@ pub mod serve;
 pub mod stats;
 pub mod ticket;
 pub mod tickets;
+pub mod trust;
 pub mod tui;
 pub mod wiki;
 pub mod workflow;

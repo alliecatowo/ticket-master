@@ -137,10 +137,20 @@ struct HookResponse {
 /// `pre_tool_us` must fail loudly, not silently configure nothing, mirroring
 /// `tm-cli::dispatch::load_oversight`'s same choice for `oversight.toml`).
 pub fn load_hooks_toml(root: &Path) -> tm_types::Result<HookConfig> {
+    load_hooks_toml_with(root, &tm_types::TrustPolicy::from_env())
+}
+
+/// [`load_hooks_toml`] against an explicit trust policy. A `hooks.toml` committed to a repo runs
+/// shell commands, so it is only loaded when the workspace is trusted (`tm trust`).
+pub fn load_hooks_toml_with(
+    root: &Path,
+    trust: &tm_types::TrustPolicy,
+) -> tm_types::Result<HookConfig> {
     let path = root.join(HOOKS_TOML_FILENAME);
     if !path.exists() {
         return Ok(HookConfig::default());
     }
+    trust.require(root, HOOKS_TOML_FILENAME)?;
     let source = std::fs::read_to_string(&path)
         .map_err(|e| tm_types::TmError::Io(format!("reading {}: {e}", path.display())))?;
     toml::from_str(&source)
@@ -394,7 +404,8 @@ mod tests {
     #[test]
     fn load_hooks_toml_defaults_to_empty_without_a_hooks_toml() {
         let dir = tempfile::TempDir::new().expect("tempdir");
-        let config = load_hooks_toml(dir.path()).expect("no error");
+        let config = load_hooks_toml_with(dir.path(), &tm_types::TrustPolicy::allow_all())
+            .expect("no error");
         assert!(config.pre_tool_use.is_empty());
         assert!(config.post_tool_use.is_empty());
     }
@@ -408,7 +419,8 @@ mod tests {
         )
         .expect("write hooks.toml");
 
-        let config = load_hooks_toml(dir.path()).expect("parses");
+        let config =
+            load_hooks_toml_with(dir.path(), &tm_types::TrustPolicy::allow_all()).expect("parses");
         assert_eq!(config.pre_tool_use.len(), 1);
         assert_eq!(config.pre_tool_use[0].matcher.as_deref(), Some("shell.run"));
     }
@@ -419,7 +431,7 @@ mod tests {
         std::fs::write(dir.path().join(HOOKS_TOML_FILENAME), "pre_tool_us = []\n")
             .expect("write hooks.toml");
 
-        assert!(load_hooks_toml(dir.path()).is_err());
+        assert!(load_hooks_toml_with(dir.path(), &tm_types::TrustPolicy::allow_all()).is_err());
     }
 
     #[tokio::test]
@@ -662,5 +674,22 @@ mod tests {
                 &ctx,
             )
             .await;
+    }
+
+    #[test]
+    fn load_hooks_toml_refuses_an_untrusted_workspace_and_loads_a_trusted_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        std::fs::write(
+            root.join(HOOKS_TOML_FILENAME),
+            "session_start = [{ command = [\"sh\", \"-c\", \"touch pwned\"] }]\n",
+        )
+        .expect("write");
+        let policy = tm_types::TrustPolicy::with_store(dir.path().join("trust"));
+        let err = load_hooks_toml_with(&root, &policy).expect_err("untrusted must not load");
+        assert!(err.to_string().contains("tm trust"), "{err}");
+        policy.trust(&root).expect("trust");
+        assert!(load_hooks_toml_with(&root, &policy).is_ok());
     }
 }

@@ -217,6 +217,7 @@ fn read_acp_toml(project: &Project) -> tm_types::Result<Option<AcpToml>> {
     if !path.exists() {
         return Ok(None);
     }
+    tm_types::TrustPolicy::from_env().require(&project.root, ACP_TOML_FILENAME)?;
     let source = std::fs::read_to_string(&path)
         .map_err(|e| tm_types::TmError::Io(format!("reading {}: {e}", path.display())))?;
     let parsed: AcpToml = toml::from_str(&source)
@@ -253,6 +254,9 @@ pub(crate) fn load_oversight(project: &Project) -> tm_types::Result<Oversight> {
     if !path.exists() {
         return Ok(Oversight::default());
     }
+    // A committed `oversight.toml` can loosen approvals, so an untrusted one refuses to run
+    // rather than silently falling back to the (more permissive) default.
+    tm_types::TrustPolicy::from_env().require(&project.root, OVERSIGHT_TOML_FILENAME)?;
     let source = std::fs::read_to_string(&path)
         .map_err(|e| tm_types::TmError::Io(format!("reading {}: {e}", path.display())))?;
     toml::from_str(&source)
@@ -586,6 +590,8 @@ mod tests {
 
     #[test]
     fn optional_acp_executor_reads_the_command_and_role_from_a_real_acp_toml() {
+        // These tests are about parsing, not trust (see `tm_types::trust`).
+        std::env::set_var("TM_TRUST_ALL", "1");
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join(ACP_TOML_FILENAME),
@@ -603,6 +609,8 @@ mod tests {
 
     #[test]
     fn optional_acp_executor_honors_an_explicit_timeout() {
+        // These tests are about parsing, not trust (see `tm_types::trust`).
+        std::env::set_var("TM_TRUST_ALL", "1");
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join(ACP_TOML_FILENAME),
@@ -619,6 +627,8 @@ mod tests {
 
     #[test]
     fn optional_acp_executor_surfaces_a_parse_error_for_malformed_toml() {
+        // These tests are about parsing, not trust (see `tm_types::trust`).
+        std::env::set_var("TM_TRUST_ALL", "1");
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join(ACP_TOML_FILENAME), "not valid toml [[[")
             .expect("write acp.toml");
@@ -651,6 +661,8 @@ mod tests {
 
     #[test]
     fn load_oversight_parses_approval_required_and_spend_limit_from_a_real_oversight_toml() {
+        // These tests are about parsing, not trust (see `tm_types::trust`).
+        std::env::set_var("TM_TRUST_ALL", "1");
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join(OVERSIGHT_TOML_FILENAME),
@@ -667,6 +679,8 @@ mod tests {
 
     #[test]
     fn load_oversight_surfaces_a_parse_error_for_malformed_toml() {
+        // These tests are about parsing, not trust (see `tm_types::trust`).
+        std::env::set_var("TM_TRUST_ALL", "1");
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(
             dir.path().join(OVERSIGHT_TOML_FILENAME),
@@ -683,6 +697,8 @@ mod tests {
 
     #[test]
     fn load_oversight_rejects_a_misspelled_key_instead_of_silently_ignoring_it() {
+        // These tests are about parsing, not trust (see `tm_types::trust`).
+        std::env::set_var("TM_TRUST_ALL", "1");
         // `Oversight`'s `deny_unknown_fields`: a typo here (`approval_requird`) must fail loudly,
         // not parse into an empty, all-autonomous policy a human wrongly believes is gating
         // something.
