@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 use axum::extract::{Path as AxumPath, State};
-use axum::response::Html;
+use axum::response::{Html, IntoResponse, Response};
 use regex::Regex;
 
 use tm_docs::registry::parse_front_matter;
@@ -117,29 +117,117 @@ fn strip_front_matter(markdown: &str) -> (String, Option<String>) {
     (body_lines.join("\n"), meta)
 }
 
+/// Escape `&`, `<`, `>`, `"` and `'` for use in HTML text or a quoted attribute.
+fn escape_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// A link/image target is kept only when it is relative, an anchor, or `http(s)`/`mailto`;
+/// anything else (`javascript:`, `data:`, `vbscript:`...) becomes `#`.
+fn safe_url(url: &str) -> bool {
+    let u = url.trim_start().to_ascii_lowercase();
+    let u: String = u
+        .chars()
+        .filter(|c| !c.is_control() && !c.is_whitespace())
+        .collect();
+    match u.split_once(':') {
+        None => true,
+        Some((scheme, _)) => {
+            // A ':' after a '/', '?' or '#' belongs to a relative path, not a scheme.
+            scheme.contains(['/', '?', '#']) || matches!(scheme, "http" | "https" | "mailto")
+        }
+    }
+}
+
+/// Render markdown with raw HTML neutralised: `<script>`, `<img onerror=...>` and the like are
+/// shown as text, and non-web link schemes are dropped. The wiki is repo (and LLM) authored, so
+/// it is untrusted input served from the API origin.
 fn markdown_to_html(markdown: &str) -> String {
+    use pulldown_cmark::{CowStr, Event, Tag};
+    let events = pulldown_cmark::Parser::new(markdown).map(|event| match event {
+        Event::Html(h) | Event::InlineHtml(h) => Event::Text(h),
+        Event::Start(Tag::Link {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) if !safe_url(&dest_url) => Event::Start(Tag::Link {
+            link_type,
+            dest_url: CowStr::Borrowed("#"),
+            title,
+            id,
+        }),
+        Event::Start(Tag::Image {
+            link_type,
+            dest_url,
+            title,
+            id,
+        }) if !safe_url(&dest_url) => Event::Start(Tag::Image {
+            link_type,
+            dest_url: CowStr::Borrowed("#"),
+            title,
+            id,
+        }),
+        other => other,
+    });
     let mut html = String::new();
-    pulldown_cmark::html::push_html(&mut html, pulldown_cmark::Parser::new(markdown));
+    pulldown_cmark::html::push_html(&mut html, events);
     html
 }
 
 fn html_page(title: &str, body_html: &str) -> String {
     format!(
-        "<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>{title}</title></head>\n<body>\n{body_html}\n</body>\n</html>\n"
+        "<!DOCTYPE html>\n<html lang=\"en\">\n<head><meta charset=\"utf-8\"><title>{}</title></head>\n<body>\n{body_html}\n</body>\n</html>\n",
+        escape_html(title)
     )
+}
+
+/// An HTML response that browsers will not run scripts from, even if sanitising missed
+/// something: a locked-down CSP and no MIME sniffing.
+fn locked_down_html(html: String) -> Response {
+    (
+        [
+            (
+                axum::http::header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            ),
+            (axum::http::header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
+        ],
+        Html(html),
+    )
+        .into_response()
 }
 
 /// `GET /wiki/{*path}`: render one wiki page as HTML.
 pub async fn get_wiki_page(
     State(state): State<AppState>,
     AxumPath(path): AxumPath<String>,
-) -> Result<Html<String>, ServerError> {
+) -> Result<Response, ServerError> {
     let rel = resolve_rel_path(&path)?;
-    let full = state.config.project_root.join(WIKI_DIR).join(&rel);
+    let wiki_root = state.config.project_root.join(WIKI_DIR);
+    let full = wiki_root.join(&rel);
+    let not_found =
+        || ServerError::Domain(TmError::not_found("wiki page", rel.display().to_string()));
 
-    let markdown = std::fs::read_to_string(&full).map_err(|_| {
-        ServerError::Domain(TmError::not_found("wiki page", rel.display().to_string()))
-    })?;
+    // Refuse symlinks (a committed `docs/wiki/x.md -> ~/.ssh/config` must not be served): the
+    // canonical path has to stay under the canonical wiki root.
+    let canonical_root = std::fs::canonicalize(&wiki_root).map_err(|_| not_found())?;
+    let canonical = std::fs::canonicalize(&full).map_err(|_| not_found())?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err(not_found());
+    }
+    let markdown = std::fs::read_to_string(&canonical).map_err(|_| not_found())?;
 
     let (body, meta) = strip_front_matter(&markdown);
     let linked = linkify_ticket_ids(&body);
@@ -148,7 +236,10 @@ pub async fn get_wiki_page(
         body_html = format!("{}\n{body_html}", markdown_to_html(&meta));
     }
 
-    Ok(Html(html_page(&rel.display().to_string(), &body_html)))
+    Ok(locked_down_html(html_page(
+        &rel.display().to_string(),
+        &body_html,
+    )))
 }
 
 fn collect_pages(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), ServerError> {
@@ -160,7 +251,14 @@ fn collect_pages(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), S
             ServerError::Domain(TmError::storage(format!("reading {}: {e}", dir.display())))
         })?;
         let path = entry.path();
-        if path.is_dir() {
+        // Symlinks are neither followed (no cycles, no escaping the wiki) nor listed.
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_pages(root, &path, out)?;
         } else if path.extension().is_some_and(|e| e == "md") {
             if let Ok(rel) = path.strip_prefix(root) {
@@ -172,7 +270,7 @@ fn collect_pages(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), S
 }
 
 /// `GET /wiki`: an index of every page found under `docs/wiki/`, linking to each one.
-pub async fn list_wiki_pages(State(state): State<AppState>) -> Result<Html<String>, ServerError> {
+pub async fn list_wiki_pages(State(state): State<AppState>) -> Result<Response, ServerError> {
     let root = state.config.project_root.join(WIKI_DIR);
 
     let mut pages = Vec::new();
@@ -183,11 +281,12 @@ pub async fn list_wiki_pages(State(state): State<AppState>) -> Result<Html<Strin
 
     let mut body = String::from("<h1>Wiki</h1>\n<ul>\n");
     for page in &pages {
+        let page = escape_html(page);
         body.push_str(&format!("<li><a href=\"/wiki/{page}\">{page}</a></li>\n"));
     }
     body.push_str("</ul>\n");
 
-    Ok(Html(html_page("Wiki", &body)))
+    Ok(locked_down_html(html_page("Wiki", &body)))
 }
 
 #[cfg(test)]
@@ -275,5 +374,25 @@ mod tests {
     fn markdown_to_html_renders_a_heading() {
         let html = markdown_to_html("# Hello\n");
         assert!(html.contains("<h1>Hello</h1>"));
+    }
+
+    #[test]
+    fn markdown_to_html_neutralises_raw_html_and_script_links() {
+        let html = markdown_to_html(
+            "<script>alert(1)</script>\n\ntext <img src=x onerror=alert(2)>\n\n[a](javascript:alert(3)) [b](JaVa\tScRiPt:alert(4)) [ok](/tickets/T-1) [web](https://example.com)\n",
+        );
+        assert!(!html.contains("<script"), "{html}");
+        assert!(!html.contains("<img"), "{html}");
+        assert!(!html.to_lowercase().contains("href=\"javascript"), "{html}");
+        assert!(html.contains("href=\"/tickets/T-1\""));
+        assert!(html.contains("href=\"https://example.com\""));
+        assert!(html.contains("&lt;script&gt;"));
+    }
+
+    #[test]
+    fn titles_and_page_names_are_escaped() {
+        let page = html_page("\"><img src=x onerror=alert(1)>", "");
+        assert!(!page.contains("<img"), "{page}");
+        assert_eq!(escape_html("a<b>&\"'"), "a&lt;b&gt;&amp;&quot;&#39;");
     }
 }
