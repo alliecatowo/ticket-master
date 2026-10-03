@@ -26,3 +26,4 @@ docs/public/
 
 site/public/
 clients/web/dist-demo/
+site/static/giallo-*.css
