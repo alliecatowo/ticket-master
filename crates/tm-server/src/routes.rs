@@ -149,9 +149,9 @@ fn milestone_json(m: &Milestone) -> Value {
 fn artifact_json(a: &Artifact) -> Value {
     let storage = match &a.storage {
         ArtifactStorage::Inline(bytes) => json!({"kind": "inline", "len": bytes.len()}),
-        ArtifactStorage::OnDisk(path) => {
-            json!({"kind": "disk", "path": path.display().to_string()})
-        }
+        // The on-disk location would leak the user's home directory to any client; the artifact
+        // id and hash are what identify it.
+        ArtifactStorage::OnDisk(_) => json!({"kind": "disk"}),
     };
     json!({
         "id": a.id,
@@ -2178,6 +2178,22 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status_of(err), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn artifact_json_does_not_leak_the_disk_path() {
+        let artifact = Artifact {
+            id: ArtifactId::new("ART-9f2a1c0b77de").expect("id"),
+            kind: ArtifactKind::CommandOutput,
+            media_type: "text/plain".to_string(),
+            bytes_len: 10,
+            hash: "abc".to_string(),
+            storage: ArtifactStorage::OnDisk(std::path::PathBuf::from("/home/someone/.tm/a")),
+            meta: json!({}),
+        };
+        let rendered = artifact_json(&artifact).to_string();
+        assert!(!rendered.contains("/home/someone"), "{rendered}");
+        assert!(rendered.contains("disk"));
     }
 
     #[tokio::test]
