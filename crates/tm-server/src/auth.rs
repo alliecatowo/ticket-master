@@ -10,9 +10,11 @@
 use std::net::SocketAddr;
 
 use axum::extract::{Request, State};
-use axum::http::header::AUTHORIZATION;
+use axum::http::header::{AUTHORIZATION, HOST, ORIGIN};
+use axum::http::StatusCode;
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
 
 use crate::state::{AppState, ServerConfig, ServerError};
 
@@ -132,6 +134,78 @@ pub async fn authenticate(
     Ok(next.run(req).await)
 }
 
+/// True when `authority` (a `Host` header value or the authority part of an `Origin` URL, with
+/// or without a port) names this machine's loopback interface: `localhost`, any `*.localhost`
+/// name, a `127.0.0.0/8` address or `[::1]`.
+///
+/// A DNS-rebinding page is served from an attacker's hostname (which merely *resolves* to
+/// `127.0.0.1`), so its `Host`/`Origin` is never one of these.
+pub fn is_loopback_authority(authority: &str) -> bool {
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((ip, _port)) => ip,
+            None => return false,
+        }
+    } else {
+        authority.split(':').next().unwrap_or(authority)
+    };
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Axum middleware: on a loopback bind (where no bearer token is required), refuse any request
+/// whose `Host` or `Origin` header names a non-loopback host.
+///
+/// Without a token, the only thing standing between the API and a web page the user happens to
+/// have open is the browser's same-origin policy. A DNS-rebinding attack (attacker hostname
+/// re-resolved to `127.0.0.1`) or a cross-site form post defeats that, so the server enforces it
+/// itself. Requests with no `Host`/`Origin` (curl, the `tm` CLI, `reqwest`) are unaffected; a
+/// non-loopback bind is protected by the bearer token instead and skips this check.
+///
+/// # Errors
+/// A `403 Forbidden` JSON body (`{"error":"forbidden_origin", ...}`) for a foreign header.
+pub async fn guard_local_origin(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if state.config.requires_auth() {
+        return next.run(req).await;
+    }
+
+    let host_ok = req
+        .headers()
+        .get(HOST)
+        .is_none_or(|v| v.to_str().is_ok_and(is_loopback_authority));
+    let origin_ok = req.headers().get(ORIGIN).is_none_or(|v| {
+        v.to_str().is_ok_and(|o| {
+            let authority = o.split_once("://").map_or(o, |(_, rest)| rest);
+            let authority = authority.split('/').next().unwrap_or(authority);
+            is_loopback_authority(authority)
+        })
+    });
+
+    if host_ok && origin_ok {
+        return next.run(req).await;
+    }
+
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "forbidden_origin",
+            "message": "This server only answers requests addressed to localhost.",
+        })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +217,41 @@ mod tests {
     /// process-global and `cargo test` runs in parallel by default, so without this they race
     /// (mirrors `tm_provider::providers::serverless::tests::ENV_LOCK`'s convention).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn loopback_authorities_are_recognised() {
+        for ok in [
+            "localhost",
+            "localhost:4477",
+            "LOCALHOST.:4477",
+            "app.localhost:80",
+            "127.0.0.1",
+            "127.0.0.1:4477",
+            "127.1.2.3:9",
+            "[::1]",
+            "[::1]:4477",
+        ] {
+            assert!(is_loopback_authority(ok), "{ok} should be loopback");
+        }
+    }
+
+    #[test]
+    fn foreign_authorities_are_rejected() {
+        for bad in [
+            "evil.example",
+            "evil.example:4477",
+            "127.0.0.1.evil.example",
+            "localhost.evil.example",
+            "192.168.1.5:80",
+            "0.0.0.0:80",
+            "[2001:db8::1]:80",
+            "[::1",
+            "user@evil.example",
+            "",
+        ] {
+            assert!(!is_loopback_authority(bad), "{bad} should be rejected");
+        }
+    }
 
     #[test]
     fn loopback_v4_not_required_auth() {

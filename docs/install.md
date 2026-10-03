@@ -5,19 +5,17 @@ client. The GitHub repo (`alliecatowo/ticket-master`) and its release assets are
 
 ## Requirements
 
-- macOS or Linux. `.github/workflows/release.yml` publishes both targets in its matrix
-  (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`) automatically on every `vX.Y.Z` tag push;
-  `mise run release` (`scripts/release.sh`) builds the same tarball layout locally, for a
-  platform that matrix doesn't cover yet or to test a release before tagging. Anything outside
-  those two targets needs the source install below. As of `v0.1.0` only `tm-aarch64-apple-darwin`
-  (macOS arm64) is actually published, so on Linux, build from source (see below). `tm-computer`
-  has compiled on Linux since `b01efda` (after `v0.1.0` was tagged), so the Linux asset attaches
-  automatically from the next tag.
+- macOS or Linux, on arm64 or x86_64. `.github/workflows/release.yml` publishes all four targets
+  (`aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`,
+  `x86_64-unknown-linux-gnu`) on every `vX.Y.Z` tag push, and updates the Homebrew formula.
+  `brew install alliecatowo/tap/ticket-master` is the shortest path; `mise run release`
+  (`scripts/release.sh`) builds the same tarball layout locally.
 - [`gh`](https://cli.github.com/), authenticated (`gh auth login`), for `scripts/install.sh`, which
   downloads through `gh release download`. Release assets are public, so you can also fetch a
   tarball with a plain `curl` and pass its path to the script (see below).
-- For the source install: Rust (see `rust-toolchain.toml`, currently 1.85+), a C compiler
-  (`rusqlite` builds SQLite from source via its `bundled` feature).
+- For the source install: Rust (see `rust-toolchain.toml`, currently 1.85+), a C and a C++ compiler
+  (`rusqlite` builds SQLite from source via its `bundled` feature; the tokenizer dependency
+  `esaxx-rs` needs a C++ compiler).
 - At least one configured model provider to actually run a turn — see "Provider setup" below.
 
 ## Install

@@ -32,6 +32,16 @@ jobs:
       - run: cargo test --workspace
       - run: cargo run -p xtask -- hygiene
 
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # Policy (and the two documented ignores) live in .cargo/audit.toml.
+      - run: cargo audit --deny warnings
+
   ts:
     runs-on: ubuntu-latest
     steps:
