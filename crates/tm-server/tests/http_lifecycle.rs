@@ -485,3 +485,68 @@ async fn agent_token_cannot_impersonate_a_human_or_decide_approvals() {
         accept.status()
     );
 }
+
+#[tokio::test]
+async fn wiki_escapes_html_sets_csp_and_refuses_symlinks() {
+    let (dir, base) = spawn_server().await;
+    let wiki = dir.path().join("docs/wiki");
+    std::fs::create_dir_all(&wiki).expect("mkdir");
+    std::fs::write(
+        wiki.join("x.md"),
+        "# hi\n\n<script>fetch('/approvals')</script>\n\n<img src=x onerror=alert(1)>\n",
+    )
+    .expect("write");
+    // A file whose *name* is an XSS payload.
+    std::fs::write(wiki.join("\"><img src=x onerror=alert(1)>.md"), "# n").expect("write");
+    let secret = dir.path().join("secret.txt");
+    std::fs::write(&secret, "TOP-SECRET-CONTENT").expect("write");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&secret, wiki.join("link.md")).expect("symlink");
+        std::os::unix::fs::symlink(&wiki, wiki.join("loop")).expect("dir symlink");
+    }
+    let client = http_client();
+
+    let page = client
+        .get(format!("{base}/wiki/x"))
+        .send()
+        .await
+        .expect("page");
+    assert_eq!(page.status(), reqwest::StatusCode::OK);
+    let csp = page
+        .headers()
+        .get("content-security-policy")
+        .expect("csp header")
+        .to_str()
+        .expect("ascii")
+        .to_string();
+    assert!(csp.contains("default-src 'none'"), "{csp}");
+    assert_eq!(page.headers()["x-content-type-options"], "nosniff");
+    let html = page.text().await.expect("text");
+    assert!(!html.contains("<script"), "{html}");
+    assert!(!html.contains("<img"), "{html}");
+
+    let index = client
+        .get(format!("{base}/wiki"))
+        .send()
+        .await
+        .expect("index");
+    assert_eq!(index.status(), reqwest::StatusCode::OK);
+    let index = index.text().await.expect("text");
+    assert!(!index.contains("<img"), "{index}");
+    assert!(
+        !index.contains("link"),
+        "symlinked page must not be listed: {index}"
+    );
+
+    #[cfg(unix)]
+    {
+        let leaked = client
+            .get(format!("{base}/wiki/link"))
+            .send()
+            .await
+            .expect("link");
+        assert_eq!(leaked.status(), reqwest::StatusCode::NOT_FOUND);
+        assert!(!leaked.text().await.expect("text").contains("TOP-SECRET"));
+    }
+}
