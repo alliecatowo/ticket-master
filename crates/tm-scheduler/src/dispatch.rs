@@ -533,6 +533,38 @@ fn verification_commands(t: &Ticket) -> Vec<Vec<String>> {
     commands
 }
 
+/// Environment variables a verification command may inherit. Everything else (provider API
+/// keys, tokens, cloud credentials) is cleared, as in `tm-templates`' verifier.
+const VERIFICATION_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "TMPDIR",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "TZ",
+];
+
+/// A tokio command for `program args` in `root` with a cleared environment plus
+/// [`VERIFICATION_ENV_ALLOWLIST`].
+fn verification_command(
+    program: &str,
+    args: &[String],
+    root: &std::path::Path,
+) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args).current_dir(root).env_clear();
+    for key in VERIFICATION_ENV_ALLOWLIST {
+        if let Ok(value) = std::env::var(key) {
+            cmd.env(key, value);
+        }
+    }
+    cmd
+}
+
 /// After a submit leaves `ticket` in `Submitted`, run every command
 /// [`verification_commands`] finds in `t.success`, directly (never through a shell), in
 /// `repo_root`, as [`ParticipantId::system`] (`SPEC.md:721-724`'s "verification separation" —
@@ -574,12 +606,17 @@ async fn run_automatic_verification(
             continue;
         };
         let rendered = command.join(" ");
-        match tokio::process::Command::new(program)
-            .args(args)
-            .current_dir(root)
-            .output()
-            .await
-        {
+        // The same shell-authority check every other shell-out goes through: a ticket whose
+        // authority doesn't permit this command (or has shell disabled) cannot get it run by
+        // smuggling it into a success predicate.
+        if !t.authority.shell.permits(command) {
+            all_passed = false;
+            transcript.push_str(&format!(
+                "$ {rendered}\nnot run: this ticket's shell authority does not permit this command\n"
+            ));
+            continue;
+        }
+        match verification_command(program, args, root).output().await {
             Ok(output) => {
                 all_passed &= output.status.success();
                 transcript.push_str(&format!(
@@ -979,6 +1016,109 @@ mod tests {
             t.state,
             TicketState::Submitted,
             "a ticket naming no CommandSucceeds predicate should submit exactly as before"
+        );
+    }
+
+    fn create_ticket_with_authority(
+        store: &Store,
+        authority: Authority,
+        success: Vec<Predicate>,
+    ) -> TicketId {
+        let events = store
+            .create_ticket(
+                TicketKind::Work,
+                "verify".into(),
+                None,
+                None,
+                authority,
+                vec![],
+                executor_reqs(),
+                vec![],
+                success,
+                tm_core::ticket::VerificationPolicy::Single,
+                Budget::unlimited(),
+                retry_policy(),
+                0,
+                ParticipantId::system(),
+            )
+            .expect("create_ticket");
+        let ticket = TicketId::new(events[0].subject.as_str()).expect("ticket id");
+        store
+            .activate(&ticket, ParticipantId::system())
+            .expect("activate");
+        ticket
+    }
+
+    #[tokio::test]
+    async fn a_success_command_the_ticket_may_not_run_is_not_executed() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let (dir, store) = open_store(clock);
+        let marker = dir.path().join("pwned");
+        // Shell authority disabled (Authority::none()), yet the predicate asks for a command.
+        let ticket = create_ticket_with_authority(
+            &store,
+            Authority::none(),
+            vec![Predicate::CommandSucceeds {
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    format!("touch {}", marker.display()),
+                ],
+            }],
+        );
+        let executor = SucceedingExecutor::new_submitting_mid_run("verifying-exec", store.clone());
+        dispatch_and_wait(
+            store.clone(),
+            &ticket,
+            Some(dir.path().to_path_buf()),
+            executor,
+        )
+        .await;
+        assert!(
+            !marker.exists(),
+            "an unauthorized predicate command must not run"
+        );
+        let view = store.view().expect("view");
+        let artifact = view
+            .artifacts
+            .values()
+            .find(|a| a.kind == ArtifactKind::CommandOutput)
+            .expect("denial is recorded as evidence");
+        assert_eq!(
+            artifact.meta.get("passed"),
+            Some(&serde_json::Value::Bool(false))
+        );
+    }
+
+    #[tokio::test]
+    async fn success_commands_do_not_inherit_secret_env() {
+        let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
+        let (dir, store) = open_store(clock);
+        std::env::set_var("TM_TEST_SECRET_TOKEN", "hunter2");
+        // Exits 0 only when the secret is NOT visible.
+        let ticket = create_ready_ticket_with_success(
+            &store,
+            vec![Predicate::CommandSucceeds {
+                command: vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "test -z \"$TM_TEST_SECRET_TOKEN\"".to_string(),
+                ],
+            }],
+        );
+        let executor = SucceedingExecutor::new_submitting_mid_run("verifying-exec", store.clone());
+        dispatch_and_wait(
+            store.clone(),
+            &ticket,
+            Some(dir.path().to_path_buf()),
+            executor,
+        )
+        .await;
+        let view = store.view().expect("view");
+        assert_eq!(
+            view.tickets.get(&ticket).expect("ticket").state,
+            TicketState::Auditing,
+            "the secret leaked into the verification command's environment"
         );
     }
 }
