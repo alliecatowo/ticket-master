@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+
+{% block content %}
+{% set demo = get_url(path='/demo/', trailing_slash=true) %}
+<section class="hero">
+  <div class="container inner">
+    <div class="hero-copy">
+      <h1>Chat with the agent. <span class="grad">Ticket the rest.</span></h1>
+      <p class="lede">
+        <strong>Ticketmaster</strong> (<code>tm</code>) is a coding agent for your terminal.
+        Talk to it live, and when a task can run without you, hand it to a background worker as a
+        <strong>ticket</strong>. Workers submit evidence; <em>you</em> accept, reject or retry.
+        Every step lands in an event-sourced log you can replay.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="{{ demo }}">Try the live demo &rarr;</a>
+        <a class="btn" href="{{ get_url(path='/getting-started/install/', trailing_slash=true) }}">Install tm</a>
+        <a class="btn btn-ghost" href="{{ get_url(path='/getting-started/', trailing_slash=true) }}">Read the docs</a>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="v">Rust</div><div class="k">Single static binary</div></div>
+        <div class="stat"><div class="v">21</div><div class="k">Provider backends</div></div>
+        <div class="stat"><div class="v">Human</div><div class="k">Owns accept / reject</div></div>
+        <div class="stat"><div class="v">MIT / Apache</div><div class="k">Dual licensed</div></div>
+      </div>
+    </div>
+
+    <figure class="frame hero-shot">
+      <header>
+        <div class="dots"><span></span><span></span><span></span></div>
+        <span class="mono">tm serve &middot; the web canvas</span>
+      </header>
+      <a href="{{ demo }}"><img src="{{ get_url(path='img/web-tickets.png', trailing_slash=false) }}" width="1360" height="860" alt="The Ticketmaster web canvas: tickets grouped into needs input, working, ready for review and queued, with a dispatch box on top" /></a>
+      <figcaption>Real screenshot of the web client. <a href="{{ demo }}">Open it live</a>: it runs in your browser on mock data.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <h2>What it is</h2>
+    <p class="sub">Most agents make you babysit one long chat. <code>tm</code> splits the work: a fast interactive agent for the thinking, and a crew of background workers for anything you can spec in a sentence.</p>
+    <div class="flow">
+      <div class="step"><b>Chat</b>Ask, explore, edit in the TUI. <code>@</code> completes files, <code>!</code> runs shell.</div>
+      <div class="step"><b>Dispatch</b><code>/bg fix the pagination bug</code> or the dispatch box turns a sentence into a ticket.</div>
+      <div class="step"><b>Work</b>A worker leases the ticket, edits in isolation, runs the checks.</div>
+      <div class="step"><b>Submit</b>It submits a summary with evidence: test reports, diffs.</div>
+      <div class="step"><b>Decide</b>You accept, send it back with a reason, or retry with guidance.</div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <h2>Key features</h2>
+    <p class="sub">Built on the idea that tools should be as intelligent as the agents using them. <a href="{{ get_url(path='/concepts/thesis/', trailing_slash=true) }}">Read the thesis &rarr;</a></p>
+    <div class="feature-grid">
+      <div class="feature">
+        <div class="icon">&#9654;</div>
+        <h3>Interactive TUI</h3>
+        <p>A chat-first terminal UI with slash commands, history search, plan / ask / auto modes, and a tickets screen laid out like a task inbox.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">&#9776;</div>
+        <h3>Ticket-powered workers</h3>
+        <p>Background workers run tickets under leases and budgets, with retries, escalation and a worktree option for isolated runs.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">&#10003;</div>
+        <h3>Human-gated outcomes</h3>
+        <p>Accept, reject and retry are human-only. The server answers 403 to an agent that tries them. Workers cannot approve their own work.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">&#8635;</div>
+        <h3>Event-sourced and replayable</h3>
+        <p>Every change is an event in a durable log. Record a run to a cassette and replay it offline, or fork a ticket at any event.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">&#9906;</div>
+        <h3>Resolved context</h3>
+        <p>Context is resolved up front, then symbol-aware and semantic search finds the rest, so the first turn already has what it needs.</p>
+      </div>
+      <div class="feature">
+        <div class="icon">&#9881;</div>
+        <h3>Any provider, any editor</h3>
+        <p>21 provider backends, an MCP server for Claude Code, an ACP agent for Zed, a VS Code extension, and a typed TypeScript client.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <h2>See it work</h2>
+    <p class="sub">The terminal clips are the real <code>tm</code> binary against a live provider. The web screenshots are the real client.</p>
+    <div class="shots">
+      <figure class="frame">
+        <header><div class="dots"><span></span><span></span><span></span></div><span class="mono">tm &middot; live turn</span></header>
+        <img loading="lazy" src="{{ get_url(path='img/tui-live.gif', trailing_slash=false) }}" alt="Terminal recording: an @-mention, file reads, a live crash reproduction and a ticket-aware answer" />
+        <figcaption>A live turn: <code>@calc.py</code> completion, tool calls, a real crash repro.</figcaption>
+      </figure>
+      <figure class="frame">
+        <header><div class="dots"><span></span><span></span><span></span></div><span class="mono">tm &middot; dispatch a worker</span></header>
+        <img loading="lazy" src="{{ get_url(path='img/tui-dispatch.gif', trailing_slash=false) }}" alt="Terminal recording: dispatching a ticket and watching its worker run doctest and pytest in the row" />
+        <figcaption>Dispatch a ticket and watch the worker verify it in its row.</figcaption>
+      </figure>
+      <figure class="frame">
+        <header><div class="dots"><span></span><span></span><span></span></div><span class="mono">tm &middot; review and accept</span></header>
+        <img loading="lazy" src="{{ get_url(path='img/tui-accept.gif', trailing_slash=false) }}" alt="Terminal recording: peeking at a submission on the tickets screen and accepting it" />
+        <figcaption>Peek at a submission, press <code>1</code>, the ticket closes.</figcaption>
+      </figure>
+      <figure class="frame">
+        <header><div class="dots"><span></span><span></span><span></span></div><span class="mono">web &middot; review</span></header>
+        <a href="{{ demo }}#/review"><img loading="lazy" src="{{ get_url(path='img/web-review.png', trailing_slash=false) }}" alt="The web client's Review page: two submissions with summaries and Accept and Reject buttons" /></a>
+        <figcaption>The web Review page: summaries, evidence, Accept / Reject inline.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <h2>Install</h2>
+    <p class="sub">One binary. Prebuilt for macOS arm64 today; build from source on Linux.</p>
+    <div class="install-grid">
+      <div class="feature">
+        <h3>Release tarball</h3>
+<pre><code class="language-sh">curl -fLO {{ config.extra.github_repo }}/releases/download/v0.1.0/tm-aarch64-apple-darwin.tar.gz
+tar -xzf tm-aarch64-apple-darwin.tar.gz
+./tm-aarch64-apple-darwin/tm init</code></pre>
+      </div>
+      <div class="feature">
+        <h3>From source</h3>
+<pre><code class="language-sh">cargo install --git {{ config.extra.github_repo }}.git tm-cli --locked
+tm init &amp;&amp; tm</code></pre>
+      </div>
+    </div>
+    <p class="sub" style="margin-top:16px">You need one configured provider, for example <code>ANTHROPIC_API_KEY</code>. <a href="{{ get_url(path='/getting-started/install/', trailing_slash=true) }}">Full install guide</a>, <a href="{{ get_url(path='/reference/providers/', trailing_slash=true) }}">providers</a>.</p>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container band">
+    <h2>Poke at it before you install it</h2>
+    <p class="sub" style="margin-left:auto;margin-right:auto">The demo is the real web client with a mock backend in your browser. Dispatch a ticket, accept a submission, send one back. Nothing leaves the page.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="{{ demo }}">Open the live demo &rarr;</a>
+      <a class="btn" href="{{ config.extra.github_repo }}">Source on GitHub</a>
+      <a class="btn btn-ghost" href="{{ get_url(path='/reference/cli/', trailing_slash=true) }}">CLI reference</a>
+    </div>
+  </div>
+</section>
+{% endblock %}

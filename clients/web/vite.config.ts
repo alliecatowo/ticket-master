@@ -32,7 +32,7 @@ const API_PATHS = [
 ];
 
 export default defineConfig({
-  base: "/app/",
+  base: process.env.VITE_BASE ?? "/app/",
   plugins: [react()],
   server: {
     proxy: Object.fromEntries(

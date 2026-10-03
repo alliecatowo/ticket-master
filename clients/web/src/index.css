@@ -1371,3 +1371,14 @@ kbd {
     flex-basis: 100%;
   }
 }
+
+/* Demo build only: the banner above the app shell. */
+.demo-banner {
+  background: #2a1d17;
+  color: #f3e4d9;
+  font-size: 0.85rem;
+  padding: 0.5rem 1rem;
+  text-align: center;
+  border-bottom: 1px solid #c8623f;
+}
+.demo-banner a { color: #ffb08a; }

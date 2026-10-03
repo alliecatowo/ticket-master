@@ -1,9 +1,16 @@
 name: Docs
 
+# Project site (Zola, site/) plus the web demo (clients/web built with VITE_TM_DEMO=1) on GitHub Pages:
+#   https://alliecatowo.github.io/ticket-master/        the Zola site
+#   https://alliecatowo.github.io/ticket-master/demo/   the web client against an in-browser mock
+
 on:
   push:
     branches: [main]
-    paths: ["docs/config.toml", "docs/content/**", "docs/themes/**", "docs/static/**", ".github/workflows/docs.yml"]
+    paths:
+      - "site/**"
+      - "clients/web/**"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
@@ -24,10 +31,29 @@ jobs:
         with:
           tool: zola@0.22.1
       - run: zola build
-        working-directory: docs
+        working-directory: site
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/web/pnpm-lock.yaml
+      - run: pnpm -C clients/web install --frozen-lockfile
+      - name: Build the web demo
+        run: pnpm -C clients/web exec vite build --outDir ../../site/public/demo
+        env:
+          VITE_TM_DEMO: "1"
+          VITE_BASE: /ticket-master/demo/
+      - name: Check the published tree
+        run: |
+          test -s site/public/index.html
+          test -s site/public/demo/index.html
+          ls site/public/demo/assets | grep -q mockServer
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/public
+          path: site/public
 
   deploy:
     needs: build

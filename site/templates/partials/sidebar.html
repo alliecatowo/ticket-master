@@ -1,0 +1,12 @@
+{% set cp = current_path | default(value="") %}
+{% for name in ["getting-started", "concepts", "reference"] %}
+  {% set sec = get_section(path=name ~ "/_index.md") %}
+  <h4><a class="sidebar-section-link" href="{{ sec.permalink }}">{{ sec.title }}</a></h4>
+  <ul>
+    {% for p in sec.pages %}
+      <li><a href="{{ p.permalink }}"{% if cp == p.path %} class="active"{% endif %}>{{ p.title }}</a></li>
+    {% endfor %}
+  </ul>
+{% endfor %}
+<h4>Try it</h4>
+<ul><li><a href="{{ get_url(path='/demo/', trailing_slash=true) }}">Live web demo</a></li></ul>
