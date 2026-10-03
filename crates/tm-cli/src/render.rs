@@ -80,14 +80,17 @@ impl Renderer {
     /// Print an incidental status line, suppressed entirely under `--quiet`.
     pub fn note(&self, text: &str) {
         if !self.quiet {
-            println!("{text}");
+            println!("{}", tm_types::sanitize::sanitize(text));
         }
     }
 
     /// Print a successful human-readable status, highlighted when color is enabled.
     pub fn status(&self, text: &str) {
         if !self.quiet {
-            println!("{}", self.apply_color(Color::Green, text));
+            println!(
+                "{}",
+                self.apply_color(Color::Green, &tm_types::sanitize::sanitize(text))
+            );
         }
     }
 
@@ -118,7 +121,13 @@ impl Renderer {
             let _ = serde_json::to_writer_pretty(std::io::stderr(), &json);
             eprintln!();
         } else {
-            eprintln!("{}", self.apply_color(Color::Red, &format!("error: {err}")));
+            eprintln!(
+                "{}",
+                self.apply_color(
+                    Color::Red,
+                    &tm_types::sanitize::sanitize(&format!("error: {err}"))
+                )
+            );
         }
     }
 

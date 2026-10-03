@@ -115,14 +115,34 @@ fn try_terminal_notifier(notification: &Notification) -> bool {
         .unwrap_or(false)
 }
 
+/// Longest message put into an OSC 9 sequence.
+const OSC_MESSAGE_MAX_CHARS: usize = 200;
+
+/// Make `text` safe to embed in an OSC sequence: notification text is model/agent-authored, and
+/// an ESC, BEL or ST inside it would end the OSC early so the rest is interpreted as arbitrary
+/// terminal escapes (OSC 52 clipboard writes, retitling, cursor/screen spoofing). Strips every
+/// escape/control character, collapses newlines to spaces and truncates.
+fn osc_safe(text: &str) -> String {
+    let cleaned = tm_types::sanitize::sanitize(text)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    cleaned.chars().take(OSC_MESSAGE_MAX_CHARS).collect()
+}
+
+/// The full OSC 9 sequence for `notification`, with its text made safe by [`osc_safe`].
+fn osc9_sequence(notification: &Notification) -> String {
+    let message = osc_safe(&format!("{}: {}", notification.title, notification.body));
+    format!("\x1b]9;{message}\x1b\\")
+}
+
 /// Write the OSC 9 escape sequence (`\x1b]9;<message>\x1b\\`) to the controlling terminal:
 /// `/dev/tty` on Unix, `CONOUT$` on Windows, falling back to stderr when neither can be opened
 /// (e.g. no controlling terminal at all — a headless/CI context, which
 /// [`crate::decision::notifications_enabled`] should already have filtered out before this is
 /// ever reached, but this function stays honest about its own fallback rather than assuming that).
 fn osc9_fallback(notification: &Notification) -> Result<(), NotifyError> {
-    let message = format!("{}: {}", notification.title, notification.body);
-    let sequence = format!("\x1b]9;{message}\x1b\\");
+    let sequence = osc9_sequence(notification);
 
     #[cfg(unix)]
     let tty_path = "/dev/tty";
@@ -140,4 +160,34 @@ fn osc9_fallback(notification: &Notification) -> Result<(), NotifyError> {
     // No controlling terminal reachable; stderr is the last honest place left to put it.
     eprint!("{sequence}");
     Ok(())
+}
+
+#[cfg(test)]
+mod osc_tests {
+    use super::*;
+
+    #[test]
+    fn hostile_notification_text_cannot_break_out_of_the_osc_sequence() {
+        let n = Notification {
+            title: "Approval needed".to_string(),
+            body: "ok\x1b\\\x1b]52;c;ZXZpbA==\x07\x1b[2J\nspoof \u{9b}31m\x07".to_string(),
+        };
+        let seq = osc9_sequence(&n);
+        // Exactly one ESC introducer at the start and one ST at the end; nothing else.
+        assert!(seq.starts_with("\x1b]9;") && seq.ends_with("\x1b\\"));
+        let inner = &seq[4..seq.len() - 2];
+        assert!(
+            !inner.chars().any(|c| c.is_control() || c == '\u{9b}'),
+            "control characters survived: {inner:?}"
+        );
+    }
+
+    #[test]
+    fn long_messages_are_truncated() {
+        let n = Notification {
+            title: "t".to_string(),
+            body: "x".repeat(10_000),
+        };
+        assert!(osc9_sequence(&n).len() < 300);
+    }
 }

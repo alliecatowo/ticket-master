@@ -39,6 +39,8 @@ fn parse_due_flag(s: &str) -> tm_types::Result<Option<time::Date>> {
 /// length. The complete objective remains available in ticket detail and to the worker.
 fn ticket_title(objective: &str) -> String {
     const MAX_CHARS: usize = 80;
+    // Ticket text can come from a mirrored issue or an agent; strip terminal escapes first.
+    let objective = tm_types::sanitize::sanitize(objective);
     let line = objective
         .lines()
         .map(str::trim)
@@ -262,7 +264,7 @@ pub fn tickets_list(
             "  {}  {}  {}\n",
             row.id,
             ticket_title(&row.objective),
-            row.summary
+            tm_types::sanitize::sanitize(&row.summary)
         ));
     }
     if rows.is_empty() {
@@ -489,7 +491,10 @@ fn format_ticket_text(
     text.push_str(&format!("State:        {}\n", state_label(ticket.state)));
     text.push_str(&format!("Kind:         {}\n", kind_label(ticket.kind)));
     text.push_str(&format!("Priority:     {}\n", ticket.priority));
-    text.push_str(&format!("Objective:    {}\n", ticket.objective));
+    text.push_str(&format!(
+        "Objective:    {}\n",
+        tm_types::sanitize::sanitize(&ticket.objective)
+    ));
     if let Some(parent) = &ticket.parent {
         text.push_str(&format!("Parent:       {}\n", parent));
     }
@@ -1290,7 +1295,7 @@ fn format_dep_graph_text(
     let edges = graph.edges();
 
     let describe = |id: &TicketId| match tickets.get(id) {
-        Some(t) => format!("{} ({})", id, t.objective),
+        Some(t) => format!("{} ({})", id, ticket_title(&t.objective)),
         None => id.to_string(),
     };
 
@@ -1626,9 +1631,18 @@ pub fn decision_show(
     } else {
         let mut text = format!("ID:       {}\n", decision.id);
         text.push_str(&format!("Active:   {}\n", decision.is_active()));
-        text.push_str(&format!("Subject:  {}\n", decision.subject));
-        text.push_str(&format!("Decision:\n{}\n", decision.decision));
-        text.push_str(&format!("Reason:\n{}\n", decision.reason));
+        text.push_str(&format!(
+            "Subject:  {}\n",
+            tm_types::sanitize::sanitize(&decision.subject)
+        ));
+        text.push_str(&format!(
+            "Decision:\n{}\n",
+            tm_types::sanitize::sanitize(&decision.decision)
+        ));
+        text.push_str(&format!(
+            "Reason:\n{}\n",
+            tm_types::sanitize::sanitize(&decision.reason)
+        ));
         if let Some(supersedes) = &decision.supersedes {
             text.push_str(&format!("Supersedes: {}\n", supersedes));
         }
@@ -1959,6 +1973,13 @@ mod tests {
         let usage = crate::stats::ticket_usage(&events, &id);
         assert_eq!(usage.tokens_total, 12);
         assert_eq!(usage.wall_seconds, 4);
+    }
+
+    #[test]
+    fn ticket_title_strips_terminal_escapes() {
+        let title = ticket_title("fix\x1b[2J\x1b]52;c;ZXZpbA==\x07 now\nsecond line");
+        assert!(!title.chars().any(|c| c.is_control()), "{title:?}");
+        assert!(title.starts_with("fix"));
     }
 
     #[test]
