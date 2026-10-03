@@ -9,10 +9,9 @@ It is **not** published to crates.io. Install it with Homebrew (`brew install al
 ## Requirements
 
 - macOS or Linux.
-- At present only `v0.1.0` is released, and it ships a single asset, `tm-aarch64-apple-darwin.tar.gz`
-  (macOS arm64). On Linux, build from source. The release workflow builds both macOS arm64 and
-  Linux x86_64 on each `vX.Y.Z` tag, so the Linux asset appears with the next tag.
-- For the source install: Rust 1.85+ and a C compiler (SQLite is built from source).
+- Each GitHub release ships `tm-<target>.tar.gz` for `aarch64-apple-darwin`, `x86_64-apple-darwin`,
+  `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`, and Homebrew installs the right one.
+- For the source install: Rust 1.85+ and C and C++ compilers (SQLite is built from source).
 - At least one configured model provider to run a turn; see [Providers](@/reference/providers.md).
 
 ## Option A: release tarball
