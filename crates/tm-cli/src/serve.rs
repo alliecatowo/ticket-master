@@ -44,11 +44,15 @@ pub async fn serve(
         }
     };
 
+    let configured_token = match &args.token_file {
+        Some(path) => Some(read_token_file(path)?),
+        None => None,
+    };
     let config = tm_server::state::ServerConfig {
         project_root: project.root.clone(),
         state_dir: project.state_dir.clone(),
         bind_addr,
-        token: None,
+        token: configured_token,
         presence_ttl_seconds: 3600,
         broadcast_poll_interval: std::time::Duration::from_millis(100),
         sse_replay_page_size: 100,
@@ -70,18 +74,12 @@ pub async fn serve(
     let token_path = project.state_dir.join(TOKEN_FILE);
     write_token_file(&token_path, state.credentials.operator_token())?;
 
-    let mut router = tm_server::routes::router((*state).clone());
-
     let web_dir = find_web_client_dir(args.web_dir.as_deref());
-    if let Some(web_dir) = &web_dir {
-        // Any path under the prefix that isn't a built file is a client route: hand it
-        // `index.html` so a reload or a pasted link works.
-        let app = ServeDir::new(web_dir).fallback(ServeFile::new(web_dir.join("index.html")));
-        router = router.nest_service(WEB_PREFIX, app).route(
-            "/",
-            axum::routing::get(|| async { axum::response::Redirect::temporary("/app/") }),
-        );
-    }
+    let router = compose_app(
+        tm_server::routes::router((*state).clone()),
+        (*state).clone(),
+        web_dir.as_deref(),
+    );
 
     let listener = TcpListener::bind(bind_addr).await?;
     let resolved_addr = listener.local_addr()?;
@@ -89,6 +87,13 @@ pub async fn serve(
 
     if !renderer.is_quiet() {
         renderer.note(&format!("Serving the API at {base}"));
+        if !bind_addr.ip().is_loopback() {
+            renderer.note(
+                "warning: this address is reachable from other machines over plain HTTP, so the \
+                 bearer token travels in the clear. Prefer a loopback address behind an SSH tunnel \
+                 or a TLS reverse proxy.",
+            );
+        }
         renderer.note(&format!(
             "Every request needs `Authorization: Bearer <token>`; the token is in {}.",
             token_path.display()
@@ -127,6 +132,47 @@ pub async fn serve(
     }
     served?;
     Ok(())
+}
+
+/// The API router plus, when a web client build exists, `/app/` and a `/` redirect to it. The
+/// origin guard wraps the whole composed app, so the static client is covered too (it carries no
+/// secrets, but it should not be reachable through a rebound hostname either). The bearer-token
+/// layer stays on the API routes only: the browser has to load the client before it has a token.
+pub(crate) fn compose_app(
+    router: axum::Router,
+    state: tm_server::state::AppState,
+    web_dir: Option<&Path>,
+) -> axum::Router {
+    let mut router = router;
+    if let Some(web_dir) = web_dir {
+        // Any path under the prefix that isn't a built file is a client route: hand it
+        // `index.html` so a reload or a pasted link works.
+        let app = ServeDir::new(web_dir).fallback(ServeFile::new(web_dir.join("index.html")));
+        router = router.nest_service(WEB_PREFIX, app).route(
+            "/",
+            axum::routing::get(|| async { axum::response::Redirect::temporary("/app/") }),
+        );
+    }
+    router.layer(axum::middleware::from_fn_with_state(
+        state,
+        tm_server::auth::guard_local_origin,
+    ))
+}
+
+/// Read a bearer token from `path`: trimmed, and at least 16 characters (an empty or tiny token
+/// is as good as none).
+pub(crate) fn read_token_file(path: &Path) -> tm_types::Result<String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| {
+        tm_types::TmError::Io(format!("reading token file {}: {e}", path.display()))
+    })?;
+    let token = raw.trim().to_string();
+    if token.chars().count() < 16 {
+        return Err(tm_types::TmError::parse(format!(
+            "the token in {} is too short; use at least 16 characters (for example `openssl rand -hex 32`)",
+            path.display()
+        )));
+    }
+    Ok(token)
 }
 
 /// File (under the project state dir) holding the operator bearer token of the running server.
@@ -235,6 +281,65 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn token_file_rejects_empty_and_short_tokens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("t");
+        std::fs::write(&path, "\n").expect("write");
+        assert!(super::read_token_file(&path).is_err());
+        std::fs::write(&path, "short").expect("write");
+        assert!(super::read_token_file(&path).is_err());
+        std::fs::write(&path, "  0123456789abcdef0123  \n").expect("write");
+        assert_eq!(
+            super::read_token_file(&path).expect("ok"),
+            "0123456789abcdef0123"
+        );
+    }
+
+    #[tokio::test]
+    async fn static_app_is_covered_by_the_origin_guard() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let web = dir.path().join("web");
+        std::fs::create_dir_all(&web).expect("mkdir");
+        std::fs::write(web.join("index.html"), "<html>app</html>").expect("write");
+        let config = tm_server::state::ServerConfig {
+            project_root: dir.path().to_path_buf(),
+            state_dir: dir.path().join("state"),
+            bind_addr: "127.0.0.1:0".parse().expect("addr"),
+            token: None,
+            presence_ttl_seconds: 60,
+            broadcast_poll_interval: std::time::Duration::from_millis(10),
+            sse_replay_page_size: 10,
+            sse_keep_alive: std::time::Duration::from_secs(15),
+            workers: false,
+        };
+        let state = tm_server::state::AppState::open(
+            config,
+            std::sync::Arc::new(tm_types::FixedClock::epoch()),
+            std::sync::Arc::new(tm_types::CounterIds::new()),
+        )
+        .expect("state");
+        let app = super::compose_app(tm_server::routes::router(state.clone()), state, Some(&web));
+        let get = |host: &str| {
+            Request::builder()
+                .uri("/app/")
+                .header("host", host)
+                .body(Body::empty())
+                .expect("request")
+        };
+        let ok = app
+            .clone()
+            .oneshot(get("localhost:4477"))
+            .await
+            .expect("resp");
+        assert_eq!(ok.status(), StatusCode::OK);
+        let rebound = app.oneshot(get("attacker.example")).await.expect("resp");
+        assert_eq!(rebound.status(), StatusCode::FORBIDDEN);
+    }
+
     #[cfg(unix)]
     #[test]
     fn token_file_is_owner_only_and_replaced() {
