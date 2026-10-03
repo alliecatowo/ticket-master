@@ -21,6 +21,7 @@ pub mod id;
 pub mod pattern;
 pub mod predicate;
 pub mod role;
+pub mod sanitize;
 pub mod time_;
 
 pub use action::{Action, Decision, GitOp, Oversight, ProjectOp, TicketOp};
