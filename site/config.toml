@@ -19,7 +19,7 @@ smart_punctuation = true
 
 [markdown.highlighting]
 light_theme = "catppuccin-latte"
-dark_theme = "catppuccin-mocha"
+dark_theme = "dracula"
 style = "class"
 
 [extra]
