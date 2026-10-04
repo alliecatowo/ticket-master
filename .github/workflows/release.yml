@@ -11,10 +11,9 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -31,16 +30,22 @@ jobs:
           - os: macos-15-intel
             target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
+    # Third-party build code runs here, so this job gets no `contents: write`; the release is
+    # created by the separate `publish` job below. id-token/attestations are for provenance.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - uses: pnpm/action-setup@v6
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           version: 11
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "22"
           cache: "pnpm"
@@ -48,14 +53,45 @@ jobs:
       # The runner's host triple always equals this job's `matrix.target` (each job runs on the
       # OS/arch it's cross-checking out for), so `scripts/release.sh`'s own `rustc -vV`-derived
       # triple lands on the same name this step's upload/asset naming expects.
+      - name: Check the tag matches the tm-cli version
+        shell: bash
+        run: |
+          version="$(cargo pkgid -p tm-cli | sed -E 's/.*[#@]//')"
+          if [ "v${version}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match tm-cli version ${version}"
+            exit 1
+          fi
       - name: Build and package via scripts/release.sh
         run: bash scripts/release.sh
-      - name: Publish to the GitHub Release
-        uses: softprops/action-gh-release@v3
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
-          files: |
+          subject-path: dist/tm-${{ matrix.target }}.tar.gz
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tm-${{ matrix.target }}
+          path: |
             dist/tm-${{ matrix.target }}.tar.gz
             dist/tm-${{ matrix.target }}.tar.gz.sha256
+          if-no-files-found: error
+
+  # Only this job can write to the release; it never builds or runs repository code.
+  publish:
+    name: Publish to the GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
           generate_release_notes: true
 
   # Homebrew formula in alliecatowo/homebrew-tap. Renders Formula/ticket-master.rb
@@ -63,7 +99,7 @@ jobs:
   # key (secret HOMEBREW_TAP_DEPLOY_KEY, no PAT). Skipped for pre-release tags.
   update-homebrew:
     name: Update Homebrew formula
-    needs: build
+    needs: publish
     runs-on: ubuntu-latest
     if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
     permissions:
@@ -144,7 +180,11 @@ jobs:
           trap 'rm -f "$keyfile"' EXIT
           printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > "$keyfile"
           chmod 600 "$keyfile"
-          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts 2>/dev/null
+          # GitHub's published SSH host keys (https://docs.github.com/authentication/keeping-your-account-and-data-secure/githubs-ssh-key-fingerprints)
+          cat >> ~/.ssh/known_hosts <<'KEYS'
+          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+          github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+          KEYS
           export GIT_SSH_COMMAND="ssh -i $keyfile -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
           git clone --depth 1 git@github.com:alliecatowo/homebrew-tap.git tap
           mkdir -p tap/Formula

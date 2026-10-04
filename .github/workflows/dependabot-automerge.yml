@@ -1,7 +1,8 @@
 name: Dependabot auto-merge
 
 # Standard pattern from GitHub's docs ("Automating Dependabot with GitHub Actions").
-# Patch and minor updates are approved and set to auto-merge; GitHub then merges
+# Only patch and minor updates to development dependencies (never GitHub Actions or
+# runtime/shipped dependencies, which end up in the release binary) are approved and set to auto-merge; GitHub then merges
 # them only once the branch's REQUIRED status checks pass (see the `require-ci`
 # ruleset), so a PR that breaks CI never lands. Major updates are labelled and
 # left for a human. pull_request_target is safe here: this job never checks out
@@ -21,12 +22,15 @@ jobs:
     steps:
       - name: Fetch Dependabot metadata
         id: metadata
-        uses: dependabot/fetch-metadata@v3
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Approve and enable auto-merge (patch and minor)
-        if: steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor'
+      - name: Approve and enable auto-merge (patch and minor, dev dependencies only)
+        if: >-
+          (steps.metadata.outputs.update-type == 'version-update:semver-patch' || steps.metadata.outputs.update-type == 'version-update:semver-minor')
+          && steps.metadata.outputs.dependency-type == 'direct:development'
+          && steps.metadata.outputs.package-ecosystem != 'github_actions'
         run: |
           gh pr review --approve "$PR_URL" || echo "approval not possible, relying on required checks only"
           gh pr merge --auto --squash "$PR_URL"
