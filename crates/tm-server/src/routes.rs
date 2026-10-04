@@ -11,10 +11,6 @@
 //! `Evidence`) intentionally don't derive `Serialize` — they're pure logic types, not wire
 //! types. This module renders them by hand (the `*_json` helpers below) rather than adding
 //! `serde` derives to a crate this module doesn't own.
-//!
-//! `GET /docs` and `POST /docs` are stubs: `tm-docs` isn't wired into [`crate::state::AppState`]
-//! (no field for it), so the list is always empty and writes are refused with a clear message
-//! rather than silently discarded.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -75,7 +71,6 @@ pub fn router(state: AppState) -> Router {
         .route("/milestones/{id}/reopen", post(reopen_milestone))
         .route("/artifacts", get(list_artifacts).post(create_artifact))
         .route("/artifacts/{id}", get(get_artifact))
-        .route("/docs", get(list_docs).post(create_doc))
         .route("/approvals", get(list_approvals).post(create_approval))
         .route("/approvals/{id}", get(get_approval))
         .route("/approvals/{id}/decide", post(decide_approval))
@@ -1130,17 +1125,6 @@ async fn create_artifact(
     ))
 }
 
-/// `tm-docs` isn't wired into [`AppState`]; always reports no docs rather than guessing at a
-/// storage location.
-async fn list_docs() -> Json<Value> {
-    Json(json!({"docs": []}))
-}
-
-/// See [`list_docs`]: there is nowhere durable to put a doc yet.
-async fn create_doc() -> ServerError {
-    ServerError::BadRequest("Docs aren't available on this server yet.".to_string())
-}
-
 async fn list_approvals(State(state): State<AppState>) -> Json<Value> {
     let pending = state.approvals.pending();
     let rendered: Vec<Value> = pending
@@ -2111,14 +2095,6 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(status_of(err), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn docs_list_is_always_empty_and_writes_are_refused() {
-        let Json(list) = list_docs().await;
-        assert_eq!(list["docs"].as_array().expect("array").len(), 0);
-        let err = create_doc().await;
-        assert_eq!(status_of(err), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
