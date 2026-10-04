@@ -578,7 +578,34 @@ fn resolve_repo_path(root: &Path, path: &str) -> Result<PathBuf> {
             "path `{path}` may not contain `..`"
         )));
     }
-    Ok(root.join(rel))
+    let joined = root.join(rel);
+    ensure_within_root(root, &joined, path)?;
+    Ok(joined)
+}
+
+/// Reject a joined path whose deepest existing ancestor (symlinks resolved) lies outside the
+/// canonical project root, so an in-repo symlink such as `link -> ~/.ssh` cannot be used to read
+/// or write outside the project. A dangling symlink as the final component is refused too.
+fn ensure_within_root(root: &Path, joined: &Path, original: &str) -> Result<()> {
+    let Ok(canonical_root) = root.canonicalize() else {
+        return Ok(());
+    };
+    let mut probe = joined.to_path_buf();
+    loop {
+        if std::fs::symlink_metadata(&probe).is_ok() {
+            match probe.canonicalize() {
+                Ok(c) if c.starts_with(&canonical_root) => return Ok(()),
+                _ => {
+                    return Err(TmError::parse(format!(
+                        "path `{original}` resolves outside the project root (symlink escape)"
+                    )))
+                }
+            }
+        }
+        if !probe.pop() {
+            return Ok(());
+        }
+    }
 }
 
 /// Turn a filesystem failure from an `fs.*` tool into a [`TmError::Io`] that names the resolved
@@ -923,6 +950,7 @@ fn resolve_cwd(root: &Path, input: &Value) -> Result<String> {
         {
             return Err(TmError::parse(format!("cwd `{rel}` may not contain `..`")));
         }
+        ensure_within_root(root, path, &rel)?;
         path.to_path_buf()
     } else {
         resolve_repo_path(root, &rel)?
@@ -4808,6 +4836,24 @@ mod tests {
     fn resolve_repo_path_rejects_parent_dir_escape() {
         let err = resolve_repo_path(Path::new("/root"), "../evil").unwrap_err();
         assert!(matches!(err, TmError::Parse(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_repo_path_rejects_symlink_escape() {
+        let outside = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("nope"), root.path().join("dangling"))
+            .unwrap();
+        std::fs::write(root.path().join("ok.txt"), "x").unwrap();
+        assert!(resolve_repo_path(root.path(), "link/id_ed25519").is_err());
+        assert!(resolve_repo_path(root.path(), "link").is_err());
+        assert!(resolve_repo_path(root.path(), "dangling").is_err());
+        assert!(resolve_repo_path(root.path(), "ok.txt").is_ok());
+        assert!(resolve_repo_path(root.path(), "new/dir/file.txt").is_ok());
+        let cwd = serde_json::json!({"cwd": root.path().join("link").to_string_lossy()});
+        assert!(resolve_cwd(root.path(), &cwd).is_err());
     }
 
     #[test]
