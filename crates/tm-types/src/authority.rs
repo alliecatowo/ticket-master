@@ -216,6 +216,11 @@ impl ShellAuthority {
     }
 }
 
+/// True when `command` is the `<shell> -c <script>` string form.
+pub fn is_shell_string(command: &[String]) -> bool {
+    shell_string(command).is_some()
+}
+
 /// The script of a `<shell> -c <script>` argv (the form `shell.run`'s string `command` takes).
 fn shell_string(command: &[String]) -> Option<&str> {
     let [program, flag, line] = command else {

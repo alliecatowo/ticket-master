@@ -4861,6 +4861,7 @@ dependencies = [
  "tm-provider",
  "tm-types",
  "tokio",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
 ]

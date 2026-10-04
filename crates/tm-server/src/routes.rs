@@ -50,6 +50,16 @@ use crate::wiki::{get_wiki_page, list_wiki_pages};
 /// bind, against DNS rebinding and cross-site requests). Neither affects a plain loopback client
 /// such as `curl`, the `tm` CLI or a test's `reqwest`.
 pub fn router(state: AppState) -> Router {
+    router_with_timeout(state, DEFAULT_REQUEST_TIMEOUT)
+}
+
+/// Longest an ordinary request may run before the server answers `408`. Deliberately generous:
+/// it only bounds stuck handlers (slow disk, wedged lock, a client that stalls its body), so a
+/// stalled request cannot pin a connection and task forever.
+pub const DEFAULT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Like [`router`] with an explicit request timeout (used by tests).
+pub fn router_with_timeout(state: AppState, timeout: std::time::Duration) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/events", get(sse_handler))
@@ -84,6 +94,10 @@ pub fn router(state: AppState) -> Router {
         .route("/wiki", get(list_wiki_pages))
         .route("/wiki/{*path}", get(get_wiki_page))
         .route("/agent-tokens", post(mint_agent_token))
+        .layer(axum::middleware::from_fn_with_state(
+            timeout,
+            request_timeout,
+        ))
         .layer(axum::middleware::from_fn(crate::auth::bind_identity))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -94,6 +108,33 @@ pub fn router(state: AppState) -> Router {
             crate::auth::guard_local_origin,
         ))
         .with_state(state)
+}
+
+/// True for the requests that legitimately stay open: the SSE stream and the approval
+/// long-poll (`POST /approvals` blocks until a human decides).
+fn is_long_lived(method: &axum::http::Method, path: &str) -> bool {
+    (method == axum::http::Method::GET && path == "/events")
+        || (method == axum::http::Method::POST && path == "/approvals")
+}
+
+/// Global request timeout. Exempts [`is_long_lived`] routes; everything else gets `408`.
+async fn request_timeout(
+    State(timeout): State<std::time::Duration>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if is_long_lived(req.method(), req.uri().path()) {
+        return next.run(req).await;
+    }
+    match tokio::time::timeout(timeout, next.run(req)).await {
+        Ok(resp) => resp,
+        Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(json!({"error": "request timed out"})),
+        )
+            .into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1405,6 +1446,44 @@ mod tests {
         };
         let state = AppState::open(config, clock, ids).expect("open app state");
         (dir, state)
+    }
+
+    #[tokio::test]
+    async fn request_timeout_cuts_slow_routes_but_not_sse_or_approval_polls() {
+        use axum::body::Body;
+        use axum::http::{Method, Request};
+        use tower::ServiceExt;
+
+        async fn slow() -> &'static str {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            "done"
+        }
+        let t = Duration::from_millis(50);
+        let app = Router::new()
+            .route("/slow", get(slow))
+            .route("/events", get(slow))
+            .route("/approvals", post(slow))
+            .layer(axum::middleware::from_fn_with_state(t, request_timeout));
+        let send = |m: Method, uri: &str| {
+            let req = Request::builder()
+                .method(m)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap();
+            app.clone().oneshot(req)
+        };
+        assert_eq!(
+            send(Method::GET, "/slow").await.unwrap().status(),
+            StatusCode::REQUEST_TIMEOUT
+        );
+        assert_eq!(
+            send(Method::GET, "/events").await.unwrap().status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            send(Method::POST, "/approvals").await.unwrap().status(),
+            StatusCode::OK
+        );
     }
 
     fn executor() -> ExecutorRequirements {
