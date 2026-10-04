@@ -166,6 +166,19 @@ install_from_tarball() {
   log "Installed tm to $prefix/bin/tm"
 }
 
+# Verifies the tarball's build provenance attestation (Sigstore, produced by release.yml) with gh.
+# Releases up to v0.1.2 were not attested, so a failure is only a warning unless
+# TM_REQUIRE_ATTESTATION=1 is set (which makes it fatal).
+verify_attestation() {
+  if gh attestation verify "$1" --repo "$repo" >/dev/null 2>&1; then
+    log "build provenance attestation OK"
+  elif [ "${TM_REQUIRE_ATTESTATION:-}" = "1" ]; then
+    die "no valid build provenance attestation for $1 (TM_REQUIRE_ATTESTATION=1)"
+  else
+    log "warning: could not verify a build provenance attestation for $1 (older releases have none); set TM_REQUIRE_ATTESTATION=1 to make this fatal"
+  fi
+}
+
 download_latest() {
   need_cmd gh
   need_cmd tar
@@ -185,6 +198,7 @@ download_latest() {
   tarball="$(find "$work" -maxdepth 1 -name "tm-${triple}.tar.gz" | head -n1)"
   [ -n "$tarball" ] || die "download succeeded but no tm-${triple}.tar.gz found in $work"
 
+  verify_attestation "$tarball"
   install_from_tarball "$tarball"
 }
 
