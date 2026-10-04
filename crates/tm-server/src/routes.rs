@@ -1141,10 +1141,22 @@ async fn list_approvals(State(state): State<AppState>) -> Json<Value> {
 /// # Errors
 /// [`ServerError::ApprovalFailed`] if the server drops the waiter (e.g. shutdown) before a
 /// decision lands.
+/// Most approvals that may be open (blocked awaiting a decision) at once. Each one pins a
+/// request task, so an unbounded count is a memory/connection exhaustion vector.
+const MAX_PENDING_APPROVALS: usize = 256;
+
+/// Most distinct participants the presence table will hold at once.
+const MAX_PRESENCE_ENTRIES: usize = 1024;
+
 async fn create_approval(
     State(state): State<AppState>,
     ApiJson(body): ApiJson<CreateApprovalRequest>,
 ) -> Result<Json<Value>, ServerError> {
+    if state.approvals.pending().len() >= MAX_PENDING_APPROVALS {
+        return Err(ServerError::TooMany(format!(
+            "{MAX_PENDING_APPROVALS} approvals are already waiting for a decision."
+        )));
+    }
     let id = format!("AP-{}", state.ids.random_hex(12));
     let request = ApprovalRequest {
         id: id.clone(),
@@ -1282,7 +1294,18 @@ async fn update_presence(
     State(state): State<AppState>,
     ApiPath(_session): ApiPath<SessionId>,
     ApiJson(body): ApiJson<PresenceUpdateRequest>,
-) -> Json<Value> {
+) -> Result<Json<Value>, ServerError> {
+    state.presence.sweep_expired(state.clock.now());
+    let known = state
+        .presence
+        .snapshot()
+        .iter()
+        .any(|e| e.participant == body.participant);
+    if !known && state.presence.snapshot().len() >= MAX_PRESENCE_ENTRIES {
+        return Err(ServerError::TooMany(format!(
+            "The presence table already holds {MAX_PRESENCE_ENTRIES} participants."
+        )));
+    }
     let participant = body.participant.clone();
     let ttl_seconds = body
         .ttl_seconds
@@ -1295,7 +1318,7 @@ async fn update_presence(
         last_seen: state.clock.now(),
         ttl_seconds,
     });
-    Json(json!({"participant": participant}))
+    Ok(Json(json!({"participant": participant})))
 }
 
 async fn get_presence(State(state): State<AppState>) -> Result<Json<Value>, ServerError> {
@@ -2182,6 +2205,69 @@ mod tests {
             .expect("valid session id");
         let delete_status = delete_session(ApiPath(id)).await;
         assert_eq!(delete_status, StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn presence_table_and_pending_approvals_are_capped() {
+        let (_dir, state) = test_state();
+        let now = state.clock.now();
+        for i in 0..MAX_PRESENCE_ENTRIES {
+            state.presence.upsert(PresenceEntry {
+                participant: ParticipantId::new(format!("human:p{i}")).expect("participant"),
+                ticket: None,
+                file: None,
+                action: "idle".to_string(),
+                last_seen: now,
+                ttl_seconds: 3600,
+            });
+        }
+        let update = |who: &str| PresenceUpdateRequest {
+            participant: ParticipantId::new(who.to_string()).expect("participant"),
+            ticket: None,
+            file: None,
+            action: "editing".to_string(),
+            ttl_seconds: Some(3600),
+        };
+        let session = SessionId::new("S-1").expect("valid shape");
+        let err = update_presence(
+            State(state.clone()),
+            ApiPath(session.clone()),
+            ApiJson(update("human:newcomer")),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status_of(err), StatusCode::TOO_MANY_REQUESTS);
+        let _ = update_presence(
+            State(state.clone()),
+            ApiPath(session),
+            ApiJson(update("human:p0")),
+        )
+        .await
+        .expect("an already-known participant may still update");
+
+        let mut waiters = Vec::new();
+        for i in 0..MAX_PENDING_APPROVALS {
+            waiters.push(state.approvals.open(ApprovalRequest {
+                id: format!("AP-{i}"),
+                ticket: None,
+                requested_by: actor(),
+                subject: "x".to_string(),
+                detail: "y".to_string(),
+                requested_at: now,
+            }));
+        }
+        let err = create_approval(
+            State(state),
+            ApiJson(CreateApprovalRequest {
+                ticket: None,
+                requested_by: actor(),
+                subject: "one too many".to_string(),
+                detail: "z".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(status_of(err), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
