@@ -303,6 +303,7 @@ impl Oversight {
                 "computer.input",
                 "computer.clipboard",
                 "pty.send",
+                "shell.string",
             ]
             .into_iter()
             .map(String::from)
@@ -326,6 +327,21 @@ impl Oversight {
             && !self.approved_for_session.iter().any(matches)
         {
             return Decision::NeedsApproval(class);
+        }
+        // A `sh -c <line>` command is a whole program, so passing the per-segment allow-list is
+        // not enough: redirections, expansions and quoting tricks are invisible to it. The
+        // pseudo-class `shell.string` lets a policy require a human for that form specifically.
+        if let Action::RunCommand { command } | Action::PtySpawn { command } = action {
+            if crate::authority::is_shell_string(command) {
+                let shell = "shell.string".to_string();
+                let m = |c: &String| shell == *c;
+                if self.approval_required.iter().any(m) && !self.approved_for_session.iter().any(m)
+                {
+                    return Decision::NeedsApproval(format!(
+                        "{class}: shell string (`sh -c`) needs human approval"
+                    ));
+                }
+            }
         }
         if let (Action::Spend { amount }, Some(limit)) = (action, self.spend_over_micros) {
             if amount.dollars_micros > limit {
@@ -386,6 +402,46 @@ mod tests {
         );
         assert_eq!(Action::PtySend.class(), "pty.send");
         assert_eq!(Action::PtyControl.class(), "pty.control");
+    }
+
+    #[test]
+    fn conservative_oversight_requires_approval_for_shell_strings_only() {
+        let o = Oversight::conservative();
+        let s = |v: &[&str]| Action::RunCommand {
+            command: v.iter().map(|x| x.to_string()).collect(),
+        };
+        for a in [
+            s(&["/bin/sh", "-c", "cargo test"]),
+            s(&["bash", "-c", "cargo test > out"]),
+            Action::PtySpawn {
+                command: vec!["sh".into(), "-c".into(), "ls".into()],
+            },
+        ] {
+            assert!(matches!(
+                o.review(&a, Decision::Allow),
+                Decision::NeedsApproval(_)
+            ));
+        }
+        // argv form is unchanged, and a denial is never softened.
+        assert_eq!(
+            o.review(&s(&["cargo", "test"]), Decision::Allow),
+            Decision::Allow
+        );
+        assert!(matches!(
+            o.review(&s(&["sh", "-c", "x"]), Decision::Deny("no".into())),
+            Decision::Deny(_)
+        ));
+        // Once approved for the session, it proceeds; autonomous never asks.
+        let mut approved = Oversight::conservative();
+        approved.approved_for_session.insert("shell.string".into());
+        assert_eq!(
+            approved.review(&s(&["sh", "-c", "ls"]), Decision::Allow),
+            Decision::Allow
+        );
+        assert_eq!(
+            Oversight::autonomous().review(&s(&["sh", "-c", "ls"]), Decision::Allow),
+            Decision::Allow
+        );
     }
 
     #[test]
