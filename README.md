@@ -95,6 +95,12 @@ mise run build            # debug build of just the `tm` binary
 
 Prefer an optimized binary? `mise run build:release` (≈ `cargo build --release -p tm-cli`).
 
+Or install straight from GitHub with Cargo (needs a C++ toolchain; not published to crates.io):
+
+```sh
+cargo install --git https://github.com/alliecatowo/ticket-master --locked tm-cli   # installs the `tm` binary
+```
+
 </details>
 
 ---
