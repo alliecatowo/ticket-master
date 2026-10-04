@@ -846,7 +846,7 @@ GET  /tickets  /tickets/:id        POST /tickets  PATCH /tickets/:id
 GET  /tickets/:id/events?after=<seq>&limit=<n>   # one page of that ticket's events + next cursor (from= = after=)
 POST /tickets/:id/transition       POST /tickets/:id/lease  /heartbeat  /release
 GET  /graph                        # nodes + edges for the canvas
-GET/POST /decisions  /milestones  /artifacts  /docs  /approvals
+GET/POST /decisions  /milestones  /artifacts  /approvals
 POST /sessions  DELETE /sessions/:id   POST /sessions/:id/presence
 GET  /presence                     GET /providers   GET /harness   GET /metrics
 ```

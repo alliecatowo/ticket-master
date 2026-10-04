@@ -49,15 +49,21 @@ async fn spawn_server() -> (TempDir, String) {
 }
 
 async fn spawn_server_with_state() -> (TempDir, String, AppState) {
+    spawn_server_bound("127.0.0.1:0").await
+}
+
+/// Like [`spawn_server_with_state`], but the *configured* bind address (the one `requires_auth`
+/// looks at) is `configured_bind`; the real listener always stays on loopback.
+async fn spawn_server_bound(configured_bind: &str) -> (TempDir, String, AppState) {
     let dir = TempDir::new().expect("tempdir");
     let clock: Arc<dyn Clock> = Arc::new(FixedClock::epoch());
     let ids: Arc<dyn IdSource> = Arc::new(CounterIds::new());
     let config = ServerConfig {
         project_root: dir.path().to_path_buf(),
         state_dir: dir.path().join(".tm"),
-        bind_addr: "127.0.0.1:0"
+        bind_addr: configured_bind
             .parse::<SocketAddr>()
-            .expect("valid loopback addr"),
+            .expect("valid bind addr"),
         token: Some(OPERATOR_TOKEN.to_string()),
         presence_ttl_seconds: 60,
         broadcast_poll_interval: Duration::from_millis(10),
@@ -295,6 +301,30 @@ async fn loopback_server_rejects_foreign_host_and_origin() {
         .await
         .expect("local dev origin");
     assert_eq!(same_origin.status(), reqwest::StatusCode::OK);
+}
+
+/// On a non-loopback bind the origin guard steps aside (a LAN client legitimately sends its own
+/// `Host`) and the bearer token is the only gate: the foreign `Host` is not a 403, but a missing
+/// or wrong token still is a 401.
+#[tokio::test]
+async fn non_loopback_bind_skips_origin_guard_but_still_requires_the_token() {
+    let (_dir, base, _state) = spawn_server_bound("0.0.0.0:0").await;
+
+    let authed = http_client()
+        .get(format!("{base}/state"))
+        .header("Host", "tm.lan.example:4477")
+        .send()
+        .await
+        .expect("authed foreign host");
+    assert_eq!(authed.status(), reqwest::StatusCode::OK);
+
+    let anon = bare_client()
+        .get(format!("{base}/state"))
+        .header("Host", "tm.lan.example:4477")
+        .send()
+        .await
+        .expect("anonymous foreign host");
+    assert_eq!(anon.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
 fn bare_client() -> reqwest::Client {

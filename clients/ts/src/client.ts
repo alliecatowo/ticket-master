@@ -201,12 +201,6 @@ export class TicketmasterClient {
     return this.request("POST", "/artifacts", input);
   }
 
-  // -- docs (server-side storage not wired up yet; see `tm-server/src/routes.rs`) -------------
-
-  listDocs(): Promise<{ docs: unknown[] }> {
-    return this.request("GET", "/docs");
-  }
-
   // -- approvals -------------------------------------------------------------------------------
 
   listApprovals(): Promise<unknown[]> {
