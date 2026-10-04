@@ -2237,7 +2237,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(status_of(err), StatusCode::TOO_MANY_REQUESTS);
-        update_presence(
+        let _ = update_presence(
             State(state.clone()),
             ApiPath(session),
             ApiJson(update("human:p0")),
