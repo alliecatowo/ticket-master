@@ -205,6 +205,9 @@ pub enum ServerError {
     /// request was still blocked waiting on a decision.
     #[error("approval rendezvous failed: {0}")]
     ApprovalFailed(String),
+    /// A bounded in-memory table (pending approvals, presence entries) is full.
+    #[error("too many requests: {0}")]
+    TooMany(String),
 }
 
 /// The JSON body every error response carries: `{"error": "<code>", "message": "<detail>"}`.
@@ -278,6 +281,7 @@ impl IntoResponse for ServerError {
             ServerError::ApprovalFailed(msg) => {
                 (StatusCode::INTERNAL_SERVER_ERROR, "approval_failed", msg)
             }
+            ServerError::TooMany(msg) => (StatusCode::TOO_MANY_REQUESTS, "too_many_requests", msg),
         };
 
         let body = ErrorBody {
