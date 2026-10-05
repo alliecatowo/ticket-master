@@ -3,8 +3,9 @@ title = "Install"
 weight = 1
 +++
 
-`tm` is a single Rust binary (package `tm-cli`, binary name `tm`) plus an optional built web client.
-It is **not** published to crates.io. Install it with Homebrew (`brew install alliecatowo/tap/ticket-master`), from a GitHub release, or from source.
+`tm` is a single Rust binary (package `tm-cli`, binary name `tm`) plus an optional built web client. The
+current release is **v0.1.4**. It is **not** published to crates.io: install it with Homebrew, from a GitHub
+release, or from source with `cargo install --git`.
 
 ## Requirements
 
@@ -14,29 +15,39 @@ It is **not** published to crates.io. Install it with Homebrew (`brew install al
 - For the source install: Rust 1.85+ and C and C++ compilers (SQLite is built from source).
 - At least one configured model provider to run a turn; see [Providers](@/reference/providers.md).
 
-## Option A: release tarball
+## Homebrew (macOS and Linux)
 
 ```sh
-curl -fLO https://github.com/alliecatowo/ticket-master/releases/download/v0.1.0/tm-aarch64-apple-darwin.tar.gz
+brew install alliecatowo/tap/ticket-master
+tm --version
+```
+
+The formula installs the prebuilt binary and the built web client, so `tm serve` finds it with no extra flags.
+
+## From source with cargo
+
+```sh
+cargo install --locked --git https://github.com/alliecatowo/ticket-master tm-cli
+tm --version
+```
+
+`tm-cli` is the package; it installs the `tm` binary into `~/.cargo/bin`. This path has no bundled web
+client; `tm serve` needs `--web-dir` (or `TM_WEB_DIR`) pointing at a build of `clients/web/`.
+
+## Release tarball
+
+```sh
+curl -fLO https://github.com/alliecatowo/ticket-master/releases/download/v0.1.4/tm-aarch64-apple-darwin.tar.gz
 tar -xzf tm-aarch64-apple-darwin.tar.gz
-./tm-aarch64-apple-darwin/tm --version
+./tm-aarch64-apple-darwin/bin/tm --version
 ```
 
-Or clone the repo and run `scripts/install.sh` (needs an authenticated [`gh`](https://cli.github.com/)).
-It detects your OS and architecture, downloads the matching asset, verifies its `.sha256` when the release
-carries one, and installs into `${PREFIX:-$HOME/.local}` (`bin/tm`, `share/tm/web`). Pass a tarball path
-to install from a local file instead.
+Each tarball has a `.sha256` beside it. Or clone the repo and run `scripts/install.sh` (needs an authenticated
+[`gh`](https://cli.github.com/)). It detects your OS and architecture, downloads the matching asset, verifies its
+checksum and installs into `${PREFIX:-$HOME/.local}` (`bin/tm`, `share/tm/web`). Pass a tarball path to install
+from a local file instead.
 
-## Option B: from source with cargo
-
-```sh
-cargo install --git https://github.com/alliecatowo/ticket-master.git tm-cli --locked
-```
-
-This path has no bundled web client; `tm serve` needs `--web-dir` (or `TM_WEB_DIR`) pointing at a build
-of `clients/web/`.
-
-## Option C: development checkout
+## Development checkout
 
 ```sh
 git clone https://github.com/alliecatowo/ticket-master.git
@@ -64,11 +75,11 @@ tm provider test     # one tiny real (billed) completion through each
 
 ## Upgrade and uninstall
 
-Re-run `scripts/install.sh` against a newer release to upgrade in place, or re-run the `cargo install`
-command with `--force`. To uninstall:
+Upgrade with `brew upgrade ticket-master`, re-run `scripts/install.sh` against a newer release, or re-run the
+`cargo install` command with `--force`. To uninstall, `brew uninstall ticket-master`, `cargo uninstall tm-cli`, or for the script install:
 
 ```sh
-rm -rf "${PREFIX:-$HOME/.local}/bin/tm" "${PREFIX:-$HOME/.local}/share/tm"   # cargo install: cargo uninstall tm-cli
+rm -rf "${PREFIX:-$HOME/.local}/bin/tm" "${PREFIX:-$HOME/.local}/share/tm"
 ```
 
 `tm`'s own state (`.tm/` in a repo, or `$TM_HOME`, default `$HOME/.tm`) is left alone.
