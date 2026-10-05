@@ -1,64 +1,91 @@
 /* Ticketmaster web client. Plain CSS, one file, custom properties for light and dark. */
 
 :root {
-  color-scheme: light dark;
-  font-family: "Inter", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+  font-family: "Hanken Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   font-size: 15px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
 
-  /* Light: Catppuccin Latte, text-bearing colors darkened for WCAG AA. */
-  --mono: "JetBrains Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
-  --bg: #eff1f5;
-  --surface: #f7f8fb;
-  --surface-2: #e6e9ef;
-  --text: #4c4f69;
-  --muted: #5c5f77;
-  --faint: #626579;
-  --border: #ccd0da;
-  --border-strong: #acb0be;
-  --accent: #7a2de0;
-  --on-accent: #ffffff;
-  --accent-soft: #e8dcfa;
-  --needs: #b3167f;
-  --needs-soft: #f7dcee;
-  --working: #0a5f7d;
-  --review: #1a6b0f;
-  --review-soft: #d9efd5;
-  --queued: #5c5f77;
-  --completed: #5c5f77;
-  --bad: #c20d34;
-  --bad-soft: #f8dbe1;
-  --good: #1a6b0f;
+  --display: "Antonio", "Arial Narrow", sans-serif;
+  --mono: "DM Mono", ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Dark: Dracula ink. */
+  --bg: #282a36;
+  --surface: #323443;
+  --surface-2: #3b3d4f;
+  --text: #f8f8f2;
+  --muted: #b3badb;
+  --faint: #8e96bd;
+  --border: #4d5068;
+  --border-strong: #666a88;
+  --accent: #bd93f9;
+  --on-accent: #282a36;
+  --accent-soft: #3b3560;
+  --needs: #ff79c6;
+  --needs-soft: #4a2e48;
+  --working: #8be9fd;
+  --review: #50fa7b;
+  --review-soft: #1f4a35;
+  --queued: #b3badb;
+  --completed: #8e96bd;
+  --bad: #ff6e6e;
+  --bad-soft: #4a2630;
+  --good: #50fa7b;
   --shadow: none;
   --radius: 4px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    /* Dracula */
-    --bg: #282a36;
-    --surface: #21222c;
-    --surface-2: #303245;
-    --text: #f8f8f2;
-    --muted: #b6bddb;
-    --faint: #8a93bd;
-    --border: #44475a;
-    --border-strong: #5a5f7a;
-    --accent: #bd93f9;
-    --on-accent: #282a36;
-    --accent-soft: #3b3560;
-    --needs: #ff79c6;
-    --needs-soft: #4a2e48;
-    --working: #8be9fd;
-    --review: #50fa7b;
-    --review-soft: #1f4a35;
-    --queued: #b6bddb;
-    --completed: #8a93bd;
-    --bad: #ff5555;
-    --bad-soft: #4a2630;
-    --good: #50fa7b;
-    --shadow: none;
+/* Light: cream ticket paper with Dracula-ink accents (darkened for contrast on cream). */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #efe5cb;
+  --surface: #fcf7e7;
+  --surface-2: #f2e9cf;
+  --text: #282a36;
+  --muted: #55587a;
+  --faint: #636688;
+  --border: #d3c49b;
+  --border-strong: #b5a477;
+  --accent: #5a3dbf;
+  --on-accent: #fcf7e7;
+  --accent-soft: #e4dcf6;
+  --needs: #a3144d;
+  --needs-soft: #f5dbe3;
+  --working: #05627f;
+  --review: #176b10;
+  --review-soft: #dbebd0;
+  --queued: #55587a;
+  --completed: #636688;
+  --bad: #b3261e;
+  --bad-soft: #f6d9d4;
+  --good: #176b10;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+    --bg: #efe5cb;
+    --surface: #fcf7e7;
+    --surface-2: #f2e9cf;
+    --text: #282a36;
+    --muted: #55587a;
+    --faint: #636688;
+    --border: #d3c49b;
+    --border-strong: #b5a477;
+    --accent: #5a3dbf;
+    --on-accent: #fcf7e7;
+    --accent-soft: #e4dcf6;
+    --needs: #a3144d;
+    --needs-soft: #f5dbe3;
+    --working: #05627f;
+    --review: #176b10;
+    --review-soft: #dbebd0;
+    --queued: #55587a;
+    --completed: #636688;
+    --bad: #b3261e;
+    --bad-soft: #f6d9d4;
+    --good: #176b10;
   }
 }
 
@@ -1414,4 +1441,53 @@ h3,
 
 .topnav__link {
   font-size: 0.85rem;
+}
+
+/* ---------------------------------------------------------------- ticket-stub skin (matches the project site) */
+
+.brand {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 1.3rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.brand__mark { color: var(--accent); }
+.topbar { border-bottom: 2px dashed var(--border); background: var(--bg); backdrop-filter: none; }
+.topnav__link {
+  font-family: var(--display);
+  font-size: 1.1rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+.topnav__link--active { background: var(--accent); color: var(--on-accent); font-weight: 400; }
+.topnav__link--stub { font-size: 1rem; }
+.demo-banner {
+  background: var(--term-bg, #21222c);
+  color: #f8f8f2;
+  border-bottom: 2px dashed var(--border);
+}
+.demo-banner a { color: #8be9fd; }
+.demo-banner .theme-toggle {
+  font: inherit; font-family: var(--display); letter-spacing: 0.09em; text-transform: uppercase;
+  color: #f8f8f2; background: transparent; border: 1px solid #666a88; border-radius: 4px; padding: 0 0.6rem; margin-left: 0.8rem; cursor: pointer;
+}
+.page-title, .app-main > section > h1, .app-main h1 {
+  font-family: var(--display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  font-size: 2.6rem;
+  line-height: 1;
+}
+.app-main h2 {
+  font-family: var(--display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+@media (max-width: 640px) {
+  .topbar__inner { flex-wrap: wrap; gap: 0.5rem 1rem; padding: 0.5rem 1rem; }
+  .topnav { order: 3; flex: 1 0 100%; padding-bottom: 0.2rem; }
+  .app-main { padding: 1.25rem 1rem 3rem; }
 }
