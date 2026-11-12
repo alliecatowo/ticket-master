@@ -1,6 +1,6 @@
 +++
 title = "Providers"
-weight = 2
+weight = 3
 +++
 
 `tm` routes turns through a provider fabric with twenty-one backends. Run `tm provider detect` (add

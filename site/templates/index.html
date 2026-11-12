@@ -1,143 +1,262 @@
 {% extends "base.html" %}
 
+{% block head %}
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/asciinema-player@3.10.0/dist/bundle/asciinema-player.css" />
+{% endblock %}
+
 {% block content %}
 {% set demo = get_url(path='/demo/', trailing_slash=true) %}
+{% set install = get_url(path='/getting-started/install/', trailing_slash=true) %}
+<main>
 <section class="hero">
-  <div class="container inner">
-    <div>
-      <h1><span class="p">$</span> tm<br />chat now, ticket the rest.</h1>
+  <div class="wrap">
+    <div class="eyebrow">Terminal coding agent &middot; v0.1.4</div>
+    <h1><span>Chat now.</span><span class="two">Ticket the rest.</span></h1>
+    <div class="sub">
       <p class="lede">
         <code>tm</code> is a coding agent for your terminal. Talk to it live. When a task can run
-        without you, hand it to a background worker as a ticket. Workers submit evidence; you
-        accept, reject or retry. Every step is an event in a log you can replay.
+        without you, hand it to a background worker as a ticket. Workers submit evidence;
+        you accept it, send it back, or retry it. Every step is an event in a log you can replay.
       </p>
-      <div class="cta-row">
-        <a class="btn btn-primary" href="{{ demo }}">open the demo &rarr;</a>
-        <a class="btn" href="{{ get_url(path='/getting-started/install/', trailing_slash=true) }}">install</a>
-        <a class="btn" href="{{ get_url(path='/getting-started/', trailing_slash=true) }}">docs</a>
-      </div>
-      <div class="meta">
-        <b>rust</b> single binary &middot; <b>21</b> provider backends<br />
-        <b>MIT OR Apache-2.0</b> &middot; macOS and Linux, arm64 and x86_64
+      <div class="fare" aria-label="Install commands">
+        <div class="row"><code><span class="p">$</span> brew install alliecatowo/tap/ticket-master</code><button class="copy" type="button" data-copy="brew install alliecatowo/tap/ticket-master">copy</button></div>
+        <div class="row"><code><span class="p">$</span> cargo install --locked --git {{ config.extra.github_repo }} tm-cli</code><button class="copy" type="button" data-copy="cargo install --locked --git {{ config.extra.github_repo }} tm-cli">copy</button></div>
       </div>
     </div>
 
-    <figure class="term">
-      <header><span class="dots"><i></i><i></i><i></i></span><span>~/api &mdash; tm 0.1.4</span></header>
-<pre><code><span class="p">$</span> tm ticket dispatch <span class="y">"Add per-key rate limiting to POST /v1/export"</span>
-<span class="g">Dispatched ticket T-2: ready for a worker (tm run T-2)</span>
-
-<span class="p">$</span> tm ticket list
-<span class="d">ID   Kind  State  Priority  Due  Objective</span>
-T-1  work  <span class="c">ready</span>  0         -    Fix off-by-one in the pagination cursor
-T-2  work  <span class="c">ready</span>  0         -    Add per-key rate limiting to POST /v1/export
-
-<span class="p">$</span> tm ticket accept T-1
-<span class="r">error:</span> can't do that from this state: T-1 is ready, so it can't be
-accepted. Run it: <span class="k">tm run T-1</span>
-
-<span class="p">$</span> tm doctor
-<span class="d">check         status  detail</span>
-invariants    <span class="g">ok</span>      no invariant violations
-hash-chain    <span class="g">ok</span>      0 events verified
-index-health  <span class="y">warn</span>    no commits yet
-<span class="p">$</span> <span class="d">&#9608;</span></code></pre>
-    </figure>
+    <div class="ticket hero-ticket">
+      <div class="body">
+        <div class="session">
+          <div class="scroller"><div class="player" id="tm-player"></div></div>
+          <p class="rec">A real, unedited <code>tm</code> session against a live provider: <code>@</code>-completion, tool calls, a crash reproduced, then the tickets screen. Recorded on tm 0.1.0, 2 min 21 s. <a href="{{ get_url(path='media/tui-live.cast', trailing_slash=false) }}">cast file</a> &middot; <a href="{{ config.extra.github_repo }}/blob/main/docs/showcase/README.md">how it was recorded</a></p>
+        </div>
+      </div>
+      <div class="stub">
+        <div class="lab"><b>Admit one</b>live session</div>
+        <div class="no">2:21</div>
+        <div class="lab">tm 0.1.0<br />141 s<br />real provider</div>
+        <div class="bars" aria-hidden="true"></div>
+      </div>
+    </div>
   </div>
 </section>
 
-<section class="section">
-  <div class="container">
-    <div class="section-head">
-      <h2>how it works</h2>
-      <p class="sub">Most agents make you babysit one long chat. <code>tm</code> splits the work: a fast interactive agent for the thinking, and background workers for anything you can spec in a sentence.</p>
+<section class="block" id="board">
+  <div class="wrap">
+    <div class="head">
+      <div class="num">01</div>
+      <h2>The board</h2>
+      <p>Work moves one way across four columns. The tickets screen in <code>tm</code> groups them just like this; the rows below are quoted from it.</p>
     </div>
-    <ol class="lifecycle">
-      <li><b>chat</b><span>Ask, explore and edit in the TUI. <code>@</code> completes file paths, <code>!</code> runs shell, <code>Shift+Tab</code> cycles auto / plan / ask.</span></li>
-      <li><b>dispatch</b><span><code>/bg fix the pagination bug</code> in the chat, or <code>tm ticket dispatch "..."</code> from the shell, turns a sentence into a queued ticket.</span></li>
-      <li><b>work</b><span>A worker leases the ticket, edits in isolation (optionally a git worktree), and runs the checks.</span></li>
-      <li><b>submit</b><span>It submits a summary with evidence: test reports and diffs.</span></li>
-      <li><b>decide</b><span>You accept, send it back with a reason, or retry with guidance. The server answers 403 to an agent that tries.</span></li>
-    </ol>
+    <div class="board">
+      <div class="col">
+        <div class="sign"><div><h3>Queued</h3><span class="st">state: ready</span></div><span class="n">1</span></div>
+        <div class="cards">
+          <div class="card">
+            <div class="id">T-2 <small>work</small></div>
+            <div class="t">Add per-key rate limiting to POST /v1/export</div>
+<pre><span class="p">$</span> tm ticket dispatch "Add per-key rate…"
+<span class="g">Dispatched ticket T-2: ready for a</span>
+<span class="g">worker (tm run T-2)</span></pre>
+            <span class="src">real output, tm 0.1.4</span>
+          </div>
+        </div>
+        <div class="move">in the chat: <code>/bg &lt;task&gt;</code><br />in a shell: <code>tm ticket dispatch</code></div>
+      </div>
+      <div class="col">
+        <div class="sign"><div><h3>Running</h3><span class="st">state: running</span></div><span class="n">2</span></div>
+        <div class="cards">
+          <div class="card">
+            <div class="id">T-3 <small>attempt 1</small></div>
+            <div class="t">Add a usage example to the mul…</div>
+<pre><span class="d">working on attempt 1</span>
+<span class="c">$</span> /bin/sh -c python -m doctest calc.py -v &amp;&amp; python -m pytest …</pre>
+            <span class="src">recorded row, tm 0.1.0</span>
+          </div>
+          <div class="card">
+            <div class="id">T-1 <small>lease lapsed</small></div>
+            <div class="t">Document div's error behavior…</div>
+            <div class="m">no worker attached; its lease lapsed (tm sched run picks it back up)</div>
+            <span class="src">recorded row, tm 0.1.0</span>
+          </div>
+        </div>
+        <div class="move">a worker leases it, edits, runs the checks: <code>tm run T-3</code></div>
+      </div>
+      <div class="col">
+        <div class="sign"><div><h3>Review</h3><span class="st">state: submitted</span></div><span class="n">3</span></div>
+        <div class="cards">
+          <div class="card">
+            <div class="id">T-2 <small>ready for review</small></div>
+            <div class="t">Guard div against zero division…</div>
+<pre><span class="g">1. Accept</span>
+2. Reject, with a reason the next
+   attempt sees
+<span class="d">result</span> Guarded div against zero
+division with ValueError and covered
+it with a test. … (4 passed)</pre>
+            <span class="src">recorded peek, tm 0.1.0</span>
+          </div>
+        </div>
+        <div class="move">human-only: <code>tm ticket accept</code>, <code>reject</code> or <code>retry</code></div>
+      </div>
+      <div class="col">
+        <div class="sign"><div><h3>Done</h3><span class="st">state: closed</span></div><span class="n">4</span></div>
+        <div class="cards">
+          <div class="card">
+            <div class="id">T-2 <small>closed</small></div>
+            <div class="t">Guard div against zero division…</div>
+<pre><span class="g">Accepted T-2: closed</span>
+<span class="d">(tm ticket reopen T-2 undoes it)</span></pre>
+            <span class="src">recorded message, tm 0.1.0</span>
+          </div>
+        </div>
+        <div class="move">closing is an event too: <code>tm events tail</code></div>
+      </div>
+    </div>
   </div>
 </section>
 
-<section class="section">
-  <div class="container">
-    <div class="section-head">
-      <h2>see it work</h2>
-      <p class="sub">The terminal clips are the real <code>tm</code> binary against a live provider, recorded in <code>docs/showcase</code>. The right-hand frame is the real web client.</p>
+<section class="block" id="trip">
+  <div class="wrap">
+    <div class="head">
+      <div class="num">02</div>
+      <h2>Take the trip</h2>
+      <p>The same session, cut into the two moves you will make most: send a ticket off, and decide on one that came back. Then the web canvas, which runs in your browser on mock data.</p>
     </div>
-    <div class="shots">
-      <figure class="term">
-        <header><span class="dots"><i></i><i></i><i></i></span><span>tm &mdash; live turn</span></header>
-        <img loading="lazy" src="{{ get_url(path='img/tui-live.gif', trailing_slash=false) }}" alt="Terminal recording: an @-mention, file reads, a live crash reproduction and a ticket-aware answer" />
-        <figcaption>A live turn: <code>@calc.py</code> completion, tool calls, a real crash repro.</figcaption>
+    <div class="clips">
+      <figure class="clip">
+        <div class="term">
+          <header><span class="pip"><i></i><i></i><i></i></span><span>tm &middot; dispatch</span></header>
+          <div class="media"><img width="1028" height="804" src="{{ get_url(path='img/tui-dispatch.gif', trailing_slash=false) }}" alt="Terminal recording: dispatching a ticket from the tickets screen and watching its worker run doctest and pytest in the row" /></div>
+        </div>
+        <figcaption class="cap"><h3>Dispatch</h3><p>Type a task, press Enter. T-3 is working seconds later, and its row streams the worker's own verification command.</p></figcaption>
       </figure>
+      <figure class="clip">
+        <div class="term">
+          <header><span class="pip"><i></i><i></i><i></i></span><span>tm &middot; review</span></header>
+          <div class="media"><img width="1028" height="804" src="{{ get_url(path='img/tui-accept.gif', trailing_slash=false) }}" alt="Terminal recording: peeking at T-2's submission on the tickets screen and pressing 1 to accept it" /></div>
+        </div>
+        <figcaption class="cap"><h3>Review</h3><p>Space peeks the submission and its evidence. <kbd>1</kbd> accepts and T-2 closes into Completed. <kbd>2</kbd> rejects with a reason the next attempt sees.</p></figcaption>
+      </figure>
+      <figure class="clip wide">
+        <div class="term">
+          <header><span class="pip"><i></i><i></i><i></i></span><span>tm serve &middot; web canvas</span></header>
+          <div class="media"><a href="{{ demo }}"><img width="1360" height="860" src="{{ get_url(path='img/web-tickets.png', trailing_slash=false) }}" alt="The Ticketmaster web canvas: tickets grouped into needs input, working, ready for review and queued, with a dispatch box on top" /></a></div>
+        </div>
+        <figcaption class="cap"><h3>The web canvas</h3><p>Tickets grouped by what needs you, a review page with evidence, a status page built from the live event stream. <a href="{{ demo }}">Open the demo</a>; nothing leaves your browser and a reload resets it.</p></figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="block" id="gate">
+  <div class="wrap">
+    <div class="head">
+      <div class="num">03</div>
+      <h2>The gate</h2>
+      <p>Workers cannot approve their own work, and you decide which actions need a person first.</p>
+    </div>
+    <div class="gate">
+      <div class="prose-block">
+        <p>Accept, reject and retry are human-only; the server answers <code class="i">403</code> to an agent that tries. Inside a run, an <code class="i">oversight.toml</code> at your repo root lists the action classes that stop and ask a human before they dispatch.</p>
+        <p>Since 0.1.4 that includes <code class="i">shell.string</code>: a <code class="i">sh -c "&hellip;"</code> command is a whole program, so passing a per-command allow-list is not enough. Redirections, expansions and quoting tricks are invisible to it. List the class and a person sees the line first.</p>
+        <p>A cloned repo cannot loosen its own gate. Its <code class="i">oversight.toml</code> is ignored until you run <code class="i">tm trust</code>, and any later edit asks again.</p>
+        <p><a href="{{ get_url(path='/reference/oversight/', trailing_slash=true) }}">Oversight and approvals &rarr;</a></p>
+      </div>
       <div class="stack">
         <figure class="term">
-          <header><span class="dots"><i></i><i></i><i></i></span><span>tm &mdash; dispatch</span></header>
-          <img loading="lazy" src="{{ get_url(path='img/tui-dispatch.gif', trailing_slash=false) }}" alt="Terminal recording: dispatching a ticket and watching its worker run doctest and pytest in the row" />
-          <figcaption>Dispatch a ticket; the worker verifies it in its row.</figcaption>
+          <header><span class="pip"><i></i><i></i><i></i></span><span>oversight.toml</span></header>
+<pre><span class="d"># repo root, reviewed in a pull request like any config</span>
+<span class="k">approval_required</span> = [<span class="y">"shell.string"</span>, <span class="y">"git.push"</span>]
+<span class="k">spend_over_micros</span> = <span class="c">5000000</span></pre>
         </figure>
         <figure class="term">
-          <header><span class="dots"><i></i><i></i><i></i></span><span>tm &mdash; review</span></header>
-          <img loading="lazy" src="{{ get_url(path='img/tui-accept.gif', trailing_slash=false) }}" alt="Terminal recording: peeking at a submission on the tickets screen and accepting it" />
-          <figcaption>Peek at a submission, press <code>1</code>, the ticket closes.</figcaption>
+          <header><span class="pip"><i></i><i></i><i></i></span><span>tm 0.1.4 &middot; real output</span></header>
+<pre><span class="p">$</span> tm trust --status
+<span class="y">Not trusted (oversight.toml). Run `tm trust` after reviewing them.</span>
+<span class="p">$</span> tm trust
+<span class="d">--- oversight.toml ---</span>
+approval_required = ["shell.string", "git.push"]
+spend_over_micros = 5000000
+
+<span class="g">Trusted oversight.toml for ~/api. Editing any of them
+(for example with git pull) asks again.</span></pre>
         </figure>
       </div>
-      <figure class="term wide">
-        <header><span class="dots"><i></i><i></i><i></i></span><span>tm serve &mdash; web canvas</span></header>
-        <a href="{{ demo }}"><img loading="lazy" src="{{ get_url(path='img/web-tickets.png', trailing_slash=false) }}" width="1360" height="860" alt="The Ticketmaster web canvas: tickets grouped into needs input, working, ready for review and queued, with a dispatch box on top" /></a>
-        <figcaption>Tickets grouped by what needs you. <a href="{{ demo }}">Open it live</a>; it runs in your browser on mock data.</figcaption>
-      </figure>
     </div>
   </div>
 </section>
 
-<section class="section">
-  <div class="container">
-    <div class="section-head">
-      <h2>what you get</h2>
-      <p class="sub">Built on the idea that tools should be as intelligent as the agents using them. <a href="{{ get_url(path='/concepts/thesis/', trailing_slash=true) }}">Read the thesis</a>.</p>
+<section class="block" id="timetable">
+  <div class="wrap">
+    <div class="head">
+      <div class="num">04</div>
+      <h2>Timetable</h2>
+      <p>What is in the single binary, and where it is documented.</p>
     </div>
-    <dl class="spec">
-      <dt>interactive-tui</dt><dd>Chat-first terminal UI with slash commands, history search, plan / ask / auto modes, and a tickets screen laid out like a task inbox.</dd>
-      <dt>background-workers</dt><dd>Workers run tickets under leases and budgets, with retries, escalation and a worktree option for isolated runs.</dd>
-      <dt>human-gated</dt><dd>Accept, reject and retry are human-only. Workers cannot approve their own work.</dd>
-      <dt>event-sourced</dt><dd>Every change is an event in a hash-chained log (<code>tm doctor</code> verifies it). Record a run to a cassette and replay it offline, or fork a ticket at any event.</dd>
-      <dt>resolved-context</dt><dd>Context is resolved up front, then symbol-aware and semantic search finds the rest, so the first turn already has what it needs.</dd>
-      <dt>any-provider</dt><dd>21 provider backends, an MCP server for Claude Code (<code>tm mcp</code>), an ACP agent for Zed (<code>tm acp</code>), a VS Code extension, and a typed TypeScript client.</dd>
-    </dl>
+    <div class="timetable" role="table" aria-label="What is in tm">
+      <div class="hd" role="row"><span>Departs</span><span>Details</span><span style="text-align:right">Platform</span></div>
+      <div class="row" role="row"><span class="what">Chat</span><span class="desc">A chat-first terminal UI: slash commands, history search, <kbd>Shift+Tab</kbd> to cycle auto, plan and ask modes, and a tickets screen laid out like an inbox.</span><span class="gate-no"><a href="{{ get_url(path='/getting-started/quickstart/', trailing_slash=true) }}">quickstart</a></span></div>
+      <div class="row" role="row"><span class="what">Workers</span><span class="desc">Tickets run under leases and budgets with retries, escalation and an optional git worktree per run, so a worker never edits your checkout.</span><span class="gate-no"><a href="{{ get_url(path='/concepts/tickets-and-workers/', trailing_slash=true) }}">tickets &amp; workers</a></span></div>
+      <div class="row" role="row"><span class="what">Event log</span><span class="desc">Every change is an event in a hash-chained log; <code>tm doctor</code> verifies it. Record a run to a cassette and replay it offline, or fork a ticket at any event.</span><span class="gate-no"><a href="{{ get_url(path='/concepts/thesis/', trailing_slash=true) }}">thesis</a></span></div>
+      <div class="row" role="row"><span class="what">Context</span><span class="desc">Context is resolved up front, then symbol-aware and semantic search find the rest, so the first turn already has what it needs.</span><span class="gate-no"><a href="{{ get_url(path='/concepts/thesis/', trailing_slash=true) }}">thesis</a></span></div>
+      <div class="row" role="row"><span class="what">Providers</span><span class="desc">21 provider backends, routed per role from <code>providers.toml</code>. Anthropic, OpenAI, OpenRouter, local models and any OpenAI-compatible gateway.</span><span class="gate-no"><a href="{{ get_url(path='/reference/providers/', trailing_slash=true) }}">providers</a></span></div>
+      <div class="row" role="row"><span class="what">Plugs in</span><span class="desc">An MCP server for Claude Code (<code>tm mcp</code>), an ACP agent for Zed (<code>tm acp</code>), a VS Code extension and a typed TypeScript client.</span><span class="gate-no"><a href="{{ get_url(path='/reference/cli/', trailing_slash=true) }}">cli reference</a></span></div>
+    </div>
   </div>
 </section>
 
-<section class="section">
-  <div class="container">
-    <div class="section-head">
-      <h2>install</h2>
-      <p class="sub">One binary, prebuilt for macOS and Linux (arm64 and x86_64). You need one configured provider, for example <code>ANTHROPIC_API_KEY</code>. See the <a href="{{ get_url(path='/getting-started/install/', trailing_slash=true) }}">install guide</a> and <a href="{{ get_url(path='/reference/providers/', trailing_slash=true) }}">providers</a>.</p>
+<section class="block" id="boarding">
+  <div class="wrap">
+    <div class="head">
+      <div class="num">05</div>
+      <h2>Board now</h2>
+      <p>One binary for macOS and Linux, arm64 and x86_64. You need one configured provider, for example <code>ANTHROPIC_API_KEY</code>.</p>
     </div>
-    <div class="installs">
-      <figure class="term">
-        <header><span class="dots"><i></i><i></i><i></i></span><span>homebrew</span></header>
-<pre><code><span class="p">$</span> brew install alliecatowo/tap/ticket-master
+    <div class="boarding">
+      <div class="ticket">
+        <div class="body">
+          <h3>Homebrew</h3>
+          <figure class="term" style="margin:0"><header><span class="pip"><i></i><i></i><i></i></span><span>macOS &amp; Linux</span></header>
+<pre><span class="p">$</span> brew install alliecatowo/tap/ticket-master
 <span class="p">$</span> cd your-repo
 <span class="p">$</span> tm init
-<span class="p">$</span> tm</code></pre>
-      </figure>
-      <figure class="term">
-        <header><span class="dots"><i></i><i></i><i></i></span><span>from source</span></header>
-<pre><code><span class="p">$</span> cargo install --locked \
-    --git {{ config.extra.github_repo }}.git tm-cli
-<span class="p">$</span> tm init &amp;&amp; tm</code></pre>
-      </figure>
+<span class="p">$</span> tm</pre></figure>
+        </div>
+        <div class="stub"><div class="lab"><b>Fare</b>prebuilt</div><div class="no">v0.1.4</div></div>
+      </div>
+      <div class="ticket">
+        <div class="body">
+          <h3>From source</h3>
+          <figure class="term" style="margin:0"><header><span class="pip"><i></i><i></i><i></i></span><span>needs Rust 1.85+</span></header>
+<pre><span class="p">$</span> cargo install --locked \
+    --git {{ config.extra.github_repo }} tm-cli
+<span class="p">$</span> tm init &amp;&amp; tm</pre></figure>
+        </div>
+        <div class="stub"><div class="lab"><b>Fare</b>compiled</div><div class="no">tm-cli</div></div>
+      </div>
     </div>
-    <div class="cta-row" style="margin-top:28px">
-      <a class="btn btn-primary" href="{{ demo }}">open the demo &rarr;</a>
-      <a class="btn" href="{{ config.extra.github_repo }}">source on github</a>
-      <a class="btn" href="{{ get_url(path='/reference/cli/', trailing_slash=true) }}">cli reference</a>
+    <div class="cta">
+      <a class="btn primary" href="{{ demo }}">Open the demo</a>
+      <a class="btn" href="{{ install }}">Install guide</a>
+      <a class="btn" href="{{ get_url(path='/getting-started/', trailing_slash=true) }}">Read the docs</a>
+      <a class="btn" href="{{ config.extra.github_repo }}">Source</a>
     </div>
   </div>
 </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/asciinema-player@3.10.0/dist/bundle/asciinema-player.min.js"></script>
+<script>
+  (function () {
+    var el = document.getElementById('tm-player');
+    if (!el || !window.AsciinemaPlayer) return;
+
+    window.AsciinemaPlayer.create("{{ get_url(path='media/tui-live.cast', trailing_slash=false) }}", el, {
+      theme: 'dracula', fit: 'width', cols: 120, rows: 40,
+      poster: 'npt:0:47', startAt: 4, idleTimeLimit: 1.5,
+      autoPlay: false, loop: true, preload: true, controls: 'auto'
+    });
+  })();
+</script>
 {% endblock %}
